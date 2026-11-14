@@ -1367,3 +1367,36 @@ fn a_settle_error_marks_the_attempt_lost_instead_of_leaving_the_slot_stuck() {
     );
     assert!(a.retained_reason.unwrap_or_default().contains("lost"));
 }
+
+fn always_gone(_: u32) -> ChildState {
+    ChildState::Gone
+}
+
+#[test]
+fn a_child_the_kernel_reaped_is_never_signalled_by_abandon_or_drop() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let s = Script("sleep 30".into());
+    let rn = runner(&r, &s);
+    let mut run = rn
+        .start(&mut w, &env, &profile(&r, &env, &policy()))
+        .unwrap()
+        .with_state_fn(always_gone);
+    let pid = run.pid();
+    // the scheduler gives the worker up: the pid is "not ours", so nothing is sent to it
+    rn.abort(&mut w, &mut run, "test");
+    assert!(
+        alive(pid),
+        "abandon sent a signal to a pid that is not ours"
+    );
+    assert_eq!(attempt(&w, &one, 1).state, AttemptState::Lost);
+    drop(run);
+    assert!(alive(pid), "drop sent a signal to a pid that is not ours");
+    // the stand-in process is really ours: clean it up by hand
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+}

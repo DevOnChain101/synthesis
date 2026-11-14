@@ -1349,8 +1349,12 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.approve_contract(version, hash, approver))
     }
 
-    pub fn new_contract_version(&mut self, contract: &Contract) -> Result<()> {
-        self.atomically(|tx| tx.new_contract_version(contract))
+    pub fn new_contract_version(
+        &mut self,
+        expected_revision: i64,
+        contract: &Contract,
+    ) -> Result<()> {
+        self.atomically(|tx| tx.new_contract_version(expected_revision, contract))
     }
 
     pub fn insert_plan(&mut self, plan: &Plan) -> Result<Vec<(String, WorkItemId)>> {
@@ -1977,8 +1981,18 @@ impl OutcomeTx<'_, '_> {
     /// current plan (made for the version before) no longer lets the outcome become `ready`, so
     /// the approval of the old version never covers the new text. Only before the work starts
     /// (`draft`, `contract_pending`); the next version only.
-    pub fn new_contract_version(&mut self, contract: &Contract) -> Result<()> {
+    pub fn new_contract_version(
+        &mut self,
+        expected_revision: i64,
+        contract: &Contract,
+    ) -> Result<()> {
         let o = self.outcome()?;
+        self.conflict_or(
+            ev::Aggregate::Outcome,
+            self.id.as_str(),
+            expected_revision,
+            o.revision,
+        )?;
         if !matches!(o.state, OutcomeState::Draft | OutcomeState::ContractPending) {
             return Err(Error::Invalid(format!(
                 "the contract cannot change while the outcome is {}",
@@ -1999,9 +2013,10 @@ impl OutcomeTx<'_, '_> {
             "INSERT INTO contracts(outcome_id,version,hash,body) VALUES (?1,?2,?3,?4)",
             params![self.id.as_str(), contract.version, hash, body.to_string()],
         )?;
+        let goal = self.et.redact_str(&contract.goal);
         self.et.tx.execute(
-            "UPDATE outcomes SET contract_version=?2, revision=revision+1, updated_at=?3 WHERE id=?1",
-            params![self.id.as_str(), contract.version, now()],
+            "UPDATE outcomes SET contract_version=?2, goal=?4, revision=revision+1, updated_at=?3 WHERE id=?1",
+            params![self.id.as_str(), contract.version, now(), goal],
         )?;
         self.et.append(
             ev::CONTRACT_CREATED,

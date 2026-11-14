@@ -102,6 +102,9 @@ pub fn kill_verified(
     Ok(())
 }
 
+/// `child_state`, or a stand-in (tests).
+pub type StateFn = fn(u32) -> ChildState;
+
 /// Where a child this process spawned stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildState {

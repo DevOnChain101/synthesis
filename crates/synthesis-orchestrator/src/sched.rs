@@ -709,7 +709,13 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
                 }
             };
             let stop = rep.stop.clone();
-            stalled = if !rep.errors.is_empty() && rep.leased.is_empty() && rep.settled.is_empty() {
+            // only a walk with no worker running can be stuck: running workers end by their own
+            // wall cap, and a brief outage of the store or the verifier must not kill them
+            stalled = if self.running.is_empty()
+                && !rep.errors.is_empty()
+                && rep.leased.is_empty()
+                && rep.settled.is_empty()
+            {
                 stalled + 1
             } else {
                 0

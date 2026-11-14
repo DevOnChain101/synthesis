@@ -62,6 +62,8 @@ pub struct ValidPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    /// The planner itself failed (a model that errored or refused); the text is its own.
+    Planner(String),
     /// The planner's JSON is too large, not JSON, or not shaped like a [`Plan`] (unknown fields
     /// are refused).
     Json(String),
@@ -107,10 +109,22 @@ pub enum PlanError {
     NotIndependentlyVerifiable(String),
 }
 
+/// Text that came from a planner, safe to print: control characters (ESC...) dropped, at most 200
+/// characters.
+fn shown(s: &str) -> String {
+    let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > 200 {
+        format!("{}...", clean.chars().take(200).collect::<String>())
+    } else {
+        clean
+    }
+}
+
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Json(e) => write!(f, "plan JSON: {e}"),
+            Self::Json(e) => write!(f, "plan JSON: {}", shown(e)),
+            Self::Planner(e) => write!(f, "the planner failed: {}", shown(e)),
             Self::Contract(e) => write!(f, "contract: {e}"),
             Self::Version => write!(f, "plan version must be 1 or more"),
             Self::ContractVersionMismatch { plan, contract } => {
@@ -121,18 +135,21 @@ impl std::fmt::Display for PlanError {
             }
             Self::Empty => write!(f, "plan has no work items"),
             Self::TooManyItems => write!(f, "plan has more than {MAX_PLAN_ITEMS} work items"),
-            Self::BadKey(k) => write!(f, "invalid work item key {k:?}"),
-            Self::DuplicateKey(k) => write!(f, "duplicate work item key {k:?}"),
+            Self::BadKey(k) => write!(f, "invalid work item key {:?}", shown(k)),
+            Self::DuplicateKey(k) => write!(f, "duplicate work item key {:?}", shown(k)),
             Self::DuplicateDependency { item, dependency } => {
                 write!(
                     f,
-                    "work item {item:?} lists dependency {dependency:?} twice"
+                    "work item {:?} lists dependency {:?} twice",
+                    shown(item),
+                    shown(dependency)
                 )
             }
             Self::TooManyEntries(i) => {
                 write!(
                     f,
-                    "work item {i:?} has a list over {MAX_LIST_ENTRIES} entries"
+                    "work item {:?} has a list over {MAX_LIST_ENTRIES} entries",
+                    shown(i)
                 )
             }
             Self::NotIndependentlyVerifiable(c) => write!(
@@ -140,24 +157,34 @@ impl std::fmt::Display for PlanError {
                 "mandatory criterion {c:?} is covered by agent items only; a verify item must cover it"
             ),
             Self::UnknownDependency { item, dependency } => {
-                write!(f, "work item {item:?} requires unknown item {dependency:?}")
+                write!(
+                    f,
+                    "work item {:?} requires unknown item {:?}",
+                    shown(item),
+                    shown(dependency)
+                )
             }
             Self::Cycle(keys) => write!(f, "dependency cycle among {}", keys.join(", ")),
             Self::UnknownCapability { item, capability } => {
                 write!(
                     f,
-                    "work item {item:?} needs unknown capability {capability:?}"
+                    "work item {:?} needs unknown capability {:?}",
+                    shown(item),
+                    shown(capability)
                 )
             }
             Self::CapabilityDenied { item, capability } => write!(
                 f,
-                "work item {item:?} needs {}, which the envelope denies",
+                "work item {:?} needs {}, which the envelope denies",
+                shown(item),
                 capability.as_str()
             ),
             Self::UnknownCriterion { item, criterion } => {
                 write!(
                     f,
-                    "work item {item:?} covers unknown criterion {criterion:?}"
+                    "work item {:?} covers unknown criterion {:?}",
+                    shown(item),
+                    shown(criterion)
                 )
             }
             Self::UncoveredCriterion(c) => {
@@ -329,6 +356,8 @@ pub struct PlanDiff {
 pub fn diff_plans(old: &Plan, new: &Plan) -> PlanDiff {
     let old_by: BTreeMap<&str, &PlanItem> = old.items.iter().map(|i| (i.key.as_str(), i)).collect();
     let mut d = PlanDiff::default();
+    // another contract version is another definition of done: nothing is carried over
+    let contract_changed = old.contract_version != new.contract_version;
     let mut dirty: BTreeSet<&str> = BTreeSet::new();
     for it in &new.items {
         match old_by.get(it.key.as_str()) {
@@ -336,7 +365,7 @@ pub fn diff_plans(old: &Plan, new: &Plan) -> PlanDiff {
                 d.added.push(it.key.clone());
                 dirty.insert(&it.key);
             }
-            Some(o) if **o != *it => {
+            Some(o) if contract_changed || **o != *it => {
                 d.changed.push(it.key.clone());
                 dirty.insert(&it.key);
             }
@@ -858,5 +887,43 @@ mod tests {
         assert_eq!(d.rerun, ["implement", "lint", "test"]);
         // the inputs are untouched (pure)
         assert_eq!(old.items.len(), 3);
+    }
+
+    #[test]
+    fn planner_text_is_truncated_and_stripped_when_an_error_is_shown() {
+        let evil = format!("a\x1b[31m{}\u{7}b", "x".repeat(5000));
+        for e in [
+            PlanError::Json(evil.clone()),
+            PlanError::Planner(evil.clone()),
+            PlanError::BadKey(evil.clone()),
+            PlanError::UnknownDependency {
+                item: "i".into(),
+                dependency: evil.clone(),
+            },
+            PlanError::UnknownCriterion {
+                item: evil.clone(),
+                criterion: evil.clone(),
+            },
+            PlanError::UnknownCapability {
+                item: "i".into(),
+                capability: evil.clone(),
+            },
+        ] {
+            let t = e.to_string();
+            assert!(!t.chars().any(char::is_control), "{t:?}");
+            assert!(t.chars().count() < 500, "{} chars", t.chars().count());
+        }
+    }
+
+    #[test]
+    fn another_contract_version_reruns_everything() {
+        let c = contract(&["c1", "c2", "c3"]);
+        let (old, _) = parse_plan(EXAMPLE, &c).unwrap();
+        let mut new = old.clone();
+        new.version = 2;
+        new.contract_version = 2;
+        let d = diff_plans(&old, &new);
+        assert!(d.unchanged.is_empty(), "nothing is carried over: {d:?}");
+        assert_eq!(d.rerun, ["implement", "inspect", "test"]);
     }
 }

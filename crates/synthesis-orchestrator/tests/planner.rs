@@ -104,7 +104,7 @@ fn whatever_a_planner_returns_is_validated_before_it_can_be_stored() {
     assert!(matches!(with(&|p| p.items.clear()), PlanError::Empty));
     assert!(matches!(
         make_plan(&Fixed(Err(PlannerError("model down".into()))), &c, 1).unwrap_err(),
-        PlanError::Json(m) if m.contains("model down")
+        PlanError::Planner(m) if m.contains("model down")
     ));
 }
 
@@ -214,8 +214,17 @@ fn a_changed_contract_is_a_new_unapproved_version_and_the_old_approval_and_plan_
     c2.goal = "a different goal".into();
     let mut skip = c2.clone();
     skip.version = 3;
-    assert!(w.new_contract_version(&skip).is_err());
-    w.new_contract_version(&c2).unwrap();
+    assert!(
+        w.new_contract_version(w.get_outcome(w.id()).unwrap().revision, &skip)
+            .is_err()
+    );
+    let rev = w.get_outcome(w.id()).unwrap().revision;
+    assert!(
+        w.new_contract_version(rev + 5, &c2).is_err(),
+        "a stale revision is refused"
+    );
+    w.new_contract_version(rev, &c2).unwrap();
+    assert_eq!(w.get_outcome(w.id()).unwrap().goal, "a different goal");
     let (stored, h2, ok2) = w.get_contract(w.id(), 2).unwrap();
     assert_eq!(stored.goal, "a different goal");
     assert_ne!(h1, h2, "the hash covers the text");
@@ -244,5 +253,19 @@ fn a_changed_contract_is_a_new_unapproved_version_and_the_old_approval_and_plan_
     // from here the contract is frozen
     let mut c3 = c2.clone();
     c3.version = 3;
-    assert!(w.new_contract_version(&c3).is_err());
+    assert!(
+        w.new_contract_version(w.get_outcome(w.id()).unwrap().revision, &c3)
+            .is_err()
+    );
+}
+
+#[test]
+fn replanning_past_the_last_version_is_an_error() {
+    let c = contract();
+    let mut old = StubPlanner.plan(&c, 1).unwrap();
+    old.version = u32::MAX;
+    assert_eq!(
+        replan(&StubPlanner, &c, &old).unwrap_err(),
+        PlanError::Version
+    );
 }

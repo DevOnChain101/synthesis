@@ -21,7 +21,7 @@ mod sched;
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
-pub use proc::kill_verified;
+pub use proc::{ChildState, StateFn, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError};
 pub use recover::{RecoveryReport, recover_attempts};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};

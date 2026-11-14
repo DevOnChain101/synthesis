@@ -92,7 +92,7 @@ pub fn make_plan(
 ) -> Result<(Plan, ValidPlan), PlanError> {
     let plan = planner
         .plan(contract, version)
-        .map_err(|e| PlanError::Json(e.to_string()))?;
+        .map_err(|e| PlanError::Planner(e.0))?;
     let valid = validate_plan(&plan, contract)?;
     Ok((plan, valid))
 }
@@ -110,7 +110,8 @@ pub struct Replan {
 /// `replan.plan` with `OutcomeWriter::insert_plan`, which refuses anything but the next version
 /// of a plan made for the approved current contract.
 pub fn replan(planner: &dyn Planner, contract: &Contract, old: &Plan) -> Result<Replan, PlanError> {
-    let (plan, valid) = make_plan(planner, contract, old.version + 1)?;
+    let version = old.version.checked_add(1).ok_or(PlanError::Version)?;
+    let (plan, valid) = make_plan(planner, contract, version)?;
     let diff = diff_plans(old, &plan);
     Ok(Replan { plan, valid, diff })
 }

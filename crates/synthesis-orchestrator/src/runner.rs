@@ -281,13 +281,32 @@ pub struct Running {
     missed: u32,
     /// The child was waited for: its pid is no longer ours.
     reaped: bool,
+    /// Where the child stands (tests substitute it, feature `test-seam`).
+    state: crate::proc::StateFn,
+}
+
+impl Running {
+    /// Has the kernel reaped the child behind our back? Then its pid is not ours: it is never
+    /// signalled again, by pid, group or handle.
+    fn gone(&mut self) -> bool {
+        if !self.reaped && (self.state)(self.pid) == crate::proc::ChildState::Gone {
+            self.reaped = true;
+        }
+        self.reaped
+    }
+
+    #[cfg(feature = "test-seam")]
+    pub fn with_state_fn(mut self, f: crate::proc::StateFn) -> Self {
+        self.state = f;
+        self
+    }
 }
 
 /// No worker outlives its handle: a handle dropped while the worker is still ours (a failed
 /// runner, a panic, a scheduler that was dropped) kills its tree and reaps it.
 impl Drop for Running {
     fn drop(&mut self) {
-        if !self.reaped {
+        if !self.gone() {
             crate::proc::kill_unreaped_tree(self.pid);
             reap_bounded(&mut self.child);
         }
@@ -391,6 +410,7 @@ impl Runner<'_> {
             last_beat: Instant::now(),
             missed: 0,
             reaped: false,
+            state: crate::proc::child_state,
         };
         let start = self.probe.start_time(pid);
         if let Err(e) = w.record_worker(&env.attempt.id, env.attempt.fence, pid, start.as_deref()) {
@@ -411,7 +431,7 @@ impl Runner<'_> {
     /// Kills and reaps a worker after an error of ours, and (unless the worker is stale) marks its
     /// attempt lost with the reason. No worker outlives a failed runner.
     fn abandon(&self, w: &mut OutcomeWriter, run: &mut Running, e: &RunError) {
-        if !run.reaped {
+        if !run.gone() {
             crate::proc::kill_child_tree(self.probe, run.pid);
             run.reaped = reap_bounded(&mut run.child);
         }
@@ -484,7 +504,7 @@ impl Runner<'_> {
         cancel: &CancelFlag,
     ) -> Result<Option<WorkerEnd>, RunError> {
         // The tree is swept BEFORE the child is reaped: an unreaped pid cannot be reused.
-        match crate::proc::child_state(r.pid) {
+        match (r.state)(r.pid) {
             crate::proc::ChildState::ExitedUnreaped => {
                 crate::proc::kill_child_tree(self.probe, r.pid);
                 let code = r.child.wait().ok().and_then(|s| s.code());

@@ -1168,7 +1168,30 @@ fn an_item_left_in_recovering_by_a_crash_is_freed() {
 }
 
 #[test]
-fn a_walk_that_only_reports_errors_gives_up_and_stops_its_workers() {
+fn a_walk_that_only_reports_errors_with_nothing_running_gives_up() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    // every start fails and nothing runs: the tick reports errors and makes no progress
+    let spawn = SyntSpawn {
+        log: r.base.join("worker.log"),
+        env: Some(vec![]),
+    };
+    let mut h = host(&r, &spawn);
+    h.program = PathBuf::from("/no/such/dir/synt");
+    let mut c = cfg();
+    c.max_stalled_ticks = 1;
+    c.backoff_base = Duration::from_secs(60);
+    let mut sched = Scheduler::new(h, EvidenceVerifier::new(&[]), c);
+    let err = sched
+        .run(&mut w, &clock, Duration::from_millis(10))
+        .unwrap_err();
+    assert!(err.to_string().contains("no progress"), "{err}");
+    assert_eq!(sched.running_count(), 0);
+}
+
+#[test]
+fn errors_every_tick_do_not_stop_a_healthy_worker() {
     need_git!();
     let r = rig();
     let (mut w, _) = r.fresh();
@@ -1182,17 +1205,21 @@ fn a_walk_that_only_reports_errors_gives_up_and_stops_its_workers() {
             Err(SchedError::State("verifier crashed".into()))
         }
     }
+    // `one` finishes at once (the verifier then fails every tick), `two` sleeps
     let s = ByItem {
         slow: "two",
         fail: None,
     };
     let mut c = cfg();
-    c.max_stalled_ticks = 4;
+    c.max_stalled_ticks = 2;
     let mut sched = Scheduler::new(host(&r, &s), Broken, c);
     let err = sched
-        .run(&mut w, &clock, Duration::from_millis(10))
+        .run_until(
+            &mut w,
+            &clock,
+            Duration::from_millis(20),
+            Some(std::time::Instant::now() + Duration::from_millis(700)),
+        )
         .unwrap_err();
-    assert!(err.to_string().contains("no progress"), "{err}");
-    assert_eq!(sched.running_count(), 0);
-    assert!(pids(&w).iter().all(|p| !alive(*p)));
+    assert!(err.to_string().contains("deadline"), "not stalled: {err}");
 }
