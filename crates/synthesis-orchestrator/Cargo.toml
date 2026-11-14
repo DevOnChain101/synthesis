@@ -1,0 +1,26 @@
+[package]
+name = "synthesis-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Dependencies point inward: this crate uses the domain (core), the store (session) and the
+# worktree manager (workspace). Nothing in `apps/*`, the CLI UI crates or `synthesis-view` may
+# depend on it (plan PR-11 adds the test); `synthesis-app` will.
+[dependencies]
+synthesis-core = { path = "../synthesis-core" }
+synthesis-session = { path = "../synthesis-session" }
+synthesis-workspace = { path = "../synthesis-workspace" }
+serde_json = "1.0.154"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+synthesis-config = { path = "../synthesis-config" }
+synthesis-events = { path = "../synthesis-events" }
+tempfile = "3"
+rusqlite = { version = "0.41", features = ["bundled"] }

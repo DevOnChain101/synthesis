@@ -1112,6 +1112,18 @@ impl Store {
         Ok(w)
     }
 
+    /// Records where a session's worktree is pinned, only if nothing was recorded yet (`false`:
+    /// already set). It lets an interrupted allocation finish the session row it left behind
+    /// without opening the session; the value is never replaced.
+    pub fn set_git_info_if_unset(&self, id: &str, json: &str) -> Result<bool> {
+        check_id(id)?;
+        let n = connect(&self.home, false)?.execute(
+            "UPDATE sessions SET git_info=?2 WHERE id=?1 AND git_info IS NULL",
+            (id, json),
+        )?;
+        Ok(n > 0)
+    }
+
     /// The orchestrator's way into an attempt's session (to read or finish it): the lock and
     /// connection without the user-path refusal of [`Self::resume_session`]. It needs the outcome's
     /// writer as proof of ownership and only opens a session that is an attempt of that outcome.

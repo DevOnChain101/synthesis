@@ -113,6 +113,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: Low-Medium (desktop behaviour change on D7). Rollback: revert. Size: M. Needs the desktop job (heavy); no new window tests.
 
 ### PR-04 Attempt allocation and base commit
+- **Status (implemented):** `WorktreeManager::create_at`, `allocate_unstarted`, `head`; new crate `synthesis-orchestrator` (`Allocator`, `finish_attempt`, `cleanup_attempt`, `retention_due`); store additions `set_attempt_retained` and `Store::set_git_info_if_unset`. See ADR-018 implementation notes.
 - Scope: orchestrator-side allocation (session id first, worktree, record `GitInfo`) with crash reconcile; `WorktreeManager` option to start at a given commit (only needed after MVP; implement the API, test it, do not use it in MVP); host `commit_all` at attempt end; `retained_reason` on refused cleanup.
 - Crates: `synthesis-workspace`, `synthesis-orchestrator` (new, first code), `synthesis-session`.
 - Tests: crash between worktree creation and DB commit (adopt/redo); two attempts get distinct dirs, branches and sessions (extends `workspace.rs:376`); cleanup refusal keeps the tree.

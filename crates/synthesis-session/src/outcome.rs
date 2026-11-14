@@ -1346,6 +1346,10 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.transition_attempt(id, expected_revision, to, end, fx))
     }
 
+    pub fn set_attempt_retained(&mut self, id: &AttemptId, reason: &str) -> Result<()> {
+        self.atomically(|tx| tx.set_attempt_retained(id, reason))
+    }
+
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
         self.atomically(|tx| tx.new_decision(d))
     }
@@ -2301,6 +2305,27 @@ impl OutcomeTx<'_, '_> {
             None,
         )?;
         self.applied(rev + 1, fx)
+    }
+
+    /// Why an attempt's worktree was kept (a refused cleanup: dirty, ignored files, unmerged
+    /// commits). Allowed on a finished attempt; the reason is redacted and bounded.
+    pub fn set_attempt_retained(&mut self, id: &AttemptId, reason: &str) -> Result<()> {
+        let mut r = Value::String(reason.chars().take(500).collect());
+        self.et.redact_value(&mut r);
+        let n = self.et.tx.execute(
+            "UPDATE attempts SET retained_reason=?2 WHERE id=?1 AND work_item_id IN \
+               (SELECT id FROM work_items WHERE outcome_id=?3)",
+            params![
+                id.as_str(),
+                r.as_str().unwrap_or_default(),
+                self.id.as_str()
+            ],
+        )?;
+        if n == 1 {
+            Ok(())
+        } else {
+            Err(Error::NotFound(format!("attempt {id}")))
+        }
     }
 
     // ---- decisions

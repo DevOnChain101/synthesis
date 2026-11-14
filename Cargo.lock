@@ -7502,6 +7502,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "synthesis-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "synthesis-config",
+ "synthesis-core",
+ "synthesis-events",
+ "synthesis-session",
+ "synthesis-workspace",
+ "tempfile",
+ "time",
+ "uuid",
+]
+
+[[package]]
 name = "synthesis-peers"
 version = "0.1.0"
 dependencies = [

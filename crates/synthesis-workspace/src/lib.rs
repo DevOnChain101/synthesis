@@ -50,7 +50,7 @@ pub use restore::{
     restore_files,
 };
 pub use worktree::{
-    Allocation, Change, Changes, GitInfo, MergePlan, SubmodulePolicy, WorktreeManager,
+    Allocation, Change, Changes, GitInfo, MergePlan, Origin, SubmodulePolicy, WorktreeManager,
     WorktreeOptions,
 };
 

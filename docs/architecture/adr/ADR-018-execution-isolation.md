@@ -42,3 +42,12 @@ Option A. Containers are rejected (no new runtime dependency; sandbox backends e
 - A native Windows sandbox (AppContainer, ADR-010 exception) exists: lift the platform exclusion.
 - The Linux read allow-list ships: raise the documented guarantee.
 - Remote workers: environment allocation moves behind a transport.
+
+## Implementation notes (PR-04)
+
+- `WorktreeManager::create_at(.., base)` starts a worktree at a full lowercase commit id of the repository (a ref name, an abbreviation, a leading `-`, a tree id are refused before git runs); `allocate_unstarted` is the idempotent form for an attempt whose worker has not started: it adopts the registered worktree on `synthesis/<session_id>`, resets a partial checkout to the base, removes an empty or `.git`-only leftover, deletes a leftover branch that has no commits of its own, and refuses everything else (another branch, other base, foreign content, a symlink at the path). It must not be called for a started attempt, and the orchestrator does not (`Allocator::allocate` returns a stored attempt past `starting` without touching its files).
+- `synthesis-orchestrator::Allocator` records the intent first (outbox `worktree.create`, key `worktree.create:<work item>:<ordinal>`, payload with the session id chosen up front), runs the effect (worktree, then the child session row, then `set_git_info_if_unset`; the probe is "session exists with git info and the directory exists"), then inserts the attempt row (ordinal, fence, liveness and ceilings checked by the store). Session ids are lowercase UUIDs, so two attempts never differ only by case; a recorded id that is not one is refused.
+- Native Windows is refused with a message naming WSL2 (D3); a folder that is not a git repository is refused with its own message. The repo-wide lock, hardened git wrapper and pinned git dir of `worktree.rs` are reused unchanged; nothing in this change calls git outside `Git`.
+- Submodules are not initialised for attempts (as for ordinary sessions, `synt.worktree.submodules` off); wiring the policy into attempts is left to PR-05 with the launch profile.
+- Retention: `cleanup_attempt` never forces; a refusal (uncommitted, ignored files, unmerged commits) keeps the tree and records `attempts.retained_reason`; `retention_due(ended_at, now, days)` answers the 7-day rule, the sweeper that applies it is PR-05/PR-06.
+

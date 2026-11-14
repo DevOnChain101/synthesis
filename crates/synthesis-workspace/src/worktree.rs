@@ -57,6 +57,13 @@ pub struct GitInfo {
     pub include_uncommitted: bool,
 }
 
+/// Whether [`WorktreeManager::allocate_unstarted`] made the worktree or found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Created,
+    Adopted,
+}
+
 #[derive(Debug, Clone)]
 pub struct Allocation {
     pub context: WorkspaceContext,
@@ -241,7 +248,26 @@ impl WorktreeManager {
         artifact_root: PathBuf,
         include_uncommitted: bool,
     ) -> Result<Allocation> {
+        self.create_at(source, session_id, artifact_root, include_uncommitted, None)
+    }
+
+    /// [`Self::create`] starting at `base` (a full commit id of the repository) instead of its
+    /// HEAD. The worktree's baseline is `base`, so the agent's edits are measured against it.
+    /// `base` and `include_uncommitted` do not combine.
+    pub fn create_at(
+        &self,
+        source: &Path,
+        session_id: &str,
+        artifact_root: PathBuf,
+        include_uncommitted: bool,
+        base: Option<&str>,
+    ) -> Result<Allocation> {
         check_id(session_id)?;
+        if base.is_some() && include_uncommitted {
+            return Err(Error::Invalid(
+                "a base commit and include_uncommitted do not combine".into(),
+            ));
+        }
         let source = synthesis_core::canonicalize(source)?;
         let ws_id = uuid::Uuid::new_v4().to_string();
         let probe = self.git.probe(&source, &["rev-parse", "--show-toplevel"])?;
@@ -267,6 +293,10 @@ impl WorktreeManager {
             .out_str(&repo_root, &["rev-parse", "--verify", "HEAD^{commit}"])
             .map_err(|_| Error::Refused("repository has no commits".into()))?;
         let main_snapshot = self.dirty(g, &repo_root, &main_head)?;
+        let start = match base {
+            Some(b) => self.resolve_base(&repo_root, b)?,
+            None => main_head.clone(),
+        };
 
         let dir = match &self.opts.worktrees_dir {
             Some(d) => d.clone(),
@@ -277,7 +307,9 @@ impl WorktreeManager {
         };
         fs::create_dir_all(&dir)?;
         let wt = synthesis_core::canonicalize(&dir)?.join(session_id);
-        if wt.exists() {
+        // any entry at all, a dangling symlink included: `exists()` follows links and would let
+        // `git worktree add` write through a planted one
+        if fs::symlink_metadata(&wt).is_ok() {
             return Err(Error::Refused(format!("{} already exists", wt.display())));
         }
         let branch = format!("synthesis/{session_id}");
@@ -288,16 +320,14 @@ impl WorktreeManager {
         with_repo_lock(&common, || {
             g.out(
                 &repo_root,
-                &[
-                    "worktree", "add", "--quiet", "-b", &branch, &wt_s, &main_head,
-                ],
+                &["worktree", "add", "--quiet", "-b", &branch, &wt_s, &start],
             )
         })??;
         let wt = synthesis_core::canonicalize(&wt)?;
         let git_dir =
             synthesis_core::canonicalize(g.out_str(&wt, &["rev-parse", "--absolute-git-dir"])?)?;
 
-        let mut baseline = main_head.clone();
+        let mut baseline = start.clone();
         if include_uncommitted && !main_snapshot.is_empty() {
             self.copy_uncommitted(&repo_root, &wt, &main_head)?;
             g.out(&wt, &["add", "-A"])?;
@@ -339,6 +369,232 @@ impl WorktreeManager {
             git: Some(info),
             not_a_git_repo: false,
         })
+    }
+
+    /// A full lowercase commit id naming a commit of `repo_root`. Anything else (a ref name, an
+    /// abbreviation, a leading `-`) is refused before it reaches git.
+    fn resolve_base(&self, repo_root: &Path, base: &str) -> Result<String> {
+        let hex = |s: &str| {
+            s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if !(base.len() == 40 || base.len() == 64) || !hex(base) {
+            return Err(Error::Invalid(format!(
+                "base {base:?} is not a full lowercase commit id"
+            )));
+        }
+        let spec = format!("{base}^{{commit}}");
+        let full = self
+            .git
+            .out_str(repo_root, &["rev-parse", "--verify", "--quiet", &spec])
+            .map_err(|_| Error::Refused(format!("base commit {base} is not in the repository")))?;
+        if full != base {
+            return Err(Error::Refused(format!(
+                "base commit {base} is not a commit"
+            )));
+        }
+        Ok(full)
+    }
+
+    /// Where session `session_id`'s worktree lives for the repository at `repo_root`.
+    fn worktree_path(&self, repo_root: &Path, session_id: &str) -> Result<PathBuf> {
+        let dir = match &self.opts.worktrees_dir {
+            Some(d) => d.clone(),
+            None => repo_root
+                .parent()
+                .ok_or_else(|| Error::Invalid("repo at filesystem root".into()))?
+                .join(".synt-worktrees"),
+        };
+        fs::create_dir_all(&dir)?;
+        Ok(synthesis_core::canonicalize(&dir)?.join(session_id))
+    }
+
+    /// Idempotent allocation of an attempt's worktree at `base`, for an attempt whose worker has
+    /// NOT started. If the worktree of `session_id` already exists and is the registered one on
+    /// branch `synthesis/<session_id>` with its tip at or above `base`, it is adopted (a partial
+    /// checkout of an interrupted `worktree add` is reset to `base`); a leftover that is empty is
+    /// removed and the allocation redone; anything else (another branch, commits that are not
+    /// ours, unregistered content) is refused, never overwritten. Calling this for a started
+    /// attempt would reset its files: the orchestrator calls it only while the attempt is
+    /// `starting`.
+    pub fn allocate_unstarted(
+        &self,
+        source: &Path,
+        session_id: &str,
+        artifact_root: PathBuf,
+        base: &str,
+    ) -> Result<(Allocation, Origin)> {
+        check_id(session_id)?;
+        let source_c = synthesis_core::canonicalize(source)?;
+        let probe = self
+            .git
+            .probe(&source_c, &["rev-parse", "--show-toplevel"])?;
+        if !probe.status.success() {
+            // not a repository: create_at reports it as such (no worktree)
+            let a = self.create_at(source, session_id, artifact_root, false, Some(base))?;
+            return Ok((a, Origin::Created));
+        }
+        let repo_root =
+            synthesis_core::canonicalize(String::from_utf8_lossy(&probe.stdout).trim_end())?;
+        let base = self.resolve_base(&repo_root, base)?;
+        let wt = self.worktree_path(&repo_root, session_id)?;
+        let branch = format!("synthesis/{session_id}");
+        let common = self.common_dir(&repo_root)?;
+        let g = &self.git;
+        let state = with_repo_lock(&common, || -> Result<Option<GitInfo>> {
+            // admin entries whose directory is gone (a crash after `worktree add` began)
+            g.out(&repo_root, &["worktree", "prune"])?;
+            let entry = fs::symlink_metadata(&wt);
+            let registered = self.registered(&repo_root, &wt)?;
+            match (entry, registered) {
+                (Err(_), None) => {
+                    // nothing on disk: a branch left by the interrupted add is ours only if it
+                    // has no work on it
+                    let r = format!("refs/heads/{branch}");
+                    let tip = g.run(&repo_root, &["rev-parse", "--verify", "--quiet", &r], None)?;
+                    if tip.status.success() {
+                        let tip = String::from_utf8_lossy(&tip.stdout).trim().to_string();
+                        if tip != base {
+                            return Err(Error::Refused(format!(
+                                "branch {branch} exists with commits of its own; not reusing it"
+                            )));
+                        }
+                        g.out(&repo_root, &["branch", "-D", &branch])?;
+                    }
+                    Ok(None)
+                }
+                (Ok(m), None) => {
+                    // on disk but not a registered worktree: an empty or `.git`-only leftover
+                    // can go; real content is never deleted here
+                    let leftovers = m.is_dir()
+                        && !m.is_symlink()
+                        && fs::read_dir(&wt)?
+                            .filter_map(|e| e.ok())
+                            .all(|e| e.file_name() == ".git");
+                    if !leftovers {
+                        return Err(Error::Refused(format!(
+                            "{} exists and is not this attempt's worktree",
+                            wt.display()
+                        )));
+                    }
+                    fs::remove_dir_all(&wt)?;
+                    Ok(None)
+                }
+                (Err(_), Some(_)) => Err(Error::Refused(format!(
+                    "{} is registered but missing",
+                    wt.display()
+                ))),
+                (Ok(m), Some((head, on))) => {
+                    if !m.is_dir() || m.is_symlink() {
+                        return Err(Error::Refused(format!(
+                            "{} is not a plain directory",
+                            wt.display()
+                        )));
+                    }
+                    if on.as_deref() != Some(&format!("refs/heads/{branch}")) {
+                        return Err(Error::Refused(format!(
+                            "{} is on another branch than {branch}",
+                            wt.display()
+                        )));
+                    }
+                    let up = g.run(
+                        &repo_root,
+                        &["merge-base", "--is-ancestor", &base, &head],
+                        None,
+                    )?;
+                    if !up.status.success() {
+                        return Err(Error::Refused(format!(
+                            "the worktree of {session_id} is not based on {base}"
+                        )));
+                    }
+                    let git_dir = synthesis_core::canonicalize(
+                        g.out_str(&wt, &["rev-parse", "--absolute-git-dir"])?,
+                    )?;
+                    Ok(Some(GitInfo {
+                        repo_root: repo_root.clone(),
+                        worktree: synthesis_core::canonicalize(&wt)?,
+                        git_dir,
+                        branch: branch.clone(),
+                        baseline: base.clone(),
+                        main_head: g
+                            .out_str(&repo_root, &["rev-parse", "--verify", "HEAD^{commit}"])?,
+                        main_snapshot: BTreeMap::new(),
+                        include_uncommitted: false,
+                    }))
+                }
+            }
+        })??;
+        let Some(info) = state else {
+            let a = self.create_at(source, session_id, artifact_root, false, Some(&base))?;
+            return Ok((a, Origin::Created));
+        };
+        let pinned = self.pinned(&info)?;
+        // an interrupted checkout leaves a partial tree at a clean HEAD: bring it to the base
+        let tip = pinned.out_str(&info.worktree, &["rev-parse", "HEAD"])?;
+        if tip == base && !self.changes_vs(&pinned, &info.worktree, "HEAD")?.is_empty() {
+            pinned.out(&info.worktree, &["reset", "--hard", "--quiet", &base])?;
+            pinned.out(&info.worktree, &["clean", "-fdxq"])?;
+        }
+        let cwd = source_c
+            .strip_prefix(&info.repo_root)
+            .map(|rel| info.worktree.join(rel))
+            .ok()
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(|| info.worktree.clone());
+        let mut context = WorkspaceContext::open(
+            uuid::Uuid::new_v4().to_string(),
+            &info.worktree,
+            &cwd,
+            &[],
+            artifact_root,
+            session_id,
+        )?;
+        context.git_worktree = Some(context.root.clone());
+        Ok((
+            Allocation {
+                context,
+                git: Some(info),
+                not_a_git_repo: false,
+            },
+            Origin::Adopted,
+        ))
+    }
+
+    /// `(HEAD, branch ref)` when `path` is a registered worktree of `repo_root`.
+    fn registered(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let out = self
+            .git
+            .out(repo_root, &["worktree", "list", "--porcelain", "-z"])?;
+        let want = synthesis_core::canonicalize(path).ok();
+        for block in out
+            .split(|b| *b == 0)
+            .collect::<Vec<_>>()
+            .split(|f| f.is_empty())
+        {
+            let field = |k: &str| {
+                block.iter().find_map(|f| {
+                    String::from_utf8_lossy(f)
+                        .strip_prefix(&format!("{k} "))
+                        .map(str::to_string)
+                })
+            };
+            let Some(p) = field("worktree") else { continue };
+            let same = synthesis_core::canonicalize(&p).ok() == want || Path::new(&p) == path;
+            if same {
+                return Ok(Some((field("HEAD").unwrap_or_default(), field("branch"))));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The worktree's current commit (pinned to the recorded git dir).
+    pub fn head(&self, info: &GitInfo) -> Result<String> {
+        let g = self.pinned(info)?;
+        g.out_str(&info.worktree, &["rev-parse", "HEAD"])
     }
 
     /// Tracked changes via a binary diff, untracked files by copy (regular files only).

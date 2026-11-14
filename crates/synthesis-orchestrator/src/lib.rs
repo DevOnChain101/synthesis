@@ -1,0 +1,15 @@
+//! Outcome orchestrator (ADR-017). PR-04 content: allocating an attempt's execution environment.
+//!
+//! One attempt, one worktree on branch `synthesis/<session_id>`, one session, one explicit cwd
+//! built here from the outcome's recorded repository and base commit (never from a surface, never
+//! from the process cwd). The allocation is an outbox effect (`worktree.create`) with the
+//! probe-before-rerun rule, so a crash at any point is reconciled without a second worktree.
+//!
+//! Everything is off unless `synt.orchestrator.enabled` and the store was migrated to v5; this
+//! crate holds no switch of its own, the store's `OutcomePolicy` gate does.
+
+mod alloc;
+mod retention;
+
+pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
+pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};
