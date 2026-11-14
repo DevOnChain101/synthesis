@@ -6,14 +6,16 @@ use synthesis_settings::OrchestratorSettings;
 
 /// The managed layer already won in `o`; a fail-closed managed value arrives as `enabled = false`.
 pub fn outcome_policy(o: &OrchestratorSettings) -> OutcomePolicy {
-    OutcomePolicy {
-        enabled: o.enabled && !o.fail_closed,
-        max_parallel_workers: o.max_parallel_workers,
-        max_attempts_per_work_item: o.max_attempts_per_work_item,
-        max_cost_usd: o.max_cost_usd,
-        attempt_max_cost_usd: o.attempt_max_cost_usd,
-        attempt_max_wall_secs: o.attempt_max_wall_secs,
-    }
+    let mut p = OutcomePolicy::new(
+        o.enabled && !o.fail_closed,
+        o.max_parallel_workers,
+        o.max_attempts_per_work_item,
+        o.decision_expiry_hours,
+    );
+    p.max_cost_usd = o.max_cost_usd;
+    p.attempt_max_cost_usd = o.attempt_max_cost_usd;
+    p.attempt_max_wall_secs = o.attempt_max_wall_secs;
+    p
 }
 
 #[cfg(test)]

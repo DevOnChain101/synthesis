@@ -890,6 +890,8 @@ impl Store {
     pub fn request_stop(&self, id: &str) -> Result<bool> {
         check_id(id)?;
         let conn = connect(&self.home, false)?;
+        // an outcome's sessions are stopped by their owner ([`Self::stop_attempt`]), not by id
+        refuse_hidden(&conn, id)?;
         let n = conn.execute(
             "UPDATE sessions SET stop_requested_at=?2 WHERE id=?1",
             (id, now()),
@@ -1102,11 +1104,40 @@ impl Store {
         Ok(w)
     }
 
-    /// The orchestrator's way into a session it owns (an attempt's, to read or finish it): the
-    /// lock and connection without the user-path refusal of [`Self::resume_session`]. Only the
-    /// orchestrator should call it; `/resume` and `/close` never do.
-    pub fn open_session_for_orchestrator(&self, id: &str) -> Result<SessionWriter> {
-        self.open_locked(id)
+    /// The orchestrator's way into an attempt's session (to read or finish it): the lock and
+    /// connection without the user-path refusal of [`Self::resume_session`]. It needs the outcome's
+    /// writer as proof of ownership and only opens a session that is an attempt of that outcome.
+    pub fn open_attempt_session(
+        &self,
+        outcome: &crate::outcome::OutcomeWriter,
+        session_id: &str,
+    ) -> Result<SessionWriter> {
+        check_id(session_id)?;
+        if !outcome.owns_attempt_session(session_id)? {
+            return Err(Error::Invalid(format!(
+                "session {session_id} is not an attempt of this outcome"
+            )));
+        }
+        self.open_locked(session_id)
+    }
+
+    /// `synt stop` for an attempt's session, on behalf of its outcome's owner (cancel path).
+    pub fn stop_attempt(
+        &self,
+        outcome: &crate::outcome::OutcomeWriter,
+        session_id: &str,
+    ) -> Result<bool> {
+        check_id(session_id)?;
+        if !outcome.owns_attempt_session(session_id)? {
+            return Err(Error::Invalid(format!(
+                "session {session_id} is not an attempt of this outcome"
+            )));
+        }
+        let n = connect(&self.home, false)?.execute(
+            "UPDATE sessions SET stop_requested_at=?2 WHERE id=?1",
+            (session_id, now()),
+        )?;
+        Ok(n > 0)
     }
 
     /// Lock + connection for an existing session without any state checks (recovery).

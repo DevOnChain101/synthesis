@@ -128,7 +128,7 @@ CREATE TABLE evidence(
   subject_commit TEXT NOT NULL, subject_tree TEXT, check_id TEXT NOT NULL, command_hash TEXT,
   criteria_ids TEXT NOT NULL CHECK(json_valid(criteria_ids)),
   result TEXT NOT NULL, exit_code INTEGER, env_fingerprint TEXT NOT NULL,
-  artifact_session_id TEXT, artifact_id TEXT, sha256 TEXT, flags TEXT NOT NULL DEFAULT '[]',
+  artifact_session_id TEXT, artifact_id TEXT, sha256 TEXT, flags TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(flags)),
   fence INTEGER NOT NULL, captured_at TEXT NOT NULL);
 -- NULL attempt ids (human reviews) dedupe too
 CREATE UNIQUE INDEX evidence_dedupe ON evidence(COALESCE(attempt_id, ''), work_item_id, check_id, subject_commit);
@@ -148,7 +148,8 @@ CREATE TABLE decision_approvals(
   decision_revision INTEGER NOT NULL, approver TEXT NOT NULL,
   choice TEXT NOT NULL, brief_sha256 TEXT NOT NULL,
   decided_at TEXT NOT NULL,
-  mac TEXT NOT NULL);   -- HMAC(chain key) over the row, checked before an approval is used
+  mac TEXT NOT NULL,    -- HMAC over the row and the decision it resolves, checked before use
+  UNIQUE(decision_id, decision_revision));
 CREATE TABLE grants(
   id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES decisions(id),
   action_hash TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT);
@@ -219,12 +220,50 @@ CREATE TRIGGER attempts_revision BEFORE UPDATE OF state ON attempts
   WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
 CREATE TRIGGER decisions_revision BEFORE UPDATE OF state ON decisions
   WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
+-- a revision never goes backwards; a decision's moves exactly one step and only with its state
+CREATE TRIGGER outcomes_revision_forward BEFORE UPDATE OF revision ON outcomes
+  WHEN NEW.revision < OLD.revision BEGIN SELECT RAISE(ABORT, 'a revision never decreases'); END;
+CREATE TRIGGER work_items_revision_forward BEFORE UPDATE OF revision ON work_items
+  WHEN NEW.revision < OLD.revision BEGIN SELECT RAISE(ABORT, 'a revision never decreases'); END;
+CREATE TRIGGER attempts_revision_forward BEFORE UPDATE OF revision ON attempts
+  WHEN NEW.revision < OLD.revision BEGIN SELECT RAISE(ABORT, 'a revision never decreases'); END;
+CREATE TRIGGER decisions_revision_step BEFORE UPDATE OF revision ON decisions
+  WHEN NEW.revision <> OLD.revision + 1 OR NEW.state = OLD.state
+  BEGIN SELECT RAISE(ABORT, 'a decision revision moves one step, with its state'); END;
+-- a finished state is final, and a person's answer only comes from `pending`
+CREATE TRIGGER outcomes_terminal BEFORE UPDATE OF state ON outcomes
+  WHEN OLD.state IN ('completed','failed','cancelled') BEGIN SELECT RAISE(ABORT, 'a finished outcome does not change'); END;
+CREATE TRIGGER work_items_terminal BEFORE UPDATE OF state ON work_items
+  WHEN OLD.state IN ('succeeded','terminal_failure','cancelled') BEGIN SELECT RAISE(ABORT, 'a finished work item does not change'); END;
+CREATE TRIGGER attempts_terminal BEFORE UPDATE OF state ON attempts
+  WHEN OLD.state IN ('finished','lost','cancelled') BEGIN SELECT RAISE(ABORT, 'a finished attempt does not change'); END;
+CREATE TRIGGER decisions_terminal BEFORE UPDATE OF state ON decisions
+  WHEN OLD.state IN ('approved','rejected','expired','invalidated') BEGIN SELECT RAISE(ABORT, 'a finished decision does not change'); END;
+CREATE TRIGGER decisions_answer_from_pending BEFORE UPDATE OF state ON decisions
+  WHEN NEW.state IN ('approved','rejected','needs_more_info') AND OLD.state <> 'pending'
+  BEGIN SELECT RAISE(ABORT, 'a decision is answered from pending only'); END;
+-- what the plan fixed: items, their order, which attempt ran where
+CREATE TRIGGER work_items_spec_immutable BEFORE UPDATE OF id, outcome_id, plan_version, key, kind, spec ON work_items
+  BEGIN SELECT RAISE(ABORT, 'a work item spec is immutable'); END;
+CREATE TRIGGER work_item_deps_no_update BEFORE UPDATE ON work_item_deps
+  BEGIN SELECT RAISE(ABORT, 'dependencies are immutable'); END;
+CREATE TRIGGER work_item_deps_no_delete BEFORE DELETE ON work_item_deps
+  BEGIN SELECT RAISE(ABORT, 'dependencies are immutable'); END;
+CREATE TRIGGER attempts_identity_immutable BEFORE UPDATE OF id, work_item_id, ordinal, session_id, worker_kind, fence, started_at ON attempts
+  BEGIN SELECT RAISE(ABORT, 'an attempt keeps its identity and fence'); END;
+CREATE TRIGGER attempts_commit_once BEFORE UPDATE OF subject_commit ON attempts
+  WHEN OLD.subject_commit IS NOT NULL AND NEW.subject_commit IS NOT OLD.subject_commit
+  BEGIN SELECT RAISE(ABORT, 'an attempt commit is set once'); END;
+CREATE TRIGGER grants_consume_once BEFORE UPDATE OF consumed_at ON grants
+  WHEN OLD.consumed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a grant is consumed once'); END;
 -- a finished command keeps its request and result
 CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempotency_key, kind, params,
     expected_revision, from_surface, created_at ON outcome_commands
   BEGIN SELECT RAISE(ABORT, 'a command request is immutable'); END;
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
+-- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
+INSERT INTO schema_migrations(version, applied_at) VALUES (1002, 'outcome-ddl-rev-2');
 "#,
 ];
 
@@ -232,6 +271,10 @@ CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.s
 pub const DEFAULT_TARGET: i64 = 4;
 /// First version with the outcome tables.
 pub const OUTCOMES: i64 = 5;
+/// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
+/// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
+/// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
+pub const OUTCOME_DDL_MARKER: i64 = 1002;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 
@@ -311,7 +354,7 @@ mod tests {
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 5);
+        assert_eq!(n, 6, "five migrations plus the outcome DDL revision marker");
         // a lower target on a newer database is a no-op: the feature-off binary keeps working
         migrate(&mut c, "t", DEFAULT_TARGET).unwrap();
         assert_eq!(user_version(&c).unwrap(), 5);

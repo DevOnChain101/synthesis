@@ -22,6 +22,8 @@ pub use recover::{
 pub use schema::DEFAULT_TARGET as SCHEMA_VERSION_LATEST;
 /// Newest schema this build reads and writes; a database above it is refused (`SchemaTooNew`).
 pub use schema::LATEST as SCHEMA_VERSION_SUPPORTED;
+/// `schema_migrations.version` marking the outcome DDL revision this build writes.
+pub use schema::OUTCOME_DDL_MARKER;
 /// First schema with the outcome tables; opened only through the explicit enable step.
 pub use schema::OUTCOMES as SCHEMA_VERSION_OUTCOMES;
 pub use store::*;

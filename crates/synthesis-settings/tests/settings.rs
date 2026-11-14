@@ -1224,3 +1224,49 @@ fn an_unusable_managed_orchestrator_value_fails_closed() {
     let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
     assert!(o.enabled && !o.fail_closed && o.max_cost_usd == Some(10.0));
 }
+
+/// N5: whatever makes the managed file unusable switches the feature off.
+#[test]
+fn a_managed_file_that_cannot_be_used_fails_closed() {
+    let user = json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 1000}}});
+    let managed_raw: [(&str, String); 5] = [
+        ("malformed json", "{not json".into()),
+        ("not an object", "[1,2]".into()),
+        (
+            "unknown key in the block",
+            json!({"synt":{"orchestrator":{"max_cost_usd": 5, "max_cost": 1}}}).to_string(),
+        ),
+        ("synt is not an object", json!({"synt": "x"}).to_string()),
+        (
+            "synt from a newer build",
+            json!({"synt":{"version": 99}}).to_string(),
+        ),
+    ];
+    for (what, raw) in managed_raw {
+        let f = fx();
+        f.user(user.clone());
+        fs::write(f.home.path().join("managed.json"), raw).unwrap();
+        let s = f.load(ProjectTrust::Trusted);
+        let o = &s.synthesis.orchestrator;
+        assert!(!o.enabled && o.fail_closed, "{what}: {:?}", s.diagnostics);
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("switched off")),
+            "{what}: {:?}",
+            s.diagnostics
+        );
+    }
+    // a managed file that simply does not mention the feature locks nothing
+    let f = fx();
+    f.user(user);
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"permissions": {"deny": ["Bash(rm:*)"]}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(o.enabled && !o.fail_closed);
+    // and no managed file at all is the user's call
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    assert!(f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
+}

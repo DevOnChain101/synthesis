@@ -178,7 +178,8 @@ impl Default for OrchestratorSettings {
     }
 }
 
-fn bad(diags: &mut Vec<String>, what: &str, key: &str, want: &str) {
+fn bad(diags: &mut Vec<String>, invalid: &mut bool, what: &str, key: &str, want: &str) {
+    *invalid = true;
     diags.push(format!(
         "{what}: synt.orchestrator.{key} must be {want}, kept"
     ));
@@ -189,29 +190,31 @@ impl OrchestratorSettings {
     /// never the value) and the previous value stays, so a layer can only change what it states
     /// correctly.
     fn apply(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) {
-        let before = diags.len();
-        self.apply_keys(o, what, diags);
-        // The managed layer cannot be skipped over: a value it states wrongly must not leave the
-        // user's looser one in force, so the feature is switched off and stays off.
-        if what == "managed settings"
-            && diags[before..]
-                .iter()
-                .any(|d| d.contains(" must be ") || d.contains("is not an object"))
-        {
-            self.enabled = false;
-            self.fail_closed = true;
-            diags.push(format!(
-                "{what}: synt.orchestrator has an unusable value: outcome orchestration is switched off"
-            ));
+        let invalid = self.apply_keys(o, what, diags);
+        // The managed layer cannot be skipped over: a value, or a key, it states wrongly must not
+        // leave the user's looser setting in force, so the feature is switched off and stays off.
+        if invalid && what == "managed settings" {
+            self.lock_off(what, "has an unusable value or an unknown key", diags);
         }
     }
 
-    fn apply_keys(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) {
+    /// Switches the feature off for good (the organisation's intent cannot be read).
+    pub(crate) fn lock_off(&mut self, what: &str, why: &str, diags: &mut Vec<String>) {
+        self.enabled = false;
+        self.fail_closed = true;
+        diags.push(format!(
+            "{what}: synt.orchestrator {why}: outcome orchestration is switched off"
+        ));
+    }
+
+    /// Returns whether anything was unusable (a wrong value, an unknown key, a wrong shape).
+    fn apply_keys(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) -> bool {
+        let mut invalid = false;
         let Some(o) = o.as_object() else {
             diags.push(format!(
                 "{what}: synt.orchestrator is not an object, ignored"
             ));
-            return;
+            return true;
         };
         let int = |v: &Value, lo: u64, hi: u64| v.as_u64().filter(|n| (lo..=hi).contains(n));
         let money = |v: &Value| v.as_f64().filter(|n| n.is_finite() && *n > 0.0);
@@ -219,61 +222,95 @@ impl OrchestratorSettings {
             match k.as_str() {
                 "enabled" => match v.as_bool() {
                     Some(b) => self.enabled = b && !self.fail_closed,
-                    None => bad(diags, what, k, "true or false"),
+                    None => bad(diags, &mut invalid, what, k, "true or false"),
                 },
                 "max_parallel_workers" => match int(v, 1, ORCH_MAX_PARALLEL) {
                     Some(n) => self.max_parallel_workers = n as u32,
-                    None => bad(diags, what, k, "a whole number from 1 to 16"),
+                    None => bad(diags, &mut invalid, what, k, "a whole number from 1 to 16"),
                 },
                 "max_attempts_per_work_item" => match int(v, 1, ORCH_MAX_ATTEMPTS) {
                     Some(n) => self.max_attempts_per_work_item = n as u32,
-                    None => bad(diags, what, k, "a whole number from 1 to 10"),
+                    None => bad(diags, &mut invalid, what, k, "a whole number from 1 to 10"),
                 },
                 "max_cost_usd" => match money(v) {
                     Some(n) => self.max_cost_usd = Some(n),
-                    None => bad(diags, what, k, "a positive number"),
+                    None => bad(diags, &mut invalid, what, k, "a positive number"),
                 },
                 "worktree_retention_days" => match int(v, 1, 3650) {
                     Some(n) => self.worktree_retention_days = n as u32,
-                    None => bad(diags, what, k, "a whole number from 1 to 3650"),
+                    None => bad(
+                        diags,
+                        &mut invalid,
+                        what,
+                        k,
+                        "a whole number from 1 to 3650",
+                    ),
                 },
                 "decision_expiry_hours" => match int(v, 1, 720) {
                     Some(n) => self.decision_expiry_hours = n as u32,
-                    None => bad(diags, what, k, "a whole number from 1 to 720"),
+                    None => bad(diags, &mut invalid, what, k, "a whole number from 1 to 720"),
                 },
                 "idle_exit_minutes" => match int(v, 1, 1440) {
                     Some(n) => self.idle_exit_minutes = n as u32,
-                    None => bad(diags, what, k, "a whole number from 1 to 1440"),
+                    None => bad(
+                        diags,
+                        &mut invalid,
+                        what,
+                        k,
+                        "a whole number from 1 to 1440",
+                    ),
                 },
                 "attempt" => match v.as_object() {
-                    None => bad(diags, what, k, "an object"),
+                    None => bad(diags, &mut invalid, what, k, "an object"),
                     Some(a) => {
                         for (ak, av) in a {
                             match ak.as_str() {
                                 "max_cost_usd" => match money(av) {
                                     Some(n) => self.attempt_max_cost_usd = Some(n),
-                                    None => bad(diags, what, "attempt.max_cost_usd", "a positive number"),
+                                    None => bad(
+                                        diags,
+                                        &mut invalid,
+                                        what,
+                                        "attempt.max_cost_usd",
+                                        "a positive number",
+                                    ),
                                 },
                                 "max_wall_secs" => match int(av, 1, 7 * 24 * 3600) {
                                     Some(n) => self.attempt_max_wall_secs = Some(n),
-                                    None => bad(diags, what, "attempt.max_wall_secs", "a whole number of seconds"),
+                                    None => bad(
+                                        diags,
+                                        &mut invalid,
+                                        what,
+                                        "attempt.max_wall_secs",
+                                        "a whole number of seconds",
+                                    ),
                                 },
-                                _ => diags.push(format!(
-                                    "{what}: synt.orchestrator.attempt.{ak} is not a setting, ignored"
-                                )),
+                                _ => {
+                                    invalid = true;
+                                    diags.push(format!(
+                                        "{what}: synt.orchestrator.attempt.{ak} is not a setting, ignored"
+                                    ));
+                                }
                             }
                         }
                     }
                 },
                 "version" => {}
-                "network" => diags.push(format!(
-                    "{what}: synt.orchestrator.network is not a setting; use synt.sandbox.network.allowedHosts, ignored"
-                )),
-                _ => diags.push(format!(
-                    "{what}: synt.orchestrator.{k} is not a setting, ignored"
-                )),
+                "network" => {
+                    invalid = true;
+                    diags.push(format!(
+                        "{what}: synt.orchestrator.network is not a setting; use synt.sandbox.network.allowedHosts, ignored"
+                    ));
+                }
+                _ => {
+                    invalid = true;
+                    diags.push(format!(
+                        "{what}: synt.orchestrator.{k} is not a setting, ignored"
+                    ));
+                }
             }
         }
+        invalid
     }
 }
 
@@ -462,6 +499,14 @@ pub fn load_settings_layers(
             Err(e) => {
                 s.diagnostics.push(e.clone());
                 s.errors.push(e);
+                // an unreadable or malformed managed file: its intent is unknown, so fail closed
+                if *what == "managed settings" {
+                    s.synthesis.orchestrator.lock_off(
+                        what,
+                        "cannot be read (the managed file is unusable)",
+                        &mut s.diagnostics,
+                    );
+                }
             }
         }
     }
@@ -938,6 +983,11 @@ impl Settings {
 
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
         let Some(n) = raw.get("synt").and_then(Value::as_object) else {
+            if raw.get("synt").is_some() && what == "managed settings" {
+                // a managed `synt` this build cannot read may carry limits it would then not apply
+                let o = &mut self.synthesis.orchestrator;
+                o.lock_off(what, "synt section is not an object", &mut self.diagnostics);
+            }
             return;
         };
         let version = n.get("version").and_then(Value::as_u64).unwrap_or(1);
@@ -945,6 +995,14 @@ impl Settings {
             self.diagnostics.push(format!(
                 "{what}: synt section version {version} is newer than supported {SYNT_SECTION_VERSION}, ignored"
             ));
+            if what == "managed settings" {
+                let o = &mut self.synthesis.orchestrator;
+                o.lock_off(
+                    what,
+                    "synt section is from a newer build",
+                    &mut self.diagnostics,
+                );
+            }
             return;
         }
         if user && let Some(p) = n.get("peers").and_then(Value::as_object) {

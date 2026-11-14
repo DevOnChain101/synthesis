@@ -38,14 +38,13 @@ fn env() -> Env {
 }
 
 fn policy() -> OutcomePolicy {
-    OutcomePolicy {
-        enabled: true,
-        max_parallel_workers: 16,
-        max_attempts_per_work_item: 10,
-        max_cost_usd: None,
-        attempt_max_cost_usd: None,
-        attempt_max_wall_secs: None,
-    }
+    OutcomePolicy::new(true, 16, 10, 24)
+}
+
+fn with(f: impl FnOnce(&mut OutcomePolicy)) -> OutcomePolicy {
+    let mut p = policy();
+    f(&mut p);
+    p
 }
 
 impl Env {
@@ -190,6 +189,13 @@ fn new_outcome(e: &Env, store: &Store) -> OutcomeWriter {
     new_outcome_with(e, store, &contract(), &policy())
 }
 
+/// The stored hash read straight from the table (`get_contract` refuses a tampered approval).
+fn contract_hash_raw(e: &Env) -> String {
+    e.db()
+        .query_row("SELECT hash FROM contracts", [], |r| r.get(0))
+        .unwrap()
+}
+
 fn contract_hash(w: &OutcomeWriter) -> String {
     w.get_contract(w.id(), 1).unwrap().1
 }
@@ -218,11 +224,22 @@ fn approved_outcome(e: &Env, store: &Store) -> OutcomeWriter {
 }
 
 /// Outcome at `ready` with a plan: contract approved, plan stored, state walked there.
-fn ready_outcome(e: &Env, store: &Store) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
-    let mut w = approved_outcome(e, store);
+fn ready_outcome_with(
+    e: &Env,
+    store: &Store,
+    c: &Contract,
+) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
+    let mut w = new_outcome_with(e, store, c, &policy());
+    go(&mut w, OutcomeState::ContractPending);
+    let h = contract_hash(&w);
+    w.approve_contract(1, &h, "user").unwrap();
     let items = w.insert_plan(&plan()).unwrap();
     go(&mut w, OutcomeState::Ready);
     (w, items)
+}
+
+fn ready_outcome(e: &Env, store: &Store) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
+    ready_outcome_with(e, store, &contract())
 }
 
 fn item<'a>(items: &'a [(String, WorkItemId)], key: &str) -> &'a WorkItemId {
@@ -287,15 +304,12 @@ fn run_agent(
     sess: &str,
     commit: &str,
 ) -> AttemptRecord {
-    for to in [
-        WorkItemState::Ready,
-        WorkItemState::Leased,
-        WorkItemState::Running,
-    ] {
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
         item_to(w, it, to).unwrap();
     }
     e.child(store, sess, w.control_session_id());
     let (a, _) = w.new_attempt(it, 1, sess, "local-inproc", NONE).unwrap();
+    item_to(w, it, WorkItemState::Running).unwrap();
     let r = w
         .transition_attempt(
             &a.id,
@@ -682,10 +696,7 @@ fn outcome_events_are_hash_chained_and_a_tampered_one_is_found() {
 fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds_them() {
     let e = env();
     let store = e.v5();
-    let off = OutcomePolicy {
-        enabled: false,
-        ..policy()
-    };
+    let off = with(|p| p.enabled = false);
     let r = store.create_outcome(NewOutcome {
         workspace: &e.ws(),
         base_commit: "x".into(),
@@ -715,10 +726,7 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
     };
     let mut c = contract();
     c.envelope.budgets.max_cost_usd = 50.0;
-    let cap = OutcomePolicy {
-        max_cost_usd: Some(10.0),
-        ..policy()
-    };
+    let cap = with(|p| p.max_cost_usd = Some(10.0));
     assert!(
         create(&c, &cap)
             .unwrap_err()
@@ -727,10 +735,7 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
     );
     c.envelope.budgets.max_cost_usd = 5.0;
     c.envelope.budgets.max_parallel_workers = 8;
-    let workers = OutcomePolicy {
-        max_parallel_workers: 2,
-        ..policy()
-    };
+    let workers = with(|p| p.max_parallel_workers = 2);
     assert!(
         create(&c, &workers)
             .unwrap_err()
@@ -739,10 +744,7 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
     );
     c.envelope.budgets.max_parallel_workers = 2;
     c.envelope.budgets.max_attempts_per_work_item = 5;
-    let attempts = OutcomePolicy {
-        max_attempts_per_work_item: 3,
-        ..policy()
-    };
+    let attempts = with(|p| p.max_attempts_per_work_item = 3);
     assert!(
         create(&c, &attempts)
             .unwrap_err()
@@ -751,11 +753,10 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
     );
     // a ceiling on the per-attempt cap makes the contract name one
     c.envelope.budgets.max_attempts_per_work_item = 3;
-    let per = OutcomePolicy {
-        attempt_max_cost_usd: Some(1.0),
-        attempt_max_wall_secs: Some(60),
-        ..policy()
-    };
+    let per = with(|p| {
+        p.attempt_max_cost_usd = Some(1.0);
+        p.attempt_max_wall_secs = Some(60);
+    });
     assert!(
         create(&c, &per)
             .unwrap_err()
@@ -776,51 +777,45 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
 }
 
 #[test]
-fn a_tighter_ceiling_applies_to_a_stored_contracts_attempt_budget() {
+fn a_tighter_ceiling_applies_when_a_stored_contract_is_approved_and_when_an_attempt_starts() {
+    let e = env();
+    let store = e.v5();
+    // N6: the ceiling tightened between creation and approval
+    let mut w = new_outcome(&e, &store);
+    go(&mut w, OutcomeState::ContractPending);
+    let h = contract_hash(&w);
+    let id = w.id().clone();
+    drop(w);
+    let tight = with(|p| p.max_attempts_per_work_item = 1);
+    let mut w = store.open_outcome(&id, &tight).unwrap();
+    let err = w.approve_contract(1, &h, "user").unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds the settings ceiling"),
+        "{err}"
+    );
+    assert!(!w.contract_is_approved(&id, 1).unwrap());
+    drop(w);
+    // ... and between approval and the start of an attempt
     let e = env();
     let store = e.v5();
     let (w, items) = ready_outcome(&e, &store);
     let id = w.id().clone();
     drop(w);
-    // the organisation lowers the cap to 1 attempt per item after approval
-    let tight = OutcomePolicy {
-        max_attempts_per_work_item: 1,
-        ..policy()
-    };
     let mut w = store.open_outcome(&id, &tight).unwrap();
     go(&mut w, OutcomeState::Running);
     let it = item(&items, "implement");
-    for to in [
-        WorkItemState::Ready,
-        WorkItemState::Leased,
-        WorkItemState::Running,
-    ] {
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
         item_to(&mut w, it, to).unwrap();
     }
     e.child(&store, "a1", w.control_session_id());
-    let (a, _) = w.new_attempt(it, 1, "a1", "local-inproc", NONE).unwrap();
-    let r = w
-        .transition_attempt(
-            &a.id,
-            1,
-            AttemptState::Running,
-            &AttemptEnd::default(),
-            NONE,
-        )
-        .unwrap();
-    w.transition_attempt(
-        &a.id,
-        r.revision,
-        AttemptState::Lost,
-        &AttemptEnd::default(),
-        NONE,
-    )
-    .unwrap();
-    e.child(&store, "a2", w.control_session_id());
     let err = w
-        .new_attempt(it, 2, "a2", "local-inproc", NONE)
+        .new_attempt(it, 1, "a1", "local-inproc", NONE)
         .unwrap_err();
-    assert!(err.to_string().contains("attempt budget"), "{err}");
+    assert!(
+        err.to_string().contains("exceeds the settings ceiling"),
+        "{err}"
+    );
+    assert!(w.list_attempts(it).unwrap().is_empty());
 }
 
 // -------------------------------------------------------------- revisions, CAS
@@ -952,13 +947,22 @@ fn a_forged_contract_approval_does_not_open_ready() {
     assert!(err.to_string().contains("approved once"), "{err}");
     // a made-up mac gets past the trigger, not past the check on use
     forge(&"ab".repeat(32)).unwrap();
-    assert!(!w.contract_is_approved(w.id(), 1).unwrap());
-    // and the plan insert (needs the approved contract) refuses too
-    assert!(w.insert_plan(&plan()).is_err());
+    // ... and it is reported loudly, not as a quiet "not approved"
+    assert!(matches!(
+        w.contract_is_approved(w.id(), 1),
+        Err(Error::Tampered(_))
+    ));
+    assert!(matches!(w.get_contract(w.id(), 1), Err(Error::Tampered(_))));
+    // the plan insert (needs the approved contract) and Ready refuse too
+    assert!(matches!(w.insert_plan(&plan()), Err(Error::Tampered(_))));
     let err = w
         .transition_outcome(rev_of(&w), OutcomeState::Ready, None, NONE)
         .unwrap_err();
-    assert!(err.to_string().contains("not approved"), "{err}");
+    assert!(matches!(err, Error::Tampered(_)), "{err}");
+    // N2: a pre-poisoned approval neither counts as "already approved" nor blocks silently
+    let h = contract_hash_raw(&e);
+    let err = w.approve_contract(1, &h, "user").unwrap_err();
+    assert!(err.to_string().contains("does not verify"), "{err}");
     // a second bare UPDATE (replace an existing approval) is refused outright
     let err = forge(&"cd".repeat(32)).unwrap_err();
     assert!(err.to_string().contains("approved once"), "{err}");
@@ -979,10 +983,10 @@ fn an_approval_for_another_contract_body_or_outcome_does_not_verify() {
     )
     .unwrap();
     assert!(
-        !w.contract_is_approved(w.id(), 1).unwrap(),
+        matches!(w.contract_is_approved(w.id(), 1), Err(Error::Tampered(_))),
         "body no longer matches the approved hash"
     );
-    let h = contract_hash(&w);
+    let h = contract_hash_raw(&e);
     assert!(w.approve_contract(1, &h, "user").is_err());
 }
 
@@ -1020,12 +1024,12 @@ fn history_cannot_be_deleted_or_rewritten_with_plain_sql() {
     db.execute("UPDATE evidence SET flags='[\"stale\"]'", [])
         .unwrap();
     // a decision cannot be resolved by a bare UPDATE: no approval row
-    let err = db
-        .execute(
-            "UPDATE decisions SET state='approved', revision=revision+1 WHERE id=?1",
-            [d.id.as_str()],
-        )
-        .unwrap_err();
+    let force = "UPDATE decisions SET state='approved', revision=revision+1 WHERE id=?1";
+    let err = db.execute(force, [d.id.as_str()]).unwrap_err();
+    assert!(err.to_string().contains("from pending only"), "{err}");
+    w.transition_decision(&d.id, 1, DecisionState::Pending, &json!({"v": 1}), NONE)
+        .unwrap();
+    let err = db.execute(force, [d.id.as_str()]).unwrap_err();
     assert!(err.to_string().contains("needs its approval row"), "{err}");
     // finished commands do not change
     let q = store
@@ -1206,11 +1210,7 @@ fn attempts_follow_the_ordinal_budget_liveness_and_session_rules() {
     let (mut w, items) = ready_outcome(&e, &store);
     go(&mut w, OutcomeState::Running);
     let it = item(&items, "implement").clone();
-    for to in [
-        WorkItemState::Ready,
-        WorkItemState::Leased,
-        WorkItemState::Running,
-    ] {
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
         item_to(&mut w, &it, to).unwrap();
     }
     let control = w.control_session_id().to_string();
@@ -1344,7 +1344,7 @@ fn evidence_is_attributed_fenced_deduplicated_and_its_artifact_is_real() {
     assert_eq!(n, 1);
 
     // artifacts: malformed, unknown, wrong hash, someone else's session: refused; the real one passes
-    let mut sw = store.resume_session_for_test("att-1");
+    let mut sw = store.open_attempt_session(&w, "att-1").unwrap();
     let art = sw
         .put_artifact("report", "text/plain", b"all green", Retention::Session)
         .unwrap();
@@ -1365,7 +1365,7 @@ fn evidence_is_attributed_fenced_deduplicated_and_its_artifact_is_real() {
         assert!(w.record_evidence(&with(s, a, h)).is_err(), "{s} {a} {h}");
     }
     e.session(&store, "elsewhere", false);
-    let mut ew = store.resume_session_for_test("elsewhere");
+    let mut ew = store.resume_session("elsewhere", false).unwrap();
     let other = ew
         .put_artifact("report", "text/plain", b"x", Retention::Session)
         .unwrap();
@@ -1377,17 +1377,6 @@ fn evidence_is_attributed_fenced_deduplicated_and_its_artifact_is_real() {
     );
     w.record_evidence(&with("att-1", &art.artifact_id, &real))
         .unwrap();
-}
-
-/// `resume_session` refuses attempt sessions (F10), so the test opens the writer through the
-/// orchestrator-side path the crate keeps for itself.
-trait ResumeForTest {
-    fn resume_session_for_test(&self, id: &str) -> synthesis_session::SessionWriter;
-}
-impl ResumeForTest for Store {
-    fn resume_session_for_test(&self, id: &str) -> synthesis_session::SessionWriter {
-        self.open_session_for_orchestrator(id).unwrap()
-    }
 }
 
 // -------------------------------------------------------------------- decisions
@@ -1446,7 +1435,7 @@ fn a_decision_is_resolved_only_by_resolve_decision_and_the_approval_is_authentic
         );
     }
     assert_eq!(
-        w.list_decisions(w.id()).unwrap()[0].state,
+        w.list_decisions(w.id()).unwrap()[0].row_state,
         DecisionState::Pending
     );
     // what the person saw must be what is stored
@@ -1479,7 +1468,7 @@ fn a_decision_is_resolved_only_by_resolve_decision_and_the_approval_is_authentic
     anon.approver = String::new();
     assert!(w.resolve_decision(&anon, &binding()).is_err());
     assert_eq!(
-        w.list_decisions(w.id()).unwrap()[0].state,
+        w.list_decisions(w.id()).unwrap()[0].row_state,
         DecisionState::Pending,
         "nothing changed"
     );
@@ -1514,6 +1503,8 @@ fn a_decision_is_resolved_only_by_resolve_decision_and_the_approval_is_authentic
         .next()
         .expect("decision.resolved event");
     assert_eq!(ev["approver"], "user:cli");
+    assert_eq!(ev["outcome_id"], w.id().as_str());
+    assert_eq!(ev["binding_hash"], d.binding_hash);
     assert_eq!(ev["brief_sha256"], d.brief_sha256);
     assert_eq!(ev["revision"], 3);
     assert!(
@@ -1577,7 +1568,7 @@ fn reject_and_request_evidence_are_resolutions_too_and_expiry_blocks_them() {
     w.transition_decision(&d.id, d.revision, DecisionState::Expired, &binding(), NONE)
         .unwrap();
     assert_eq!(
-        w.list_decisions(&id).unwrap()[0].state,
+        w.list_decisions(&id).unwrap()[0].row_state,
         DecisionState::Expired
     );
     assert!(
@@ -1621,7 +1612,7 @@ fn decision_dedupe_follows_the_binding_and_rejects_conflicting_reuse() {
     let store = e.v5();
     let (mut w, _) = ready_outcome(&e, &store);
     let (d, fresh) = w.new_decision(&decision("k", binding())).unwrap();
-    assert!(fresh && d.state == DecisionState::Preparing);
+    assert!(fresh && d.row_state == DecisionState::Preparing);
     let (again, fresh) = w.new_decision(&decision("k", binding())).unwrap();
     assert!(!fresh && again.id == d.id);
     // same key and binding but another brief is an error, not a silent reuse
@@ -1812,7 +1803,7 @@ fn a_stale_brief_or_binding_becomes_a_stale_command_result_with_no_effect() {
     );
     assert!(w.decision_approvals(&d.id).unwrap().is_empty());
     assert_eq!(
-        w.list_decisions(w.id()).unwrap()[0].state,
+        w.list_decisions(w.id()).unwrap()[0].row_state,
         DecisionState::Pending
     );
 }
@@ -2051,11 +2042,7 @@ fn ready_for_attempt(e: &Env, store: &Store) -> (OutcomeWriter, WorkItemId) {
     let (mut w, items) = ready_outcome(e, store);
     go(&mut w, OutcomeState::Running);
     let it = item(&items, "implement").clone();
-    for to in [
-        WorkItemState::Ready,
-        WorkItemState::Leased,
-        WorkItemState::Running,
-    ] {
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
         item_to(&mut w, &it, to).unwrap();
     }
     e.child(store, "att-1", w.control_session_id());
@@ -2282,6 +2269,7 @@ fn an_outbox_key_means_one_effect_and_the_duplicate_is_reported() {
     let fx = with_worktree_effect("same");
     let (_, new) = w.new_attempt(&it, 1, "att-1", "local-inproc", &fx).unwrap();
     assert_eq!(new, [true]);
+    item_to(&mut w, &it, WorkItemState::Running).unwrap();
     // the same effect again (a replayed transition) reports `false`, nothing doubles
     let r = w
         .transition_work_item(&it, item_rev(&w, &it), WorkItemState::Verifying, &fx)
@@ -2514,4 +2502,386 @@ fn a_plan_is_stored_only_in_the_right_state_as_the_next_version_for_an_approved_
     bad.items[2].requires.push("ghost".into());
     assert!(w.insert_plan(&bad).is_err());
     assert_eq!(w.list_work_items(w.id()).unwrap().len(), 6);
+}
+
+// ---------------------------------------------------- re-review: N1 .. N9
+
+fn hex_sha(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn resolved_decision(e: &Env, store: &Store, choice: &str) -> (OutcomeWriter, DecisionRecord) {
+    let (mut w, _) = ready_outcome(e, store);
+    let d = open_decision(&mut w);
+    w.resolve_decision(&resolution(&d, choice), &binding())
+        .unwrap();
+    (w, d)
+}
+
+const DECISION_TRIGGERS: [&str; 5] = [
+    "decisions_revision_step",
+    "decisions_terminal",
+    "decisions_revision",
+    "decisions_answer_from_pending",
+    "decisions_resolution_needs_approval",
+];
+
+/// N1 (a): rewind the revision, then flip the state. The row is read back from the table, so the
+/// authority must come from the MAC'd choice, not from the row.
+#[test]
+fn n1_a_revision_rewind_cannot_turn_a_rejection_into_an_approval() {
+    let e = env();
+    let store = e.v5();
+    let (w, d) = resolved_decision(&e, &store, "reject");
+    assert_eq!(w.decision_state(&d.id).unwrap(), DecisionState::Rejected);
+    let db = e.db();
+    // plain SQL, step by step: every one is refused by the triggers
+    for sql in [
+        "UPDATE decisions SET revision=2",
+        "UPDATE decisions SET state='approved', revision=3",
+        "UPDATE decisions SET state='approved'",
+        "UPDATE decisions SET state='pending', revision=revision+1",
+    ] {
+        assert!(db.execute(sql, []).is_err(), "{sql}");
+    }
+    assert!(
+        db.execute("UPDATE decisions SET revision=revision-1", [])
+            .is_err()
+    );
+    // a writer that also drops the triggers still cannot make the row say something the MAC'd
+    // choice does not: loud Tampered, never a quiet Approved
+    for t in DECISION_TRIGGERS {
+        db.execute(&format!("DROP TRIGGER {t}"), []).unwrap();
+    }
+    db.execute("UPDATE decisions SET revision=2", []).unwrap();
+    db.execute("UPDATE decisions SET state='approved', revision=3", [])
+        .unwrap();
+    assert_eq!(
+        w.list_decisions(w.id()).unwrap()[0].row_state,
+        DecisionState::Approved,
+        "the raw column lies"
+    );
+    assert!(matches!(
+        w.verified_resolution(&d.id),
+        Err(Error::Tampered(_))
+    ));
+    assert!(matches!(w.decision_state(&d.id), Err(Error::Tampered(_))));
+}
+
+/// N1 (b): `INSERT OR REPLACE` skips the triggers; the approval must still not cover a swapped row.
+#[test]
+fn n1_b_a_replaced_decision_row_does_not_verify() {
+    // (column to replace, its new SQL value); the binding_hash cases are computed in Rust
+    let new_binding = r#"{"contract_version":9}"#;
+    let cases: Vec<(&str, String)> = vec![
+        ("binding", format!("'{new_binding}'")),
+        ("kind", "'policy_change'".into()),
+        ("expires_at", "'2099-01-01T00:00:00.000Z'".into()),
+        (
+            "brief",
+            r#"'{"alternatives":["A","B"],"why":"swapped"}'"#.into(),
+        ),
+        ("binding+hash", format!("'{new_binding}'")),
+        ("outcome_id", "OTHER".into()),
+    ];
+    for (col, val) in cases {
+        let e = env();
+        let store = e.v5();
+        let (w, d) = resolved_decision(&e, &store, "A");
+        let other = new_outcome(&e, &store);
+        assert_eq!(
+            w.decision_state(&d.id).unwrap(),
+            DecisionState::Approved,
+            "{col}: authentic before"
+        );
+        let mut sel = vec![
+            "id",
+            "outcome_id",
+            "kind",
+            "dedupe_key",
+            "state",
+            "revision",
+            "brief",
+            "binding",
+            "binding_hash",
+            "expires_at",
+            "created_at",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+        let set = |sel: &mut Vec<String>, name: &str, v: &str| {
+            let i = sel.iter().position(|c| c == name).unwrap();
+            sel[i] = v.to_string();
+        };
+        match col {
+            "binding+hash" => {
+                set(&mut sel, "binding", &val);
+                set(
+                    &mut sel,
+                    "binding_hash",
+                    &format!("'{}'", hex_sha(new_binding)),
+                );
+            }
+            "outcome_id" => set(&mut sel, "outcome_id", &format!("'{}'", other.id())),
+            _ => set(&mut sel, col, &val),
+        }
+        e.db()
+            .execute(
+                &format!(
+                    "INSERT OR REPLACE INTO decisions SELECT {} FROM decisions",
+                    sel.join(",")
+                ),
+                [],
+            )
+            .unwrap_or_else(|err| panic!("{col}: replace should get past the triggers: {err}"));
+        let r = w.verified_resolution(&d.id);
+        assert!(matches!(r, Err(Error::Tampered(_))), "{col}: {r:?}");
+    }
+}
+
+#[test]
+fn n1_one_approval_per_decision_revision_and_the_event_names_the_binding() {
+    let e = env();
+    let store = e.v5();
+    let (w, d) = resolved_decision(&e, &store, "A");
+    let err = e
+        .db()
+        .execute(
+            "INSERT INTO decision_approvals(id,decision_id,decision_revision,approver,choice,brief_sha256,decided_at,mac) \
+             VALUES ('x',?1,2,'mallory','B','h','t','m')",
+            [d.id.as_str()],
+        )
+        .unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("unique"), "{err}");
+    assert_eq!(w.decision_approvals(&d.id).unwrap().len(), 1);
+}
+
+#[test]
+fn n1_a_resolved_state_without_its_approval_is_tampering_not_unresolved() {
+    let e = env();
+    let store = e.v5();
+    let (w, d) = resolved_decision(&e, &store, "A");
+    let db = e.db();
+    db.execute("DROP TRIGGER decision_approvals_no_delete", [])
+        .unwrap();
+    db.execute("DELETE FROM decision_approvals", []).unwrap();
+    assert!(matches!(
+        w.verified_resolution(&d.id),
+        Err(Error::Tampered(_))
+    ));
+}
+
+/// N3: what the plan and the attempts fixed, and the one-way grant.
+#[test]
+fn n3_plan_attempt_and_grant_columns_are_one_way() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    finish_items(&e, &store, &mut w, &items);
+    let db = e.db();
+    for sql in [
+        "UPDATE work_items SET spec='{}'",
+        "UPDATE work_items SET key='x'",
+        "UPDATE work_items SET kind='verify'",
+        "UPDATE work_item_deps SET requires_id=work_item_id",
+        "DELETE FROM work_item_deps",
+        "UPDATE attempts SET session_id='elsewhere'",
+        "UPDATE attempts SET fence=99",
+        "UPDATE attempts SET ordinal=7",
+        "UPDATE attempts SET subject_commit='evil'",
+        "UPDATE evidence SET flags='not json'",
+    ] {
+        assert!(db.execute(sql, []).is_err(), "{sql}");
+    }
+    let (d, _) = w.new_decision(&decision("g", binding())).unwrap();
+    db.execute(
+        "INSERT INTO grants(id,decision_id,action_hash,expires_at) VALUES ('g1',?1,'h','2099')",
+        [d.id.as_str()],
+    )
+    .unwrap();
+    db.execute("UPDATE grants SET consumed_at='t1'", [])
+        .unwrap();
+    assert!(
+        db.execute("UPDATE grants SET consumed_at=NULL", [])
+            .is_err(),
+        "a grant cannot be un-consumed"
+    );
+    assert!(
+        db.execute("UPDATE grants SET consumed_at='t2'", [])
+            .is_err(),
+        "nor re-stamped"
+    );
+}
+
+/// N4: a criterion that names its checks is only satisfied by those checks.
+#[test]
+fn n4_a_criterion_with_check_ids_needs_evidence_from_one_of_them() {
+    for (ids, verified) in [(vec!["unit"], true), (vec!["lint"], false)] {
+        let e = env();
+        let store = e.v5();
+        let mut c = contract();
+        c.criteria[0].check_ids = ids.iter().map(|s| (*s).into()).collect();
+        let (mut w, items) = ready_outcome_with(&e, &store, &c);
+        finish_items(&e, &store, &mut w, &items);
+        go(&mut w, OutcomeState::Verifying);
+        let r = w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE);
+        assert_eq!(r.is_ok(), verified, "{ids:?}: {r:?}");
+    }
+}
+
+/// N6: the decision expiry is bounded by the settings.
+#[test]
+fn n6_decision_expiry_is_capped_by_the_settings() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, _) = ready_outcome(&e, &store);
+    let mut d = decision("exp", binding());
+    d.expires_at = hours(25);
+    assert!(
+        w.new_decision(&d)
+            .unwrap_err()
+            .to_string()
+            .contains("decision_expiry_hours")
+    );
+    d.expires_at = hours(23);
+    w.new_decision(&d).unwrap();
+}
+
+/// N7
+#[test]
+fn n7_attempts_start_only_from_ready_or_leased_items() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    go(&mut w, OutcomeState::Running);
+    let it = item(&items, "implement").clone();
+    e.child(&store, "s1", w.control_session_id());
+    // created
+    let err = w
+        .new_attempt(&it, 1, "s1", "local-inproc", NONE)
+        .unwrap_err();
+    assert!(err.to_string().contains("ready or leased"), "{err}");
+    for to in [
+        WorkItemState::Ready,
+        WorkItemState::Leased,
+        WorkItemState::Running,
+    ] {
+        item_to(&mut w, &it, to).unwrap();
+    }
+    // running
+    assert!(w.new_attempt(&it, 1, "s1", "local-inproc", NONE).is_err());
+    assert!(w.list_attempts(&it).unwrap().is_empty());
+}
+
+#[test]
+fn n7_attempt_sessions_are_reached_only_through_their_outcomes_writer() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    go(&mut w, OutcomeState::Running);
+    run_agent(&e, &store, &mut w, item(&items, "inspect"), "att-1", "c1");
+    e.session(&store, "plain", true);
+    let control = w.control_session_id().to_string();
+    // another outcome, with its own attempt
+    drop(w);
+    let (mut other, other_items) = ready_outcome(&e, &store);
+    go(&mut other, OutcomeState::Running);
+    run_agent(
+        &e,
+        &store,
+        &mut other,
+        item(&other_items, "inspect"),
+        "att-other",
+        "c1",
+    );
+    drop(store.open_attempt_session(&other, "att-other").unwrap());
+    for id in ["att-1", "plain", control.as_str()] {
+        assert!(store.open_attempt_session(&other, id).is_err(), "{id}");
+        assert!(store.stop_attempt(&other, id).is_err(), "{id}");
+    }
+    // `synt stop` by id refuses control and attempt sessions; the owner's path works
+    for id in [control.as_str(), "att-other"] {
+        assert!(
+            matches!(store.request_stop(id), Err(Error::Invalid(m)) if m.contains("belongs to an outcome"))
+        );
+    }
+    assert!(store.request_stop("plain").unwrap());
+    assert!(store.stop_attempt(&other, "att-other").unwrap());
+    let stopped: Option<String> = e
+        .db()
+        .query_row(
+            "SELECT stop_requested_at FROM sessions WHERE id='att-other'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(stopped.is_some());
+}
+
+/// N8
+#[test]
+fn n8_an_outbox_payload_is_bounded() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, _) = ready_outcome(&e, &store);
+    let big = NewOutbox {
+        idempotency_key: "big".into(),
+        kind: OutboxKind::VerifierRun,
+        payload: json!({"x": "a".repeat(MAX_OUTBOX_PAYLOAD_BYTES)}),
+    };
+    let r = w.atomically(|tx| tx.enqueue(&big));
+    assert!(matches!(r, Err(Error::TooLarge { .. })), "{r:?}");
+    assert!(w.list_outbox(w.id()).unwrap().is_empty());
+}
+
+/// N9: a developer database that enabled an earlier draft of v5.
+#[test]
+fn n9_a_v5_database_without_the_ddl_revision_marker_is_refused_loudly() {
+    let e = env();
+    let store = e.v5();
+    let w = new_outcome(&e, &store);
+    let id = w.id().clone();
+    drop(w);
+    e.db()
+        .execute(
+            "DELETE FROM schema_migrations WHERE version=?1",
+            [synthesis_session::OUTCOME_DDL_MARKER],
+        )
+        .unwrap();
+    let reader = store.reader().unwrap();
+    assert!(matches!(
+        reader.list_outcomes(),
+        Err(Error::OutcomeSchemaOutdated)
+    ));
+    assert!(matches!(
+        reader.get_outcome(&id),
+        Err(Error::OutcomeSchemaOutdated)
+    ));
+    let r = store.create_outcome(NewOutcome {
+        workspace: &e.ws(),
+        base_commit: "x".into(),
+        contract: &contract(),
+        policy: &policy(),
+    });
+    assert!(matches!(r, Err(Error::OutcomeSchemaOutdated)));
+    assert!(
+        Error::OutcomeSchemaOutdated
+            .to_string()
+            .contains("restore backups/pre-v5")
+    );
+    // chat sessions on the same database are untouched
+    e.session(&store, "chat", true);
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .list_used_sessions(None)
+            .unwrap()
+            .len(),
+        1
+    );
 }

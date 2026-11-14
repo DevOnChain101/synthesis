@@ -34,6 +34,12 @@ pub enum Error {
     /// A request that was right when it was made but no longer matches the stored state: the
     /// brief changed, the binding moved. The caller reloads (command result `stale`).
     Stale(String),
+    /// A stored approval or the row it authorises does not match its MAC: the file was changed by
+    /// something that could not produce the MAC. Loud on purpose, never a quiet "not approved".
+    Tampered(String),
+    /// The database holds the outcome tables of an earlier draft of the v5 DDL (no revision
+    /// marker): restore the pre-v5 backup and enable again.
+    OutcomeSchemaOutdated,
     /// `synt.orchestrator.enabled` is off (or locked off by the managed settings).
     OutcomesDisabled,
     /// The database is below schema v5: outcomes were never enabled here.
@@ -78,6 +84,11 @@ impl std::fmt::Display for Error {
             Self::OutsideWorkspace(p) => write!(f, "{} is outside the workspace", p.display()),
             Self::Invalid(s) => write!(f, "{s}"),
             Self::Stale(why) => write!(f, "stale: {why}"),
+            Self::Tampered(what) => write!(f, "tampered: {what}"),
+            Self::OutcomeSchemaOutdated => write!(
+                f,
+                "the outcome tables come from an earlier draft of the v5 schema: restore backups/pre-v5-*/synt.db (stop every surface and delete synt.db-wal and synt.db-shm first) and enable again"
+            ),
             Self::OutcomesDisabled => write!(
                 f,
                 "outcome orchestration is disabled by the settings (synt.orchestrator.enabled)"

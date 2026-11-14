@@ -39,17 +39,26 @@ pub const LIST_LIMIT: usize = 1000;
 /// A command's params, and how many commands may wait for an owner per outcome.
 pub const MAX_COMMAND_PARAMS_BYTES: usize = 64 * 1024;
 pub const MAX_QUEUED_COMMANDS: i64 = 1000;
-/// A decision may not stay open longer than this (settings allow at most 30 days).
-const MAX_DECISION_DAYS: i64 = 31;
+/// An outbox payload is bounded like a command's params.
+pub const MAX_OUTBOX_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Backoff cap of the outbox: after this many tries a row stays `failed` for a person to look at.
 pub const OUTBOX_MAX_TRIES: u32 = 5;
 
 fn need_v5(conn: &Connection) -> Result<()> {
-    if schema::user_version(conn)? >= schema::OUTCOMES {
+    if schema::user_version(conn)? < schema::OUTCOMES {
+        return Err(Error::OutcomesNotEnabled);
+    }
+    // a v5 made by an earlier draft of the DDL lacks the triggers and MAC columns this code relies on
+    let marked: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [schema::OUTCOME_DDL_MARKER],
+        |r| r.get(0),
+    )?;
+    if marked {
         Ok(())
     } else {
-        Err(Error::OutcomesNotEnabled)
+        Err(Error::OutcomeSchemaOutdated)
     }
 }
 
@@ -122,7 +131,9 @@ pub struct DecisionRecord {
     pub id: DecisionId,
     pub kind: String,
     pub dedupe_key: String,
-    pub state: DecisionState,
+    /// The raw `state` column. NOT authoritative for a resolved decision (anyone who can write
+    /// the file can change it): use [`Reader::decision_state`] or [`Reader::verified_resolution`].
+    pub row_state: DecisionState,
     pub revision: i64,
     pub brief: Value,
     /// Hash of the stored brief as shown: the resolve command must echo it back.
@@ -288,7 +299,7 @@ fn decision_row(r: &Row<'_>) -> rusqlite::Result<DecisionRecord> {
         id: id_col(r, 0)?,
         kind: r.get(1)?,
         dedupe_key: r.get(2)?,
-        state: col(r, 3)?,
+        row_state: col(r, 3)?,
         revision: r.get(4)?,
         brief_sha256: sha_hex(r.get::<_, String>(5)?.as_bytes()),
         brief: json_col(r, 5)?,
@@ -381,18 +392,22 @@ impl Reader {
     }
 
     /// The stored contract of a version and whether a person approved it.
+    /// The stored contract, its hash, and whether its approval **verifies** (MAC and body hash,
+    /// [`Self::contract_is_approved`]); an `approved_at` written by anything else is `false`.
     pub fn get_contract(&self, id: &OutcomeId, version: u32) -> Result<(Contract, String, bool)> {
         need_v5(&self.conn)?;
-        let (body, hash, approved): (String, String, Option<String>) = self
+        let (body, hash): (String, String) = self
             .conn
             .query_row(
-                "SELECT body,hash,approved_at FROM contracts WHERE outcome_id=?1 AND version=?2",
+                "SELECT body,hash FROM contracts WHERE outcome_id=?1 AND version=?2",
                 params![id.as_str(), version],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("contract {id} v{version}")))?;
-        Ok((serde_json::from_str(&body)?, hash, approved.is_some()))
+        let key = crate::trust::existing_chain_key(&self.home);
+        let approved = contract_authentic(&self.conn, key.as_ref(), id, version)?;
+        Ok((serde_json::from_str(&body)?, hash, approved))
     }
 
     pub fn list_work_items(&self, id: &OutcomeId) -> Result<Vec<WorkItemRecord>> {
@@ -497,29 +512,43 @@ impl Reader {
         contract_authentic(&self.conn, key.as_ref(), id, version)
     }
 
-    /// The resolution of a decision, only if its approval row is authentic: the MAC matches, it
-    /// belongs to the revision the decision resolved at, and it names the brief that is stored.
-    /// `None` for an open decision or for a state reached without a valid approval.
+    /// The resolution of a decision, only if everything the approval authorised still holds: the
+    /// MAC (over the decision, its outcome, kind, revision, binding hash, expiry, brief hash,
+    /// approver, choice and time) verifies, the binding hash is the hash of the stored binding,
+    /// the brief hash is the stored brief's, and the state the row shows is the one the MAC'd
+    /// choice leads to (`reject` is rejected, `request_evidence`/`edit_scope` need more info, an
+    /// offered alternative is approved). `None` for an open decision and for anything that does
+    /// not add up.
     pub fn verified_resolution(&self, id: &DecisionId) -> Result<Option<Resolved>> {
         need_v5(&self.conn)?;
-        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
-            return Ok(None);
-        };
-        let d = self
+        let (d, outcome, binding_text) = self
             .conn
             .query_row(
-                &format!("SELECT {DECISION_COLS} FROM decisions WHERE id=?1"),
+                &format!("SELECT {DECISION_COLS}, outcome_id, binding FROM decisions WHERE id=?1"),
                 [id.as_str()],
-                decision_row,
+                |r| {
+                    Ok((
+                        decision_row(r)?,
+                        r.get::<_, String>(10)?,
+                        r.get::<_, String>(11)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
         if !matches!(
-            d.state,
+            d.row_state,
             DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo
         ) {
             return Ok(None);
         }
+        let tampered = |why: &str| Error::Tampered(format!("decision {id}: {why}"));
+        if sha_hex(binding_text.as_bytes()) != d.binding_hash {
+            return Err(tampered("the binding does not match its hash"));
+        }
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            return Err(tampered("a resolved state but the chain key is missing"));
+        };
         let row: Option<(String, String, String, String, String)> = self
             .conn
             .query_row(
@@ -529,17 +558,66 @@ impl Reader {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((approver, choice, brief, at, mac)) = row else {
-            return Ok(None);
+        let Some((approver, choice, brief, at, stored)) = row else {
+            return Err(tampered("a resolved state without its approval"));
         };
-        let want = approval_mac(&key, id, d.revision - 1, &approver, &choice, &brief, &at);
-        Ok(
-            (want == mac && brief == d.brief_sha256).then_some(Resolved {
-                state: d.state,
-                approver,
-                choice,
-            }),
-        )
+        let facts = ApprovalFacts {
+            decision: id.as_str(),
+            outcome: &outcome,
+            kind: &d.kind,
+            revision: d.revision - 1,
+            binding_hash: &d.binding_hash,
+            expires_at: &d.expires_at,
+            brief_sha256: &brief,
+            approver: &approver,
+            choice: &choice,
+            at: &at,
+        };
+        if !approval_mac_ok(&key, &facts, &stored) {
+            return Err(tampered("the approval does not verify"));
+        }
+        if brief != d.brief_sha256 {
+            return Err(tampered("the brief is not the one that was approved"));
+        }
+        let derived = match choice.as_str() {
+            "reject" => DecisionState::Rejected,
+            "request_evidence" | "edit_scope" => DecisionState::NeedsMoreInfo,
+            c if offers(&d.brief, c) => DecisionState::Approved,
+            _ => return Err(tampered("the approved choice is not one the brief offered")),
+        };
+        if derived != d.row_state {
+            return Err(tampered(
+                "the state does not follow from the approved choice",
+            ));
+        }
+        Ok(Some(Resolved {
+            state: derived,
+            approver,
+            choice,
+        }))
+    }
+
+    /// The authoritative state of a decision. A resolved state (approved, rejected, needs more
+    /// info) is returned only if [`Self::verified_resolution`] vouches for it; a row that shows one
+    /// without a valid approval is an error, never a quiet `Approved`. `DecisionRecord::row_state`
+    /// is the raw column and must not be used to authorise anything.
+    pub fn decision_state(&self, id: &DecisionId) -> Result<DecisionState> {
+        need_v5(&self.conn)?;
+        let row_state: DecisionState = enum_from(&self.conn.query_row(
+            "SELECT state FROM decisions WHERE id=?1",
+            [id.as_str()],
+            |r| r.get::<_, String>(0),
+        )?)?;
+        if matches!(
+            row_state,
+            DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo
+        ) {
+            return Ok(self
+                .verified_resolution(id)?
+                .map(|r| r.state)
+                .expect("a resolved row state yields Some or Tampered"));
+        }
+        Ok(row_state)
     }
 
     /// Commands waiting for an owner, oldest first.
@@ -563,22 +641,54 @@ pub struct Resolved {
     pub choice: String,
 }
 
-/// HMAC-SHA256 under the chain key over length-prefixed parts, so no two different tuples share
-/// an input. The key lives in the home that the sandbox must not read (the `chain.key` read deny
-/// is plan PR-S1, a separate branch), so an attempt cannot forge a MAC.
-fn mac(key: &[u8; 32], domain: &str, parts: &[&str]) -> String {
-    let mut m = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
-    m.update(b"synt-outcome-v1\0");
-    m.update(domain.as_bytes());
-    for p in parts {
+/// A MAC over length-prefixed parts (domain included), so no two different tuples share an input.
+/// The key is a subkey of the per-user chain key (`HMAC(chain key, "synt outcome mac v1")`), so a
+/// MAC never doubles as a chain link. The chain key lives in the home the sandbox must not read
+/// (that deny is plan PR-S1 / PR #117), so an attempt cannot forge a MAC.
+fn mac_state(key: &[u8; 32], domain: &str, parts: &[&str]) -> Hmac<Sha256> {
+    let mut sub = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+    sub.update(b"synt outcome mac v1");
+    let sub = sub.finalize().into_bytes();
+    let mut m = Hmac::<Sha256>::new_from_slice(&sub).expect("any key length");
+    for p in std::iter::once(&domain).chain(parts) {
         m.update(&(p.len() as u64).to_le_bytes());
         m.update(p.as_bytes());
     }
-    m.finalize()
+    m
+}
+
+fn mac(key: &[u8; 32], domain: &str, parts: &[&str]) -> String {
+    mac_state(key, domain, parts)
+        .finalize()
         .into_bytes()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Constant-time check of a stored hex MAC.
+fn mac_ok(key: &[u8; 32], domain: &str, parts: &[&str], stored_hex: &str) -> bool {
+    let bytes: Option<Vec<u8>> = (stored_hex.len() % 2 == 0 && stored_hex.is_ascii())
+        .then(|| {
+            (0..stored_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&stored_hex[i..i + 2], 16).ok())
+                .collect()
+        })
+        .flatten();
+    bytes.is_some_and(|b| mac_state(key, domain, parts).verify_slice(&b).is_ok())
+}
+
+/// What a contract approval authorises: the outcome, the version, the hash of the whole stored
+/// body (goal, criteria, envelope and budgets are all in it), who approved and when.
+fn contract_parts<'a>(
+    outcome: &'a str,
+    version: &'a str,
+    hash: &'a str,
+    approver: &'a str,
+    at: &'a str,
+) -> [&'a str; 5] {
+    [outcome, version, hash, approver, at]
 }
 
 fn contract_mac(
@@ -589,33 +699,66 @@ fn contract_mac(
     approver: &str,
     at: &str,
 ) -> String {
+    let v = version.to_string();
     mac(
         key,
         "contract",
-        &[outcome, &version.to_string(), hash, approver, at],
+        &contract_parts(outcome, &v, hash, approver, at),
     )
 }
 
-fn approval_mac(
-    key: &[u8; 32],
-    id: &DecisionId,
+/// What a decision approval authorises: the decision and the outcome it belongs to, its kind, the
+/// revision answered, the binding (by hash), the expiry, the brief shown (by hash), who answered
+/// what, and when.
+struct ApprovalFacts<'a> {
+    decision: &'a str,
+    outcome: &'a str,
+    kind: &'a str,
     revision: i64,
-    approver: &str,
-    choice: &str,
-    brief_sha256: &str,
-    at: &str,
-) -> String {
+    binding_hash: &'a str,
+    expires_at: &'a str,
+    brief_sha256: &'a str,
+    approver: &'a str,
+    choice: &'a str,
+    at: &'a str,
+}
+
+impl ApprovalFacts<'_> {
+    fn parts(&self) -> Vec<String> {
+        [
+            self.decision,
+            self.outcome,
+            self.kind,
+            &self.revision.to_string(),
+            self.binding_hash,
+            self.expires_at,
+            self.brief_sha256,
+            self.approver,
+            self.choice,
+            self.at,
+        ]
+        .iter()
+        .map(|p| (*p).to_string())
+        .collect()
+    }
+}
+
+fn approval_mac(key: &[u8; 32], f: &ApprovalFacts<'_>) -> String {
+    let p = f.parts();
     mac(
         key,
         "approval",
-        &[
-            id.as_str(),
-            &revision.to_string(),
-            approver,
-            choice,
-            brief_sha256,
-            at,
-        ],
+        &p.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+fn approval_mac_ok(key: &[u8; 32], f: &ApprovalFacts<'_>, stored: &str) -> bool {
+    let p = f.parts();
+    mac_ok(
+        key,
+        "approval",
+        &p.iter().map(String::as_str).collect::<Vec<_>>(),
+        stored,
     )
 }
 
@@ -627,7 +770,9 @@ type ContractApprovalRow = (
     Option<String>,
 );
 
-/// Shared by [`Reader::contract_is_approved`] and the check before `Ready`.
+/// Shared by [`Reader::contract_is_approved`] and the check before `Ready`. `Ok(false)`: no
+/// approval is recorded. `Ok(true)`: it verifies. An approval that is recorded but does not
+/// verify (no key, wrong MAC, a body that no longer matches its hash) is [`Error::Tampered`].
 fn contract_authentic(
     conn: &Connection,
     key: Option<&[u8; 32]>,
@@ -642,13 +787,36 @@ fn contract_authentic(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let (Some((body, hash, Some(by), Some(at), Some(m))), Some(key)) = (row, key) else {
+    let Some((body, hash, by, at, m)) = row else {
         return Ok(false);
+    };
+    if by.is_none() && at.is_none() && m.is_none() {
+        return Ok(false);
+    }
+    let tampered = || {
+        Error::Tampered(format!(
+            "the approval of contract v{version} does not verify"
+        ))
+    };
+    let (Some(by), Some(at), Some(m), Some(key)) = (by, at, m, key) else {
+        return Err(tampered());
     };
     let body_ok = serde_json::from_str::<Value>(&body)
         .map(|v| body_hash(&v) == hash)
         .unwrap_or(false);
-    Ok(body_ok && contract_mac(key, id.as_str(), version, &hash, &by, &at) == m)
+    let v = version.to_string();
+    if body_ok
+        && mac_ok(
+            key,
+            "contract",
+            &contract_parts(id.as_str(), &v, &hash, &by, &at),
+            &m,
+        )
+    {
+        Ok(true)
+    } else {
+        Err(tampered())
+    }
 }
 
 fn parse_ts(s: &str) -> Option<OffsetDateTime> {
@@ -658,6 +826,17 @@ fn parse_ts(s: &str) -> Option<OffsetDateTime> {
     time::PrimitiveDateTime::parse(s, &fmt)
         .ok()
         .map(time::PrimitiveDateTime::assume_utc)
+}
+
+/// Is `c` one of the alternatives the brief offers (a string, or an object with that `id`)?
+fn offers(brief: &Value, c: &str) -> bool {
+    brief
+        .get("alternatives")
+        .and_then(Value::as_array)
+        .is_some_and(|a| {
+            a.iter()
+                .any(|x| x.as_str() == Some(c) || x.get("id").and_then(Value::as_str) == Some(c))
+        })
 }
 
 fn is_sha256(s: &str) -> bool {
@@ -671,11 +850,19 @@ fn is_sha256(s: &str) -> bool {
 /// What the settings allow (`synt.orchestrator.*`, user and managed layers already merged, managed
 /// winning). Required to create or open an outcome, so the store itself refuses when the
 /// feature is off and never accepts a contract above the ceilings.
+///
+/// The policy is **caller-built**: the store trusts what it is handed, so the gate is exactly as
+/// strong as the code that builds it. `#[non_exhaustive]` stops a struct literal outside this
+/// crate; the one production builder is `synthesis_app::outcome_policy`, which reads the merged
+/// settings (managed layer last, fail-closed on an unusable managed value).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct OutcomePolicy {
     pub enabled: bool,
     pub max_parallel_workers: u32,
     pub max_attempts_per_work_item: u32,
+    /// Longest a decision may stay open, in hours.
+    pub decision_expiry_hours: u32,
     /// `None`: no ceiling on the outcome cap (the contract still has to name one).
     pub max_cost_usd: Option<f64>,
     /// A ceiling makes a per-attempt cap mandatory in the contract.
@@ -684,6 +871,24 @@ pub struct OutcomePolicy {
 }
 
 impl OutcomePolicy {
+    /// A policy with no cost ceilings; set the optional fields on the value.
+    pub fn new(
+        enabled: bool,
+        max_parallel_workers: u32,
+        max_attempts_per_work_item: u32,
+        decision_expiry_hours: u32,
+    ) -> Self {
+        Self {
+            enabled,
+            max_parallel_workers,
+            max_attempts_per_work_item,
+            decision_expiry_hours,
+            max_cost_usd: None,
+            attempt_max_cost_usd: None,
+            attempt_max_wall_secs: None,
+        }
+    }
+
     /// Refuses a contract whose budgets exceed the ceilings (never silently clamps: what the
     /// person approves is what runs).
     pub fn check(&self, c: &Contract) -> Result<()> {
@@ -815,37 +1020,32 @@ impl Store {
         let conn = connect(self.home(), false)?;
         need_v5(&conn)?;
         let reader = self.reader()?;
-        let existing = reader.get_command(&c.outcome_id, &c.idempotency_key)?;
-        if existing.is_none() {
-            let queued: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM outcome_commands WHERE outcome_id=?1 AND state='queued'",
-                [c.outcome_id.as_str()],
-                |r| r.get(0),
-            )?;
-            if queued >= MAX_QUEUED_COMMANDS {
-                return Err(Error::QuotaExceeded {
-                    what: "queued commands",
-                    limit: MAX_QUEUED_COMMANDS as u64,
-                });
-            }
-            conn.execute(
-                "INSERT INTO outcome_commands(id,outcome_id,idempotency_key,kind,params,expected_revision,from_surface,state,created_at) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8) ON CONFLICT(outcome_id,idempotency_key) DO NOTHING",
-                params![
-                    new_uuid(),
-                    c.outcome_id.as_str(),
-                    c.idempotency_key,
-                    c.kind,
-                    text,
-                    c.expected_revision,
-                    enum_str(&c.from_surface),
-                    now(),
-                ],
-            )?;
-        }
-        let rec = reader
-            .get_command(&c.outcome_id, &c.idempotency_key)?
-            .ok_or_else(|| Error::NotFound("command".into()))?;
+        // One statement: the quota is counted by the same write that inserts, so concurrent
+        // surfaces cannot slip past it. A retry of a stored key conflicts and inserts nothing.
+        conn.execute(
+            "INSERT INTO outcome_commands(id,outcome_id,idempotency_key,kind,params,expected_revision,from_surface,state,created_at) \
+             SELECT ?1,?2,?3,?4,?5,?6,?7,'queued',?8 \
+             WHERE (SELECT COUNT(*) FROM outcome_commands WHERE outcome_id=?2 AND state='queued') < ?9 \
+             ON CONFLICT(outcome_id,idempotency_key) DO NOTHING",
+            params![
+                new_uuid(),
+                c.outcome_id.as_str(),
+                c.idempotency_key,
+                c.kind,
+                text,
+                c.expected_revision,
+                enum_str(&c.from_surface),
+                now(),
+                MAX_QUEUED_COMMANDS,
+            ],
+        )?;
+        let Some(rec) = reader.get_command(&c.outcome_id, &c.idempotency_key)? else {
+            return Err(Error::QuotaExceeded {
+                what: "queued commands",
+                limit: MAX_QUEUED_COMMANDS as u64,
+            });
+        };
+
         if rec.kind != c.kind
             || rec.params != params_json
             || rec.expected_revision != c.expected_revision
@@ -1018,7 +1218,7 @@ pub struct NewDecision {
     pub brief: Value,
     /// Contract and plan versions, subject commit, policy hash, action hash, attempt ordinal.
     pub binding: Value,
-    /// A store-format timestamp in the future, at most 31 days away.
+    /// A store-format timestamp in the future, within `decision_expiry_hours` of the settings.
     pub expires_at: String,
 }
 
@@ -1063,6 +1263,16 @@ impl OutcomeWriter {
 
     pub fn id(&self) -> &OutcomeId {
         &self.id
+    }
+
+    /// Is `session_id` the session of one of this outcome's attempts?
+    pub(crate) fn owns_attempt_session(&self, session_id: &str) -> Result<bool> {
+        Ok(self.w.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+             WHERE a.session_id=?1 AND w.outcome_id=?2)",
+            params![session_id, self.id.as_str()],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn control_session_id(&self) -> &str {
@@ -1453,6 +1663,13 @@ impl OutcomeTx<'_, '_> {
     pub fn enqueue(&mut self, o: &NewOutbox) -> Result<bool> {
         let mut payload = o.payload.clone();
         self.et.redact_value(&mut payload);
+        if payload.to_string().len() > MAX_OUTBOX_PAYLOAD_BYTES {
+            return Err(Error::TooLarge {
+                what: "outbox payload",
+                size: payload.to_string().len(),
+                max: MAX_OUTBOX_PAYLOAD_BYTES,
+            });
+        }
         let inserted = self.et.tx.execute(
             "INSERT INTO outbox(id,outcome_id,idempotency_key,kind,payload,state) \
              VALUES (?1,?2,?3,?4,?5,'pending') ON CONFLICT(outcome_id,idempotency_key) DO NOTHING",
@@ -1504,6 +1721,13 @@ impl OutcomeTx<'_, '_> {
     }
 
     fn conflict_or(&self, agg: ev::Aggregate, id: &str, expected: i64, actual: i64) -> Result<()> {
+        // a revision this close to the end of the range is not one of ours: no `+ 1` below can overflow
+        if actual >= i64::MAX - 1 {
+            return Err(Error::Tampered(format!(
+                "{} {id} has an impossible revision",
+                agg.as_str()
+            )));
+        }
         if expected == actual {
             Ok(())
         } else {
@@ -1541,8 +1765,19 @@ impl OutcomeTx<'_, '_> {
             ));
         }
         if approved.is_some() {
-            return Ok(());
+            // an approval that does not verify (a bare UPDATE, a poisoned row) is tampering: it is
+            // reported, never accepted as "already approved" and never silently replaced
+            return if contract_authentic(self.et.tx, Some(self.et.key()), self.id, version)? {
+                Ok(())
+            } else {
+                Err(Error::Invalid(format!(
+                    "contract v{version} carries an approval that does not verify; the store was altered"
+                )))
+            };
         }
+        // the ceilings may have tightened since the contract was created
+        let contract: Contract = serde_json::from_str(&body)?;
+        self.policy.check(&contract)?;
         let at = ts(self.now);
         let m = contract_mac(
             self.et.key(),
@@ -1664,8 +1899,8 @@ impl OutcomeTx<'_, '_> {
 
     // ---- derived facts
 
-    /// Attempts per work item the plan's contract allows, under the settings ceiling.
-    fn max_attempts(&self, plan_version: u32) -> Result<u32> {
+    /// The stored contract the plan was made for.
+    fn plan_contract(&self, plan_version: u32) -> Result<Contract> {
         let body: String = self.et.tx.query_row(
             "SELECT c.body FROM plans p JOIN contracts c \
                ON c.outcome_id=p.outcome_id AND c.version=p.contract_version \
@@ -1673,8 +1908,14 @@ impl OutcomeTx<'_, '_> {
             params![self.id.as_str(), plan_version],
             |r| r.get(0),
         )?;
-        let c: Contract = serde_json::from_str(&body)?;
-        Ok(c.envelope
+        Ok(serde_json::from_str(&body)?)
+    }
+
+    /// Attempts per work item the plan's contract allows, under the settings ceiling.
+    fn max_attempts(&self, plan_version: u32) -> Result<u32> {
+        Ok(self
+            .plan_contract(plan_version)?
+            .envelope
             .budgets
             .max_attempts_per_work_item
             .min(self.policy.max_attempts_per_work_item))
@@ -1740,7 +1981,14 @@ impl OutcomeTx<'_, '_> {
         )?)
     }
 
-    /// The verdict (ADR-020 section 4, MVP rule), computed from the rows: every item of the
+    /// **Do not enable outcomes for real attempts before PR-08 and PR-09.** This MVP verdict reads
+    /// unsigned evidence rows (a writer without the key can INSERT a passing `independent_check`
+    /// row), nothing produces `definitions_changed` yet, the evidence `command_hash` is not bound to
+    /// a frozen command, and "the attempt that ended last" is unsound for parallel branches. PR-09
+    /// replaces it with a verdict over signed `evidence.recorded` events.
+    ///
+    /// The verdict (ADR-020 section 4, MVP rule), computed from the rows (a criterion with
+    /// `check_ids` is only satisfied by evidence of one of those checks): every item of the
     /// current plan `succeeded`, and every mandatory criterion has evidence of the class it
     /// requires (`independent_check`, or `human_review` for a manual one), passed, for the
     /// candidate commit, from the current fence, without `definitions_changed`, and no failed
@@ -1768,15 +2016,17 @@ impl OutcomeTx<'_, '_> {
             } else {
                 "independent_check"
             };
+            let check_ids = serde_json::to_string(&c.check_ids)?;
             let any = |result: &str| -> Result<bool> {
                 Ok(self.et.tx.query_row(
                     &format!(
                         "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.outcome_id=?1 \
                            AND e.subject_commit=?2 AND e.trust_class=?3 AND e.result IN ({result}) \
                            AND EXISTS (SELECT 1 FROM json_each(e.criteria_ids) j WHERE j.value=?4) \
+                           AND (?5='[]' OR e.check_id IN (SELECT value FROM json_each(?5))) \
                            AND {FLAG_FREE} AND {FENCE_CURRENT})"
                     ),
-                    params![self.id.as_str(), commit, class, c.id],
+                    params![self.id.as_str(), commit, class, c.id, check_ids],
                     |r| r.get(0),
                 )?)
             };
@@ -1910,7 +2160,18 @@ impl OutcomeTx<'_, '_> {
         if !matches!(worker_kind, "local-inproc" | "local-engine") {
             return Err(Error::Invalid("worker kind is invalid".into()));
         }
-        let (_, _, _, plan_version, kind) = self.load_item(item)?;
+        let (state, _, _, plan_version, kind) = self.load_item(item)?;
+        // allocated when the scheduler has the item ready or leased (a retry passes through `ready`)
+        if !matches!(
+            enum_from::<WorkItemState>(&state)?,
+            WorkItemState::Ready | WorkItemState::Leased
+        ) {
+            return Err(Error::Invalid(format!(
+                "an attempt starts from a ready or leased work item, not {state}"
+            )));
+        }
+        // the ceilings may have tightened since the contract was approved
+        self.policy.check(&self.plan_contract(plan_version)?)?;
         if kind != WorkItemKind::Agent {
             return Err(Error::Invalid(
                 "only an agent work item runs attempts".into(),
@@ -1925,10 +2186,12 @@ impl OutcomeTx<'_, '_> {
         if ordinal != 0 && ordinal <= max_ord {
             return Err(Error::AlreadyExists(format!("attempt {ordinal} of {item}")));
         }
-        if ordinal != max_ord + 1 {
+        let next_ord = max_ord
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("attempt ordinal overflow".into()))?;
+        if ordinal != next_ord {
             return Err(Error::Invalid(format!(
-                "the next attempt of this item is {}",
-                max_ord + 1
+                "the next attempt of this item is {next_ord}"
             )));
         }
         if ordinal > self.max_attempts(plan_version)? {
@@ -2074,10 +2337,11 @@ impl OutcomeTx<'_, '_> {
             )));
         }
         let expires = parse_ts(&d.expires_at)
-            .filter(|t| *t > self.now && *t <= self.now + time::Duration::days(MAX_DECISION_DAYS))
+            .filter(|t| *t > self.now
+                    && *t <= self.now + time::Duration::hours(i64::from(self.policy.decision_expiry_hours)))
             .ok_or_else(|| {
                 Error::Invalid(
-                    "expires_at must be a store timestamp in the future, within 31 days".into(),
+                    "expires_at must be a store timestamp in the future, within the settings limit (decision_expiry_hours)".into(),
                 )
             })?;
         let _ = expires;
@@ -2099,7 +2363,7 @@ impl OutcomeTx<'_, '_> {
             .optional()?;
         if let Some(rec) = latest
             && !matches!(
-                rec.state,
+                rec.row_state,
                 DecisionState::Expired | DecisionState::Invalidated
             )
         {
@@ -2140,16 +2404,27 @@ impl OutcomeTx<'_, '_> {
         Ok((rec, true))
     }
 
+    /// The decision of this outcome; a row whose binding no longer hashes to `binding_hash` was
+    /// written by something else and is refused.
     fn load_decision(&self, id: &DecisionId) -> Result<DecisionRecord> {
-        self.et
+        let (d, binding_text) = self
+            .et
             .tx
             .query_row(
-                &format!("SELECT {DECISION_COLS} FROM decisions WHERE id=?1 AND outcome_id=?2"),
+                &format!(
+                    "SELECT {DECISION_COLS}, binding FROM decisions WHERE id=?1 AND outcome_id=?2"
+                ),
                 params![id.as_str(), self.id.as_str()],
-                decision_row,
+                |r| Ok((decision_row(r)?, r.get::<_, String>(10)?)),
             )
             .optional()?
-            .ok_or_else(|| Error::NotFound(format!("decision {id}")))
+            .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
+        if sha_hex(binding_text.as_bytes()) != d.binding_hash {
+            return Err(Error::Invalid(format!(
+                "decision {id} is inconsistent: its binding does not match its hash"
+            )));
+        }
+        Ok(d)
     }
 
     fn binding_current(&self, d: &DecisionRecord, current: &Value) -> bool {
@@ -2195,7 +2470,7 @@ impl OutcomeTx<'_, '_> {
             binding_current: self.binding_current(&d, current_binding),
             expiry_reached: self.expired(&d),
         };
-        d.state.transition(to, &guards).map_err(refuse)?;
+        d.row_state.transition(to, &guards).map_err(refuse)?;
         let changed = self.et.tx.execute(
             "UPDATE decisions SET state=?2, revision=revision+1 WHERE id=?1 AND revision=?3",
             params![id.as_str(), enum_str(&to), d.revision],
@@ -2212,7 +2487,7 @@ impl OutcomeTx<'_, '_> {
             ev::Aggregate::Decision,
             id.as_str(),
             d.revision + 1,
-            &enum_str(&d.state),
+            &enum_str(&d.row_state),
             &enum_str(&to),
             None,
         )?;
@@ -2254,22 +2529,11 @@ impl OutcomeTx<'_, '_> {
         let to = match r.choice.as_str() {
             "reject" => DecisionState::Rejected,
             "request_evidence" | "edit_scope" => DecisionState::NeedsMoreInfo,
-            c => {
-                let offered = d
-                    .brief
-                    .get("alternatives")
-                    .and_then(Value::as_array)
-                    .is_some_and(|a| {
-                        a.iter().any(|x| {
-                            x.as_str() == Some(c) || x.get("id").and_then(Value::as_str) == Some(c)
-                        })
-                    });
-                if !offered {
-                    return Err(Error::Invalid(
-                        "the choice is not offered by the brief".into(),
-                    ));
-                }
-                DecisionState::Approved
+            c if offers(&d.brief, c) => DecisionState::Approved,
+            _ => {
+                return Err(Error::Invalid(
+                    "the choice is not offered by the brief".into(),
+                ));
             }
         };
         let guards = DecisionGuards {
@@ -2277,16 +2541,22 @@ impl OutcomeTx<'_, '_> {
             binding_current: true,
             expiry_reached: self.expired(&d),
         };
-        d.state.transition(to, &guards).map_err(refuse)?;
+        d.row_state.transition(to, &guards).map_err(refuse)?;
         let at = ts(self.now);
         let m = approval_mac(
             self.et.key(),
-            &r.decision_id,
-            d.revision,
-            &r.approver,
-            &r.choice,
-            &r.brief_sha256,
-            &at,
+            &ApprovalFacts {
+                decision: r.decision_id.as_str(),
+                outcome: self.id.as_str(),
+                kind: &d.kind,
+                revision: d.revision,
+                binding_hash: &d.binding_hash,
+                expires_at: &d.expires_at,
+                brief_sha256: &r.brief_sha256,
+                approver: &r.approver,
+                choice: &r.choice,
+                at: &at,
+            },
         );
         // the approval row first: the v5 trigger refuses a resolution without it
         self.et.tx.execute(
@@ -2319,13 +2589,14 @@ impl OutcomeTx<'_, '_> {
             ev::Aggregate::Decision,
             r.decision_id.as_str(),
             d.revision + 1,
-            &enum_str(&d.state),
+            &enum_str(&d.row_state),
             &enum_str(&to),
             None,
         )?;
         self.et.append(
             ev::DECISION_RESOLVED,
-            json!({"decision_id": r.decision_id, "revision": d.revision + 1,
+            json!({"decision_id": r.decision_id, "outcome_id": self.id,
+                   "revision": d.revision + 1, "binding_hash": d.binding_hash,
                    "approver": r.approver, "choice": r.choice,
                    "brief_sha256": r.brief_sha256, "state": to}),
         )?;
@@ -2515,8 +2786,8 @@ impl OutcomeTx<'_, '_> {
         }
         self.et.redact_value(&mut result);
         let changed = self.et.tx.execute(
-            "UPDATE outcome_commands SET state=?2, result=?3, applied_at=?4 WHERE id=?1 AND state='queued'",
-            params![cmd.id.as_str(), enum_str(&state), result.to_string(), now()],
+            "UPDATE outcome_commands SET state=?2, result=?3, applied_at=?4 WHERE id=?1 AND outcome_id=?5 AND state='queued'",
+            params![cmd.id.as_str(), enum_str(&state), result.to_string(), now(), self.id.as_str()],
         )?;
         if changed == 1 {
             self.et.append(
