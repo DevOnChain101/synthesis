@@ -2177,6 +2177,21 @@ pub fn prepare(
     } else {
         Arc::new(crate::login::CliHost { sink: sink.clone() })
     };
+    // the interactive app shows the agent's browser (a person watches) unless `synt.browser.headed` says false
+    let mut browser = browser;
+    let headed = browser.headed.unwrap_or(is_cli);
+    browser.headed = Some(headed);
+    if headed
+        && let Err(why) =
+            synthesis_browser::profile::display_available(env, synthesis_browser::Os::current())
+    {
+        let note = format!("browser: no visible window ({why}); the agent's browser runs headless");
+        if is_cli {
+            notices.push(note);
+        } else {
+            eprintln!("synt: {note}");
+        }
+    }
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()

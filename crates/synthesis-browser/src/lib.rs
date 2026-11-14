@@ -535,6 +535,21 @@ fn dir_listing(dir: &Path) -> String {
 }
 
 /// Windows system variables Chrome and its helpers expect; `child_env` strips them. Non-secret.
+/// The agent cursor and field highlight of a VISIBLE window (docs/BROWSER-LOGIN.md, "Headed agent browser"). Page
+/// script, but it takes only numbers and an element the agent just acted on, reads nothing from the page, sits in a
+/// closed shadow root with `pointer-events:none`, and runs in the top frame only. The page can see or remove it;
+/// that only costs the cosmetics.
+const OVERLAY_JS: &str = r##"(()=>{if(window.top!==window||window.__syntOverlay)return;
+let h=null,c,g,b;const ensure=()=>{if(h&&h.isConnected)return;h=document.createElement('div');
+h.style.cssText='all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647';
+const r=h.attachShadow({mode:'closed'});
+r.innerHTML='<style>*{pointer-events:none}.c{position:fixed;left:-50px;top:-50px;transition:left .3s,top .3s}.g{position:fixed;width:34px;height:34px;margin:-17px 0 0 -17px;border:2px solid #c7ae90;border-radius:50%;opacity:0}.g.on{animation:p .6s ease-out}@keyframes p{from{opacity:.9;transform:scale(.4)}to{opacity:0;transform:scale(1.3)}}.b{position:fixed;border:2px solid #82a2c4;border-radius:4px;opacity:0;transition:opacity .3s}</style><svg class=c width=22 height=22 viewBox="0 0 22 22"><path d="M3 2l14 8-6 2-3 6z" fill="#fff" stroke="#111" stroke-width="1.5" stroke-linejoin="round"/></svg><div class=g></div><div class=b></div>';
+c=r.querySelector('.c');g=r.querySelector('.g');b=r.querySelector('.b');(document.documentElement||document).appendChild(h)};
+Object.defineProperty(window,'__syntOverlay',{value:{move(x,y,click){if(!isFinite(x)||!isFinite(y))return;ensure();c.style.left=x+'px';c.style.top=y+'px';
+if(click){g.style.left=x+'px';g.style.top=y+'px';g.classList.remove('on');void g.getBoundingClientRect();g.classList.add('on')}},
+hi(el){ensure();const r=el.getBoundingClientRect();Object.assign(b.style,{left:r.left-3+'px',top:r.top-3+'px',width:r.width+'px',height:r.height+'px',opacity:'1'});
+setTimeout(()=>{b.style.opacity='0'},1500);this.move(r.left+r.width/2,r.top+r.height/2,false)}}})})()"##;
+
 /// A visible window needs the display the person is on; `child_env` (an allowlist) lacks it.
 fn display_env(env: &Env, headless: bool) -> Vec<(String, String)> {
     if headless {
@@ -908,6 +923,18 @@ impl BrowserRuntime {
             let m = json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false});
             self.call(&tab, "Emulation.setDeviceMetricsOverride", m)
                 .await?;
+        } else {
+            // a person watches: the agent's cursor and field highlight (cosmetic, so a failure is ignored)
+            let _ = self
+                .call(
+                    &tab,
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({"source": OVERLAY_JS}),
+                )
+                .await;
+            let _ = self
+                .call(&tab, "Runtime.evaluate", json!({"expression": OVERLAY_JS}))
+                .await;
         }
         lock(&self.tabs)
             .attached
@@ -1260,6 +1287,12 @@ impl BrowserRuntime {
             }
             self.call(&tab, "Input.dispatchMouseEvent", ev).await?;
         }
+        if !self.opts.headless && x.is_finite() && y.is_finite() {
+            let js = format!("window.__syntOverlay&&window.__syntOverlay.move({x:.1},{y:.1},true)");
+            let _ = self
+                .call(&tab, "Runtime.evaluate", json!({"expression": js}))
+                .await;
+        }
         let (w, h) = self.viewport(&tab).await;
         Ok(Spot { x, y, w, h })
     }
@@ -1275,6 +1308,17 @@ impl BrowserRuntime {
             json!({"objectId": oid, "functionDeclaration": f}),
         )
         .await?;
+        if !self.opts.headless {
+            // the highlight of the field being typed into (no text goes to the overlay)
+            let hi = "function(){window.__syntOverlay&&window.__syntOverlay.hi(this)}";
+            let _ = self
+                .call(
+                    &tab,
+                    "Runtime.callFunctionOn",
+                    json!({"objectId": oid, "functionDeclaration": hi}),
+                )
+                .await;
+        }
         self.call(&tab, "Input.insertText", json!({"text": text}))
             .await?;
         Ok(())

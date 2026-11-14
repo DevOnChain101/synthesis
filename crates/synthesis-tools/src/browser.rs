@@ -41,6 +41,9 @@ pub struct BrowserConfig {
     pub profile_domains: BTreeMap<String, Vec<String>>,
     /// How long a login waits for the person (default 10 minutes).
     pub login_timeout: Option<Duration>,
+    /// `synt.browser.headed`: the agent's own browser opens a VISIBLE window with a cursor overlay, when a display
+    /// exists (else it stays headless). The profile, URL policy, downloads and credential rules do not change.
+    pub headed: bool,
     /// The process environment snapshot. Used to resolve `{env:SYNT_...}` secret sources
     /// (the tool env is an allowlist that never carries secret-shaped names) and, when set, as
     /// the ONLY source for finding and starting the browser: a project's settings `env` cannot
@@ -178,6 +181,12 @@ async fn runtime(
             let mut o = BrowserOptions::new(ctx.workspace.artifact_root.join("browser"));
             o.policy = cfg.policy.clone();
             o.no_sandbox = cfg.no_sandbox;
+            // visible only where a display exists and the pipe transport can carry a window (not Windows' TCP one)
+            o.headless = headless_for(
+                cfg.headed,
+                o.transport,
+                profile::display_available(&launch_env(&cfg, ctx), Os::current()).is_ok(),
+            );
             if let Some(name) = profile {
                 // choosing a saved login is the local person's decision, like logging in
                 if ctx.sub_agent {
@@ -239,6 +248,25 @@ async fn runtime(
         ));
     }
     Ok(rt)
+}
+
+/// Visible only when asked for, a display exists and the pipe transport can carry a window (not Windows' TCP one).
+fn headless_for(headed: bool, transport: synthesis_browser::Transport, display: bool) -> bool {
+    !(headed && display && transport == synthesis_browser::Transport::Pipe)
+}
+
+#[cfg(test)]
+mod headed_tests {
+    use super::headless_for;
+    use synthesis_browser::Transport::{Pipe, Tcp};
+
+    #[test]
+    fn the_window_is_visible_only_when_asked_for_and_possible() {
+        assert!(!headless_for(true, Pipe, true));
+        assert!(headless_for(false, Pipe, true), "not asked for");
+        assert!(headless_for(true, Pipe, false), "no display");
+        assert!(headless_for(true, Tcp, true), "Windows TCP transport");
+    }
 }
 
 /// Tool error for a failed browser call.
