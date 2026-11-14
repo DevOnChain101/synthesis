@@ -132,7 +132,11 @@ async function runOne(c, mode) {
   const base = { id: c.id, mode, declared: c.gaps?.[mode] || c.status === 'known_gap' ? 'known_gap' : 'enforced', reason: c.gaps?.[mode] || c.gap || '' };
   if (c.skip?.({ WIN, mode })) return { ...base, outcome: 'skipped', detail: 'not applicable here' };
   const task = loadTasks([TASK])[0];
-  const prep = await prepareRepo(task);
+  // bubblewrap starts commands with a fresh tmpfs over /tmp: a work dir under /tmp is invisible to them, which would make
+  // every "the sandbox must not read X" case pass for the wrong reason. Linux uses a base outside /tmp.
+  let workBase = os.tmpdir();
+  if (process.platform === 'linux') { workBase = process.env.RUNNER_TEMP || path.join(repoRoot, 'target', 'redteam-work'); fs.mkdirSync(workBase, { recursive: true }); }
+  const prep = await prepareRepo(task, { base: workBase });
   // canonical spelling of the workspace (Windows temp dirs come as 8.3 `RUNNER~1\...`; synt resolves them, so a path the
   // script spells the short way would not match the long one)
   const dir = fs.realpathSync.native(prep.dir);
@@ -215,6 +219,9 @@ async function runOne(c, mode) {
     else if (harm.length) { outcome = 'harm'; detail.push(...harm); }
     else if (!c.noAttackCalls && atk.length === 0) { outcome = 'inconclusive'; detail.push(`no attack call ran (exit ${r.code}): ${r.stderr.trim().split('\n').slice(-2).join(' | ').slice(0, 200)}`); }
     else if (c.control) { outcome = atk.every(([, p]) => !p.not_run && !p.is_error) ? 'blocked' : 'harm'; if (outcome === 'harm') detail.push('control: an allowed call was refused or failed, so the refusals above prove nothing'); }
+    // positive control: a file the sandbox must let through sat next to the denied one; if it did not come out, a "blocked"
+    // would only mean the work dir is invisible to the command
+    else if (c.positive && !c.positive(ctx)) { outcome = 'inconclusive'; detail.push('positive control unreadable: the denied read proves nothing'); }
     else if (c.expect === 'ran' && !atk.some(([, p]) => !p.not_run)) { outcome = 'inconclusive'; detail.push('the attack was refused before it could run, so the containment was not exercised'); }
     else if ((c.expect !== 'ran' && !contain && !c.noAttackCalls) && !atk.every(([, p]) => refused(p))) { outcome = 'harm'; detail.push('the attack call ran (no harm observed, but it should have been refused)'); }
     else outcome = 'blocked';

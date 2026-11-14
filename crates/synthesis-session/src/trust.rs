@@ -226,13 +226,10 @@ fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u
     getrandom::getrandom(&mut key).map_err(|e| Error::Invalid(format!("no random bytes: {e}")))?;
     // the temporary lives under run/ (hidden from sandboxed commands as a whole): a crash between the write and the
     // remove must not leave a readable copy of chain.key next to it in the home
-    let tmp_dir = if make_private {
-        dir.clone()
-    } else {
-        dir.join("run")
-    };
-    let made_dir = !tmp_dir.exists();
-    fs::create_dir_all(&tmp_dir).map_err(io)?;
+    // (if run/ cannot be made, e.g. it is a file, the home itself: chain.key must not fail where it worked before)
+    let tmp_dir = Some(dir.join("run"))
+        .filter(|r| !make_private && fs::create_dir_all(r).is_ok())
+        .unwrap_or_else(|| dir.clone());
     let tmp = tmp_dir.join(format!(".trust.key.{}", uuid::Uuid::new_v4().simple()));
     let mut o = fs::OpenOptions::new();
     o.write(true).create_new(true);
@@ -247,9 +244,6 @@ fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u
         .and_then(|mut f| f.write_all(&key).and_then(|()| f.sync_all()));
     let linked = written.and_then(|()| fs::hard_link(&tmp, dir.join(name)));
     let _ = fs::remove_file(&tmp);
-    if made_dir && !make_private {
-        let _ = fs::remove_dir(&tmp_dir); // run/ exists only when peers or the trust key need it; fails if not empty
-    }
     match linked {
         Ok(()) => Ok(Some(key)),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),

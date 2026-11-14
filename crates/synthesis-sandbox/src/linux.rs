@@ -2011,10 +2011,13 @@ mod tests {
             let d = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
             let key = d.path().join("chain.key");
             std::fs::write(&key, "KEYBYTES").unwrap();
-            let cat = |deny: Vec<PathBuf>| {
+            let bk = d.path().join("backups");
+            std::fs::create_dir_all(bk.join("x")).unwrap();
+            std::fs::write(bk.join("x/synt.db"), "DBBYTES").unwrap();
+            let cat = |target: &Path, deny: Vec<PathBuf>| {
                 let c = SandboxedCommand {
                     program: "/bin/cat".into(),
-                    args: vec![key.clone().into_os_string()],
+                    args: vec![target.as_os_str().to_owned()],
                     ..Default::default()
                 };
                 let pol = SandboxPolicy {
@@ -2040,12 +2043,15 @@ mod tests {
             };
             // the denied file is a /dev/null bind on a nodev mount: `cat` fails with EACCES, which is
             // fine; what matters is that no key byte comes out
+            let db = bk.join("x/synt.db");
             assert_eq!(
-                cat(vec![]),
+                cat(&key, vec![]),
                 "KEYBYTES",
                 "control: readable without the deny"
             );
-            assert_eq!(cat(vec![key.clone()]), "", "denied: reads empty");
+            assert_eq!(cat(&key, vec![key.clone()]), "", "denied: reads empty");
+            assert_eq!(cat(&db, vec![]), "DBBYTES", "control: dir readable");
+            assert_eq!(cat(&db, vec![bk.clone()]), "", "denied dir: reads empty");
         }
 
         #[test]
