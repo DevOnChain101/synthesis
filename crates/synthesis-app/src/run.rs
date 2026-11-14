@@ -2981,6 +2981,10 @@ pub fn resolve_provider(
             .find_map(|w| w.split("missing env var \"").nth(1)?.split('"').next());
         return Err(match var {
             Some(v) => format!("no API key for provider \"{id}\": set {v} and restart"),
+            None if synthesis_config::env_credential_blocked(&id, Some(p), env) => format!(
+                "no API key for provider \"{id}\": {}",
+                synthesis_config::ENV_CREDENTIAL_BLOCKED
+            ),
             None => format!(
                 "no API key for provider \"{id}\": set SYNT_API_KEY (when SYNT_PROVIDER={id}) or add apiKey to its config"
             ),

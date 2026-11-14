@@ -1122,3 +1122,115 @@ fn looks_like_key_separates_keys_from_names() {
         assert!(!looks_like_key(n), "{n}");
     }
 }
+
+#[test]
+fn the_documented_gateway_setup_still_loads_and_resolves_its_env_key() {
+    // docs/INSTALL.md: options.baseURL + options.apiKey {env:...}, npm openai-compatible
+    let h = tmp();
+    write(
+        h.path().join("synt.json"),
+        &json!({"$schema": "config.json/v1", "providers": {"mygw": {"npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://gateway.example.com/v1", "apiKey": "{env:MY_GATEWAY_KEY}"},
+            "models": {"my-model": {"capabilities": {"toolCalling": true}}}}}, "model": "mygw/my-model"}),
+    );
+    let e = env(&[("MY_GATEWAY_KEY", "gw-key")]);
+    let c = load(h.path(), &e);
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    let p = &c.providers["mygw"];
+    assert_eq!(p.protocol, Protocol::OpenAi);
+    assert_eq!(
+        resolve_credential("mygw", Some(p), h.path(), &e)
+            .unwrap()
+            .secret,
+        "gw-key"
+    );
+}
+
+#[test]
+fn the_vendor_gate_needs_https_and_names_the_way_out() {
+    let h = tmp();
+    for url in ["http://api.anthropic.com", "https://gw.example/v1"] {
+        write(
+            h.path().join("synt.json"),
+            &json!({"$schema": "config.json/v1", "providers": {"anthropic": {"type": "anthropic", "baseURL": url}}}),
+        );
+        let e = env(&[("SYNT_API_KEY", "k")]);
+        let c = load(h.path(), &e);
+        let p = c.providers.get("anthropic");
+        assert!(
+            resolve_credential("anthropic", p, h.path(), &e).is_none(),
+            "{url}"
+        );
+        assert!(env_credential_blocked("anthropic", p, &e));
+    }
+    assert!(
+        ENV_CREDENTIAL_BLOCKED.contains("SYNT_PROVIDER=<id>")
+            && ENV_CREDENTIAL_BLOCKED.contains("{env:NAME}")
+    );
+    write(
+        h.path().join("synt.json"),
+        &json!({"$schema": "config.json/v1", "providers": {"anthropic": {"type": "anthropic", "baseURL": "https://api.anthropic.com"}}}),
+    );
+    let e = env(&[("SYNT_API_KEY", "k")]);
+    let c = load(h.path(), &e);
+    assert!(resolve_credential("anthropic", c.providers.get("anthropic"), h.path(), &e).is_some());
+}
+
+#[test]
+fn a_file_credential_is_read_unless_it_is_a_secret_store_a_state_file_or_not_a_small_file() {
+    let h = tmp();
+    let home = h.path().join("home");
+    let sh = h.path().join("synt");
+    fs::create_dir_all(&sh).unwrap();
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::create_dir_all(home.join("secrets")).unwrap();
+    fs::write(home.join(".ssh/id_rsa"), "ssh-secret").unwrap();
+    fs::write(home.join("secrets/key.txt"), " ordinary \n").unwrap();
+    fs::write(home.join("secrets/big"), vec![b'x'; 5000]).unwrap();
+    fs::write(sh.join("mykey"), "in-synt-home").unwrap();
+    fs::write(sh.join("chain.key"), "state").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(home.join(".ssh/id_rsa"), home.join("secrets/later")).unwrap();
+    let refs = |r: &str| {
+        write(
+            sh.join("synt.json"),
+            &json!({"$schema": "config.json/v1", "providers": {"p": {"type": "openai", "baseURL": "https://p.example/v1", "apiKey": format!("{{file:{r}}}")}}}),
+        );
+        let ctx_env = env(&[]);
+        let c = load_config(&LoadContext {
+            cwd: h.path(),
+            synthesis_home: &sh,
+            user_home: &home,
+            env: &ctx_env,
+        })
+        .unwrap();
+        (c.providers["p"].api_key.clone(), c.warnings.join("\n"))
+    };
+    let (k, w) = refs("~/secrets/key.txt");
+    assert_eq!(
+        (k, w.is_empty()),
+        (Some(ApiKey::Value("ordinary".into())), true),
+        "{w}"
+    );
+    let (k, _) = refs("./mykey");
+    assert_eq!(k, Some(ApiKey::Value("in-synt-home".into())));
+    let mut bad = vec![
+        "~/.ssh/id_rsa",
+        "~/secrets/big",
+        "./chain.key",
+        "/etc/passwd",
+        "//host/share/k",
+        "~/secrets",
+    ];
+    if cfg!(unix) {
+        bad.push("~/secrets/later");
+    }
+    for b in bad {
+        let (k, w) = refs(b);
+        assert_eq!(k, None, "{b}");
+        assert!(
+            w.contains("refused") && !w.contains("ssh-secret"),
+            "{b}: {w}"
+        );
+    }
+}

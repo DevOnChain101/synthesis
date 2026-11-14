@@ -84,10 +84,19 @@ fn env_may_target(provider: Option<&Provider>, env: &Env) -> bool {
     if env.get_nonempty("SYNT_BASE_URL") == Some(url) {
         return true;
     }
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| h == "api.anthropic.com")
+    url::Url::parse(url).ok().is_some_and(|u| {
+        u.scheme() == "https"
+            && u.host_str()
+                .is_some_and(|h| h.eq_ignore_ascii_case("api.anthropic.com"))
+    })
+}
+
+/// Why `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` were not used for a provider they name by default.
+pub const ENV_CREDENTIAL_BLOCKED: &str = "SYNT_API_KEY is only sent to the vendor URL; set SYNT_PROVIDER=<id> or SYNT_BASE_URL, or use a {env:NAME} apiKey";
+
+/// True when the flat env credential exists for `id` but [`resolve_credential`] withholds it (see above).
+pub fn env_credential_blocked(id: &str, provider: Option<&Provider>, env: &Env) -> bool {
+    env_credential(id, env).is_some() && !env_may_target(provider, env)
 }
 
 /// Tier 3: legacy `<synthesis_home>/auth.json` written by the Node CLI. Read-only.

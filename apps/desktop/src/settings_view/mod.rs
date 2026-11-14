@@ -239,7 +239,7 @@ pub struct SettingsView {
     prov_accepted: Option<String>,
     /// A test waiting for the click that sends the credential: `(provider, what is sent)`; and the line of the
     /// test that ran.
-    prov_test_pending: Option<(String, String)>,
+    prov_test_pending: Option<(String, String, String)>,
     prov_sent: Option<(String, String)>,
     notice: Option<String>,
     scroll: ScrollHandle,
@@ -770,22 +770,22 @@ impl SettingsView {
         self.prov_test_pending = None;
         match m.provider_preflight(id) {
             Err(e) => m.prov_result = Some((id.into(), format!("Not sent: {e}"))),
-            Ok(p) if p.needs_click => self.prov_test_pending = Some((id.into(), p.text)),
+            Ok(p) if p.needs_click => self.prov_test_pending = Some((id.into(), p.text, p.hash)),
             Ok(p) => {
                 self.prov_sent = Some((id.into(), p.text));
-                return self.prov_test_go(id, false, cx);
+                return self.prov_test_go(id, None, cx);
             }
         }
         cx.notify();
     }
 
-    /// Sends the test (`clicked`: the person saw the pre-flight line and pressed Send).
-    fn prov_test_go(&mut self, id: &str, clicked: bool, cx: &mut Context<Self>) {
-        if clicked && let Some((pid, text)) = self.prov_test_pending.take() {
+    /// Sends the test; `approved` is the hash of the pre-flight the person saw when they pressed Send.
+    fn prov_test_go(&mut self, id: &str, approved: Option<String>, cx: &mut Context<Self>) {
+        if let Some((pid, text, _)) = self.prov_test_pending.take() {
             self.prov_sent = Some((pid, text));
         }
         let Some(m) = &mut self.model else { return };
-        m.start_provider_test(id, clicked);
+        m.start_provider_test(id, approved.as_deref());
         cx.notify();
         if m.prov_testing.is_none() {
             return;
@@ -1560,9 +1560,10 @@ impl SettingsView {
                 .child(head)
                 .child(small(format!("key: {status}"), t::MUTED))
                 .child(small(models, t::MUTED));
-            if let Some((pid, text)) = &self.prov_test_pending
+            if let Some((pid, text, hash)) = &self.prov_test_pending
                 && pid == &e.id
             {
+                let hash = hash.clone();
                 let go = e.id.clone();
                 let no = e.id.clone();
                 col = col.child(
@@ -1577,7 +1578,7 @@ impl SettingsView {
                                 .gap(px(8.))
                                 .child(btn(format!("prov-send-{go}"), "Send test", true).on_click(
                                     cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.prov_test_go(&go, true, cx)
+                                        this.prov_test_go(&go, Some(hash.clone()), cx)
                                     }),
                                 ))
                                 .child(btn(format!("prov-nosend-{no}"), "Cancel", false).on_click(
@@ -2655,7 +2656,7 @@ mod tests {
         // Test connection of it shows what is sent and waits for the click
         act(v, &|s, _, cx| s.prov_test("gw", cx));
         ent.read_with(v, |s, _| {
-            let (id, text) = s.prov_test_pending.clone().expect("waits for the click");
+            let (id, text, _) = s.prov_test_pending.clone().expect("waits for the click");
             assert_eq!(id, "gw");
             assert!(
                 text.contains("the value of {env:MY_GATEWAY_KEY}")

@@ -18,6 +18,8 @@ use synthesis_harness::sanitize_for_display as san;
 pub struct Ctx<'a> {
     pub home: &'a Path,
     pub user_home: &'a Path,
+    /// The environment the engine will run with (a flat `SYNT_PROVIDER` override is reported from it).
+    pub env: &'a synthesis_config::Env,
 }
 
 /// What the form holds; every field is the text as typed.
@@ -57,8 +59,6 @@ pub struct Confirm {
 
 const MAX_HEADERS: usize = 8;
 const MAX_MODELS: usize = 64;
-/// Biggest key file a test reads.
-const MAX_KEY_FILE: u64 = 4096;
 /// The ids the loader and `SYNT_API_KEY` treat as the vendors'.
 const BUILTIN_IDS: [&str; 2] = ["anthropic", "openai"];
 
@@ -126,21 +126,30 @@ const KEY_HELP: &str = "give the NAME of an environment variable that holds the 
 #[derive(Clone, Debug, PartialEq)]
 enum Ref {
     Env(String),
-    File(String),
+    /// The path as written and the real path it resolves to now (what a confirmation names).
+    File(String, String),
 }
 
 impl Ref {
     fn render(&self) -> String {
         match self {
             Ref::Env(n) => format!("{{env:{n}}}"),
-            Ref::File(p) => format!("{{file:{p}}}"),
+            Ref::File(p, _) => format!("{{file:{p}}}"),
+        }
+    }
+    /// What the click-through and the pre-flight name.
+    fn shown(&self) -> String {
+        match self {
+            Ref::Env(n) => format!("the value of {{env:{n}}}"),
+            Ref::File(p, real) if p == real => format!("the content of file {p}"),
+            Ref::File(p, real) => format!("the content of file {p} (resolves to {real})"),
         }
     }
     /// Needs the person's click-through: any file, any variable that is not the product's own.
     fn needs_confirm(&self) -> bool {
         match self {
             Ref::Env(n) => !n.starts_with("SYNT_"),
-            Ref::File(_) => true,
+            Ref::File(..) => true,
         }
     }
 }
@@ -159,7 +168,7 @@ fn env_name_shape(n: &str) -> bool {
 
 /// Names that hold another tool's or a cloud's credentials: never sent to a model provider.
 fn env_denied(n: &str) -> bool {
-    const PREFIXES: [&str; 22] = [
+    const PREFIXES: [&str; 33] = [
         "AWS_",
         "GITHUB_",
         "GH_",
@@ -182,35 +191,40 @@ fn env_denied(n: &str) -> bool {
         "PG",
         "MYSQL_",
         "VAULT_",
+        "HOMEBREW_GITHUB_",
+        "OP_",
+        "CARGO_REGISTRY_",
+        "TWINE_",
+        "NETLIFY_",
+        "VERCEL_",
+        "CLOUDFLARE_",
+        "SENTRY_",
+        "PYPI_",
+        "LINODE_",
+        "FLY_",
     ];
-    PREFIXES.iter().any(|p| n.starts_with(p)) || n == "DATABASE_URL"
+    PREFIXES.iter().any(|p| n.starts_with(p)) || n.starts_with("RAILWAY_") || n == "DATABASE_URL"
 }
 
-fn norm(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/").to_lowercase()
-}
-
-fn under(path: &str, dir: &str) -> bool {
-    let d = dir.trim_end_matches('/');
-    path == d || path.strip_prefix(d).is_some_and(|r| r.starts_with('/'))
+/// The product's own credential variables: a custom provider must not share the vendor key (that would send
+/// it to another host), so the form refuses them. Other `SYNT_*` names (`SYNT_MYGW_KEY`) are free.
+fn env_vendor(n: &str) -> bool {
+    matches!(n, "SYNT_API_KEY" | "SYNT_AUTH_TOKEN" | "SYNT_TOKEN")
+        || n.starts_with("SYNT_ANTHROPIC_")
+        || n.starts_with("SYNT_OPENAI_")
 }
 
 /// A `{file:}` path a key may be read from: absolute, `~/` or `./` (relative to the synt home), no `..`, no
 /// UNC or device path, nothing that is another tool's secret store or a system or state path; under the
-/// synt home only `keys/`. When the file exists (canonicalised first) it must be a regular file of at most
-/// 4 KB. Never touches a network path.
+/// synt home only `keys/` (see `synthesis_config::check_credential_file`, which the loader applies again at
+/// use time). Returns the real path.
 fn check_file(path: &str, ctx: &Ctx<'_>) -> Result<std::path::PathBuf, String> {
-    let bad = |why: &str| Err(format!("file path: {why}"));
     let p = path.replace('\\', "/");
-    if p.starts_with("//")
-        || p.starts_with("/dev/")
-        || p.starts_with("/proc/")
-        || p.starts_with("/sys/")
-    {
-        return bad("network and device paths are refused");
+    if p.starts_with("//") {
+        return Err("file path: network and device paths are refused".into());
     }
     if p.split('/').any(|c| c == "..") {
-        return bad("no .. in the path");
+        return Err("file path: no .. in the path".into());
     }
     let full = if let Some(r) = p.strip_prefix("~/") {
         ctx.user_home.join(r)
@@ -219,65 +233,11 @@ fn check_file(path: &str, ctx: &Ctx<'_>) -> Result<std::path::PathBuf, String> {
     } else if std::path::Path::new(path).is_absolute() || p.as_bytes().get(1) == Some(&b':') {
         std::path::PathBuf::from(path)
     } else {
-        return bad("use an absolute path, ~/... or ./... (relative to the synt home)");
+        return Err(
+            "file path: use an absolute path, ~/... or ./... (relative to the synt home)".into(),
+        );
     };
-    let real = std::fs::canonicalize(&full).ok();
-    let home = std::fs::canonicalize(ctx.home).unwrap_or_else(|_| ctx.home.to_path_buf());
-    let uh = std::fs::canonicalize(ctx.user_home).unwrap_or_else(|_| ctx.user_home.to_path_buf());
-    for cand in std::iter::once(&full).chain(real.as_ref()) {
-        let n = norm(cand);
-        let in_home = under(&n, &norm(&home)) || under(&n, &norm(ctx.home));
-        if in_home {
-            if under(&n, &format!("{}/keys", norm(&home)))
-                || under(&n, &format!("{}/keys", norm(ctx.home)))
-            {
-                continue;
-            }
-            return bad("under the synt home only the keys/ folder can hold a key");
-        }
-        let uh_n = [norm(&uh), norm(ctx.user_home)];
-        let secret_dirs = [
-            ".ssh",
-            ".aws",
-            ".gnupg",
-            ".config/gcloud",
-            ".kube",
-            ".docker",
-            ".netrc",
-            ".npmrc",
-            ".git-credentials",
-        ];
-        let system = [
-            "/etc",
-            "/proc",
-            "/sys",
-            "/dev",
-            "/boot",
-            "/root",
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/private/etc",
-            "/system",
-            "/library",
-            "c:/windows",
-            "c:/programdata",
-        ];
-        if uh_n
-            .iter()
-            .any(|u| secret_dirs.iter().any(|d| under(&n, &format!("{u}/{d}"))))
-            || system.iter().any(|d| under(&n, d))
-        {
-            return bad("that location holds credentials or system files; use a file of its own");
-        }
-    }
-    if let Some(r) = &real {
-        let m = std::fs::metadata(r).map_err(|_| "file path: not readable".to_string())?;
-        if !m.is_file() || m.len() > MAX_KEY_FILE {
-            return bad("must be a regular file of at most 4 KB");
-        }
-    }
-    Ok(full)
+    synthesis_config::check_credential_file(&full, ctx.home, ctx.user_home, true)
 }
 
 /// `MY_KEY` -> `{env:MY_KEY}`, `~/keys/x` or `/run/x` -> `{file:...}`; a ready `{env:}` / `{file:}`
@@ -297,9 +257,14 @@ fn parse_ref(input: &str, ctx: &Ctx<'_>) -> Result<Ref, String> {
         if env_denied(n) {
             return Err("API key: that variable holds another tool's or a cloud's credentials (AWS_, GITHUB_, GH_, NPM_, SSH_, GOOGLE_ ...); use a variable of its own, ideally SYNT_...".into());
         }
+        if env_vendor(n) {
+            return Err("API key: SYNT_API_KEY, SYNT_AUTH_TOKEN and the vendor variables are the product's own key and are never shared with a custom provider; use a variable of its own (for example SYNT_MYGW_KEY)".into());
+        }
         Ok(Ref::Env(n.to_string()))
     };
-    let file = |p: &str| check_file(p, ctx).map(|_| Ref::File(p.to_string()));
+    let file = |p: &str| {
+        check_file(p, ctx).map(|real| Ref::File(p.to_string(), real.to_string_lossy().into_owned()))
+    };
     if let Some(n) = s.strip_prefix("{env:").and_then(|r| r.strip_suffix('}')) {
         return env(n);
     }
@@ -511,27 +476,29 @@ fn host_of(url: &str) -> String {
     })
 }
 
-fn confirm_of(refs: &[Ref], url: &str) -> Option<Confirm> {
+fn confirm_of(refs: &[Ref], url: &str, protocol: Protocol) -> Option<Confirm> {
     let risky: Vec<&Ref> = refs.iter().filter(|r| r.needs_confirm()).collect();
     if risky.is_empty() {
         return None;
     }
     let dest = host_of(url);
-    let names = risky
+    let what = risky
         .iter()
-        .map(|r| r.render())
+        .map(|r| r.shown())
         .collect::<Vec<_>>()
         .join(", ");
+    let proto = protocol.as_str();
     Some(Confirm {
-        token: format!("{names}@{dest}"),
+        token: format!("{what}@{dest}/{proto}"),
         text: format!(
-            "This provider will send the value of {names} (for a file: its content) to {dest} with its requests, and Test connection does the same. Confirm that this is the right variable or file and the right host."
+            "This provider will send {what} to {dest} ({proto} protocol) with its requests, and Test connection does the same. Confirm that this is the right variable or file and the right host."
         ),
     })
 }
 
 /// The click-through the form needs before it may be saved: `None` when every reference is a `SYNT_*`
-/// variable. It is asked again whenever a reference or the host changes (the token differs).
+/// variable. It is asked again whenever a reference, the real path of a file, the host or the protocol
+/// changes (the token differs).
 pub fn confirmation(d: &Draft, ctx: &Ctx<'_>) -> Result<Option<Confirm>, String> {
     let p = parse_form(d, ctx)?;
     let refs: Vec<Ref> = p
@@ -539,60 +506,111 @@ pub fn confirmation(d: &Draft, ctx: &Ctx<'_>) -> Result<Option<Confirm>, String>
         .into_iter()
         .chain(p.headers.into_iter().map(|(_, r)| r))
         .collect();
-    Ok(confirm_of(&refs, &p.url))
+    Ok(confirm_of(&refs, &p.url, d.protocol))
 }
 
-/// What Test connection of the saved `id` sends, checked again (a hand-edited file may hold a name or a path
-/// the form would refuse). `needs_click`: show `text` and wait for a click first.
+/// What Test connection of the saved `id` sends, from what the LOADER will use: `apiKey`, `authToken`,
+/// `options.apiKey`, `options.authToken`, `headers`, `options.headers`, and a flat `SYNT_PROVIDER` override.
+/// Each is checked again (a hand-edited file may hold what the form refuses). `needs_click`: show `text`
+/// and wait for a click; the click authorises `hash` (sources, real file paths, host, protocol), which the
+/// worker checks again before it sends.
 pub struct Preflight {
     pub text: String,
     pub needs_click: bool,
+    pub hash: String,
+}
+
+/// `top-level k` if set, else `options.k` (the loader's `rawv(k).or(opt(k))`).
+fn eff<'a>(e: &'a Value, k: &str) -> Option<&'a Value> {
+    e.get(k)
+        .filter(|v| !v.is_null())
+        .or_else(|| e.pointer(&format!("/options/{k}")).filter(|v| !v.is_null()))
 }
 
 pub fn preflight(id: &str, ctx: &Ctx<'_>) -> Result<Preflight, String> {
+    use sha2::{Digest, Sha256};
     let root = read(ctx.home)?;
     let e = group_of(&root, id)
         .and_then(|g| root[g].get(id))
         .ok_or_else(|| "this provider is not in your synt.json".to_string())?;
-    let url = e
-        .get("baseURL")
+    let url = eff(e, "baseURL")
         .and_then(Value::as_str)
         .map(redact_url)
         .unwrap_or_default();
-    let mut refs = vec![];
+    let protocol = protocol_of(id, e);
+    let mut refs: Vec<Ref> = vec![];
     let mut literal = false;
-    for v in std::iter::once(e.get("apiKey")).chain(
-        e.get("headers")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|h| h.values().map(Some)),
-    ) {
+    let mut note = |v: Option<&Value>, refs: &mut Vec<Ref>| -> Result<(), String> {
         match v.and_then(Value::as_str) {
             Some(s) if is_ref(s) => refs.push(parse_ref(s, ctx)?),
-            Some(_) => literal = true,
-            None => {}
+            Some(s) if !s.is_empty() => literal = true,
+            _ => {}
+        }
+        Ok(())
+    };
+    // every place the loader reads a credential or a header value from, shadowed ones too
+    for k in ["apiKey", "authToken"] {
+        note(e.get(k), &mut refs)?;
+        note(e.pointer(&format!("/options/{k}")), &mut refs)?;
+    }
+    for hs in [e.get("headers"), e.pointer("/options/headers")] {
+        for v in hs
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|h| h.values())
+        {
+            note(Some(v), &mut refs)?;
         }
     }
-    let shown: Vec<String> = refs
-        .iter()
-        .map(|r| match r {
-            Ref::Env(n) => format!("the value of {{env:{n}}}"),
-            Ref::File(p) => format!("the content of file {p}"),
-        })
-        .chain(literal.then(|| "the key written in synt.json".to_string()))
-        .collect();
+    // SYNT_PROVIDER naming this provider hands it the flat credential (it wins over the configured key)
+    let names_it = ctx
+        .env
+        .get_nonempty("SYNT_PROVIDER")
+        .is_some_and(|p| p.eq_ignore_ascii_case(id));
+    let mut shown: Vec<String> = refs.iter().map(Ref::shown).collect();
+    if literal {
+        shown.push("the key written in synt.json".into());
+    }
+    let mut flat = false;
+    if names_it {
+        for n in ["SYNT_AUTH_TOKEN", "SYNT_API_KEY"] {
+            if ctx.env.get_nonempty(n).is_some() {
+                shown.push(format!("the value of {{env:{n}}} (SYNT_PROVIDER names this provider, so it is used instead of the configured key)"));
+                flat = true;
+            }
+        }
+        if ctx.env.get_nonempty("SYNT_CUSTOM_HEADERS").is_some() {
+            shown.push("the headers of SYNT_CUSTOM_HEADERS".into());
+            flat = true;
+        }
+    }
+    shown.dedup();
+    let dest = host_of(&url);
     let text = if shown.is_empty() {
-        format!("Sends no credential to {}.", san(&url))
+        format!(
+            "No key or header value is configured; sends nothing secret to {}.",
+            san(&dest)
+        )
     } else {
         format!(
-            "Sends {} to {}.",
+            "Sends {} to {} ({} protocol).",
             san(&shown.join(", ")),
-            san(&host_of(&url))
+            san(&dest),
+            protocol.as_str()
         )
     };
+    let mut sorted = shown.clone();
+    sorted.sort();
+    let hash = Sha256::digest(
+        format!("{sorted:?}|{literal}|{flat}|{url}|{}", protocol.as_str()).as_bytes(),
+    )
+    .iter()
+    .map(|b| format!("{b:02x}"))
+    .collect();
     Ok(Preflight {
-        needs_click: literal || refs.iter().any(Ref::needs_confirm),
+        needs_click: literal || flat || refs.iter().any(Ref::needs_confirm),
         text,
+        hash,
     })
 }
 
@@ -624,15 +642,30 @@ fn redact_url(u: &str) -> String {
     }
 }
 
+/// A reference that is safe to show: `{env:NAME}` / `{file:path}` whose inside is not a key typed in its place.
+fn shown_ref(s: &str) -> Option<String> {
+    let inner = s
+        .strip_prefix("{env:")
+        .or_else(|| s.strip_prefix("{file:"))?
+        .strip_suffix('}')?;
+    (!looks_like_key(inner)).then(|| san(s))
+}
+
 fn is_ref(s: &str) -> bool {
     (s.starts_with("{env:") || s.starts_with("{file:")) && s.ends_with('}')
 }
 
-fn protocol_of(e: &Value) -> Protocol {
-    match e.get("type").and_then(Value::as_str) {
-        Some("openai") => Protocol::OpenAi,
-        _ => Protocol::Anthropic,
-    }
+/// The protocol the loader will use (explicit `type`, then `npm`, then the id and the URL).
+fn protocol_of(id: &str, e: &Value) -> Protocol {
+    let text = |k: &str| e.get(k).and_then(Value::as_str);
+    synthesis_config::detect_protocol(synthesis_config::DetectInput {
+        id: Some(id),
+        explicit_type: text("type"),
+        npm: text("npm"),
+        base_url: eff(e, "baseURL").and_then(Value::as_str),
+        credential: None,
+    })
+    .0
 }
 
 fn model_ids(e: &Value) -> Vec<String> {
@@ -656,20 +689,21 @@ pub fn entries(home: &Path) -> Result<Vec<Entry>, String> {
             if out.iter().any(|o: &Entry| &o.id == id) {
                 continue;
             }
-            let key = match e.get("apiKey") {
-                Some(Value::String(s)) if is_ref(s) => s.clone(),
+            let key = match eff(e, "apiKey") {
+                Some(Value::String(s)) if is_ref(s) => {
+                    shown_ref(s).unwrap_or_else(|| "literal in file (hidden)".into())
+                }
                 Some(Value::String(_)) => "literal in file (hidden)".into(),
                 _ => "none".into(),
             };
             out.push(Entry {
                 id: san(id),
-                protocol: protocol_of(e).as_str(),
-                base_url: e
-                    .get("baseURL")
+                protocol: protocol_of(id, e).as_str(),
+                base_url: eff(e, "baseURL")
                     .and_then(Value::as_str)
                     .map(|u| san(&redact_url(u)))
                     .unwrap_or_default(),
-                key: san(&key),
+                key,
                 models: model_ids(e).iter().map(|m| san(m)).collect(),
             });
         }
@@ -684,20 +718,26 @@ pub fn draft_of(home: &Path, id: &str) -> Result<Draft, String> {
     let e = group_of(&root, id)
         .and_then(|g| root[g].get(id))
         .ok_or_else(|| "this provider is not in your synt.json".to_string())?;
-    let api_key = match e.get("apiKey") {
-        Some(Value::String(s)) if is_ref(s) => s
-            .strip_prefix("{env:")
-            .and_then(|r| r.strip_suffix('}'))
-            .unwrap_or(s)
-            .to_string(),
+    let api_key = match eff(e, "apiKey") {
+        Some(Value::String(s)) => shown_ref(s)
+            .map(|s| {
+                s.strip_prefix("{env:")
+                    .and_then(|r| r.strip_suffix('}'))
+                    .unwrap_or(&s)
+                    .to_string()
+            })
+            .unwrap_or_default(),
         _ => String::new(),
     };
     let headers = e
         .get("headers")
+        .filter(|h| h.is_object())
+        .or_else(|| e.pointer("/options/headers"))
         .and_then(Value::as_object)
         .map(|h| {
             h.iter()
-                .filter_map(|(k, v)| Some(format!("{k}: {}", v.as_str().filter(|s| is_ref(s))?)))
+                .filter(|(k, _)| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                .filter_map(|(k, v)| Some(format!("{k}: {}", shown_ref(v.as_str()?)?)))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -734,13 +774,12 @@ pub fn draft_of(home: &Path, id: &str) -> Result<Draft, String> {
     };
     Ok(Draft {
         id: id.into(),
-        protocol: protocol_of(e),
-        base_url: e
-            .get("baseURL")
+        protocol: protocol_of(id, e),
+        base_url: eff(e, "baseURL")
             .and_then(Value::as_str)
             .map(|u| san(&redact_url(u)))
             .unwrap_or_default(),
-        api_key: san(&api_key),
+        api_key,
         headers: san(&headers),
         models: san(&models),
         confirmed: String::new(),
@@ -759,7 +798,7 @@ pub fn save(ctx: &Ctx<'_>, d: &Draft, editing: bool) -> Result<(), String> {
         .cloned()
         .chain(p.headers.iter().map(|(_, r)| r.clone()))
         .collect();
-    if let Some(c) = confirm_of(&refs, &p.url)
+    if let Some(c) = confirm_of(&refs, &p.url, d.protocol)
         && d.confirmed != c.token
     {
         return Err(format!("needs confirmation: {}", c.text));
@@ -801,6 +840,22 @@ pub fn save(ctx: &Ctx<'_>, d: &Draft, editing: bool) -> Result<(), String> {
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| no(format!("the entry of {id} is not an object")))?;
+        // an authToken is a second credential the form does not manage (and it beats the key)
+        for tok in [entry.get("authToken"), entry.get("options").and_then(|o| o.get("authToken"))] {
+            if tok.is_some_and(|t| !t.is_null()) {
+                return Err(no("this provider has an authToken in synt.json; the form manages apiKey only. Remove the authToken there first".into()));
+            }
+        }
+        // the form's fields win over `options.*`: drop the shadowed copies so no other credential, header or
+        // host is left behind them
+        if let Some(Value::Object(o)) = entry.get_mut("options") {
+            for k in ["apiKey", "headers", "baseURL"] {
+                o.shift_remove(k);
+            }
+            if o.is_empty() {
+                entry.shift_remove("options");
+            }
+        }
         entry.insert("type".into(), json!(d.protocol.as_str()));
         entry.insert("baseURL".into(), json!(url));
         // a top-level apiKey wins over options.apiKey in the loader; no key = explicit "none"
@@ -893,6 +948,7 @@ pub fn remove(home: &Path, id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use synthesis_config::Env;
 
     /// `(home, user_home)` inside one temp dir.
     fn dirs(t: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -998,6 +1054,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         assert_eq!(
             parse_key_ref("SYNT_ACME_KEY", &c).unwrap(),
@@ -1062,6 +1119,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         std::fs::create_dir_all(h.join("keys")).unwrap();
         std::fs::write(h.join("keys/acme"), "k").unwrap();
@@ -1116,6 +1174,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         for raw in [
             "sk-ant-api03-abcdefghijklmnop",
@@ -1166,6 +1225,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         let ok = parse_headers("X-Org: SYNT_ORG_ID\n\nX-Tok: ~/t", false, &c).unwrap();
         assert_eq!(ok[0].1.render(), "{env:SYNT_ORG_ID}");
@@ -1220,6 +1280,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         save(&c, &d("acme"), false).unwrap();
         let f = file(&h);
@@ -1318,6 +1379,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         for bad in [
             "{\"providers\": {",
@@ -1339,6 +1401,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         let mut p = d("acme");
         p.api_key = String::new();
@@ -1359,6 +1422,7 @@ mod tests {
         let c = Ctx {
             home: &h,
             user_home: &u,
+            env: &Env::default(),
         };
         save(&c, &d("acme"), false).unwrap();
         let p = preflight("acme", &c).unwrap();
@@ -1388,5 +1452,330 @@ mod tests {
             "{}",
             lit.text
         );
+    }
+
+    fn put(h: &Path, entry: Value) {
+        std::fs::write(
+            h.join("synt.json"),
+            json!({"$schema": "config.json/v1", "providers": {"x": entry}}).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_preflight_covers_every_place_the_loader_reads_a_credential() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        let base = || json!({"type": "openai", "baseURL": "https://x.example/v1"});
+        let with = |extra: Value| {
+            let mut e = base();
+            e.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            put(&h, e);
+            preflight("x", &c)
+        };
+        // nothing configured: it says so
+        let none = with(json!({})).unwrap();
+        assert!(
+            !none.needs_click && none.text.contains("nothing secret"),
+            "{}",
+            none.text
+        );
+        // each field, top-level or under options, is named and needs the click for a non-SYNT variable
+        for e in [
+            json!({"apiKey": "{env:MY_KEY}"}),
+            json!({"authToken": "{env:MY_KEY}"}),
+            json!({"options": {"apiKey": "{env:MY_KEY}"}}),
+            json!({"options": {"authToken": "{env:MY_KEY}"}}),
+            json!({"headers": {"X-A": "{env:MY_KEY}"}}),
+            json!({"options": {"headers": {"X-A": "{env:MY_KEY}"}}}),
+            json!({"apiKey": "SYNT_OK_KEY", "options": {"apiKey": "{env:MY_KEY}"}}),
+        ] {
+            let p = with(e.clone()).unwrap();
+            assert!(
+                p.needs_click
+                    && p.text.contains("{env:MY_KEY}")
+                    && !p.text.contains("nothing secret"),
+                "{e}: {}",
+                p.text
+            );
+        }
+        // a denied variable in any of them refuses the test, a literal needs the click without being shown
+        for e in [
+            json!({"options": {"authToken": "{env:AWS_SECRET_ACCESS_KEY}"}}),
+            json!({"options": {"headers": {"X": "{file:~/.ssh/id_rsa}"}}}),
+            json!({"authToken": "{env:SYNT_API_KEY}"}),
+        ] {
+            assert!(with(e.clone()).is_err(), "{e}");
+        }
+        let lit = with(json!({"options": {"apiKey": "sk-literal-literal-literal"}})).unwrap();
+        assert!(lit.needs_click && !lit.text.contains("literal-literal"));
+        // SYNT_PROVIDER naming it: the flat key goes there, and it is said
+        let env = Env::from_pairs([
+            ("SYNT_PROVIDER", "X"),
+            ("SYNT_API_KEY", "v"),
+            ("SYNT_CUSTOM_HEADERS", "A: b"),
+        ]);
+        let c2 = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &env,
+        };
+        put(
+            &h,
+            json!({"type": "openai", "baseURL": "https://x.example/v1", "apiKey": "{env:SYNT_X_KEY}"}),
+        );
+        let p = preflight("x", &c2).unwrap();
+        assert!(
+            p.needs_click
+                && p.text.contains("{env:SYNT_API_KEY}")
+                && p.text.contains("SYNT_CUSTOM_HEADERS"),
+            "{}",
+            p.text
+        );
+        assert!(!preflight("x", &c).unwrap().needs_click);
+    }
+
+    #[test]
+    fn the_hash_follows_the_host_the_protocol_and_the_real_file() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        std::fs::create_dir_all(u.join("s")).unwrap();
+        std::fs::write(u.join("s/a"), "k").unwrap();
+        std::fs::write(u.join("s/b"), "k").unwrap();
+        let hash = |e: Value| {
+            put(&h, e);
+            preflight("x", &c).unwrap().hash
+        };
+        let e = |url: &str, ty: &str, key: &str| json!({"type": ty, "baseURL": url, "apiKey": key});
+        let a = hash(e("https://a.example", "openai", "{env:MY_KEY}"));
+        assert_eq!(a, hash(e("https://a.example", "openai", "{env:MY_KEY}")));
+        for other in [
+            e("https://b.example", "openai", "{env:MY_KEY}"),
+            e("https://a.example", "anthropic", "{env:MY_KEY}"),
+            e("https://a.example", "openai", "{env:MY_OTHER_KEY}"),
+        ] {
+            assert_ne!(a, hash(other.clone()), "{other}");
+        }
+        // a path that is swapped for a link to another file changes the real path, so the hash
+        #[cfg(unix)]
+        {
+            let f = hash(e("https://a.example", "openai", "{file:~/s/a}"));
+            std::fs::remove_file(u.join("s/a")).unwrap();
+            std::os::unix::fs::symlink(u.join("s/b"), u.join("s/a")).unwrap();
+            let g = hash(e("https://a.example", "openai", "{file:~/s/a}"));
+            assert_ne!(f, g);
+            // and the confirmation names where it resolves to
+            let mut d = d("acme");
+            d.api_key = "~/s/a".into();
+            let text = confirmation(&d, &c).unwrap().unwrap().text;
+            assert!(
+                text.contains("resolves to") && text.contains("s/b"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_products_own_key_is_never_shared_but_other_synt_names_are_free() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        for v in [
+            "SYNT_API_KEY",
+            "SYNT_AUTH_TOKEN",
+            "SYNT_TOKEN",
+            "SYNT_ANTHROPIC_API_KEY",
+            "SYNT_OPENAI_API_KEY",
+            "{env:SYNT_API_KEY}",
+        ] {
+            let e = parse_key_ref(v, &c).unwrap_err();
+            assert!(e.contains("never shared"), "{v}: {e}");
+        }
+        for v in ["SYNT_MYGW_KEY", "SYNT_MYGW_API_KEY"] {
+            assert!(parse_key_ref(v, &c).is_ok(), "{v}");
+            assert!(!Ref::Env(v.into()).needs_confirm());
+        }
+    }
+
+    #[test]
+    fn more_secret_stores_and_variables_are_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        for n in [
+            "HOMEBREW_GITHUB_API_TOKEN",
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "CARGO_REGISTRY_TOKEN",
+            "TWINE_PASSWORD",
+            "NETLIFY_AUTH_TOKEN",
+            "VERCEL_TOKEN",
+            "CLOUDFLARE_API_TOKEN",
+            "SENTRY_AUTH_TOKEN",
+            "PYPI_TOKEN",
+            "DOCKER_PASSWORD",
+            "TF_TOKEN_X",
+            "HEROKU_API_KEY",
+            "DIGITALOCEAN_TOKEN",
+            "LINODE_TOKEN",
+            "FLY_API_TOKEN",
+            "RAILWAY_TOKEN",
+        ] {
+            assert!(parse_key_ref(n, &c).is_err(), "{n}");
+        }
+        for d in [
+            ".config/gh/hosts.yml",
+            ".cargo/credentials.toml",
+            ".cargo/credentials",
+            ".pypirc",
+            ".azure/x",
+            ".oci/config",
+            ".password-store/x",
+            "Library/Keychains/login.keychain-db",
+            ".npmrc",
+            ".netrc",
+            ".git-credentials",
+            ".docker/config.json",
+        ] {
+            let p = u.join(d);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "k").unwrap();
+            assert!(parse_key_ref(&format!("~/{d}"), &c).is_err(), "{d}");
+        }
+        for p in [
+            "/var/root/k",
+            "/home/someone-else/k",
+            "/Users/someone-else/k",
+            "/etc/k",
+        ] {
+            assert!(parse_key_ref(p, &c).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn saving_clears_shadowed_options_and_refuses_a_second_credential() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        put(
+            &h,
+            json!({"type": "openai", "options": {"baseURL": "https://old.example/v1", "apiKey": "{env:OLD_KEY}", "headers": {"X-Old": "{env:OLD_HDR}"}, "authHeader": "bearer"}}),
+        );
+        let mut f = d("x");
+        f.base_url = "https://new.example/v1".into();
+        save(&c, &f, true).unwrap();
+        let e = &file(&h)["providers"]["x"];
+        assert_eq!(e["options"], json!({"authHeader": "bearer"}));
+        assert_eq!(
+            (&e["baseURL"], &e["apiKey"]),
+            (
+                &json!("https://new.example/v1"),
+                &json!("{env:SYNT_ACME_KEY}")
+            )
+        );
+        // an authToken (top-level or under options) is refused, the file stays
+        for tok in [
+            json!({"authToken": "{env:T_K}"}),
+            json!({"options": {"authToken": "{env:T_K}"}}),
+        ] {
+            let mut entry = json!({"type": "openai", "baseURL": "https://x.example/v1", "apiKey": "{env:SYNT_X_KEY}"});
+            entry
+                .as_object_mut()
+                .unwrap()
+                .extend(tok.as_object().unwrap().clone());
+            put(&h, entry);
+            let before = std::fs::read_to_string(h.join("synt.json")).unwrap();
+            assert!(save(&c, &d("x"), true).unwrap_err().contains("authToken"));
+            assert_eq!(
+                std::fs::read_to_string(h.join("synt.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn documented_gateway_setups_list_edit_and_keep_working() {
+        // docs/INSTALL.md: npm openai-compatible, options.baseURL, options.apiKey {env:...}
+        let t = tempfile::tempdir().unwrap();
+        let (h, u) = dirs(&t);
+        let c = Ctx {
+            home: &h,
+            user_home: &u,
+            env: &Env::default(),
+        };
+        put(
+            &h,
+            json!({"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "https://gateway.example.com/v1", "apiKey": "{env:MY_GATEWAY_KEY}"}, "models": {"my-model": {"capabilities": {"toolCalling": true}}}}),
+        );
+        let e = &entries(&h).unwrap()[0];
+        assert_eq!(
+            (e.protocol, e.base_url.as_str(), e.key.as_str()),
+            (
+                "openai",
+                "https://gateway.example.com/v1",
+                "{env:MY_GATEWAY_KEY}"
+            )
+        );
+        let mut dr = draft_of(&h, "x").unwrap();
+        assert_eq!(
+            (dr.api_key.as_str(), dr.base_url.as_str(), dr.protocol),
+            (
+                "MY_GATEWAY_KEY",
+                "https://gateway.example.com/v1",
+                Protocol::OpenAi
+            )
+        );
+        let p = preflight("x", &c).unwrap();
+        assert!(
+            p.needs_click
+                && p.text.contains("{env:MY_GATEWAY_KEY}")
+                && p.text.contains("openai protocol"),
+            "{}",
+            p.text
+        );
+        // saving it as it is asks for the same confirmation, then keeps the model's own fields
+        dr.confirmed = confirmation(&dr, &c).unwrap().unwrap().token;
+        save(&c, &dr, true).unwrap();
+        let f = &file(&h)["providers"]["x"];
+        assert_eq!(
+            f["models"]["my-model"]["capabilities"],
+            json!({"toolCalling": true})
+        );
+        assert_eq!(f["apiKey"], "{env:MY_GATEWAY_KEY}");
+    }
+
+    #[test]
+    fn a_key_typed_inside_a_reference_is_not_shown_by_the_list_or_the_form() {
+        let t = tempfile::tempdir().unwrap();
+        let (h, _) = dirs(&t);
+        put(
+            &h,
+            json!({"type": "openai", "baseURL": "https://x.example/v1", "apiKey": "{env:sk-ant-api03-abcdefghijkl}", "headers": {"X-A": "{file:sk-ant-api03-abcdefghijkl}"}}),
+        );
+        let shown = format!("{:?}{:?}", entries(&h).unwrap(), draft_of(&h, "x").unwrap());
+        assert!(!shown.contains("abcdefghij"), "{shown}");
     }
 }

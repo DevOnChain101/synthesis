@@ -843,6 +843,7 @@ impl Model {
         Ctx {
             home: &self.cfg.home,
             user_home: &self.cfg.user_home,
+            env: &self.cfg.env,
         }
     }
 
@@ -887,21 +888,29 @@ impl Model {
     /// `synthesis-providers`, bounded to 30 s; note that provider calls do not go through the `synthesis-egress`
     /// proxy) on a worker thread, reading the same `<home>/synt.json` the form wrote. The credential is sent to
     /// the provider's host, so the references are checked again first (a hand-edited file can hold what the
-    /// form refuses) and anything but a `SYNT_*` variable needs `clicked` (the person saw
-    /// [`Model::provider_preflight`]). [`Model::poll_provider_test`] collects the answer.
-    pub fn start_provider_test(&mut self, id: &str, clicked: bool) {
+    /// form refuses), the pre-flight is read from what the loader will send, and anything but a `SYNT_*`
+    /// variable needs `approved`: the hash of the pre-flight the person saw. The worker computes it again
+    /// before it loads the configuration and sends nothing when it differs.
+    /// [`Model::poll_provider_test`] collects the answer.
+    pub fn start_provider_test(&mut self, id: &str, approved: Option<&str>) {
         if self.prov_testing.is_some() {
             return;
         }
-        let refused = match self.provider_preflight(id) {
-            Err(e) => Some(e),
-            Ok(p) if p.needs_click && !clicked => Some("confirm what is sent first".to_string()),
-            Ok(_) => None,
+        let hash = match self.provider_preflight(id) {
+            Err(e) => {
+                self.prov_result = Some((id.into(), format!("Not sent: {e}")));
+                return;
+            }
+            Ok(p) if p.needs_click && approved != Some(p.hash.as_str()) => {
+                self.prov_result = Some((
+                    id.into(),
+                    "Not sent: confirm what is sent first (or it changed since it was shown)"
+                        .into(),
+                ));
+                return;
+            }
+            Ok(p) => p.hash,
         };
-        if let Some(e) = refused {
-            self.prov_result = Some((id.into(), format!("Not sent: {e}")));
-            return;
-        }
         self.prov_testing = Some(id.into());
         self.prov_result = None;
         let (env, h, cwd, id) = (
@@ -910,9 +919,22 @@ impl Model {
             self.cfg.cwd.clone(),
             id.to_string(),
         );
+        let user_home = self.cfg.user_home.clone();
         let slot = self.prov_slot.clone();
         std::thread::spawn(move || {
             let run = || -> Result<(), String> {
+                // the file may have changed since the pre-flight: what is sent is what was shown
+                let ctx = Ctx {
+                    home: &h.synthesis,
+                    user_home: &user_home,
+                    env: &env,
+                };
+                if provider_cfg::preflight(&id, &ctx)?.hash != hash {
+                    return Err(
+                        "the provider changed since the pre-flight was shown; nothing was sent"
+                            .into(),
+                    );
+                }
                 let cfg = load_config(&env, &h, Some(&cwd), ProjectTrust::Untrusted)?;
                 let p = cfg
                     .providers
@@ -1320,7 +1342,7 @@ mod tests {
     fn the_connection_test_checks_what_it_sends_and_runs_off_the_thread() {
         let (_t, mut m) = model();
         // unknown provider: nothing starts
-        m.start_provider_test("nope", true);
+        m.start_provider_test("nope", None);
         assert!(m.prov_testing.is_none());
         assert!(m.prov_result.as_ref().unwrap().1.starts_with("Not sent:"));
         // a variable that is not SYNT_*: no start without the click, and a cloud credential never
@@ -1330,15 +1352,27 @@ mod tests {
         d.confirmed = m.provider_confirmation(&d).unwrap().unwrap().token;
         m.save_provider(&d, false).unwrap();
         assert!(m.provider_preflight("acme").unwrap().needs_click);
-        m.start_provider_test("acme", false);
+        m.start_provider_test("acme", None);
         assert!(m.prov_testing.is_none());
         assert!(m.prov_result.as_ref().unwrap().1.contains("confirm"));
+        // a click for something else (a stale hash) does not send either; the hash it was shown does
+        m.start_provider_test("acme", Some("stale"));
+        assert!(m.prov_testing.is_none());
+        let hash = m.provider_preflight("acme").unwrap().hash;
+        m.start_provider_test("acme", Some(&hash));
+        assert_eq!(m.prov_testing.as_deref(), Some("acme"));
+        let t0 = std::time::Instant::now();
+        while !m.poll_provider_test() {
+            assert!(t0.elapsed().as_secs() < 60);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(m.prov_result.as_ref().unwrap().1.starts_with("Failed:"));
         // a SYNT_* key needs no click: the test runs on a worker, against the file that was saved
         let mut e = draft("local");
         e.base_url = "http://127.0.0.1:1/v1".into();
         m.save_provider(&e, false).unwrap();
         assert!(!m.provider_preflight("local").unwrap().needs_click);
-        m.start_provider_test("local", false);
+        m.start_provider_test("local", None);
         assert_eq!(m.prov_testing.as_deref(), Some("local"));
         let t0 = std::time::Instant::now();
         while !m.poll_provider_test() {

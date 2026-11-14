@@ -283,6 +283,15 @@ pub fn substitute_string(raw: &str, ctx: &SubstCtx<'_>) -> Substituted {
         if !p.is_absolute() {
             p = ctx.base_dir.join(p);
         }
+        // a network path would be contacted by the read itself; the rest is judged on the real path
+        if let Err(e) =
+            crate::secretfile::check_credential_file(&p, ctx.base_dir, ctx.user_home, false)
+        {
+            return Substituted {
+                warning: Some(format!("{{file:...}} refused: {e}")),
+                ..Default::default()
+            };
+        }
         return match std::fs::read(&p) {
             Ok(b) => Substituted {
                 value: Some(String::from_utf8_lossy(&b).trim().to_string()),
