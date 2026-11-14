@@ -24,15 +24,50 @@ pub struct RecoveryReport {
     pub settled: Vec<AttemptId>,
     /// Workers whose lease expired while the process lived (killed, then lost).
     pub expired: Vec<AttemptId>,
+    /// Running attempts whose worker could not be identified (no pid or start token recorded)
+    /// but whose session is still open in some process: neither killed nor marked lost.
+    pub unknown: Vec<AttemptId>,
+    /// Things worth a person's eye (an unreadable or future heartbeat, a refused kill).
+    pub notes: Vec<String>,
 }
 
-fn age(at: &Option<String>, now: OffsetDateTime) -> Option<Duration> {
-    let t = crate::retention::parse_store_time(at.as_deref()?)?;
-    (now - t).try_into().ok()
+/// Is the worker's lease run out? A heartbeat that cannot be read, or lies in the future (the
+/// clock was set back), proves nothing about the worker: it counts as FRESH, with a note. Only a
+/// readable heartbeat older than `lease` is silence.
+fn silent(
+    at: &Option<String>,
+    now: OffsetDateTime,
+    lease: Duration,
+    notes: &mut Vec<String>,
+) -> bool {
+    let Some(t) = at.as_deref().and_then(crate::retention::parse_store_time) else {
+        notes.push("a worker has no readable heartbeat: treated as alive".into());
+        return false;
+    };
+    match (now - t).try_into() {
+        Ok(age) => {
+            let age: Duration = age;
+            age > lease
+        }
+        Err(_) => {
+            notes.push(
+                "a worker's heartbeat is in the future (clock set back?): treated as alive".into(),
+            );
+            false
+        }
+    }
 }
 
 /// Reconciles every live attempt of the outcome. `max_attempts` is the attempt budget per work
 /// item (contract under settings); `lease` how long a worker may be silent.
+///
+/// A worker is killed only when its recorded start token still matches (`kill_guard`) AND its
+/// readable heartbeat is older than `lease`. A session whose OS lock is held by a live process is
+/// never marked lost. After a laptop sleep every lease looks expired though the worker lives on:
+/// the verified-token kill then ends a worker that was merely paused, which is the safe reading
+/// (it is retried as a new attempt). This function assumes it is the only recovering owner of the
+/// outcome (the control-session lock, enforced by the store); exclusion between two orchestrator
+/// processes is PR-12's.
 #[allow(clippy::too_many_arguments)]
 pub fn recover_attempts(
     store: &Store,
@@ -51,18 +86,34 @@ pub fn recover_attempts(
             if !matches!(a.state, AttemptState::Starting | AttemptState::Running) {
                 continue;
             }
-            let alive = a
+            let token_matches = a
                 .worker_pid
                 .zip(a.worker_start.as_deref())
                 .is_some_and(|(pid, start)| probe.start_time(pid).as_deref() == Some(start));
-            if alive {
-                let silent = age(&a.heartbeat_at, now).is_none_or(|d| d > lease);
-                if !silent {
-                    report.alive.push(a.id.clone());
+            // is some process still writing this session? (a free lock is released at once)
+            let lock_held = matches!(
+                store.open_attempt_session(w, &a.session_id),
+                Err(synthesis_session::Error::Locked(_))
+            );
+            if token_matches || lock_held {
+                if !silent(&a.heartbeat_at, now, lease, &mut report.notes) {
+                    if token_matches {
+                        report.alive.push(a.id.clone());
+                    } else {
+                        report.unknown.push(a.id.clone());
+                    }
                     continue;
                 }
-                if let Some(pid) = a.worker_pid {
-                    crate::proc::kill_tree(probe, pid);
+                if !token_matches {
+                    // silent, but its identity is unproven: never kill what we cannot name
+                    report.unknown.push(a.id.clone());
+                    continue;
+                }
+                let pid = a.worker_pid.expect("a matching token has a pid");
+                if let Err(e) = crate::proc::kill_verified(probe, pid, a.worker_start.as_deref()) {
+                    report.notes.push(format!("not killed: {e}"));
+                    report.alive.push(a.id.clone());
+                    continue;
                 }
                 report.expired.push(a.id.clone());
             }
@@ -124,6 +175,7 @@ fn never_spawns<'a>(
         probe,
         poll: Duration::from_secs(1),
         grace: Duration::from_secs(1),
+        beat: None,
     }
 }
 

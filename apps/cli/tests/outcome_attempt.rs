@@ -44,6 +44,15 @@ fn g(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
+/// A host without an enforcing sandbox cannot run an attempt. Where CI requires one
+/// (`SYNT_REQUIRE_BWRAP`, as the sandbox tests do) that is a failure, not a skip.
+fn no_sandbox_is_ok(what: &str) {
+    assert!(
+        std::env::var_os("SYNT_REQUIRE_BWRAP").is_none_or(|v| v.is_empty()),
+        "SYNT_REQUIRE_BWRAP is set but this host has no enforcing sandbox: {what}"
+    );
+}
+
 fn host_confines(home: &Path) -> bool {
     let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
@@ -127,7 +136,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
         version: 1,
-        goal: "write hello.txt".into(),
+        goal: "- write hello.txt".into(),
         criteria: vec![ContractCriterion {
             id: "c1".into(),
             text: "hello.txt exists".into(),
@@ -250,6 +259,7 @@ fn run(
         &env,
         &contract(),
         &policy,
+        0.0,
         "write hello.txt".into(),
     )
     .unwrap()
@@ -266,6 +276,7 @@ fn run(
         probe: &OsProbe,
         poll: Duration::from_millis(100),
         grace: Duration::from_secs(5),
+        beat: None,
     };
     let settled = runner.run_attempt(&mut w, &env, &profile, &CancelFlag::default());
     (w, it, env, settled)
@@ -284,6 +295,7 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
     let (w, it, env, settled) = run(&r, hello(&r));
     let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
     if !confines {
+        no_sandbox_is_ok("the attempt cannot run");
         // `--unattended` refuses to start without an enforcing sandbox: the attempt FAILS, no
         // command ran, and nothing was written outside the worktree
         let s = settled.unwrap();
@@ -332,6 +344,7 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
 fn an_attempt_starts_no_mcp_server_and_runs_no_project_hook() {
     let r = rig();
     if !host_confines(&r.home) {
+        no_sandbox_is_ok("the exclusion test needs a running worker");
         println!(
             "SKIP: no enforcing sandbox on this host (the worker would be refused before it started)"
         );
@@ -368,6 +381,38 @@ fn an_attempt_starts_no_mcp_server_and_runs_no_project_hook() {
         String::from_utf8_lossy(&o.stderr)
     );
     std::fs::remove_file(&mcp).unwrap();
+    // positive control for the hook: the same project, TRUSTED, in a plain run DOES run its hook
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["run", "--cwd"])
+        .arg(&r.repo)
+        .args([
+            "--provider",
+            &format!("fake:{}", s.display()),
+            "--prompt",
+            "x",
+            "--no-cost-cap",
+            "--no-worktree",
+            "--trust-project",
+            // the hook writes outside the workspace: the control must not be blocked by the sandbox
+            "--sandbox",
+            "off",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &base)
+        .env("SYNT_HOME", &r.home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        hook.exists(),
+        "control: a trusted project's hook runs in a plain run ({})",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    std::fs::remove_file(&hook).unwrap();
+    if mcp.exists() {
+        std::fs::remove_file(&mcp).unwrap();
+    }
     // the attempt
     let (_, _, _, settled) = run(&r, json!([{"text": "ok"}]));
     let s = settled.unwrap();
@@ -413,6 +458,7 @@ fn the_worker_cannot_be_given_a_weaker_profile() {
         &env,
         &contract(),
         &OutcomePolicy::new(true, 16, 10, 24),
+        0.0,
         "x".into(),
     )
     .unwrap();

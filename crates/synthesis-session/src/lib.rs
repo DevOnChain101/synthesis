@@ -15,8 +15,8 @@ pub mod trust;
 pub use clean::{CleanCounts, CleanPlan, CleanResult, CleanScope, INACTIVE_DAYS};
 pub use error::{Error, Result};
 pub use recover::{
-    Orphan, OrphanAction, OrphanState, OsProbe, ProcessProbe, RecoveryReport, process_start_time,
-    recover, recover_with,
+    Orphan, OrphanAction, OrphanState, OsProbe, ProcessProbe, RecoveryReport, kill_guard,
+    process_start_time, recover, recover_with,
 };
 /// The schema a default open produces (outcomes are opt-in: this stays 4 until they are enabled).
 pub use schema::DEFAULT_TARGET as SCHEMA_VERSION_LATEST;

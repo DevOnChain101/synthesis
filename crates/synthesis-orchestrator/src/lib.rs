@@ -16,6 +16,7 @@ mod retention;
 mod runner;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
+pub use proc::kill_verified;
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError};
 pub use recover::{RecoveryReport, recover_attempts};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};

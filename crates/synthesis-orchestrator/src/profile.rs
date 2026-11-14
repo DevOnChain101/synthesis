@@ -22,6 +22,8 @@ pub const DEFAULT_WALL_SECS: u64 = 1800;
 pub enum ProfileError {
     /// No usable cost cap (the contract always names one; this guards a hand-built value).
     NoCostCap,
+    /// The earlier attempts of the outcome already spent its whole cap.
+    BudgetExhausted { spent: f64, cap: f64 },
     /// A flag outside the allow-list was offered for the worker.
     Forbidden(String),
 }
@@ -30,6 +32,10 @@ impl std::fmt::Display for ProfileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCostCap => write!(f, "an attempt needs a cost cap and none is usable"),
+            Self::BudgetExhausted { spent, cap } => write!(
+                f,
+                "the outcome's cost cap is used up: {spent:.4} of {cap:.4} USD spent by earlier attempts"
+            ),
             Self::Forbidden(a) => write!(
                 f,
                 "{a:?} is not allowed for an outcome attempt: sandbox, network, trust, MCP, hooks and permission mode come from the profile, never from the caller"
@@ -65,13 +71,30 @@ impl Profile {
         env: &AttemptEnv,
         contract: &Contract,
         policy: &OutcomePolicy,
+        spent_usd: f64,
         prompt: String,
     ) -> Result<Self, ProfileError> {
         let b = &contract.envelope.budgets;
+        // earlier attempts already spent part of the outcome's cap; this one gets what is left
+        let outcome_cap = [Some(b.max_cost_usd), policy.max_cost_usd]
+            .into_iter()
+            .flatten()
+            .fold(f64::INFINITY, f64::min);
+        let spent = if spent_usd.is_finite() && spent_usd > 0.0 {
+            spent_usd
+        } else {
+            0.0
+        };
+        let left = outcome_cap - spent;
+        if left <= 0.0 {
+            return Err(ProfileError::BudgetExhausted {
+                spent,
+                cap: outcome_cap,
+            });
+        }
         let cap = [
-            Some(b.max_cost_usd),
+            Some(left),
             b.attempt_max_cost_usd,
-            policy.max_cost_usd,
             policy.attempt_max_cost_usd,
         ]
         .into_iter()
@@ -161,7 +184,8 @@ impl Profile {
         v.extend(["--permission-mode".into(), self.permission_mode.into()]);
         v.extend(["--output-format".into(), "json".into()]);
         v.extend(self.extra.iter().map(OsString::from));
-        v.extend(["--prompt".into(), self.prompt.clone().into()]);
+        // `--prompt=<text>`: a prompt that starts with `-` is a value, not a flag
+        v.push(format!("--prompt={}", self.prompt).into());
         v
     }
 }

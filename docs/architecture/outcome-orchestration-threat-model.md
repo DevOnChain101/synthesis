@@ -113,7 +113,8 @@ Test ids: existing red-team case ids are in `tests/redteam/cases.mjs`; ids with 
 5. A person can still approve something harmful; the design reduces rubber-stamping, it does not remove the human.
 6. Any same-user process outside the sandbox can read `run/orch.key` and the database and so impersonate a surface; the endpoint raises the bar against sandboxed code and other users, not against the user's own processes.
 7. The standalone orchestrator process (PR-12) is an **ownership and correctness boundary, not a security boundary**: it runs as the same OS user as every surface. Real boundaries (a daemon under a separate OS user; a person-present signature through FIDO2, Touch ID or Windows Hello for irreversible decisions) are post-MVP owner decisions.
-8. No independent security audit exists for the repo (`docs/SECURITY.md` Known gaps).
+8. A sandboxed command on macOS that calls `setsid` leaves the process tree the runner lists and kills, and can keep writing the attempt's worktree after its subject commit is recorded (Linux bubblewrap unshares the pid namespace and dies with its parent). Mitigation by design: the independent runner verifies a fresh checkout of the subject commit (PR-09), never the worktree. User and managed hooks run on the host outside the sandbox.
+9. No independent security audit exists for the repo (`docs/SECURITY.md` Known gaps).
 
 ## 6. Review gates
 

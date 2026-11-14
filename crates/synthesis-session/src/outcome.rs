@@ -450,6 +450,20 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// What the outcome's attempts have cost so far, from the usage their sessions recorded
+    /// (`sessions.usage.cost_usd`). Used to lower the cap of the next attempt: N attempts must not
+    /// spend N times the outcome cap.
+    pub fn outcome_spend(&self, id: &OutcomeId) -> Result<f64> {
+        need_v5(&self.conn)?;
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0) \
+             FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+             JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
+            [id.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn list_decisions(&self, id: &OutcomeId) -> Result<Vec<DecisionRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(

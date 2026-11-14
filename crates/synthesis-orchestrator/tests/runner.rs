@@ -41,12 +41,13 @@ fn runner<'a>(r: &'a Rig, s: &'a Script) -> Runner<'a> {
         probe: &OsProbe,
         poll: Duration::from_millis(40),
         grace: Duration::from_millis(400),
+        beat: None,
     }
 }
 
 fn profile(r: &Rig, env: &AttemptEnv, p: &OutcomePolicy) -> Profile {
     let c = r.contract_for_profile();
-    Profile::build(PathBuf::from("sh"), env, &c, p, "do the work".into()).unwrap()
+    Profile::build(PathBuf::from("sh"), env, &c, p, 0.0, "do the work".into()).unwrap()
 }
 
 fn alive(pid: u32) -> bool {
@@ -656,7 +657,7 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     let mut p = policy();
     p.attempt_max_cost_usd = Some(1.5);
     p.attempt_max_wall_secs = Some(600);
-    let prof = Profile::build(PathBuf::from("synt"), &env, &c, &p, "goal".into()).unwrap();
+    let prof = Profile::build(PathBuf::from("synt"), &env, &c, &p, 0.0, "goal".into()).unwrap();
     // the smallest of contract and settings; the outcome cap bounds it too
     assert_eq!((prof.max_cost_usd(), prof.max_wall_secs()), (1.5, 600));
     assert_eq!(prof.permission_mode(), "acceptEdits");
@@ -707,6 +708,7 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
         &env,
         &r.contract_for_profile(),
         &policy(),
+        0.0,
         "g".into(),
     )
     .unwrap();
@@ -716,7 +718,7 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     let mut ro = r.contract_for_profile();
     ro.envelope.capabilities.remove(&Capability::RepoWrite);
     assert_eq!(
-        Profile::build(PathBuf::from("synt"), &env, &ro, &policy(), "g".into())
+        Profile::build(PathBuf::from("synt"), &env, &ro, &policy(), 0.0, "g".into())
             .unwrap()
             .permission_mode(),
         "default"
@@ -738,6 +740,7 @@ fn only_the_model_and_turn_bounds_can_be_added_to_the_profile() {
             &env,
             &r.contract_for_profile(),
             &policy(),
+            0.0,
             "g".into(),
         )
         .unwrap()
@@ -786,4 +789,402 @@ fn unverified_hands_over_to_verification_like_completed() {
         attempt(&w, &one, 1).task_status.as_deref(),
         Some("unverified")
     );
+}
+
+// ------------------------------------------------------- review fixes (PR-05)
+
+fn busy() -> synthesis_session::Error {
+    synthesis_session::Error::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        None,
+    ))
+}
+
+fn pid_of(env: &AttemptEnv, file: &str) -> u32 {
+    fs::read_to_string(env.git.worktree.join(file))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn gone(pid: u32) -> bool {
+    let until = Instant::now() + Duration::from_secs(3);
+    while alive(pid) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    !alive(pid)
+}
+
+#[test]
+fn a_busy_database_never_kills_a_healthy_worker() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let s = Script("sleep 1; exit 0".into());
+    // five misses in a row, then the database answers: under the limit of six
+    let n = std::cell::Cell::new(0u32);
+    let hook = |w: &mut OutcomeWriter, id: &AttemptId, fence: i64| {
+        n.set(n.get() + 1);
+        if n.get() <= 5 {
+            Err(busy())
+        } else {
+            w.heartbeat(id, fence)
+        }
+    };
+    let mut rn = runner(&r, &s);
+    rn.beat = Some(&hook);
+    let settled = rn
+        .run_attempt(
+            &mut w,
+            &env,
+            &profile(&r, &env, &policy()),
+            &CancelFlag::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        settled.end,
+        WorkerEnd::Completed,
+        "a missed beat is not a verdict on the worker"
+    );
+    assert!(n.get() > 5);
+    // an I/O error and a missing row are transient from the worker's point of view too
+    let (mut w2, one2, _) = r.outcome();
+    let env2 = r
+        .allocator()
+        .allocate(&mut w2, &r.spec(&one2, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let k = std::cell::Cell::new(0u32);
+    let hook2 = |w: &mut OutcomeWriter, id: &AttemptId, fence: i64| {
+        k.set(k.get() + 1);
+        match k.get() {
+            1 => Err(synthesis_session::Error::NotFound("attempt".into())),
+            2 => Err(synthesis_session::Error::Io(io::Error::other("disk full"))),
+            _ => w.heartbeat(id, fence),
+        }
+    };
+    let mut rn = runner(&r, &s);
+    rn.beat = Some(&hook2);
+    let settled = rn
+        .run_attempt(
+            &mut w2,
+            &env2,
+            &profile(&r, &env2, &policy()),
+            &CancelFlag::default(),
+        )
+        .unwrap();
+    assert_eq!(settled.end, WorkerEnd::Completed);
+}
+
+#[test]
+fn only_a_stale_heartbeat_kills_the_worker_and_a_dead_database_gives_the_attempt_up() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, two) = r.outcome();
+    // Stale: the worker is superseded; its whole tree goes, the error says why
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let s = Script("echo $$ > w.pid; sleep 300 & echo $! > sub.pid; wait".into());
+    let hook = |_: &mut OutcomeWriter, _: &AttemptId, _: i64| {
+        Err(synthesis_session::Error::Stale("superseded".into()))
+    };
+    let mut rn = runner(&r, &s);
+    rn.beat = Some(&hook);
+    let began = Instant::now();
+    let err = rn
+        .run_attempt(
+            &mut w,
+            &env,
+            &profile(&r, &env, &policy()),
+            &CancelFlag::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, RunError::Store(synthesis_session::Error::Stale(_))),
+        "{err}"
+    );
+    assert!(began.elapsed() < Duration::from_secs(10));
+    assert!(
+        gone(pid_of(&env, "w.pid")) && gone(pid_of(&env, "sub.pid")),
+        "no worker outlives a failed runner"
+    );
+    // a database that keeps failing: after six misses the worker is stopped and the attempt is
+    // marked lost with the reason, not retried blindly
+    let env2 = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&two, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let hook = |_: &mut OutcomeWriter, _: &AttemptId, _: i64| Err(busy());
+    let mut rn = runner(&r, &s);
+    rn.beat = Some(&hook);
+    let err = rn
+        .run_attempt(
+            &mut w,
+            &env2,
+            &profile(&r, &env2, &policy()),
+            &CancelFlag::default(),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("heartbeat failed 6 times"),
+        "{err}"
+    );
+    assert!(gone(pid_of(&env2, "w.pid")) && gone(pid_of(&env2, "sub.pid")));
+    let a = attempt(&w, &two, 1);
+    assert_eq!(a.state, AttemptState::Lost);
+    assert!(a.retained_reason.unwrap().contains("heartbeat failed"));
+}
+
+struct Broken;
+impl Spawn for Broken {
+    fn spawn(&self, _: &Profile) -> io::Result<Child> {
+        Err(io::Error::other("no such program"))
+    }
+}
+
+#[test]
+fn a_worker_that_cannot_start_fails_the_attempt_instead_of_leaving_it_running() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let rn = Runner {
+        store: &r.store,
+        worktrees: &r.wm,
+        spawn: &Broken,
+        probe: &OsProbe,
+        poll: Duration::from_millis(40),
+        grace: Duration::from_millis(100),
+        beat: None,
+    };
+    let err = rn
+        .run_attempt(
+            &mut w,
+            &env,
+            &profile(&r, &env, &policy()),
+            &CancelFlag::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(err, RunError::Io(_)), "{err}");
+    let a = attempt(&w, &one, 1);
+    assert_eq!(
+        (a.state, a.task_status.as_deref()),
+        (AttemptState::Finished, Some("failed"))
+    );
+    assert_eq!(item_state(&w, &one), WorkItemState::RetryableFailure);
+}
+
+#[test]
+fn kill_verified_refuses_what_it_cannot_prove_is_the_worker() {
+    use synthesis_orchestrator::kill_verified;
+    let probe = OsProbe;
+    // reserved pids and ourselves
+    assert!(kill_verified(&probe, 0, Some("x")).is_err());
+    assert!(kill_verified(&probe, 1, Some("x")).is_err());
+    assert!(
+        kill_verified(
+            &probe,
+            std::process::id(),
+            probe.start_time(std::process::id()).as_deref()
+        )
+        .is_err()
+    );
+    // a live process whose start token is not the recorded one (pid reuse), or none recorded
+    let mut other = Command::new("sleep").arg("60").spawn().unwrap();
+    assert!(kill_verified(&probe, other.id(), Some("not the token")).is_err());
+    assert!(kill_verified(&probe, other.id(), None).is_err());
+    assert!(alive(other.id()), "refused means untouched");
+    other.kill().unwrap();
+    other.wait().unwrap();
+}
+
+#[test]
+fn a_running_attempt_with_no_recorded_worker_is_left_alone_while_its_session_is_open() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    // the owner died between spawn and record_worker: Running, no pid
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    r.wm.mark_started(&env.git).unwrap();
+    let rev = attempt(&w, &one, 1).revision;
+    w.transition_attempt(
+        &env.attempt.id,
+        rev,
+        AttemptState::Running,
+        &AttemptEnd::default(),
+        &Effects::default(),
+    )
+    .unwrap();
+    // the worker, still running, holds its session's lock
+    let held = r.store.open_attempt_session(&w, &env.session_id).unwrap();
+    let rep = recover(
+        &r,
+        &mut w,
+        OffsetDateTime::now_utc() + time::Duration::hours(2),
+        Duration::from_secs(1),
+        3,
+    );
+    assert_eq!(
+        (rep.unknown.len(), rep.lost.len(), rep.expired.len()),
+        (1, 0, 0),
+        "{rep:?}"
+    );
+    assert_eq!(attempt(&w, &one, 1).state, AttemptState::Running);
+    drop(held);
+    // the lock is free now: nobody is writing, the attempt is lost
+    let rep = recover(
+        &r,
+        &mut w,
+        OffsetDateTime::now_utc(),
+        Duration::from_secs(120),
+        3,
+    );
+    assert_eq!(rep.lost.len(), 1);
+}
+
+#[test]
+fn an_unreadable_or_future_heartbeat_counts_as_fresh_never_as_silence() {
+    need_git!();
+    use std::os::unix::process::CommandExt;
+    for bad in ["garbage", "2999-01-01T00:00:00.000Z", ""] {
+        let r = rig();
+        let (mut w, one, _) = r.outcome();
+        let mut live = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = OsProbe.start_time(live.id());
+        let env = running_with_worker(&r, &mut w, &one, 1, live.id(), start.as_deref());
+        rusqlite::Connection::open(r.home.join("synt.db"))
+            .unwrap()
+            .execute(
+                "UPDATE attempts SET heartbeat_at=?1 WHERE id=?2",
+                rusqlite::params![bad, env.attempt.id.as_str()],
+            )
+            .unwrap();
+        let rep = recover(
+            &r,
+            &mut w,
+            OffsetDateTime::now_utc(),
+            Duration::from_secs(1),
+            3,
+        );
+        assert_eq!(
+            (rep.alive.len(), rep.expired.len(), rep.lost.len()),
+            (1, 0, 0),
+            "{bad:?}: {rep:?}"
+        );
+        assert!(!rep.notes.is_empty(), "{bad:?}: it is logged");
+        assert!(alive(live.id()), "{bad:?}: a live worker was killed");
+        live.kill().unwrap();
+        live.wait().unwrap();
+    }
+}
+
+#[test]
+fn later_attempts_get_what_is_left_of_the_outcome_cap() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let c = r.contract_for_profile(); // outcome cap 5.0
+    let build = |spent| {
+        Profile::build(
+            PathBuf::from("synt"),
+            &env,
+            &c,
+            &policy(),
+            spent,
+            "g".into(),
+        )
+    };
+    assert_eq!(build(0.0).unwrap().max_cost_usd(), 5.0);
+    assert_eq!(build(3.5).unwrap().max_cost_usd(), 1.5);
+    assert!(matches!(
+        build(5.0),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
+    assert!(matches!(
+        build(7.0),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
+    // a hostile value cannot raise the cap
+    assert_eq!(build(f64::NAN).unwrap().max_cost_usd(), 5.0);
+    assert_eq!(build(-100.0).unwrap().max_cost_usd(), 5.0);
+    // the settings' ceiling bounds it as well
+    let mut p = policy();
+    p.max_cost_usd = Some(4.0);
+    assert_eq!(
+        Profile::build(PathBuf::from("synt"), &env, &c, &p, 1.0, "g".into())
+            .unwrap()
+            .max_cost_usd(),
+        3.0
+    );
+    // the spend is read from what the attempts' sessions recorded
+    let id = w.id().clone();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 0.0);
+    rusqlite::Connection::open(r.home.join("synt.db"))
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET usage='{\"cost_usd\":2.25}' WHERE id=?1",
+            [&env.session_id],
+        )
+        .unwrap();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 2.25);
+    let left = Profile::build(
+        PathBuf::from("synt"),
+        &env,
+        &c,
+        &policy(),
+        w.outcome_spend(&id).unwrap(),
+        "g".into(),
+    )
+    .unwrap();
+    assert_eq!(left.max_cost_usd(), 2.75);
+}
+
+#[test]
+fn a_prompt_that_starts_with_a_dash_is_a_value() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let p = Profile::build(
+        PathBuf::from("synt"),
+        &env,
+        &r.contract_for_profile(),
+        &policy(),
+        0.0,
+        "--sandbox off".into(),
+    )
+    .unwrap();
+    let argv: Vec<String> = p
+        .argv()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        argv.contains(&"--prompt=--sandbox off".to_string()),
+        "{argv:?}"
+    );
+    assert!(!argv.iter().any(|a| a == "--sandbox"));
 }
