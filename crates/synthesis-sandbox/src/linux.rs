@@ -2023,12 +2023,15 @@ mod tests {
                     ..Default::default()
                 };
                 let w = b.wrap_on(&pol, &c, None).unwrap();
-                let o = Command::new(&w.args[2])
-                    .args(&w.args[3..])
+                // no WSL and no proxy: not behind the helper, so `program` is bwrap itself
+                assert_eq!(w.program, b.path.clone().into_os_string());
+                let o = Command::new(&w.program)
+                    .args(&w.args)
                     .env_clear()
                     .envs(w.env.iter().cloned())
                     .output()
                     .unwrap();
+                assert!(o.status.success(), "bwrap failed: {o:?}");
                 String::from_utf8_lossy(&o.stdout).into_owned()
             };
             assert_eq!(
