@@ -128,26 +128,91 @@ fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreE
     }))
 }
 
-/// `*` within a segment, `**` across segments, `?` one character.
-fn glob_matches(pat: &[u8], text: &[u8]) -> bool {
-    match pat {
-        [] => text.is_empty(),
-        [b'*', b'*', rest @ ..] => (0..=text.len()).any(|i| glob_matches(rest, &text[i..])),
-        [b'*', rest @ ..] => {
-            let end = text.iter().position(|c| *c == b'/').unwrap_or(text.len());
-            (0..=end).any(|i| glob_matches(rest, &text[i..]))
-        }
-        [b'?', rest @ ..] => !text.is_empty() && text[0] != b'/' && glob_matches(rest, &text[1..]),
-        [c, rest @ ..] => text.first() == Some(c) && glob_matches(rest, &text[1..]),
+/// Longest needed rule (or deny spec) the coverage check will look at, and the work it may do:
+/// beyond either the answer is "covered", i.e. no grant is offered.
+const MAX_RULE_LEN: usize = 1_000;
+const MAX_MATCH_STEPS: usize = 2_000_000;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tok {
+    Lit(u8),
+    One,
+    Star,
+    Deep,
+}
+
+/// `*` within a segment, `**` across segments, `?` one character. Iterative (a set of reachable
+/// text positions per token, no backtracking), consecutive wildcards collapsed. `None` when the
+/// work budget is spent: callers read that as "covered".
+fn glob_matches(pat: &[u8], text: &[u8]) -> Option<bool> {
+    let mut toks: Vec<Tok> = vec![];
+    let mut i = 0;
+    while i < pat.len() {
+        let t = match pat[i] {
+            b'*' => {
+                let mut j = i;
+                while j < pat.len() && pat[j] == b'*' {
+                    j += 1;
+                }
+                let t = if j - i >= 2 { Tok::Deep } else { Tok::Star };
+                i = j;
+                match (toks.last().copied(), t) {
+                    (Some(Tok::Deep), _) | (Some(Tok::Star), Tok::Star) => continue,
+                    (Some(Tok::Star), Tok::Deep) => {
+                        toks.pop();
+                    }
+                    _ => {}
+                }
+                t
+            }
+            b'?' => {
+                i += 1;
+                Tok::One
+            }
+            c => {
+                i += 1;
+                Tok::Lit(c)
+            }
+        };
+        toks.push(t);
     }
+    if toks.len().saturating_mul(text.len() + 1) > MAX_MATCH_STEPS {
+        return None;
+    }
+    let n = text.len();
+    let mut cur = vec![false; n + 1];
+    cur[0] = true;
+    for t in toks {
+        let mut next = vec![false; n + 1];
+        match t {
+            Tok::Lit(c) => (0..n).for_each(|k| next[k + 1] = cur[k] && text[k] == c),
+            Tok::One => (0..n).for_each(|k| next[k + 1] = cur[k] && text[k] != b'/'),
+            Tok::Star | Tok::Deep => {
+                let mut open = false;
+                for k in 0..=n {
+                    open = open || cur[k];
+                    next[k] = open;
+                    if k < n && t == Tok::Star && text[k] == b'/' {
+                        open = false;
+                    }
+                }
+            }
+        }
+        cur = next;
+    }
+    Some(cur[n])
 }
 
 /// Is the rule the worker needed one that must not be offered as a grant: covered by a deny rule
-/// of the compiled contract or a tool that does not exist in an attempt? Covered means: identical;
-/// a bare deny of the tool (the edit tools count as one family); a path deny whose glob matches
-/// the needed path (`Edit(/s/**)` covers `Edit(/s/k)`); a command-prefix deny (`Bash(git push:*)`
-/// covers `Bash(git push origin:*)`). This is a best-effort FILTER for what the brief offers, not
-/// an authority: PR-10 must check a grant against the contract itself.
+/// of the compiled contract or a tool that does not exist in an attempt? Covered means:
+/// identical; a bare deny of the tool (the edit tools count as one family); a path deny whose
+/// glob matches the needed path (`Edit(/s/**)` covers `Edit(/s/k)`); a command-prefix deny
+/// (`Bash(git push:*)` covers `Bash(git push origin:*)`); and the other way round, a BROADER need
+/// that contains a deny (`Bash(git:*)` contains the deny of `git push`, `Read(/**)` contains the
+/// deny of `/s/**`, a bare `Edit` contains any edit deny). Case is folded like the engine does on
+/// case-insensitive file systems, and anything too long or too costly to check counts as covered.
+/// This errs toward NOT offering a grant; it is a best-effort FILTER for what the brief offers,
+/// not an authority: PR-10 must check a grant against the contract itself.
 fn rule_denied(deny: &[String], rule: &str) -> bool {
     let family = |t: &str| match t {
         "Write" | "MultiEdit" | "NotebookEdit" => "Edit".to_owned(),
@@ -155,23 +220,42 @@ fn rule_denied(deny: &[String], rule: &str) -> bool {
     };
     let split = |r: &str| -> (String, String) {
         let (t, rest) = r.split_once('(').unwrap_or((r, ""));
-        (family(t), rest.strip_suffix(')').unwrap_or(rest).to_owned())
+        (
+            family(t).to_lowercase(),
+            rest.strip_suffix(')').unwrap_or(rest).to_lowercase(),
+        )
     };
+    if rule.len() > MAX_RULE_LEN {
+        return true;
+    }
     let (tool, need) = split(rule);
     // an attempt has no browser and no MCP tools: a grant could never make them exist
     if tool.starts_with("browser_") || tool.starts_with("mcp__") {
         return true;
     }
+    let prefix = |s: &str| s.strip_suffix(":*").map(str::to_owned);
     deny.iter().any(|d| {
         let (dt, spec) = split(d);
-        d == rule
-            || (dt == tool
-                && (spec.is_empty()
-                    || spec == need
-                    || glob_matches(spec.as_bytes(), need.as_bytes())
-                    || spec
-                        .strip_suffix(":*")
-                        .is_some_and(|prefix| need.starts_with(prefix))))
+        if d.to_lowercase() == rule.to_lowercase() {
+            return true;
+        }
+        if dt != tool {
+            return false;
+        }
+        if spec.is_empty() || need.is_empty() || spec == need || spec.len() > MAX_RULE_LEN {
+            return true; // a bare deny, or a bare need (which contains every deny of the tool)
+        }
+        // the deny's glob matches the needed path, or the needed glob matches the deny's text
+        // (a broader need contains the deny)
+        let covers = |p: &str, t: &str| glob_matches(p.as_bytes(), t.as_bytes()).unwrap_or(true);
+        if covers(&spec, &need) || covers(&need, &spec) {
+            return true;
+        }
+        match (prefix(&spec), prefix(&need)) {
+            (Some(dp), Some(np)) => np.starts_with(&dp) || dp.starts_with(&np),
+            (Some(dp), None) => need.starts_with(&dp),
+            _ => false,
+        }
     })
 }
 
@@ -215,6 +299,7 @@ pub fn record_blocked_decision(
     // a list too long to review
     let grantable = !b.needed.is_empty()
         && b.needed.len() <= MAX_RULES
+        && b.needed.iter().map(String::len).sum::<usize>() <= 10 * MAX_RULE_LEN
         && !b.needed.iter().any(|r| denied_by_contract(r));
     let shown_rules: Vec<String> = rules.iter().map(|r| clean(r)).collect();
     let refused: Vec<String> = b
@@ -371,9 +456,42 @@ mod tests {
             "* stays in a segment"
         );
         assert!(rule_denied(&globs, "Read(/a/b/c/k)"));
+        // a broader need contains a deny; case is folded
+        let d2: Vec<String> = vec!["Bash(git push:*)".into(), "Read(/s/**)".into()];
+        assert!(rule_denied(&d2, "Bash(git:*)"));
+        assert!(rule_denied(&d2, "Read(/**)"));
+        assert!(rule_denied(&d2, "Read(/S/K)"));
+        assert!(rule_denied(&d2, "BASH(GIT PUSH:*)"));
+        assert!(rule_denied(&["Edit(/src/x)".to_string()], "Edit"));
+        assert!(!rule_denied(&d2, "Bash(cargo:*)"));
+        assert!(!rule_denied(&d2, "Read(/other/k)"));
         assert!(!rule_denied(&deny, "Read(/other)"));
         assert!(!rule_denied(&deny, "Bash(cargo test:*)"));
         assert!(rule_denied(&deny, "browser_navigate(domain:x)"));
         assert!(rule_denied(&deny, "mcp__s__t"));
+    }
+
+    #[test]
+    fn a_pathological_glob_costs_bounded_time_and_counts_as_covered() {
+        let t0 = std::time::Instant::now();
+        // ~170 wildcard groups against a long near-miss text: backtracking would never finish
+        let pat = format!("/{}z", "*a".repeat(170));
+        let text = format!("/{}", "a".repeat(900));
+        let deny = vec![format!("Edit({pat})")];
+        // within budget the answer is exact (no match), over budget it is "covered"
+        let _ = rule_denied(&deny, &format!("Edit({text})"));
+        // far over the text cap: covered without looking
+        assert!(rule_denied(&deny, &format!("Edit({})", "a".repeat(5_000))));
+        // collapsed wildcards give the same answers as the plain ones
+        assert_eq!(glob_matches(b"/s/***/k", b"/s/a/b/k"), Some(true));
+        assert_eq!(glob_matches(b"/s/*/k", b"/s/a/b/k"), Some(false));
+        assert_eq!(glob_matches(b"/s/**/k", b"/s/a/b/k"), Some(true));
+        assert_eq!(glob_matches(b"a?c", b"abc"), Some(true));
+        assert_eq!(glob_matches(b"a?c", b"a/c"), Some(false));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
     }
 }

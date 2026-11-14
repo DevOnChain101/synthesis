@@ -245,7 +245,7 @@ impl std::error::Error for EnvelopeError {}
 /// Control characters and the invisible or direction-changing ones (soft hyphen, bidi, zero-width,
 /// variation selectors, fillers, line and paragraph separators, the tag block): text from a model
 /// must not rewrite what a person reads. One list, used for decision briefs; path patterns use an
-/// allow rule instead (see [`valid_pattern`]).
+/// allow rule instead (see `valid_pattern`).
 pub fn hidden_char(c: char) -> bool {
     c.is_control()
         || matches!(

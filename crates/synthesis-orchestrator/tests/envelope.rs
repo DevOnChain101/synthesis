@@ -28,11 +28,11 @@ fn engine(c: &CompiledEnvelope, cwd: &Path, home: &Path) -> Permissions {
     env.enforce_sandbox();
     // what `synt run --attempt-session` sets: the user's allow rules are the compiled flags only
     // (they can lift the irreversible table), and the work happens in a worktree
-    env.user_allow = c.allow.clone();
+    env.user_allow = c.allow_all();
     env.worktree = true;
     Permissions::new(
         PermissionRules {
-            allow: c.allow.clone(),
+            allow: c.allow_all(),
             deny: c.deny.clone(),
             ask: vec![],
             additional_directories: vec![],
@@ -53,7 +53,7 @@ fn golden_compile_of_a_typical_envelope() {
     let e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow), (TestsRun, Allow)]);
     let c = compile_envelope(&e, &["cargo test".into(), "npm run test --silent".into()]).unwrap();
     assert_eq!(
-        c.allow,
+        c.allow_all(),
         [
             "Bash(cargo test:*)",
             "Bash(npm run test --silent:*)",
@@ -153,7 +153,7 @@ fn the_compiler_refuses_what_it_cannot_make_safe() {
     assert!(
         compile_envelope(&e, &["git push".into()])
             .unwrap()
-            .allow
+            .allow_all()
             .iter()
             .all(|a| a.starts_with("Edit("))
     );
@@ -287,11 +287,11 @@ fn no_envelope_compiles_to_an_allow_for_an_irreversible_action() {
             let c = compile_envelope(&e, &["cargo test".into(), "pytest -q".into()]).unwrap();
             // the allow list holds only edit rules for the allowed paths and the test commands
             assert!(
-                c.allow.iter().all(|a| a.starts_with("Edit(/")
+                c.allow_all().iter().all(|a| a.starts_with("Edit(/")
                     || a == "Bash(cargo test:*)"
                     || a == "Bash(pytest -q:*)"),
                 "{:?}",
-                c.allow
+                c.allow_all()
             );
             let p = engine(&c, &cwd, &home);
             for cmd in [
@@ -564,7 +564,8 @@ fn the_policy_hash_ignores_the_users_test_commands() {
     let e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow), (TestsRun, Allow)]);
     let none = compile_envelope(&e, &[]).unwrap();
     let some = compile_envelope(&e, &["cargo test".into(), "pytest".into()]).unwrap();
-    assert_ne!(none.allow, some.allow, "the rules do differ");
+    assert_ne!(none.allow_all(), some.allow_all(), "the rules do differ");
+    assert_eq!(none.allow, some.allow, "the envelope part is the same");
     assert_eq!(some.test_rules, ["Bash(cargo test:*)", "Bash(pytest:*)"]);
     assert_eq!(none.policy_hash(), some.policy_hash());
     let mut other = e.clone();

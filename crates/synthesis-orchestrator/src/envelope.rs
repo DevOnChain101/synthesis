@@ -90,15 +90,23 @@ const TEST_RUNNERS: [&str; 14] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledEnvelope {
-    /// Sorted, deduplicated: the edit rules for the allowed paths and the test-command rules.
+    /// Sorted, deduplicated: the edit rules for the allowed paths (from the contract's envelope).
     pub allow: Vec<String>,
-    /// The entries of `allow` that come from the user's test commands (not from the envelope).
+    /// Allow rules for the user's test commands (from the settings, not from the envelope): kept
+    /// apart by origin, left out of the policy hash.
     pub test_rules: Vec<String>,
     pub deny: Vec<String>,
     pub network: Network,
 }
 
 impl CompiledEnvelope {
+    /// Every allow rule, envelope and test commands, sorted.
+    pub fn allow_all(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.allow.iter().chain(&self.test_rules).cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Permission mode of every attempt (see the module comment).
     pub const MODE: &'static str = "default";
 
@@ -107,7 +115,7 @@ impl CompiledEnvelope {
     /// A decision binding names it so a decision made under another envelope is stale.
     pub fn policy_hash(&self) -> String {
         let mut h = Sha256::new();
-        for l in self.allow.iter().filter(|l| !self.test_rules.contains(l)) {
+        for l in &self.allow {
             h.update(format!("allow {l}\n"));
         }
         for l in &self.deny {
@@ -120,7 +128,7 @@ impl CompiledEnvelope {
     /// `--allow R ... --deny R ... --network N` for `synt run`.
     pub fn args(&self) -> Vec<std::ffi::OsString> {
         let mut v: Vec<std::ffi::OsString> = vec![];
-        for r in &self.allow {
+        for r in self.allow_all() {
             v.extend(["--allow".into(), r.into()]);
         }
         for r in &self.deny {
@@ -213,9 +221,7 @@ pub fn compile_envelope(
     }
     if mode(Capability::TestsRun) == CapabilityMode::Allow {
         for c in test_commands {
-            let r = test_rule(c)?;
-            test_rules.insert(r.clone());
-            allow.insert(r);
+            test_rules.insert(test_rule(c)?);
         }
     }
     // irreversible: `deny` (or unlisted) gets explicit deny rules; `approval_required` is left to
