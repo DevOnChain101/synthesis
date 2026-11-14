@@ -476,11 +476,13 @@ fn canon_lossy(p: &Path) -> PathBuf {
 
 /// Synthesis's own state under `synthesis_home` that a sandboxed command must neither read nor write:
 /// credentials, settings, the session database (prompts, tool output), the memory store and
-/// `projects/` (transcripts, imported notes), `run/` (peer key, sockets, registry).
+/// `projects/` (transcripts, imported notes), `run/` (peer key, trust key, sockets, registry) and
+/// `chain.key` (the HMAC key of the audit chain: readable means the events can be forged).
 pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
     [
         "auth.json",
         "settings.json",
+        "chain.key",
         "synt.db",
         "synt.db-wal",
         "synt.db-shm",
@@ -733,6 +735,7 @@ mod tests {
         assert!(synthesis_state_paths(&home).contains(&home.join("synt.db-journal")));
         assert!(home.join("run/trust.key").starts_with(home.join("run")));
         assert!(synthesis_state_paths(&home).contains(&home.join("browser-profiles")));
+        assert!(synthesis_state_paths(&home).contains(&home.join("chain.key")));
     }
 
     #[test]

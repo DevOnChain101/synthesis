@@ -1280,6 +1280,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // renders POSIX mount arguments
+    #[test]
+    fn bwrap_blanks_a_denied_key_file_and_a_denied_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let (key, run) = (t.path().join("chain.key"), t.path().join("run"));
+        std::fs::write(&key, "K").unwrap();
+        std::fs::create_dir(&run).unwrap();
+        let pol = SandboxPolicy {
+            deny_paths: vec![key.clone(), run.clone()],
+            ..Default::default()
+        };
+        let j = BwrapBackend::args(&pol, &SandboxedCommand::default())
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            j.contains(&format!("--ro-bind /dev/null {}", key.display())),
+            "{j}"
+        );
+        assert!(j.contains(&format!("--tmpfs {}", run.display())), "{j}");
+    }
+
     #[cfg(unix)] // renders POSIX mount arguments (`--bind /work /work`)
     #[test]
     fn bwrap_worktree_git_pin_is_readonly() {
