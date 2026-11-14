@@ -220,7 +220,8 @@ pub fn row_paths(d: &ProjectData) -> Vec<String> {
         .collect()
 }
 
-/// The rows to draw: a row under a closed directory is not built (the tree is "lazy": only what is open).
+/// The rows to draw: a row under a closed directory is not built (the tree is "lazy": only what is open), and
+/// names starting with a dot (`.github`, `.env`, everything under a dot directory) are not listed.
 pub fn visible_rows(d: &ProjectData, open: &HashSet<String>) -> Vec<usize> {
     let paths = row_paths(d);
     let mut out = vec![];
@@ -231,6 +232,10 @@ pub fn visible_rows(d: &ProjectData, open: &HashSet<String>) -> Vec<usize> {
                 continue;
             }
             hide_below = None;
+        }
+        if r.name.starts_with('.') {
+            hide_below = r.dir.then_some(r.depth);
+            continue;
         }
         out.push(i);
         if r.dir && !open.contains(&paths[i]) {

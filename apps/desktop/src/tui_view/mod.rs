@@ -1343,6 +1343,60 @@ mod tests {
         });
     }
 
+    /// The engine attaching another session changes `sid` and `cwd` on the same `Live` (no wholesale
+    /// replacement): the explorer lists the new folder, and names starting with a dot are not listed.
+    #[gpui::test]
+    fn the_file_explorer_follows_an_attach_and_hides_dotfiles(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(a.path().join("a.txt"), "a").unwrap();
+        std::fs::write(a.path().join(".env"), "x").unwrap();
+        std::fs::create_dir(a.path().join(".hid")).unwrap();
+        std::fs::write(a.path().join(".hid/in.txt"), "x").unwrap();
+        std::fs::write(b.path().join("b.txt"), "b").unwrap();
+        let mut l = Live::new();
+        l.starting = false;
+        l.sid = "a".into();
+        l.cwd = a.path().to_string_lossy().into_owned();
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let shown = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                let d = t.tree.data.as_ref().unwrap();
+                tabs::visible_rows(d, &t.ts.tree_open)
+                    .into_iter()
+                    .map(|i| d.rows[i].name.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let open_files = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.update(vcx, |t, cx| {
+                t.select_tab(ChatTab::Files, cx);
+                t.tabs_tick(cx);
+            });
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        open_files(&view, vcx);
+        assert_eq!(shown(&view, vcx), ["a.txt"]);
+        for (sid, dir, want) in [("b", &b, "b.txt"), ("a2", &a, "a.txt"), ("b2", &b, "b.txt")] {
+            view.update(vcx, |t, _| {
+                let l = &mut t.live.as_mut().unwrap().live;
+                l.sid = sid.into();
+                l.cwd = dir.path().to_string_lossy().into_owned();
+            });
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+            open_files(&view, vcx);
+            assert_eq!(shown(&view, vcx), [want], "session {sid}");
+        }
+    }
+
     #[gpui::test]
     fn a_long_chat_builds_only_the_rows_near_the_viewport(cx: &mut TestAppContext) {
         use crate::live::Live;
