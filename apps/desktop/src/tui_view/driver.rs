@@ -450,6 +450,17 @@ impl TuiView {
                 }
                 lu.pending_remember.clear();
                 lu.model_override = l.model;
+                // the next launch starts here (best effort: a state file that cannot be written loses only that)
+                if !l.engine.is_remote() && !lu.fixture {
+                    let _ = crate::last_session::save(
+                        &lu.cfg.synthesis_home,
+                        crate::last_session::LOCAL,
+                        &crate::last_session::Last {
+                            sid: l.engine.sid.clone(),
+                            root: l.engine.cwd.clone(),
+                        },
+                    );
+                }
                 lu.live.attach(Arc::new(l.engine), l.replay);
                 lu.live.session_grant = lu
                     .session_trust
