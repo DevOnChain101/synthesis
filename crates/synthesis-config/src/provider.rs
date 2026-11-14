@@ -233,6 +233,12 @@ pub struct Substituted {
     pub warning: Option<String>,
 }
 
+// Test seam: runs between the credential-file check and the read.
+#[cfg(test)]
+thread_local! {
+    static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn braced<'a>(raw: &'a str, prefix: &str) -> Option<&'a str> {
     let inner = raw.strip_prefix(prefix)?.strip_suffix('}')?;
     (!inner.is_empty() && !inner.contains('}')).then_some(inner)
@@ -284,15 +290,39 @@ pub fn substitute_string(raw: &str, ctx: &SubstCtx<'_>) -> Substituted {
             p = ctx.base_dir.join(p);
         }
         // a network path would be contacted by the read itself; the rest is judged on the real path
-        if let Err(e) =
-            crate::secretfile::check_credential_file(&p, ctx.base_dir, ctx.user_home, false)
-        {
-            return Substituted {
-                warning: Some(format!("{{file:...}} refused: {e}")),
-                ..Default::default()
-            };
-        }
-        return match std::fs::read(&p) {
+        // the read goes to the canonical path that was judged (not the typed one, which a link may be
+        // repointed under), capped at the size the check allows
+        let real = match crate::secretfile::check_credential_file(
+            &p,
+            ctx.base_dir,
+            ctx.user_home,
+            false,
+        ) {
+            Ok(real) => real,
+            Err(e) => {
+                return Substituted {
+                    warning: Some(format!("{{file:...}} refused: {e}")),
+                    ..Default::default()
+                };
+            }
+        };
+        #[cfg(test)]
+        AFTER_CHECK.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f();
+            }
+        });
+        let read = std::fs::File::open(&real).and_then(|f| {
+            use std::io::Read;
+            let mut b = vec![];
+            f.take(crate::secretfile::MAX_KEY_FILE + 1)
+                .read_to_end(&mut b)?;
+            if b.len() as u64 > crate::secretfile::MAX_KEY_FILE {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            Ok(b)
+        });
+        return match read {
             Ok(b) => Substituted {
                 value: Some(String::from_utf8_lossy(&b).trim().to_string()),
                 source: Some(format!("{{file:{r}}}")),
@@ -505,4 +535,58 @@ pub fn normalize_providers(
         })
         .collect();
     (providers, warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subst(raw: &str, base: &Path) -> Substituted {
+        let env = Env::from_pairs::<String, String>([]);
+        let ctx = SubstCtx {
+            env: &env,
+            base_dir: base,
+            user_home: base,
+            allow_file: true,
+        };
+        substitute_string(raw, &ctx)
+    }
+
+    #[test]
+    fn a_key_file_over_the_cap_is_refused_even_if_it_grows_after_the_check() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().canonicalize().unwrap();
+        std::fs::write(base.join("k"), "sk-small").unwrap();
+        let raw = format!("{{file:{}}}", base.join("k").display());
+        assert_eq!(subst(&raw, &base).value.as_deref(), Some("sk-small"));
+        // the file is small at the check and large at the read
+        let big = base.join("k");
+        AFTER_CHECK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(&big, vec![b'a'; 1 << 20]).unwrap()
+            }))
+        });
+        let r = subst(&raw, &base);
+        assert!(r.value.is_none() && r.warning.unwrap().contains("could not read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_repointed_after_the_check_does_not_change_what_is_read() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().canonicalize().unwrap();
+        std::fs::write(base.join("good"), "sk-good").unwrap();
+        std::fs::write(base.join("other"), "sk-other").unwrap();
+        std::os::unix::fs::symlink(base.join("good"), base.join("l")).unwrap();
+        let l = base.join("l");
+        let other = base.join("other");
+        AFTER_CHECK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&l).unwrap();
+                std::os::unix::fs::symlink(&other, &l).unwrap();
+            }))
+        });
+        let r = subst(&format!("{{file:{}}}", base.join("l").display()), &base);
+        assert_eq!(r.value.as_deref(), Some("sk-good"));
+    }
 }
