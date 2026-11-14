@@ -8,6 +8,16 @@
 //! becomes a recorded Decision. Unknown and unlisted capabilities are denied. An allow for an
 //! irreversible capability (push, secrets, deploy) is refused by `validate_envelope`, and no rule
 //! this module emits can lift the engine's own irreversible table.
+//!
+//! Path patterns are worktree-relative globs of `/`-separated, non-empty segments (`*` within a
+//! segment, `**` across segments; no `.`, `..`, empty segments or leading `/`). `allowed_paths`
+//! `src` allows only a file named `src`; write `src/**` for a directory. A `denied_paths` entry
+//! that does not end in `**` denies the path and everything under it.
+//!
+//! Residuals, stated: `repo.read: deny` leaves read-only shell commands (`cat`, `ls`) that the
+//! engine auto-allows; reads of a denied path through an interpreter (`python -c`, `node -e`)
+//! are not parsed; `secrets.read: deny` covers five path patterns, not every secret store. The OS
+//! sandbox and the path rules together are the boundary, not the rules alone.
 
 use std::collections::BTreeSet;
 
@@ -119,16 +129,19 @@ impl CompiledEnvelope {
     }
 }
 
-/// A worktree-relative envelope pattern as a rule path (`src/**` -> `/src/**`).
+/// A worktree-relative envelope pattern as a rule path (`src/**` -> `/src/**`). A leading `/`
+/// is project-relative in a rule, `//` would be an absolute path: the pattern is re-checked here
+/// (the envelope validator checks it too) and the result must start with exactly one `/`.
 fn rule_path(p: &str) -> Result<String, CompileError> {
-    let mut q = p;
-    while let Some(rest) = q.strip_prefix("./") {
-        q = rest;
-    }
-    if q.is_empty() || q.contains(['(', ')']) {
+    let bad = p.is_empty()
+        || p.starts_with('/')
+        || p.contains(['(', ')', '\\'])
+        || p.split('/').any(|s| s.is_empty() || s == "." || s == "..");
+    let rule = format!("/{p}");
+    if bad || rule.starts_with("//") {
         return Err(CompileError::PathPattern(p.to_owned()));
     }
-    Ok(format!("/{q}"))
+    Ok(rule)
 }
 
 fn test_rule(cmd: &str) -> Result<String, CompileError> {
@@ -158,15 +171,23 @@ pub fn compile_envelope(
         set.extend(rules.iter().map(|r| (*r).to_owned()));
     };
 
-    // paths: the denied ones are refused for every tool that reads or edits
+    // paths: the denied ones are refused for every tool that reads, lists or edits. A pattern
+    // that does not end in `/**` names a file or a directory: both the path and what is under it
+    // are denied (`secrets` and `secrets/` style entries cannot fail open).
     for p in &env.denied_paths {
         let rp = rule_path(p)?;
-        for tool in ["Read", "Grep", "Glob", "Edit"] {
-            deny.insert(format!("{tool}({rp})"));
+        let mut forms = vec![rp.clone()];
+        if !rp.ends_with("**") {
+            forms.push(format!("{rp}/**"));
+        }
+        for tool in ["Read", "Grep", "Glob", "LS", "Edit"] {
+            for f in &forms {
+                deny.insert(format!("{tool}({f})"));
+            }
         }
     }
     if mode(Capability::RepoRead) != CapabilityMode::Allow {
-        add(&mut deny, &["Read", "Grep", "Glob"]);
+        add(&mut deny, &["Read", "Grep", "Glob", "LS"]);
     }
     match mode(Capability::RepoWrite) {
         CapabilityMode::Allow => {

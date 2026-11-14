@@ -14,7 +14,7 @@ use synthesis_permissions::{Decision, Env, Mode, PermissionRules, Permissions};
 
 fn envelope(caps: &[(Capability, CapabilityMode)]) -> Envelope {
     Envelope {
-        allowed_paths: vec!["src/**".into(), "./tests/*.rs".into()],
+        allowed_paths: vec!["src/**".into(), "tests/*.rs".into()],
         denied_paths: vec!["src/secret/**".into()],
         capabilities: caps.iter().copied().collect(),
         budgets: Budgets::new(5.0),
@@ -26,6 +26,10 @@ fn envelope(caps: &[(Capability, CapabilityMode)]) -> Envelope {
 fn engine(c: &CompiledEnvelope, cwd: &Path, home: &Path) -> Permissions {
     let mut env = Env::new(cwd, home, Mode::Default).interactive(true);
     env.enforce_sandbox();
+    // what `synt run --attempt-session` sets: the user's allow rules are the compiled flags only
+    // (they can lift the irreversible table), and the work happens in a worktree
+    env.user_allow = c.allow.clone();
+    env.worktree = true;
     Permissions::new(
         PermissionRules {
             allow: c.allow.clone(),
@@ -71,6 +75,7 @@ fn golden_compile_of_a_typical_envelope() {
             "Edit(/src/secret/**)",
             "Glob(/src/secret/**)",
             "Grep(/src/secret/**)",
+            "LS(/src/secret/**)",
             "Read(**/.env)",
             "Read(**/.env.*)",
             "Read(/src/secret/**)",
@@ -156,14 +161,11 @@ fn the_compiler_refuses_what_it_cannot_make_safe() {
     let mut e = envelope(&[]);
     e.allowed_paths = vec!["src/(x)".into()];
     assert!(
-        compile_envelope(&e, &[]).is_ok(),
-        "allowed paths only matter with repo.write"
+        compile_envelope(&e, &[]).is_err(),
+        "refused with or without repo.write"
     );
     e.capabilities.insert(RepoWrite, Allow);
-    assert!(matches!(
-        compile_envelope(&e, &[]),
-        Err(CompileError::PathPattern(_))
-    ));
+    assert!(compile_envelope(&e, &[]).is_err());
 }
 
 #[cfg(unix)]
@@ -307,6 +309,65 @@ fn no_envelope_compiles_to_an_allow_for_an_irreversible_action() {
                     "{cmd} under {caps:?}"
                 );
             }
+            // every tool, explicitly: what is blocked here is blocked (Deny), or becomes a decision
+            // (Ask: nobody can answer in an attempt), never Allow
+            let write_mode = caps.iter().find(|(k, _)| *k == RepoWrite).unwrap().1;
+            // (with reads denied the engine denies a write outside the allowed paths too: stricter)
+            let read_mode = caps.iter().find(|(k, _)| *k == RepoRead).unwrap().1;
+            let want_outside = if write_mode == Deny || read_mode != Allow {
+                Decision::Deny
+            } else {
+                Decision::Ask
+            };
+            for (tool, input) in [
+                (
+                    "Write",
+                    json!({"file_path": cwd.join("README.md"), "content": "x"}),
+                ),
+                (
+                    "Edit",
+                    json!({"file_path": cwd.join("README.md"), "old_string": "a", "new_string": "b"}),
+                ),
+                (
+                    "MultiEdit",
+                    json!({"file_path": cwd.join("README.md"), "edits": []}),
+                ),
+                (
+                    "NotebookEdit",
+                    json!({"notebook_path": cwd.join("n.ipynb"), "new_source": "x"}),
+                ),
+            ] {
+                assert_eq!(
+                    verdict(&p, tool, input),
+                    want_outside,
+                    "{tool} under {caps:?}"
+                );
+            }
+            let net = caps.iter().find(|(k, _)| *k == NetworkOutbound).unwrap().1;
+            let fetch = verdict(
+                &p,
+                "WebFetch",
+                json!({"url": "https://example.com", "prompt": "x"}),
+            );
+            assert_ne!(fetch, Decision::Allow, "WebFetch under {caps:?}");
+            if net == Deny {
+                assert_eq!(fetch, Decision::Deny);
+            }
+            // an MCP tool would ask (attempts start no MCP server at all)
+            assert_eq!(
+                verdict(&p, "mcp__x__y", json!({})),
+                Decision::Ask,
+                "MCP under {caps:?}"
+            );
+            // sub-agents run under these same rules (one Permissions object): allowed by design
+            assert_eq!(
+                verdict(
+                    &p,
+                    "Task",
+                    json!({"description": "d", "prompt": "p", "subagent_type": "g"})
+                ),
+                Decision::Allow
+            );
             for f in [".env", ".env.local", "id_rsa"] {
                 assert_ne!(
                     verdict(&p, "Read", json!({"file_path": cwd.join(f)})),
@@ -349,4 +410,100 @@ fn the_red_team_cases_use_what_the_compiler_emits() {
     };
     assert_eq!(count("const ORCH_ALLOW"), c.allow.len());
     assert_eq!(count("const ORCH_DENY"), c.deny.len());
+}
+
+/// Patterns that would turn into an absolute or non-matching rule: refused by the contract
+/// validator and, independently, by the compiler.
+#[test]
+fn hostile_path_patterns_are_refused_twice() {
+    use Capability::*;
+    use CapabilityMode::*;
+    let bad = [
+        ".//etc/x",
+        "././/x",
+        "a//b",
+        ".//",
+        "./x",
+        "x/.",
+        "x/",
+        "src/",
+        "/abs",
+        "//abs",
+        "../x",
+        "a/../b",
+        "a\\b",
+        "~/x",
+        "C:x",
+        "src/\u{2215}x",
+        "src\u{FF0F}x",
+        "src/\u{202E}x",
+        "src/\u{200B}x",
+        "src/\u{FEFF}x",
+        "src/\u{E0041}x",
+        "src/(x)",
+        "",
+    ];
+    for p in bad {
+        for field in ["allowed", "denied"] {
+            let mut e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow)]);
+            if field == "allowed" {
+                e.allowed_paths = vec![p.to_string()];
+            } else {
+                e.denied_paths = vec![p.to_string()];
+            }
+            assert!(
+                validate_envelope(&e).is_err(),
+                "validator accepted {p:?} in {field}"
+            );
+            assert!(
+                compile_envelope(&e, &[]).is_err(),
+                "compiler accepted {p:?} in {field}"
+            );
+        }
+    }
+    // no accepted pattern becomes an absolute (`//`) rule
+    for ok in ["src/**", "a/b.rs", "**/x", "*.lock", "dir/sub/*"] {
+        let mut e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow)]);
+        e.allowed_paths = vec![ok.into()];
+        e.denied_paths = vec![ok.into()];
+        let c = compile_envelope(&e, &[]).unwrap();
+        for r in c.allow.iter().chain(&c.deny) {
+            assert!(!r.contains("(//"), "{r}");
+        }
+    }
+}
+
+/// A denied directory in any spelling denies what is under it; the rule matches the worktree,
+/// never an absolute path elsewhere.
+#[cfg(unix)]
+#[test]
+fn the_compiled_rules_cannot_reach_outside_the_worktree_and_directory_denies_cover_the_tree() {
+    use Capability::*;
+    use CapabilityMode::*;
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (cwd, home, outside) = (base.join("wt"), base.join("home"), base.join("outside"));
+    for d in [cwd.join("secrets/deep"), home.clone(), outside.join("etc")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow)]);
+    e.allowed_paths = vec!["etc/x".into(), "src/**".into()];
+    e.denied_paths = vec!["secrets".into()];
+    let c = compile_envelope(&e, &[]).unwrap();
+    let p = engine(&c, &cwd, &home);
+    // `etc/x` allows only <worktree>/etc/x; the same name elsewhere is not allowed
+    let w =
+        |path: std::path::PathBuf| verdict(&p, "Write", json!({"file_path": path, "content": "x"}));
+    assert_eq!(w(cwd.join("etc/x")), Decision::Allow);
+    assert_ne!(w(outside.join("etc/x")), Decision::Allow);
+    assert_ne!(w(std::path::PathBuf::from("/etc/x")), Decision::Allow);
+    // `secrets` (no glob) denies the path and everything under it, for reads and edits
+    for f in ["secrets", "secrets/k", "secrets/deep/k"] {
+        assert_eq!(w(cwd.join(f)), Decision::Deny, "{f}");
+        assert_eq!(
+            verdict(&p, "Read", json!({"file_path": cwd.join(f)})),
+            Decision::Deny,
+            "{f}"
+        );
+    }
 }

@@ -634,75 +634,229 @@ fn ask_user_question_becomes_a_decision_not_a_prompt() {
     assert!(brief.contains("Which API shape?") && brief.contains("REST") && brief.contains("gRPC"));
 }
 
+/// One attempt for one bypass path: the evidence of its session and its decisions.
+struct PathRun {
+    ran: Ran,
+    log: String,
+    events: Vec<synthesis_events::Record>,
+}
+
+fn path_run(r: &Rig, prompt: &str, calls: Vec<serde_json::Value>) -> PathRun {
+    let ran = run_with(r, &contract(), prompt, script(calls));
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let events = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&ran.2.session_id, 0, 5000)
+        .unwrap();
+    PathRun { ran, log, events }
+}
+
+impl PathRun {
+    fn end(&self) -> WorkerEnd {
+        self.ran
+            .3
+            .as_ref()
+            .unwrap_or_else(|e| panic!("{e}: {}", self.log))
+            .end
+    }
+    fn decisions(&self) -> Vec<DecisionRecord> {
+        decisions(&self.ran.0)
+    }
+    fn tool_error(&self, tool: &str) -> Option<bool> {
+        self.events.iter().find_map(|rec| match rec {
+            synthesis_events::Record::Known(e) => match &e.event {
+                synthesis_events::Event::ToolCompleted { name, is_error, .. } if name == tool => {
+                    Some(*is_error)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+}
+
+fn tool_call(id: &str, name: &str, input: serde_json::Value) -> serde_json::Value {
+    json!({"text": "calling", "tools": [{"id": id, "name": name, "input": input}]})
+}
+
 #[test]
-fn the_bypass_paths_are_closed_for_an_attempt() {
+fn bypass_bang_cmd_is_plain_text_in_an_attempt() {
     let r = rig();
     if !host_confines(&r.home) {
         no_sandbox_is_ok("the attempt cannot run");
         return;
     }
-    let marker = |n: &str| r.dir.path().join(n);
-    // git alias in the repo's config (shared by its worktrees): `git st` would run a shell
+    let marker = r.dir.path().join("bang-ran");
+    let p = path_run(&r, &format!("!touch {}", marker.display()), vec![]);
+    assert!(
+        matches!(p.end(), WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{}",
+        p.log
+    );
+    assert!(!marker.exists(), "`!cmd` ran");
+    assert!(p.decisions().is_empty());
+}
+
+#[test]
+fn bypass_git_alias_and_repo_scripts_are_refused_and_nothing_widens() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let marker = r.dir.path().join("alias-ran");
     g(
         &r.repo,
         &[
             "config",
             "alias.st",
-            &format!("!touch {}", marker("alias-ran").display()),
+            &format!("!touch {}", marker.display()),
         ],
     );
-    let bash = |id: &str, cmd: String| json!({"text": "run", "tools": [{"id": id, "name": "Bash", "input": {"command": cmd}}]});
-    let calls = vec![
-        // 1. `!cmd` is a chat-UI feature: as a task text it is just text (the model is scripted)
-        // 2. a repo script / git alias needs approval nobody can give: not run
-        bash("b1", "git st".into()),
-        // 3. ExitPlanMode is not a way out: it asks, which nobody can answer
-        json!({"text": "plan", "tools": [{"id": "p1", "name": "ExitPlanMode", "input": {"plan": "x"}}]}),
-        // 4. no browser tools exist in an attempt
-        json!({"text": "browse", "tools": [{"id": "n1", "name": "browser_navigate", "input": {"url": "http://127.0.0.1:9"}}]}),
-        // 5. ToolSearch is read-only and has nothing to load (no MCP tools): it makes no decision
-        json!({"text": "search", "tools": [{"id": "s1", "name": "ToolSearch", "input": {"query": "select:nothing"}}]}),
-    ];
     let settings_before = std::fs::read_to_string(r.home.join("settings.json")).unwrap();
-    let bang = format!("!touch {}", marker("bang-ran").display());
-    let (w, _, env, settled) = run_with(&r, &contract(), &bang, script(calls));
-    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
-    let s = settled.unwrap();
-    assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
-    assert!(!marker("bang-ran").exists(), "`!cmd` ran");
-    assert!(!marker("alias-ran").exists(), "a git alias ran");
-    let evs = r
-        .store
-        .reader()
-        .unwrap()
-        .read_events(&env.session_id, 0, 5000)
-        .unwrap();
-    let text = format!("{evs:?}");
-    assert!(
-        text.contains("requires approval"),
-        "the alias call was refused for approval"
+    let p = path_run(
+        &r,
+        "x",
+        vec![tool_call("b1", "Bash", json!({"command": "git st"}))],
     );
-    // the browser tool does not exist in an attempt: the call failed, nothing was started
-    let nav = evs.iter().find_map(|rec| match rec {
-        synthesis_events::Record::Known(e) => match &e.event {
-            synthesis_events::Event::ToolCompleted { name, is_error, .. }
-                if name == "browser_navigate" =>
-            {
-                Some(*is_error)
-            }
-            _ => None,
-        },
-        _ => None,
-    });
-    assert_eq!(nav, Some(true), "no browser tool: {text}");
-    // one decision (the alias), none from ExitPlanMode or ToolSearch; nothing widened the settings
-    assert_eq!(decisions(&w).len(), 1);
+    assert_eq!(p.end(), WorkerEnd::Blocked, "{}", p.log);
+    assert!(!marker.exists(), "a git alias ran");
+    let ds = p.decisions();
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind, "approval_needed");
+    assert!(
+        ds[0].brief["evidence"]["refused_calls"]
+            .to_string()
+            .contains("git st")
+    );
+    // no `Always`: nothing was written to any settings file
     assert_eq!(
         std::fs::read_to_string(r.home.join("settings.json")).unwrap(),
         settings_before
     );
     assert!(!r.repo.join(".synt/settings.local.json").exists());
-    assert!(!env.git.worktree.join(".synt/settings.local.json").exists());
+    assert!(
+        !p.ran
+            .2
+            .git
+            .worktree
+            .join(".synt/settings.local.json")
+            .exists()
+    );
+}
+
+#[test]
+fn bypass_exit_plan_mode_blocks_with_a_blocked_decision() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let p = path_run(
+        &r,
+        "x",
+        vec![tool_call("p1", "ExitPlanMode", json!({"plan": "do it"}))],
+    );
+    assert_eq!(p.end(), WorkerEnd::Blocked, "{}", p.log);
+    let ds = p.decisions();
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind, "blocked");
+    assert!(
+        ds[0].brief["why"].as_str().unwrap().contains("plan mode"),
+        "{}",
+        ds[0].brief
+    );
+}
+
+#[test]
+fn bypass_tool_search_is_read_only_and_makes_no_decision() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let p = path_run(
+        &r,
+        "x",
+        vec![tool_call(
+            "s1",
+            "ToolSearch",
+            json!({"query": "select:nothing"}),
+        )],
+    );
+    assert!(
+        matches!(p.end(), WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{}",
+        p.log
+    );
+    assert!(p.decisions().is_empty());
+    assert!(p.tool_error("ToolSearch").is_some(), "the call ran");
+}
+
+#[test]
+fn bypass_browser_tools_do_not_exist_in_an_attempt() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let p = path_run(
+        &r,
+        "x",
+        vec![tool_call(
+            "n1",
+            "browser_navigate",
+            json!({"url": "http://127.0.0.1:9"}),
+        )],
+    );
+    assert_eq!(p.tool_error("browser_navigate"), Some(true), "{}", p.log);
+    // the permission check comes first, so a decision is recorded, but never a grant for a tool
+    // that cannot exist in an attempt
+    let ds = p.decisions();
+    assert_eq!(ds.len(), 1);
+    assert!(
+        !ds[0].brief.to_string().contains("grant_once"),
+        "{}",
+        ds[0].brief
+    );
+}
+
+#[test]
+fn a_decision_binds_to_the_policy_the_attempt_started_under_and_hashes_the_full_action() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    // two refused writes whose paths agree for far longer than the brief shows
+    let long = |tail: &str| format!("{}{tail}", "d/".repeat(300));
+    let a = run_with(
+        &r,
+        &src_only(),
+        "x",
+        script(vec![write_call("w1", &long("a.txt"))]),
+    );
+    let b = run_with(
+        &r,
+        &src_only(),
+        "x",
+        script(vec![write_call("w1", &long("b.txt"))]),
+    );
+    let (da, db) = (decisions(&a.0).remove(0), decisions(&b.0).remove(0));
+    assert_ne!(
+        da.binding["action_hash"], db.binding["action_hash"],
+        "the hash covers the full action"
+    );
+    assert_eq!(da.brief["evidence"]["text_shortened_or_cleaned"], true);
+    assert!(da.brief.to_string().len() < 3000);
+    // the binding names the contract version and policy hash stored on the attempt at start
+    let at = a.0.list_attempts(&a.1).unwrap().remove(0);
+    assert_eq!(at.bound_contract_version, Some(1));
+    let hash = at.bound_policy_hash.clone().expect("bound at start");
+    assert_eq!(da.binding["policy_hash"], hash.as_str());
+    assert_eq!(da.binding["contract_version"], 1);
 }
 
 #[test]
@@ -764,4 +918,66 @@ fn an_attempt_refuses_auto_and_bypass_modes_whatever_the_caller_says() {
             "{mode}: {err}"
         );
     }
+}
+
+#[test]
+fn user_settings_cannot_widen_the_compiled_envelope_of_an_attempt() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    // hostile user settings: blanket edit and push allows, an extra writable directory
+    let extra = r.dir.path().join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    let remote = r.dir.path().join("remote.git");
+    g(&r.repo, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    g(
+        &r.repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let settings = json!({
+        "synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}},
+        "permissions": {"allow": ["Edit", "Write", "Bash(git push:*)", "Bash"],
+                         "additionalDirectories": [extra.display().to_string()],
+                         "defaultMode": "acceptEdits"}
+    });
+    std::fs::write(r.home.join("settings.json"), settings.to_string()).unwrap();
+    // push needs approval in this contract (not denied), so only the engine's table stands in the way
+    let mut c = src_only();
+    c.envelope
+        .capabilities
+        .insert(Capability::GitPush, CapabilityMode::ApprovalRequired);
+    let bash = |id: &str, cmd: String| json!({"text": "run", "tools": [{"id": id, "name": "Bash", "input": {"command": cmd}}]});
+    let calls = vec![
+        write_call("w1", "src/ok.txt"),  // control: inside the envelope
+        write_call("w2", "outside.txt"), // outside allowed_paths
+        write_call("w3", &format!("{}/x.txt", extra.display())), // the extra directory
+        bash("b1", "git push origin HEAD:main".into()),
+    ];
+    let (w, _, env, settled) = run_with(&r, &c, "go", script(calls));
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
+    assert!(
+        env.git.worktree.join("src/ok.txt").exists(),
+        "control: {log}"
+    );
+    assert!(
+        !env.git.worktree.join("outside.txt").exists(),
+        "user allow widened the envelope"
+    );
+    assert!(
+        !extra.join("x.txt").exists(),
+        "an additional directory was writable"
+    );
+    assert_eq!(g(&remote, &["for-each-ref"]), "", "the push went through");
+    // all three refusals are recorded as one decision of the blocked attempt
+    let ds = decisions(&w);
+    assert_eq!(ds.len(), 1);
+    let brief = ds[0].brief.to_string();
+    assert!(
+        brief.contains("outside.txt") && brief.contains("git push"),
+        "{brief}"
+    );
 }

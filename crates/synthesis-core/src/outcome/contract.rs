@@ -242,16 +242,31 @@ impl std::fmt::Display for EnvelopeError {
 }
 impl std::error::Error for EnvelopeError {}
 
+/// Characters that look like a path separator or hide text (bidi controls, zero-width, tags): a
+/// pattern with one never matches the path it seems to name, which fails open for a deny.
+fn lookalike_or_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2044}' | '\u{2215}' | '\u{2216}' | '\u{29F5}' | '\u{29F8}' | '\u{2571}' | '\u{FE68}'
+            | '\u{FF0F}' | '\u{FF3C}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}' | '\u{2060}'
+            | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// A worktree-relative pattern: `/`-separated segments, each non-empty and neither `.` nor
+/// `..` (so `.//x`, `a//b`, `./x`, `x/` and `x/.` are refused: a leading empty segment would
+/// become an absolute path in a permission rule).
 fn valid_pattern(p: &str) -> bool {
     let bytes = p.as_bytes();
     !p.is_empty()
         && p.chars().count() <= MAX_PATH_PATTERN_CHARS
-        && !p.chars().any(|c| c.is_control() || c == '\\')
+        && !p.chars().any(|c| c.is_control() || matches!(c, '\\' | '(' | ')') || lookalike_or_invisible(c))
         && !p.starts_with('/')
         && !p.starts_with('~')
         // `C:...` drive paths
         && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-        && p.split('/').all(|seg| seg != "..")
+        && p.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 /// Refuses an envelope that could never be compiled safely (ADR-019 section 3).

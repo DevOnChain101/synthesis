@@ -60,6 +60,7 @@ pub struct Profile {
     prompt: String,
     max_cost_usd: f64,
     max_wall_secs: u64,
+    contract_version: u32,
     envelope: Envelope,
     compiled: CompiledEnvelope,
     extra: Vec<String>,
@@ -131,6 +132,7 @@ impl Profile {
             prompt,
             max_cost_usd: cap,
             max_wall_secs: wall,
+            contract_version: contract.version,
             envelope: contract.envelope.clone(),
             compiled,
             extra: vec![],
@@ -142,6 +144,10 @@ impl Profile {
     pub fn with_test_commands(mut self, cmds: &[String]) -> Result<Self, ProfileError> {
         self.compiled = compile_envelope(&self.envelope, cmds).map_err(ProfileError::Envelope)?;
         Ok(self)
+    }
+
+    pub fn contract_version(&self) -> u32 {
+        self.contract_version
     }
 
     /// What the envelope compiled to.

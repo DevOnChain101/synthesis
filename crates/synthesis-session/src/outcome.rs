@@ -130,6 +130,10 @@ pub struct AttemptRecord {
     /// The cost cap allocated to this attempt when its worker started. It counts as spent until
     /// the session records a final usage (then the recorded cost counts, never less).
     pub reserved_usd: Option<f64>,
+    /// The contract version and the hash of the compiled policy the attempt started under: a
+    /// Decision of the attempt binds to these, not to whatever the outcome says later.
+    pub bound_contract_version: Option<u32>,
+    pub bound_policy_hash: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
 }
@@ -281,7 +285,7 @@ fn item_row(r: &Row<'_>) -> rusqlite::Result<WorkItemRecord> {
     })
 }
 
-const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.reserved_usd,a.started_at,a.ended_at";
+const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.reserved_usd,a.bound_contract_version,a.bound_policy_hash,a.started_at,a.ended_at";
 fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
     Ok(AttemptRecord {
         id: id_col(r, 0)?,
@@ -299,8 +303,10 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         worker_start: r.get(12)?,
         heartbeat_at: r.get(13)?,
         reserved_usd: r.get(14)?,
-        started_at: r.get(15)?,
-        ended_at: r.get(16)?,
+        bound_contract_version: r.get(15)?,
+        bound_policy_hash: r.get(16)?,
+        started_at: r.get(17)?,
+        ended_at: r.get(18)?,
     })
 }
 
@@ -1432,6 +1438,16 @@ impl OutcomeWriter {
 
     pub fn release_budget(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
         self.atomically(|tx| tx.release_budget(id, fence))
+    }
+
+    pub fn bind_policy(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        contract_version: u32,
+        policy_hash: &str,
+    ) -> Result<()> {
+        self.atomically(|tx| tx.bind_policy(id, fence, contract_version, policy_hash))
     }
 
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
@@ -2639,6 +2655,27 @@ impl OutcomeTx<'_, '_> {
         self.et.tx.execute(
             "UPDATE attempts SET reserved_usd=?2 WHERE id=?1",
             params![id.as_str(), usd],
+        )?;
+        Ok(())
+    }
+
+    /// Records, once, the contract version and compiled-policy hash the attempt starts under.
+    pub fn bind_policy(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        contract_version: u32,
+        policy_hash: &str,
+    ) -> Result<()> {
+        if policy_hash.is_empty() || policy_hash.len() > 128 {
+            return Err(Error::Invalid(
+                "a policy hash is 1 to 128 characters".into(),
+            ));
+        }
+        self.live_attempt(id, fence)?;
+        self.et.tx.execute(
+            "UPDATE attempts SET bound_contract_version=?2, bound_policy_hash=?3 WHERE id=?1",
+            params![id.as_str(), contract_version, policy_hash],
         )?;
         Ok(())
     }

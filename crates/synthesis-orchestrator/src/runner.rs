@@ -388,6 +388,19 @@ impl Runner<'_> {
             }
             return Err(RunError::Store(e));
         }
+        // a Decision of this attempt binds to the contract and policy it started under
+        if let Err(e) = w.bind_policy(
+            &env.attempt.id,
+            env.attempt.fence,
+            profile.contract_version(),
+            &profile.compiled().policy_hash(),
+        ) {
+            if !matches!(e, StoreError::Stale(_)) {
+                let _ = w.release_budget(&env.attempt.id, env.attempt.fence);
+                let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
+            }
+            return Err(RunError::Store(e));
+        }
         let child = match self.spawn.spawn(profile) {
             Ok(c) => c,
             Err(e) => {

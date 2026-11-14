@@ -1261,11 +1261,19 @@ pub fn prepare(
         .as_deref()
         .and_then(Mode::parse)
     {
+        // an attempt takes a managed mode only if it is stricter than `default`: acceptEdits would
+        // allow edits outside the contract's allowed paths
+        Some(Mode::AcceptEdits) if c.attempt_session => mode,
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
-    if c.attempt_session && matches!(mode, Mode::Auto | Mode::BypassPermissions) {
-        return Err("an outcome attempt runs in default, acceptEdits, plan or dontAsk mode: never auto (no model is the authority) and never bypassPermissions".into());
+    if c.attempt_session
+        && matches!(
+            mode,
+            Mode::Auto | Mode::BypassPermissions | Mode::AcceptEdits
+        )
+    {
+        return Err("an outcome attempt runs in default, plan or dontAsk mode: never auto (no model is the authority), never bypassPermissions and never acceptEdits (it would allow edits outside the contract's allowed paths)".into());
     }
     let mut budget = budget_from_settings(&settings);
     if let Some(v) = limits.max_turns {
@@ -1286,10 +1294,12 @@ pub fn prepare(
         .or(governed.then_some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
+    // an attempt works in its worktree only: settings cannot add writable or readable directories
     let mut extra_dirs: Vec<PathBuf> = settings
         .permissions
         .additional_directories
         .iter()
+        .filter(|_| !c.attempt_session)
         .filter_map(|d| match std::fs::canonicalize(d) {
             Ok(p) if Path::new(d).is_absolute() && p.is_dir() => Some(p),
             _ => {
@@ -1299,6 +1309,9 @@ pub fn prepare(
         })
         .collect();
 
+    if c.attempt_session && !c.add_dir.is_empty() {
+        return Err("an outcome attempt works in its worktree only: --add-dir is refused".into());
+    }
     for d in &c.add_dir {
         match std::fs::canonicalize(d) {
             Ok(p) if p.is_dir() => extra_dirs.push(p),
@@ -1734,11 +1747,16 @@ pub fn prepare(
         None
     };
 
+    // The envelope can only restrict (ADR-019 section 3): in an attempt the allow rules are the
+    // compiled ones (the flags) and nothing from user or managed settings, which could otherwise
+    // allow edits outside the contract or lift the irreversible table. Deny and ask rules still
+    // come from every layer (a managed deny wins).
     let rules = PermissionRules {
         allow: settings
             .permissions
             .allow
             .iter()
+            .filter(|_| !c.attempt_session)
             .chain(&cli_allow)
             .cloned()
             .collect(),
@@ -1771,6 +1789,7 @@ pub fn prepare(
         .permissions
         .allow
         .iter()
+        .filter(|_| !c.attempt_session)
         .chain(&cli_allow)
         .cloned()
         .collect();
@@ -1787,7 +1806,8 @@ pub fn prepare(
             .use_auto_mode_during_plan
             .unwrap_or(true),
     };
-    perms.block_outside_reads = settings.permissions.block_reads_outside_working_directories;
+    perms.block_outside_reads =
+        c.attempt_session || settings.permissions.block_reads_outside_working_directories;
 
     let mut hcfg = HarnessConfig::new(res.model.clone());
     hcfg.max_output_tokens = cfg.max_tokens as u32;
