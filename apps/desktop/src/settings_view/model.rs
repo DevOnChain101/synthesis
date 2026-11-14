@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use synthesis_app::mcp::{AddArgs, ScopeArg, add_server, plan, remove_server};
-use synthesis_app::provider_cfg::{self, Draft as ProviderDraft, Entry as ProviderEntry};
+use synthesis_app::provider_cfg::{
+    self, Confirm, Ctx, Draft as ProviderDraft, Entry as ProviderEntry, Preflight,
+};
 use synthesis_app::{Homes, load_config};
 use synthesis_config::{Env, LoadContext, ProjectTrust, resolve_credential};
 use synthesis_settings::load_settings_with_managed;
@@ -837,11 +839,31 @@ impl Model {
         Ok(())
     }
 
+    fn provider_ctx(&self) -> Ctx<'_> {
+        Ctx {
+            home: &self.cfg.home,
+            user_home: &self.cfg.user_home,
+        }
+    }
+
+    /// The click-through the form needs before it may be saved (`None`: every reference is a `SYNT_*` variable).
+    pub fn provider_confirmation(&self, d: &ProviderDraft) -> Result<Option<Confirm>, String> {
+        self.providers_writable()?;
+        provider_cfg::confirmation(d, &self.provider_ctx())
+    }
+
+    /// What Test connection of `id` would send, and whether it needs a click first.
+    pub fn provider_preflight(&self, id: &str) -> Result<Preflight, String> {
+        self.providers_writable()?;
+        provider_cfg::preflight(id, &self.provider_ctx())
+    }
+
     /// Adds (`editing: false`) or changes a provider of the USER `synt.json`; a file that cannot be read or that
-    /// the loader would refuse is kept as it is and the reason returned.
+    /// the loader would refuse is kept as it is and the reason returned. A reference that is not a `SYNT_*`
+    /// variable is saved only with the draft's `confirmed` token.
     pub fn save_provider(&mut self, d: &ProviderDraft, editing: bool) -> Result<(), String> {
         self.providers_writable()?;
-        provider_cfg::save(&self.cfg.home, d, editing)?;
+        provider_cfg::save(&self.provider_ctx(), d, editing)?;
         self.prov_result = None;
         self.refresh_info();
         Ok(())
@@ -861,34 +883,42 @@ impl Model {
         provider_cfg::draft_of(&self.cfg.home, id)
     }
 
-    /// Asks the provider for its model list (the call `synt models --refresh` makes: same client, same
-    /// egress rules, bounded) on a worker thread. [`Model::poll_provider_test`] collects the answer.
-    pub fn start_provider_test(&mut self, id: &str) {
+    /// Asks the provider for its model list (the call `synt models --refresh` makes: the provider client of
+    /// `synthesis-providers`, bounded to 30 s; note that provider calls do not go through the `synthesis-egress`
+    /// proxy) on a worker thread, reading the same `<home>/synt.json` the form wrote. The credential is sent to
+    /// the provider's host, so the references are checked again first (a hand-edited file can hold what the
+    /// form refuses) and anything but a `SYNT_*` variable needs `clicked` (the person saw
+    /// [`Model::provider_preflight`]). [`Model::poll_provider_test`] collects the answer.
+    pub fn start_provider_test(&mut self, id: &str, clicked: bool) {
         if self.prov_testing.is_some() {
             return;
         }
-        if let Err(e) = self.providers_writable() {
-            self.prov_result = Some((id.into(), e));
+        let refused = match self.provider_preflight(id) {
+            Err(e) => Some(e),
+            Ok(p) if p.needs_click && !clicked => Some("confirm what is sent first".to_string()),
+            Ok(_) => None,
+        };
+        if let Some(e) = refused {
+            self.prov_result = Some((id.into(), format!("Not sent: {e}")));
             return;
         }
         self.prov_testing = Some(id.into());
         self.prov_result = None;
-        let (env, home, cwd, id) = (
+        let (env, h, cwd, id) = (
             self.cfg.env.clone(),
-            self.cfg.home.clone(),
+            self.cfg.homes(),
             self.cfg.cwd.clone(),
             id.to_string(),
         );
         let slot = self.prov_slot.clone();
         std::thread::spawn(move || {
             let run = || -> Result<(), String> {
-                let h = synthesis_app::homes(&env)?;
                 let cfg = load_config(&env, &h, Some(&cwd), ProjectTrust::Untrusted)?;
                 let p = cfg
                     .providers
                     .get(&id)
-                    .ok_or_else(|| format!("provider {id} is not in the configuration"))?;
-                synthesis_app::models::refresh_provider(&env, &home, &id, p)
+                    .ok_or_else(|| "this provider is not in the configuration".to_string())?;
+                synthesis_app::models::refresh_provider(&env, &h.synthesis, &id, p)
             };
             let text = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
                 Ok(Ok(())) => "Connected: the provider answered its model list.".to_string(),
@@ -1216,9 +1246,10 @@ mod tests {
             id: id.into(),
             protocol: synthesis_config::Protocol::OpenAi,
             base_url: "https://llm.example.com/v1".into(),
-            api_key: "ACME_KEY".into(),
+            api_key: "SYNT_ACME_KEY".into(),
             models: "m1 | Model One | 128k | 8k | low,high".into(),
             headers: String::new(),
+            confirmed: String::new(),
         }
     }
 
@@ -1228,12 +1259,12 @@ mod tests {
         assert!(m.prov_entries.is_empty() && m.prov_error.is_none());
         m.save_provider(&draft("acme"), false).unwrap();
         assert_eq!(m.prov_entries.len(), 1);
-        assert_eq!(m.prov_entries[0].key, "{env:ACME_KEY}");
+        assert_eq!(m.prov_entries[0].key, "{env:SYNT_ACME_KEY}");
         // the key status row names the variable and says it is unset, never a value
         assert!(
             m.providers
                 .iter()
-                .any(|k| k.provider == "acme" && !k.set && k.label.contains("ACME_KEY"))
+                .any(|k| k.provider == "acme" && !k.set && k.label.contains("SYNT_ACME_KEY"))
         );
         // the model picker (config models, read from the file) lists it
         let rows = crate::models::rows(&m.cfg.env, &m.cfg.cwd);
@@ -1249,7 +1280,7 @@ mod tests {
         assert!(cfg.providers.contains_key("acme"));
         // edit
         let mut d = m.provider_draft("acme").unwrap();
-        assert_eq!(d.api_key, "ACME_KEY");
+        assert_eq!(d.api_key, "SYNT_ACME_KEY");
         d.base_url = "http://localhost:11434/v1".into();
         m.save_provider(&d, true).unwrap();
         assert_eq!(m.prov_entries[0].base_url, "http://localhost:11434/v1");
@@ -1286,19 +1317,40 @@ mod tests {
     }
 
     #[test]
-    fn the_connection_test_runs_off_the_thread_and_reports_a_failure() {
+    fn the_connection_test_checks_what_it_sends_and_runs_off_the_thread() {
         let (_t, mut m) = model();
-        m.start_provider_test("nope");
-        assert_eq!(m.prov_testing.as_deref(), Some("nope"));
+        // unknown provider: nothing starts
+        m.start_provider_test("nope", true);
+        assert!(m.prov_testing.is_none());
+        assert!(m.prov_result.as_ref().unwrap().1.starts_with("Not sent:"));
+        // a variable that is not SYNT_*: no start without the click, and a cloud credential never
+        let mut d = draft("acme");
+        d.api_key = "OPENAI_API_KEY".into();
+        d.base_url = "http://127.0.0.1:1/v1".into();
+        d.confirmed = m.provider_confirmation(&d).unwrap().unwrap().token;
+        m.save_provider(&d, false).unwrap();
+        assert!(m.provider_preflight("acme").unwrap().needs_click);
+        m.start_provider_test("acme", false);
+        assert!(m.prov_testing.is_none());
+        assert!(m.prov_result.as_ref().unwrap().1.contains("confirm"));
+        // a SYNT_* key needs no click: the test runs on a worker, against the file that was saved
+        let mut e = draft("local");
+        e.base_url = "http://127.0.0.1:1/v1".into();
+        m.save_provider(&e, false).unwrap();
+        assert!(!m.provider_preflight("local").unwrap().needs_click);
+        m.start_provider_test("local", false);
+        assert_eq!(m.prov_testing.as_deref(), Some("local"));
         let t0 = std::time::Instant::now();
         while !m.poll_provider_test() {
-            assert!(t0.elapsed().as_secs() < 20);
+            assert!(t0.elapsed().as_secs() < 60);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let (id, text) = m.prov_result.clone().unwrap();
-        assert_eq!(id, "nope");
-        assert!(text.starts_with("Failed: provider nope"), "{text}");
-        assert!(m.prov_testing.is_none());
+        assert_eq!(id, "local");
+        assert!(
+            text.starts_with("Failed:") && !text.contains("SYNT_ACME_KEY"),
+            "{text}"
+        );
     }
 
     #[test]

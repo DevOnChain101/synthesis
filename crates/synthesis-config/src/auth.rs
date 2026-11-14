@@ -70,6 +70,26 @@ pub fn env_credential(id: &str, env: &Env) -> Option<Credential> {
     mk(CredentialKind::Token, "SYNT_AUTH_TOKEN").or_else(|| mk(CredentialKind::Api, "SYNT_API_KEY"))
 }
 
+/// `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` go to the provider named by `SYNT_PROVIDER`. When that is only the
+/// implicit default (`anthropic`, `SYNT_PROVIDER` unset), the provider must still point at the vendor (no
+/// `baseURL`, the vendor's host, or the `SYNT_BASE_URL` the user set): a `synt.json` entry that re-uses the
+/// id with another URL would otherwise receive a key meant for the vendor.
+fn env_may_target(provider: Option<&Provider>, env: &Env) -> bool {
+    if env.get_nonempty("SYNT_PROVIDER").is_some() {
+        return true;
+    }
+    let Some(url) = provider.and_then(|p| p.base_url.as_deref()) else {
+        return true;
+    };
+    if env.get_nonempty("SYNT_BASE_URL") == Some(url) {
+        return true;
+    }
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "api.anthropic.com")
+}
+
 /// Tier 3: legacy `<synthesis_home>/auth.json` written by the Node CLI. Read-only.
 pub fn file_credential(id: &str, synthesis_home: &Path) -> Option<Credential> {
     let data: Value =
@@ -102,7 +122,7 @@ pub fn resolve_credential(
     synthesis_home: &Path,
     env: &Env,
 ) -> Option<Credential> {
-    if let Some(c) = env_credential(id, env) {
+    if let Some(c) = env_credential(id, env).filter(|_| env_may_target(provider, env)) {
         return Some(c);
     }
     if let Some(p) = provider {

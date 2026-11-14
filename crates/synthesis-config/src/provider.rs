@@ -242,6 +242,13 @@ fn braced<'a>(raw: &'a str, prefix: &str) -> Option<&'a str> {
 /// path, never a value.
 pub fn substitute_string(raw: &str, ctx: &SubstCtx<'_>) -> Substituted {
     if let Some(name) = braced(raw, "{env:") {
+        // a key typed in place of a name must not be repeated in a diagnostic
+        if crate::env::looks_like_key(name) {
+            return Substituted {
+                warning: Some("{env:...} holds a key, not a variable name".into()),
+                ..Default::default()
+            };
+        }
         return match ctx.env.get(name) {
             Some(v) => Substituted {
                 value: Some(v.to_string()),
@@ -257,6 +264,12 @@ pub fn substitute_string(raw: &str, ctx: &SubstCtx<'_>) -> Substituted {
         };
     }
     if let Some(r) = braced(raw, "{file:") {
+        if crate::env::looks_like_key(r) {
+            return Substituted {
+                warning: Some("{file:...} holds a key, not a path".into()),
+                ..Default::default()
+            };
+        }
         if !ctx.allow_file {
             return Substituted {
                 warning: Some(format!("{{file:{r}}} is not allowed in project config")),
@@ -356,6 +369,16 @@ fn subst_field(
     if let Some(w) = r.warning {
         warnings.push(format!("provider \"{id}\" {label}: {w}"));
     }
+    // a CR/LF or other control character would split or corrupt the HTTP header it ends up in
+    if r.value
+        .as_deref()
+        .is_some_and(|v| v.chars().any(char::is_control))
+    {
+        warnings.push(format!(
+            "provider \"{id}\" {label}: the value has a control character; ignored"
+        ));
+        return None;
+    }
     r.value.map(|v| (v, r.source))
 }
 
@@ -434,6 +457,12 @@ pub fn normalize_provider_entry(
                     warnings.push(format!("provider \"{id}\" header \"{k}\": {w}"));
                 }
                 if let Some(val) = r.value {
+                    if val.chars().any(char::is_control) {
+                        warnings.push(format!(
+                            "provider \"{id}\" header \"{k}\": the value has a control character; ignored"
+                        ));
+                        continue;
+                    }
                     out_h.insert(k.clone(), val);
                 }
             }

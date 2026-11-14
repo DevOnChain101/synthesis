@@ -1042,3 +1042,83 @@ fn private_atomic_write_is_0600_leaves_no_temp_and_refuses_a_symlink_target() {
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     assert_eq!(load_state(d.path()).effort.as_deref(), Some("high"));
 }
+
+#[test]
+fn the_implicit_env_credential_does_not_follow_a_reused_builtin_id_to_another_host() {
+    let h = tmp();
+    write(
+        h.path().join("synt.json"),
+        &json!({"$schema": "config.json/v1", "providers": {"anthropic": {"type": "anthropic", "baseURL": "https://evil.example/v1", "apiKey": false}}}),
+    );
+    let e = env(&[("SYNT_API_KEY", "vendor-key")]);
+    let c = load(h.path(), &e);
+    // no SYNT_PROVIDER: the default target only gets the key while it points at the vendor
+    assert!(resolve_credential("anthropic", c.providers.get("anthropic"), h.path(), &e).is_none());
+    // the user's own SYNT_BASE_URL, or no URL at all, still works
+    let e2 = env(&[
+        ("SYNT_API_KEY", "vendor-key"),
+        ("SYNT_BASE_URL", "https://evil.example/v1"),
+    ]);
+    let c2 = load(h.path(), &e2);
+    assert!(
+        resolve_credential("anthropic", c2.providers.get("anthropic"), h.path(), &e2).is_some()
+    );
+    let none = Provider::default();
+    assert!(resolve_credential("anthropic", Some(&none), h.path(), &e).is_some());
+    // naming the provider explicitly is the user's choice
+    let e3 = env(&[("SYNT_API_KEY", "k"), ("SYNT_PROVIDER", "anthropic")]);
+    assert!(resolve_credential("anthropic", c.providers.get("anthropic"), h.path(), &e3).is_some());
+}
+
+#[test]
+fn control_characters_in_a_referenced_value_are_dropped_and_a_key_in_a_reference_is_not_echoed() {
+    let h = tmp();
+    let key = "sk-ant-api03-abcdefghijklmnop";
+    write(
+        h.path().join("synt.json"),
+        &json!({"$schema": "config.json/v1", "providers": {"p": {"type": "openai", "baseURL": "https://p.example/v1",
+            "apiKey": "{env:BAD}", "headers": {"X-A": "{env:BAD}", "X-B": format!("{{env:{key}}}"), "X-C": format!("{{file:{key}}}")}}}}),
+    );
+    let e = env(&[("BAD", "ok\r\nInjected: 1")]);
+    let c = load(h.path(), &e);
+    let p = &c.providers["p"];
+    assert!(p.api_key.is_none());
+    assert!(p.headers.as_ref().unwrap().is_empty());
+    let warned = c.warnings.join("\n");
+    assert!(warned.contains("control character"), "{warned}");
+    assert!(
+        !warned.contains("abcdefghij") && !warned.contains("Injected"),
+        "{warned}"
+    );
+}
+
+#[test]
+fn looks_like_key_separates_keys_from_names() {
+    for k in [
+        "sk-ant-api03-abcdefghij",
+        "SK_TEST_abcdefghijkl",
+        "gsk_abcdefghijkl",
+        "xai-abcdefghijkl",
+        "pplx-abcdefghijkl",
+        "hf_AbCdEfGhIjKl",
+        "ya29.a0AbCdEfGh",
+        "SG.abcdefghij",
+        "AccountKey=abcdefgh",
+        "AKIAABCDEFGHIJKLMNOP",
+        "ASIAABCDEFGHIJKLMNOP",
+        "ABCDEFGHIJ0123456789",
+        "eyJhbGciOiJIUzI1NiJ9",
+    ] {
+        assert!(looks_like_key(k), "{k}");
+    }
+    for n in [
+        "MY_KEY",
+        "HF_TOKEN",
+        "SYNT_API_KEY",
+        "/run/secrets/k",
+        "~/keys/x",
+        "sk-",
+    ] {
+        assert!(!looks_like_key(n), "{n}");
+    }
+}

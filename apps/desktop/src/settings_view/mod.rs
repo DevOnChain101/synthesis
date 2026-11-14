@@ -19,7 +19,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use synthesis_app::provider_cfg::Draft as ProviderDraft;
+use synthesis_app::provider_cfg::{Confirm, Draft as ProviderDraft, url_warning};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_config::Protocol;
 use synthesis_settings_ui::{Kind, Origin, Section};
@@ -233,6 +233,14 @@ pub struct SettingsView {
     prov_protocol: Protocol,
     prov_editing: Option<String>,
     prov_error: Option<String>,
+    /// The click-through shown for the form (what the provider will be sent, and where), and the token the
+    /// person accepted. Kept in memory only; a changed reference or host has another token and asks again.
+    prov_confirm: Option<Confirm>,
+    prov_accepted: Option<String>,
+    /// A test waiting for the click that sends the credential: `(provider, what is sent)`; and the line of the
+    /// test that ran.
+    prov_test_pending: Option<(String, String)>,
+    prov_sent: Option<(String, String)>,
     notice: Option<String>,
     scroll: ScrollHandle,
     /// The tab strip's own scrolling (it never wraps).
@@ -265,7 +273,7 @@ const PROV_LABELS: [(&str, &str); 3] = [
     ("Base URL", "https://llm.example.com/v1"),
     (
         "API key: environment variable name or file path",
-        "MY_GATEWAY_KEY",
+        "SYNT_GATEWAY_KEY",
     ),
 ];
 const PROV_HEADERS_HINT: &str = "X-Org: MY_ORG_ID";
@@ -416,6 +424,10 @@ impl SettingsView {
             prov_protocol: Protocol::OpenAi,
             prov_editing: None,
             prov_error: None,
+            prov_confirm: None,
+            prov_accepted: None,
+            prov_test_pending: None,
+            prov_sent: None,
             notice: None,
             scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
@@ -652,6 +664,8 @@ impl SettingsView {
     fn prov_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.prov_editing = None;
         self.prov_error = None;
+        self.prov_confirm = None;
+        self.prov_accepted = None;
         for i in &self.prov_in {
             i.update(cx, |s, cx| s.set_value("", window, cx));
         }
@@ -671,8 +685,28 @@ impl SettingsView {
             api_key: v(2, cx),
             headers: self.prov_headers.read(cx).value().to_string(),
             models: self.prov_models.read(cx).value().to_string(),
+            confirmed: String::new(),
         };
         let Some(m) = &mut self.model else { return };
+        let mut draft = draft;
+        // a reference that is not a SYNT_* variable (or any file) is sent to the host: ask first, again
+        // whenever the reference or the host differs from what was accepted
+        match m.provider_confirmation(&draft) {
+            Err(e) => {
+                self.prov_error = Some(e);
+                self.prov_confirm = None;
+                cx.notify();
+                return;
+            }
+            Ok(Some(c)) if self.prov_accepted.as_deref() != Some(c.token.as_str()) => {
+                self.prov_error = None;
+                self.prov_confirm = Some(c);
+                cx.notify();
+                return;
+            }
+            Ok(Some(c)) => draft.confirmed = c.token,
+            Ok(None) => {}
+        }
         match m.save_provider(&draft, editing.is_some()) {
             Ok(()) => {
                 self.notice = Some(format!(
@@ -688,12 +722,20 @@ impl SettingsView {
         }
     }
 
+    /// "Confirm and save": the person read what is sent and where.
+    fn prov_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prov_accepted = self.prov_confirm.take().map(|c| c.token);
+        self.prov_save(window, cx);
+    }
+
     fn prov_edit(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = &self.model else { return };
         match m.provider_draft(id) {
             Ok(d) => {
                 self.prov_editing = Some(id.into());
                 self.prov_error = None;
+                self.prov_confirm = None;
+                self.prov_accepted = None;
                 self.prov_protocol = d.protocol;
                 for (i, text) in [&d.id, &d.base_url, &d.api_key].into_iter().enumerate() {
                     self.prov_in[i].update(cx, |s, cx| s.set_value(text.as_str(), window, cx));
@@ -722,10 +764,28 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Tests the saved provider off the UI thread; looks every 250 ms until the answer is in.
+    /// Test connection: shows what is sent and where; anything but a `SYNT_*` variable waits for a click.
     fn prov_test(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(m) = &mut self.model else { return };
-        m.start_provider_test(id);
+        self.prov_test_pending = None;
+        match m.provider_preflight(id) {
+            Err(e) => m.prov_result = Some((id.into(), format!("Not sent: {e}"))),
+            Ok(p) if p.needs_click => self.prov_test_pending = Some((id.into(), p.text)),
+            Ok(p) => {
+                self.prov_sent = Some((id.into(), p.text));
+                return self.prov_test_go(id, false, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sends the test (`clicked`: the person saw the pre-flight line and pressed Send).
+    fn prov_test_go(&mut self, id: &str, clicked: bool, cx: &mut Context<Self>) {
+        if clicked && let Some((pid, text)) = self.prov_test_pending.take() {
+            self.prov_sent = Some((pid, text));
+        }
+        let Some(m) = &mut self.model else { return };
+        m.start_provider_test(id, clicked);
         cx.notify();
         if m.prov_testing.is_none() {
             return;
@@ -1500,6 +1560,39 @@ impl SettingsView {
                 .child(head)
                 .child(small(format!("key: {status}"), t::MUTED))
                 .child(small(models, t::MUTED));
+            if let Some((pid, text)) = &self.prov_test_pending
+                && pid == &e.id
+            {
+                let go = e.id.clone();
+                let no = e.id.clone();
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(small(text.clone(), t::WARN))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(btn(format!("prov-send-{go}"), "Send test", true).on_click(
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.prov_test_go(&go, true, cx)
+                                    }),
+                                ))
+                                .child(btn(format!("prov-nosend-{no}"), "Cancel", false).on_click(
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.prov_test_pending = None;
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                );
+            } else if let Some((pid, text)) = &self.prov_sent
+                && pid == &e.id
+            {
+                col = col.child(small(text.clone(), t::MUTED));
+            }
             if let Some((pid, text)) = &m.prov_result
                 && pid == &e.id
             {
@@ -1589,25 +1682,44 @@ impl SettingsView {
             Textarea::new(&self.prov_models).into_any_element(),
         ));
         out.push(
-            small("Keys are never typed here: give the name of an environment variable (for example MY_GATEWAY_KEY) or a file path; it is saved as {env:NAME} / {file:path} and read when a session starts. Text that looks like a key is refused. Plain http is accepted for localhost only. Test connection asks the provider for its model list.", t::MUTED)
+            small("Keys are never typed here: give the name of an environment variable (SYNT_... is free; any other name asks you to confirm the variable and the host) or a file path (absolute, ~/ or ./, always confirmed); it is saved as {env:NAME} / {file:path} and read when a session starts, and its value is sent to the base URL host. Variables of other tools (AWS_, GITHUB_, ...) and text that looks like a key are refused. Plain http is accepted for localhost only. Test connection shows what it sends, then asks the provider for its model list.", t::MUTED)
                 .mt(px(6.))
                 .into_any_element(),
         );
+        if let Some(w) = url_warning(self.prov_in[1].read(cx).value().as_ref()) {
+            out.push(small(w, t::WARN).mt(px(4.)).into_any_element());
+        }
         if let Some(e) = &self.prov_error {
             out.push(small(e.clone(), t::ERROR).mt(px(4.)).into_any_element());
         }
-        let mut row = div().mt(px(8.)).flex().gap(px(8.)).child(
-            btn(
-                "prov-save",
-                if editing.is_some() {
-                    "Save provider"
-                } else {
-                    "Add provider"
-                },
-                true,
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.prov_save(w, cx))),
-        );
+        if let Some(c) = &self.prov_confirm {
+            out.push(
+                div()
+                    .debug_selector(|| "prov-confirm".to_string())
+                    .mt(px(6.))
+                    .child(small(c.text.clone(), t::WARN))
+                    .into_any_element(),
+            );
+        }
+        let mut row = div()
+            .mt(px(8.))
+            .flex()
+            .gap(px(8.))
+            .child(if self.prov_confirm.is_some() {
+                btn("prov-accept", "Confirm and save", true)
+                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.prov_accept(w, cx)))
+            } else {
+                btn(
+                    "prov-save",
+                    if editing.is_some() {
+                        "Save provider"
+                    } else {
+                        "Add provider"
+                    },
+                    true,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.prov_save(w, cx)))
+            });
         if editing.is_some() {
             row = row.child(
                 btn("prov-cancel", "Cancel", false)
@@ -2457,7 +2569,7 @@ mod tests {
         );
         assert!(!file.exists());
         // a valid form is saved, the form empties and the list shows the provider
-        fill(v, 2, "ACME_KEY");
+        fill(v, 2, "SYNT_ACME_KEY");
         v.update(|w, cx| {
             ent.update(cx, |s, cx| {
                 s.prov_models
@@ -2479,13 +2591,13 @@ mod tests {
         assert!(
             std::fs::read_to_string(&file)
                 .unwrap()
-                .contains("{env:ACME_KEY}")
+                .contains("{env:SYNT_ACME_KEY}")
         );
         // edit: the form is filled from the file (the variable name, not a value), the name is fixed
         act(v, &|s, w, cx| s.prov_edit("acme", w, cx));
         ent.read_with(v, |s, cx| {
             assert_eq!(s.prov_editing.as_deref(), Some("acme"));
-            assert_eq!(s.prov_in[2].read(cx).value().as_ref(), "ACME_KEY");
+            assert_eq!(s.prov_in[2].read(cx).value().as_ref(), "SYNT_ACME_KEY");
             assert!(
                 s.prov_models
                     .read(cx)
@@ -2504,6 +2616,54 @@ mod tests {
                 .unwrap()
                 .contains("other.example.com")
         );
+        // a variable that is not SYNT_*: asked first, and again when the host changes
+        act(v, &|s, w, cx| s.prov_clear(w, cx));
+        fill(v, 0, "gw");
+        fill(v, 1, "https://gw.example.com/v1");
+        fill(v, 2, "MY_GATEWAY_KEY");
+        act(v, &|s, w, cx| s.prov_save(w, cx));
+        let asked = ent
+            .read_with(v, |s, _| s.prov_confirm.clone())
+            .expect("asks first");
+        assert!(
+            asked.text.contains("{env:MY_GATEWAY_KEY}")
+                && asked.text.contains("https://gw.example.com")
+        );
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("gw.example.com")
+        );
+        assert!(v.debug_bounds("prov-confirm").is_some());
+        fill(v, 1, "https://evil.example.com/v1");
+        act(v, &|s, w, cx| s.prov_accept(w, cx));
+        let again = ent
+            .read_with(v, |s, _| s.prov_confirm.clone())
+            .expect("asks again for the new host");
+        assert!(again.text.contains("https://evil.example.com") && again.token != asked.token);
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("evil.example.com")
+        );
+        act(v, &|s, w, cx| s.prov_accept(w, cx));
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("{env:MY_GATEWAY_KEY}")
+        );
+        // Test connection of it shows what is sent and waits for the click
+        act(v, &|s, _, cx| s.prov_test("gw", cx));
+        ent.read_with(v, |s, _| {
+            let (id, text) = s.prov_test_pending.clone().expect("waits for the click");
+            assert_eq!(id, "gw");
+            assert!(
+                text.contains("the value of {env:MY_GATEWAY_KEY}")
+                    && text.contains("https://evil.example.com")
+            );
+            assert!(s.model.as_ref().unwrap().prov_testing.is_none());
+        });
+        act(v, &|s, w, cx| s.prov_remove("gw", w, cx));
         // remove
         act(v, &|s, w, cx| s.prov_remove("acme", w, cx));
         ent.read_with(v, |s, _| {
