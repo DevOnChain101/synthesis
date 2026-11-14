@@ -11,10 +11,28 @@ pub const MAX_KEY_FILE: u64 = 4096;
 fn norm(p: &Path) -> String {
     let n = p.to_string_lossy().replace('\\', "/").to_lowercase();
     // Windows verbatim forms (`\\?\C:\x`, `\\?\UNC\h\s`) name the same place as the plain form
-    if let Some(r) = n.strip_prefix("//?/unc/") {
-        return format!("//{r}");
-    }
-    n.strip_prefix("//?/").map(str::to_string).unwrap_or(n)
+    let n = match n.strip_prefix("//?/unc/") {
+        Some(r) => format!("//{r}"),
+        None => n.strip_prefix("//?/").map(str::to_string).unwrap_or(n),
+    };
+    // no trailing slash: a home of `/h/` or `/` must build `/h/.ssh` (and `/.ssh`), and `n[h.len()..]` must stay in bounds
+    n.trim_end_matches('/').to_string()
+}
+
+/// A DOS device name (`CON`, `NUL.txt`, `COM1`, `CONIN$` ...) that a non-verbatim Windows path opens instead of a file.
+fn windows_device(comp: &str) -> bool {
+    let stem = comp
+        .split(['.', ':'])
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ["COM", "LPT"].iter().any(|p| {
+            stem.strip_prefix(p).is_some_and(|d| {
+                matches!(d.chars().collect::<Vec<_>>()[..], [c] if ('1'..='9').contains(&c) || "\u{b9}\u{b2}\u{b3}".contains(c))
+            })
+        })
 }
 
 /// A UNC share (`//host/s`, `//?/UNC/host/s`) or a device path (`//./x`, `//?/GLOBALROOT/..`, `/dev/`): reading
@@ -60,6 +78,9 @@ const SECRET_PATHS: [&str; 17] = [
     ".cargo/credentials",
     ".local/share/keyrings",
 ];
+
+/// Folders whose children are accounts' homes.
+const ACCOUNT_ROOTS: [&str; 3] = ["/home", "/users", "c:/users"];
 
 const SYSTEM_DIRS: [&str; 15] = [
     "/etc",
@@ -108,39 +129,63 @@ pub fn check_credential_file(
     if raw.split('/').any(|c| c == "..") {
         return bad("no .. in the path");
     }
+    // judged on the text so the rule is tested on every OS; a verbatim path (`//?/`) names the file itself
+    let drive = raw.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && raw.as_bytes().get(1) == Some(&b':');
+    if (cfg!(windows) || drive || full.to_string_lossy().contains('\\'))
+        && !raw.starts_with("//?/")
+        && raw.split('/').any(windows_device)
+    {
+        return bad("a Windows device name (CON, NUL, COM1, ...) is not a file");
+    }
     let real = std::fs::canonicalize(full).ok();
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let homes = [norm(&canon(home)), norm(home)];
     let uhs = [norm(&canon(user_home)), norm(user_home)];
+    // A synt home INSIDE an account dir (`/home/x/.synt`, `c:/users/x/appdata/local/temp/y`) is that account's own
+    // place: its subtree is not "another account's home", and the secret stores of that account dir are guarded too.
+    // A synt home that is the account root or above it (`/home`, `c:/users`, `/etc`) gets no such exemption.
+    let account = |h: &String| {
+        ACCOUNT_ROOTS.iter().find_map(|b| {
+            let mut it = h.strip_prefix(&format!("{b}/"))?.split('/');
+            let name = it.next().filter(|n| !n.is_empty())?;
+            it.next().filter(|n| !n.is_empty())?;
+            Some(format!("{b}/{name}"))
+        })
+    };
+    let bases: Vec<String> = uhs
+        .iter()
+        .cloned()
+        .chain(homes.iter().filter_map(account))
+        .collect();
     for cand in std::iter::once(full).chain(real.as_deref()) {
         let n = norm(cand);
         if n.starts_with("//") {
             return bad("network and device paths are refused");
         }
         let own = uhs.iter().any(|u| under(&n, u));
-        let secret = uhs.iter().any(|u| {
+        let secret = bases.iter().any(|u| {
             SECRET_PATHS.iter().any(|d| {
                 let dir = format!("{u}/{d}");
                 under(&n, &dir) || (d.ends_with("credentials") && n.starts_with(&dir))
             })
         });
-        // the secret stores are checked before the synt-home exemption: a synt home that contains them
-        // (`SYNT_HOME=$HOME`) must not open them
-        if !secret && let Some(h) = homes.iter().find(|h| under(&n, h)) {
+        // another account's home (a key of someone else), a system folder or a secret store is refused BEFORE the
+        // synt-home exemption: a synt home that contains them (`SYNT_HOME=$HOME`, `/home`, `/etc`) must not open them
+        let in_account_home = homes.iter().any(|h| under(&n, h) && account(h).is_some());
+        let other_home = ACCOUNT_ROOTS
+            .iter()
+            .any(|b| n.strip_prefix(&format!("{b}/")).is_some() && !own && !in_account_home);
+        if secret || other_home || SYSTEM_DIRS.iter().any(|d| under(&n, d)) {
+            return bad("that location holds credentials or system files; use a file of its own");
+        }
+        if let Some(h) = homes.iter().find(|h| under(&n, h)) {
             let rel = n[h.len()..].trim_start_matches('/').to_string();
             let first = rel.split('/').next().unwrap_or("");
             let keys = first == "keys";
             if (strict_home && !keys) || HOME_STATE.contains(&first) {
                 return bad("under the synt home only files of the keys/ folder can hold a key");
             }
-            continue;
-        }
-        // another account's home (a key of someone else) is never read
-        let other_home = ["/home", "/users", "c:/users"]
-            .iter()
-            .any(|b| n.strip_prefix(&format!("{b}/")).is_some() && !own);
-        if secret || other_home || SYSTEM_DIRS.iter().any(|d| under(&n, d)) {
-            return bad("that location holds credentials or system files; use a file of its own");
         }
     }
     if let Some(r) = &real {
@@ -161,6 +206,101 @@ mod tests {
         assert!(!under("/users/x/.ssh/id_rsa", ""));
         assert!(!under("/users/x/.ssh/id_rsa", "/"));
         assert!(under("/a/b", "/a"));
+    }
+
+    #[test]
+    fn a_home_with_a_trailing_slash_or_the_root_still_guards_the_secret_stores() {
+        let ssh = |h: &str, p: &str, sh: &str| {
+            check_credential_file(Path::new(p), Path::new(sh), Path::new(h), false)
+        };
+        // `/h/` used to build `/h//.ssh`, which never matched
+        assert!(ssh("/zz/me/", "/zz/me/.ssh/id_rsa", "/zz/me/.synt").is_err());
+        assert!(ssh("/zz/me", "/zz/me/.ssh/id_rsa", "/zz/me/.synt/").is_err());
+        // HOME=/: the store is `/.ssh`
+        assert!(ssh("/", "/.ssh/id_rsa", "/zz/.synt").is_err());
+        assert!(ssh("/", "/zz/plain/key", "/zz/.synt").is_ok());
+        // a trailing-slash home that does not exist, and a path equal to it without the slash: no panic
+        assert!(ssh("/zz/none/", "/zz/none", "/zz/none/").is_ok());
+        assert!(!under("/a", "") && norm(Path::new("/")).is_empty());
+    }
+
+    #[test]
+    fn a_synt_home_inside_other_accounts_or_system_folders_opens_nothing_of_theirs() {
+        let ck = |p: &str, sh: &str| {
+            check_credential_file(Path::new(p), Path::new(sh), Path::new("/home/me"), false)
+        };
+        assert!(ck("/home/bob/.ssh/id_rsa", "/home").is_err());
+        assert!(ck("/home/bob/notes", "/home").is_err());
+        assert!(ck("/etc/shadow", "/etc").is_err());
+        assert!(ck("/home/me/.synt/mykey", "/home/me/.synt").is_ok());
+    }
+
+    #[test]
+    fn a_synt_home_inside_an_account_dir_is_not_another_account_but_one_above_it_is() {
+        let ck = |p: &str, sh: &str, uh: &str| {
+            check_credential_file(Path::new(p), Path::new(sh), Path::new(uh), true)
+        };
+        let t = "c:/users/runneradmin/appdata/local/temp/x";
+        assert!(ck(&format!("{t}/keys/acme"), t, "d:/other").is_ok());
+        assert!(ck(&format!("{t}/../x/keys/acme"), t, "d:/other").is_err());
+        // secret stores of the account that holds the synt home
+        assert!(ck("c:/users/runneradmin/.ssh/id_rsa", t, "d:/other").is_err());
+        assert!(ck("/home/me/.synt/keys/k", "/home/me/.synt", "/elsewhere").is_ok());
+        assert!(ck("/home/me/.aws/credentials", "/home/me/.synt", "/elsewhere").is_err());
+        // the account root or above it, or a system folder: no exemption
+        assert!(ck("c:/users/bob/.ssh/id_rsa", "c:/users", "d:/other").is_err());
+        assert!(ck("/home/bob/.ssh/id_rsa", "/home", "/home/me").is_err());
+        assert!(ck("/Users/bob/.ssh/id_rsa", "/Users", "/Users/me").is_err());
+        assert!(ck("/etc/passwd", "/etc", "/home/me").is_err());
+        // SYNT_HOME == $HOME
+        assert!(ck("/home/me/.ssh/id_rsa", "/home/me", "/home/me").is_err());
+    }
+
+    #[test]
+    fn dos_device_names_are_refused_in_windows_style_paths() {
+        let ok = |p: &str| {
+            check_credential_file(
+                Path::new(p),
+                Path::new(r"C:\h\.synt"),
+                Path::new(r"C:\h"),
+                false,
+            )
+        };
+        for bad in [
+            r"C:\h\NUL",
+            r"C:\h\con.txt",
+            r"C:\h\COM1",
+            r"C:\h\lpt9.log",
+            r"C:\h\CONIN$",
+            r"C:\h\nul .txt",
+            r"C:\h\NUL:",
+            r"C:\h\com1:",
+            r"C:\h\NUL:x",
+            "c:/h/Aux",
+            r"\\?\C:\h\ok\..\x",
+        ] {
+            assert!(ok(bad).is_err(), "{bad}");
+        }
+        for fine in [
+            r"C:\h\COM0",
+            r"C:\h\COM10",
+            r"C:\h\console.txt",
+            r"C:\h\nulx",
+            r"\\?\C:\h\NUL",
+        ] {
+            assert!(ok(fine).is_ok(), "{fine}");
+        }
+        // a POSIX file may be called con
+        assert!(
+            check_credential_file(
+                Path::new("/zz/con"),
+                Path::new("/zz/.synt"),
+                Path::new("/zz"),
+                false
+            )
+            .is_ok()
+                || cfg!(windows)
+        );
     }
 
     #[test]

@@ -61,6 +61,10 @@ Under `Proxied`, bubblewrap keeps the network namespace, which hides abstract un
 - DNS rebinding is closed for the proxy (validated IP is dialled); WebFetch has its own resolver guard (same address list).
 - Tests: pure and tokio tests on all OSes in `synthesis-egress`; real bubblewrap (`crates/synthesis-sandbox/tests/egress.rs`, `SYNT_REQUIRE_BWRAP=1` in CI) and real Seatbelt (`tests/seatbelt.rs`) end-to-end runs.
 
+### Residual: another session's `sessions/<id>/lock` (open item, not fixed)
+
+A sandboxed command can open `~/.synt/sessions/<other id>/lock` read-only and `flock` it, which makes that session look dead-but-held to `synt stop`/liveness checks (denial of service only; no data). `sessions/` has to stay readable because the command may read the session's own spilled tool outputs, and `deny_paths` are subtrees, so the narrow rule (deny read of `sessions/*/lock`, any id) cannot be expressed by the current policy. Per backend: Seatbelt could add a `(regex #"^<home>/sessions/[^/]+/lock$")` deny (a new policy field, macOS only); bubblewrap mounts the filesystem read-only already (a read-only fd still locks) and can only hide lock files that exist at launch (`nonexistent deny_paths ... are not protected`); Landlock grants subtrees and cannot carve a child out. A deny that exists on one backend only would leave the same hole on the others, so it is left until the Linux read allow-list (section 2) exists, at which point `sessions/` can be exposed per session (own directory only) on every backend.
+
 ## 2. Linux read allow-list (not built)
 
 Today bubblewrap mounts the whole filesystem read-only and hides only `deny_paths`. Target: bind only an allow-list (`/usr`, `/bin`, `/lib*`, a minimal `/etc` set, `/proc`, `/dev`, the workspace, `readable_roots`). Decision 2: until then all of `/etc` is readable. Decision 3: `readScope: host` (the opt-out that exposes the host filesystem) is forbidden under `--unattended`.

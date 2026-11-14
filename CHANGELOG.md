@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Security (hardening batch 1)
+- `synt rewind` writes through a handle of the parent folder (no link followed) and now refuses hard-linked files (pnpm stores, `cp -l` trees): the dry run lists them as skipped. `{file:}` credentials are read from the checked path with a 4 KB cap; `secretfile` handles homes with a trailing slash and DOS device names. A shell run that changed no file is no longer reported as unverified when a change tracker is active.
+
 ### Changed (governance leftovers)
 - The cost cap is also checked before each model call against a conservative worst case (`budget_exceeded:max_cost_usd_estimate`); judge and reflection calls are priced; long-context price tiers (`long_above_tokens`, `long_input_mult`, `long_output_mult` in `synt.pricing`); OpenAI-compatible `input_tokens` now excludes cached tokens (no double count). New optional `synt.notify` (user/managed settings) and `synt.worktree.submodules`; `synt stop` reaches the desktop's in-process session without exiting the app and says which mechanism acts; the CLI's hard stop restores the terminal (docs/UNATTENDED.md).
 
