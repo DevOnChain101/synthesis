@@ -649,14 +649,26 @@ impl Srv<'_> {
                 }
             }
             Call::FsList { dir, offset } => {
-                // a page after the first continues the same scan; the first one reads the folder again
-                if offset == 0 || self.tree.is_none() {
+                // the first page of the whole tree scans (first level, and what git says); a page after it
+                // continues that scan; a folder is read from the disk when the client opens it
+                if (dir.is_empty() && offset == 0) || self.tree.is_none() {
                     self.heavy()?;
                     let root = self.files_root()?;
                     self.tree = Some(engine_fs::scan(&root, self.trusted, self.env));
                 }
                 let d = self.tree.as_ref().ok_or("no scan")?;
-                Ok(engine_fs::list_of(d, &dir, offset as usize, self.trusted)?)
+                if dir.is_empty() {
+                    Ok(engine_fs::list_of(d, offset as usize, self.trusted))
+                } else {
+                    let root = self.files_root()?;
+                    Ok(engine_fs::list_dir(
+                        &root,
+                        d,
+                        &dir,
+                        offset as usize,
+                        self.trusted,
+                    )?)
+                }
             }
             Call::FsRead { path } => Ok(engine_fs::read(&self.files_root()?, &path)?),
             Call::FsGitStatus => {

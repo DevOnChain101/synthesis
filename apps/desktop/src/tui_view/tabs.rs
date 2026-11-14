@@ -210,23 +210,7 @@ pub fn preview_note(tab: ChatTab) -> &'static str {
 
 /// Paths of the tree rows (`dir/sub/file`), in row order.
 pub fn row_paths(d: &ProjectData) -> Vec<String> {
-    let mut stack: Vec<String> = vec![];
-    d.rows
-        .iter()
-        .map(|r| {
-            stack.truncate(usize::from(r.depth));
-            let path = stack
-                .iter()
-                .map(String::as_str)
-                .chain([r.name.as_str()])
-                .collect::<Vec<_>>()
-                .join("/");
-            if r.dir {
-                stack.push(r.name.clone());
-            }
-            path
-        })
-        .collect()
+    project::row_paths(d)
 }
 
 /// The rows to draw: a row under a closed directory is not built (the tree is "lazy": only what is open).
@@ -249,12 +233,12 @@ pub fn visible_rows(d: &ProjectData, open: &HashSet<String>) -> Vec<usize> {
     out
 }
 
-/// The directories to open at first: the parents of every changed file.
+/// The directories to open at first: the parents of every changed path.
 pub fn dirs_of_changes(d: &ProjectData) -> HashSet<String> {
     let paths = row_paths(d);
     let mut out = HashSet::new();
     for (i, r) in d.rows.iter().enumerate() {
-        if !r.dir && r.status.is_some() {
+        if r.status.is_some() {
             let mut p = Path::new(&paths[i]).parent();
             while let Some(q) = p.filter(|q| !q.as_os_str().is_empty()) {
                 out.insert(q.to_string_lossy().into_owned());
@@ -387,8 +371,8 @@ impl TuiView {
         cx.notify();
     }
 
-    /// Reads the project tree off the UI thread: git (read-only) in a trusted folder, a plain walk without git
-    /// in an untrusted one.
+    /// Reads the project tree off the UI thread: the first level and the directories already opened (git
+    /// read-only in a trusted folder, the disk alone in an untrusted one). Other directories are read when opened.
     pub fn request_scan(&mut self, cx: &mut Context<Self>) {
         if self.previewing() {
             return;
@@ -401,6 +385,11 @@ impl TuiView {
         }
         let epoch = self.tree.begin();
         let (dir, env, trusted) = (PathBuf::from(&cwd), lu.cfg.env.clone(), lu.live.trusted);
+        // Refresh lists the opened directories again; the first scan opens the parents of the changed files
+        let open: Option<Vec<String>> = self
+            .ts
+            .tree_init
+            .then(|| self.ts.tree_open.iter().cloned().collect());
         // WSL mode: the engine scans its own folder (a path of this machine would be the Windows view of it)
         let remote = lu.live.engine.clone().filter(|e| e.is_remote());
         let job = cx.background_spawn(async move {
@@ -408,18 +397,19 @@ impl TuiView {
                 return e
                     .remote()
                     .ok_or_else(|| "not a WSL engine".to_string())
-                    .and_then(|r| r.fs_list())
+                    .and_then(|r| {
+                        let mut d = r.fs_list()?;
+                        let all = open.unwrap_or_else(|| dirs_of_changes(&d).into_iter().collect());
+                        d.load_open(&all, |dir| r.fs_list_dir(dir, 0).ok());
+                        Ok(d)
+                    })
                     .unwrap_or_else(|why| ProjectData {
                         loaded: true,
                         note: Some(why),
                         ..Default::default()
                     });
             }
-            if trusted {
-                project::scan(&dir, &env)
-            } else {
-                project::scan_plain(&dir)
-            }
+            project::scan_lazy(&dir, &env, trusted, open.as_deref())
         });
         cx.spawn(async move |this, cx| {
             let d = job.await;
@@ -437,6 +427,38 @@ impl TuiView {
                     t.ts.tree_init = true;
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reads the entries of the directory `dir` off the UI thread, when it is opened or when its "... more" row is
+    /// clicked (`append`: the next page, after the entries already listed).
+    fn list_dir(&mut self, dir: String, append: bool, cx: &mut Context<Self>) {
+        let (Some(lu), Some(d)) = (&self.live, &self.tree.data) else {
+            return;
+        };
+        let skip = if append { d.loaded(&dir) } else { 0 };
+        let (root, listing) = (PathBuf::from(&lu.live.cwd), d.listing.clone());
+        let (cwd, epoch) = (lu.live.cwd.clone(), self.tree.epoch);
+        let remote = lu.live.engine.clone().filter(|e| e.is_remote());
+        let name = dir.clone();
+        let job = cx.background_spawn(async move {
+            match remote {
+                Some(e) => e.remote().and_then(|r| r.fs_list_dir(&name, skip).ok()),
+                None => project::children_rows(&root, &name, &listing, skip),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let rows = job.await;
+            this.update(cx, |t, cx| {
+                let same =
+                    t.tree.epoch == epoch && t.live.as_ref().is_some_and(|l| l.live.cwd == cwd);
+                if let (true, Some(rows), Some(d)) = (same, rows, t.tree.data.as_mut()) {
+                    d.put_children(&dir, rows, append);
+                    cx.notify();
+                }
             })
             .ok();
         })
@@ -496,7 +518,7 @@ impl TuiView {
             row_paths(d)
                 .iter()
                 .zip(&d.rows)
-                .any(|(p, r)| p == path && !r.dir)
+                .any(|(p, r)| p == path && !r.dir && r.more == 0)
         })
     }
 
@@ -554,7 +576,7 @@ impl TuiView {
         };
         let Some(&i) = next else { return true };
         let path = paths[i].clone();
-        if d.rows[i].dir {
+        if d.rows[i].dir || d.rows[i].more > 0 {
             self.ts.tree_sel = Some(path);
             cx.notify();
         } else {
@@ -732,7 +754,14 @@ impl TuiView {
                 )
             });
             let click_path = path.clone();
-            let dir = r.dir;
+            let (dir, more) = (r.dir, r.more > 0);
+            let tag = if r.link {
+                Some("link")
+            } else if r.generated {
+                Some("generated")
+            } else {
+                None
+            };
             rows = rows.child(
                 div()
                     .id(("tree-row", i))
@@ -747,9 +776,14 @@ impl TuiView {
                     .when(sel, |d| d.bg(hsla(t::ELEVATED)))
                     .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if dir {
+                        if more {
+                            // the page after the entries listed, in the directory this row ends
+                            let parent = click_path.rsplit_once('/').map_or("", |(p, _)| p);
+                            this.list_dir(parent.to_string(), true, cx);
+                        } else if dir {
                             if !this.ts.tree_open.remove(&click_path) {
                                 this.ts.tree_open.insert(click_path.clone());
+                                this.list_dir(click_path.clone(), false, cx);
                             }
                             cx.notify();
                         } else {
@@ -770,17 +804,21 @@ impl TuiView {
                                 "\u{25B8}"
                             }),
                     )
-                    .child(icon(
-                        if dir { "folder" } else { "file" },
-                        14.,
-                        if dir { hsla(t::INFO) } else { dim() },
-                    ))
+                    .when(!more, |d| {
+                        d.child(icon(
+                            if dir { "folder" } else { "file" },
+                            14.,
+                            if dir { hsla(t::INFO) } else { dim() },
+                        ))
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .truncate()
-                            .text_color(if dir {
+                            .text_color(if more {
+                                dim()
+                            } else if dir {
                                 hsla(t::INFO)
                             } else if sel {
                                 strong()
@@ -789,6 +827,14 @@ impl TuiView {
                             })
                             .child(synthesis_harness::sanitize_for_display(&r.name)),
                     )
+                    .children(tag.map(|l| {
+                        div()
+                            .flex_none()
+                            .pr(px(6.))
+                            .text_size(px(10.))
+                            .text_color(dim())
+                            .child(l)
+                    }))
                     .children(st.map(|(l, c)| {
                         div()
                             .pr(px(6.))
@@ -1055,6 +1101,7 @@ mod tests {
             name: name.into(),
             dir,
             status,
+            ..Default::default()
         }
     }
 
@@ -1185,6 +1232,62 @@ mod tests {
     fn changed_files_open_their_directories() {
         let o = dirs_of_changes(&data());
         assert_eq!(o, ["src".to_string(), "src/lib".to_string()].into());
+    }
+
+    #[test]
+    fn opening_directories_lists_them_and_a_huge_closed_one_costs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = dir.path();
+        std::fs::create_dir_all(w.join("crates/x/src")).unwrap();
+        std::fs::write(w.join("crates/x/src/lib.rs"), "x").unwrap();
+        std::fs::create_dir_all(w.join("target/debug")).unwrap();
+        std::fs::write(
+            w.join("target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(w.join("big")).unwrap();
+        for i in 0..(project::DIR_ROWS + 5) {
+            std::fs::write(w.join(format!("big/f{i:05}")), "").unwrap();
+        }
+        let env = synthesis_config::Env::from_pairs::<&str, &str>([]);
+        let mut d = project::scan_lazy(w, &env, false, Some(&[]));
+        let mut open: HashSet<String> = HashSet::new();
+        let shown = |d: &ProjectData, open: &HashSet<String>| -> Vec<String> {
+            let p = row_paths(d);
+            visible_rows(d, open)
+                .into_iter()
+                .map(|i| p[i].clone())
+                .collect()
+        };
+        assert_eq!(shown(&d, &open), ["big", "crates", "target"]);
+        // a click opens a directory and lists it (what `list_dir` does off the thread)
+        for dir in ["crates", "crates/x", "crates/x/src"] {
+            open.insert(dir.into());
+            let rows = project::children_rows(w, dir, &d.listing, 0).unwrap();
+            d.put_children(dir, rows, false);
+        }
+        assert_eq!(
+            shown(&d, &open),
+            [
+                "big",
+                "crates",
+                "crates/x",
+                "crates/x/src",
+                "crates/x/src/lib.rs",
+                "target"
+            ]
+        );
+        // `target` is a closed, labelled row; opening it lists it, nothing else changes
+        assert!(d.rows.iter().any(|r| r.name == "target" && r.generated));
+        // the cut directory ends in a "more" row whose parent is the directory to page
+        open.insert("big".into());
+        let rows = project::children_rows(w, "big", &d.listing, 0).unwrap();
+        d.put_children("big", rows, false);
+        let all = shown(&d, &open);
+        let more = all.iter().find(|p| p.starts_with("big/\u{2026}")).unwrap();
+        assert_eq!(more.rsplit_once('/').map(|(p, _)| p), Some("big"));
+        assert_eq!(d.loaded("big"), project::DIR_ROWS);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! name. The git scan runs only in a trusted folder (`--trust-project`); an untrusted folder gets [`scan_plain`]
 //! (no git at all), which is why the file explorer needs no trust.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use synthesis_harness::sanitize_for_display as clean_line;
@@ -21,13 +21,28 @@ use synthesis_harness::sanitize_for_display as clean_line;
 use synthesis_cli_ui_base::imgclip::{Output, RealExec};
 use synthesis_config::Env;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TreeRow {
     pub depth: u16,
     pub name: String,
     pub dir: bool,
     /// `git status --porcelain` letter: `M`, `A`, `D`, `R`, `?`.
     pub status: Option<char>,
+    /// A symbolic link: shown, never entered and never followed.
+    pub link: bool,
+    /// A build or vendor directory (`target`, `node_modules`, a valid `CACHEDIR.TAG`): listed only when opened.
+    pub generated: bool,
+    /// Not a file or a folder but the "... N more" row of a directory cut at [`DIR_ROWS`]: N entries are left.
+    pub more: usize,
+}
+
+/// What a lazy listing needs to know besides the disk: `git status` (letters, ignored paths) when the folder is
+/// a repository in a trusted folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    pub git: bool,
+    pub status: HashMap<String, char>,
+    pub ignored: HashSet<String>,
 }
 
 /// What was read; `note` is why there is nothing to show (`not a git repository`).
@@ -43,6 +58,8 @@ pub struct ProjectData {
     pub stats: Vec<(String, String, String)>,
     /// The tree or the diff was cut at the bound.
     pub truncated: bool,
+    /// Kept for listing the directories opened later (see [`scan_lazy`]).
+    pub listing: Listing,
 }
 
 /// `/files`: the tree, indented, with the git status letter before changed files.
@@ -350,7 +367,7 @@ fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>,
                 depth: d as u16,
                 name: (*name).to_string(),
                 dir: true,
-                status: None,
+                ..Default::default()
             });
             open.push(name);
         }
@@ -359,6 +376,7 @@ fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>,
             name: parts[parts.len() - 1].to_string(),
             dir: false,
             status: status.get(p).copied(),
+            ..Default::default()
         });
     }
     if rows.len() <= TREE_ROWS {
@@ -445,6 +463,294 @@ pub fn scan_plain(cwd: &Path) -> ProjectData {
     }
 }
 
+/// Entries of one directory listed at a time; the rest is behind a "... N more" row.
+pub const DIR_ROWS: usize = 1000;
+/// Entries of one directory looked at at most (a directory of millions of files is not read whole).
+const DIR_ENTRIES: usize = 200_000;
+/// Directories that hold build output or vendored code; listed only when the person opens them.
+const GENERATED: &[&str] = &["target", "node_modules", ".venv", "dist", "build"];
+/// First line of a valid `CACHEDIR.TAG` (https://bford.info/cachedir/), which cargo writes into `target/`.
+const CACHEDIR_SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+/// Open directories read again by one scan (Refresh), and the changed-file parents opened by the first one.
+const MAX_OPEN: usize = 100;
+
+/// One page of a directory: its entries from `skip` (at most `limit`) and how many it has in all.
+pub struct Children {
+    pub rows: Vec<TreeRow>,
+    pub total: usize,
+}
+
+fn has_cachedir_tag(dir: &Path) -> bool {
+    use std::io::Read as _;
+    let tag = dir.join("CACHEDIR.TAG");
+    // a regular file only: opening a pipe of that name would block
+    let mut sig = [0u8; 43];
+    std::fs::symlink_metadata(&tag).is_ok_and(|m| m.is_file())
+        && std::fs::File::open(&tag)
+            .and_then(|mut f| f.read_exact(&mut sig))
+            .is_ok()
+        && &sig == CACHEDIR_SIGNATURE
+}
+
+/// The entries of the directory `dir` (relative, `/`-separated, "" is `root`) read NOW from the disk, so a
+/// closed or huge directory costs nothing until it is opened. `None`: it is not a directory of the project (a
+/// link on the way is not entered, it could lead out of the folder or round in a loop). Entries `git` ignores
+/// are left out except build directories; links are listed as links; names are made printable.
+pub fn list_children(
+    root: &Path,
+    dir: &str,
+    listing: &Listing,
+    skip: usize,
+    limit: usize,
+) -> Option<Children> {
+    let mut here = root.to_path_buf();
+    let mut depth = 0u16;
+    for c in dir.split('/').filter(|c| !c.is_empty()) {
+        if matches!(c, "." | ".." | ".git") {
+            return None;
+        }
+        here.push(c);
+        depth = depth.saturating_add(1);
+        if !std::fs::symlink_metadata(&here).ok()?.is_dir() {
+            return None;
+        }
+    }
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    let path_of = |n: &str| format!("{prefix}{n}");
+    let mut kids: Vec<(String, bool, bool)> = std::fs::read_dir(&here)
+        .ok()?
+        .flatten()
+        .take(DIR_ENTRIES)
+        .filter_map(|e| {
+            let ft = e.file_type().ok()?;
+            let name = e.file_name().into_string().ok()?;
+            (name != ".git").then_some((name, ft.is_dir(), ft.is_symlink()))
+        })
+        .collect();
+    // files git reports as deleted are not on the disk but are still part of the project
+    for (p, c) in &listing.status {
+        if let Some(n) = p
+            .strip_prefix(&prefix)
+            .filter(|n| *c == 'D' && !n.contains('/') && !kids.iter().any(|k| k.0 == *n))
+        {
+            kids.push((n.to_string(), false, false));
+        }
+    }
+    kids.sort();
+    // a build directory is not hidden by .gitignore but not listed either: it is one closed row. Where git
+    // answered, a tracked directory of that name is an ordinary directory.
+    let generated = |n: &str| {
+        let p = path_of(n);
+        (GENERATED.contains(&n) || has_cachedir_tag(&here.join(n)))
+            && (!listing.git
+                || listing.ignored.contains(&p)
+                || listing.status.get(&p) == Some(&'?'))
+    };
+    kids.retain(|(n, d, _)| !listing.ignored.contains(&path_of(n)) || (*d && generated(n)));
+    let rows = kids
+        .iter()
+        .skip(skip)
+        .take(limit)
+        .map(|(n, d, l)| TreeRow {
+            depth,
+            name: clean_line(n),
+            dir: *d,
+            status: listing.status.get(&path_of(n)).copied(),
+            link: *l,
+            generated: *d && generated(n),
+            more: 0,
+        })
+        .collect();
+    Some(Children {
+        rows,
+        total: kids.len(),
+    })
+}
+
+/// The "... N more" row that ends a directory cut after its first entries.
+pub fn more_row(depth: u16, left: usize) -> TreeRow {
+    TreeRow {
+        depth,
+        name: format!("\u{2026} {left} more"),
+        more: left,
+        ..Default::default()
+    }
+}
+
+/// [`list_children`] from `skip` for the window: one [`DIR_ROWS`] page, with the "... more" row when cut.
+pub fn children_rows(
+    root: &Path,
+    dir: &str,
+    listing: &Listing,
+    skip: usize,
+) -> Option<Vec<TreeRow>> {
+    let c = list_children(root, dir, listing, skip, DIR_ROWS)?;
+    let left = c.total.saturating_sub(skip + c.rows.len());
+    let depth = c.rows.first().map_or_else(
+        || dir.split('/').filter(|c| !c.is_empty()).count() as u16,
+        |r| r.depth,
+    );
+    let mut rows = c.rows;
+    if left > 0 {
+        rows.push(more_row(depth, left));
+    }
+    Some(rows)
+}
+
+/// Paths of the rows (`dir/sub/file`), in row order.
+pub fn row_paths(d: &ProjectData) -> Vec<String> {
+    let mut stack: Vec<&str> = vec![];
+    d.rows
+        .iter()
+        .map(|r| {
+            stack.truncate(usize::from(r.depth));
+            let p = stack
+                .iter()
+                .copied()
+                .chain([r.name.as_str()])
+                .collect::<Vec<_>>()
+                .join("/");
+            if r.dir {
+                stack.push(&r.name);
+            }
+            p
+        })
+        .collect()
+}
+
+impl ProjectData {
+    fn dir_at(&self, dir: &str) -> Option<usize> {
+        let paths = row_paths(self);
+        (0..self.rows.len()).find(|i| self.rows[*i].dir && paths[*i] == dir)
+    }
+
+    /// Entries of `dir` ("" is the project) that are already listed (the "... more" row not counted): where the
+    /// next page starts.
+    pub fn loaded(&self, dir: &str) -> usize {
+        let Some((start, depth)) = self.span(dir) else {
+            return 0;
+        };
+        self.rows[start..]
+            .iter()
+            .take_while(|r| r.depth >= depth)
+            .filter(|r| r.depth == depth && r.more == 0)
+            .count()
+    }
+
+    /// Where the children of `dir` start in `rows` and their depth.
+    fn span(&self, dir: &str) -> Option<(usize, u16)> {
+        if dir.is_empty() {
+            return Some((0, 0));
+        }
+        let at = self.dir_at(dir)?;
+        Some((at + 1, self.rows[at].depth + 1))
+    }
+
+    /// Lists `kids` as the children of `dir`: instead of what was listed (an opened directory, Refresh), or after
+    /// it (`append`: the page the "... more" row asked for). A directory that is not in the tree changes nothing.
+    pub fn put_children(&mut self, dir: &str, kids: Vec<TreeRow>, append: bool) {
+        let Some((start, depth)) = self.span(dir) else {
+            return;
+        };
+        let end = start
+            + self.rows[start..]
+                .iter()
+                .take_while(|r| r.depth >= depth)
+                .count();
+        let from = if !append {
+            start
+        } else if end > start && self.rows[end - 1].more > 0 && self.rows[end - 1].depth == depth {
+            end - 1
+        } else {
+            end
+        };
+        self.rows.splice(from..end, kids);
+    }
+
+    /// Lists again the directories in `open` (shallow ones first, so a deeper one finds its parent), each with
+    /// `list`; one that is no longer in the tree is skipped.
+    pub fn load_open(
+        &mut self,
+        open: &[String],
+        mut list: impl FnMut(&str) -> Option<Vec<TreeRow>>,
+    ) {
+        let mut open: Vec<&String> = open.iter().collect();
+        open.sort_by_key(|d| (d.matches('/').count(), d.as_str()));
+        for d in open.into_iter().take(MAX_OPEN) {
+            if self.dir_at(d).is_some()
+                && let Some(kids) = list(d)
+            {
+                self.put_children(d, kids, false);
+            }
+        }
+    }
+}
+
+/// The tree of the file explorer, LAZY: the first level of the folder and the directories in `open` (`None`:
+/// the parents of the changed files, for the first look) are listed; every other directory is read when the
+/// person opens it ([`children_rows`]), so a huge `target/` or `node_modules/` never uses up the listing.
+/// `trusted` runs the hardened git for the status letters and the ignored paths; otherwise nothing but the disk
+/// is read (a folder that is not trusted can name programs in its `.git/config`).
+pub fn scan_lazy(cwd: &Path, env: &Env, trusted: bool, open: Option<&[String]>) -> ProjectData {
+    let mut data = ProjectData {
+        loaded: true,
+        ..Default::default()
+    };
+    let git = Git::new(env);
+    if trusted
+        && git
+            .run(cwd, &["rev-parse", "--is-inside-work-tree"], 0)
+            .is_some()
+    {
+        let guards = match git.filter_guards(cwd) {
+            Ok(g) => g,
+            Err(why) => {
+                data.note = Some(format!("{why}; git was not run"));
+                return data;
+            }
+        };
+        let args = [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--ignored",
+            "--ignore-submodules=all",
+        ];
+        if let Some((st, cut)) = git.run_with(cwd, &guards, &args, 0) {
+            data.listing.git = true;
+            data.truncated = cut;
+            for (p, c) in parse_status(&st) {
+                let p = p.trim_end_matches('/').to_string();
+                if c == '!' {
+                    data.listing.ignored.insert(p);
+                } else {
+                    data.listing.status.insert(p, c);
+                }
+            }
+        }
+    }
+    let listing = data.listing.clone();
+    data.rows = children_rows(cwd, "", &listing, 0).unwrap_or_default();
+    let open: Vec<String> = match open {
+        Some(o) => o.to_vec(),
+        None => {
+            // the parents of every changed path, so the first look shows what changed
+            let all: BTreeSet<&str> = listing
+                .status
+                .keys()
+                .flat_map(|p| p.match_indices('/').map(|(i, _)| &p[..i]))
+                .collect();
+            all.into_iter().map(String::from).collect()
+        }
+    };
+    data.load_open(&open, |d| children_rows(cwd, d, &listing, 0));
+    data
+}
+
 /// `git status --porcelain=v1 -z`: `XY path`, and for a rename or a copy (in either column) the
 /// origin follows as an entry of its own, which is not a file of its own.
 fn parse_status(st: &[u8]) -> HashMap<String, char> {
@@ -456,7 +762,9 @@ fn parse_status(st: &[u8]) -> HashMap<String, char> {
         if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
             it.next();
         }
-        let letter = if x == '?' {
+        let letter = if x == '!' {
+            '!' // ignored (only with `--ignored`)
+        } else if x == '?' {
             '?'
         } else if x == 'A' || y == 'A' || x == 'C' || y == 'C' {
             'A'
@@ -565,6 +873,7 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
         diff: all.into_iter().take(MAX_DIFF_LINES).collect(),
         stats,
         truncated,
+        ..Default::default()
     }
 }
 
@@ -1152,5 +1461,193 @@ mod tests {
         );
         assert!(p.rows.is_empty());
         assert!(!marker.exists(), "the evil filter ran");
+    }
+
+    const SIG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n";
+
+    /// crates/x/src/*.rs, a `target/` of 20 000 files with a CACHEDIR.TAG, and a README.
+    fn rust_workspace(w: &Path) {
+        std::fs::create_dir_all(w.join("crates/x/src")).unwrap();
+        for f in ["lib.rs", "a.rs"] {
+            std::fs::write(w.join("crates/x/src").join(f), "x").unwrap();
+        }
+        std::fs::write(w.join("README.md"), "x").unwrap();
+        let deps = w.join("target/debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(w.join("target/CACHEDIR.TAG"), SIG).unwrap();
+        for i in 0..20_000 {
+            std::fs::write(deps.join(format!("o{i}.o")), "").unwrap();
+        }
+    }
+
+    fn names(rows: &[TreeRow]) -> Vec<String> {
+        rows.iter().map(|r| r.name.clone()).collect()
+    }
+
+    fn lazy_checks(w: &Path, trusted: bool) {
+        let t = Instant::now();
+        let mut d = scan_lazy(w, &env(), trusted, Some(&[]));
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "the first scan does not read target: {:?}",
+            t.elapsed()
+        );
+        assert_eq!(names(&d.rows), ["README.md", "crates", "target"]);
+        let target = d.rows.iter().find(|r| r.name == "target").unwrap();
+        assert!(target.dir && target.generated, "{target:?}");
+        assert!(d.rows.len() < 10, "{:?}", names(&d.rows));
+        // opening the directories one after the other shows the files
+        let l = d.listing.clone();
+        for dir in ["crates", "crates/x", "crates/x/src"] {
+            let kids = children_rows(w, dir, &l, 0).unwrap();
+            d.put_children(dir, kids, false);
+        }
+        let paths = row_paths(&d);
+        assert!(
+            paths.contains(&"crates/x/src/lib.rs".to_string()),
+            "{paths:?}"
+        );
+        assert!(paths.contains(&"crates/x/src/a.rs".to_string()));
+        // Refresh: the same directories listed again by one scan
+        let open: Vec<String> = ["crates", "crates/x", "crates/x/src"]
+            .map(String::from)
+            .into();
+        let d2 = scan_lazy(w, &env(), trusted, Some(&open));
+        assert_eq!(row_paths(&d2), paths);
+    }
+
+    #[test]
+    fn a_huge_untracked_target_does_not_use_up_the_listing_without_git() {
+        let d = tempfile::tempdir().unwrap();
+        rust_workspace(d.path());
+        lazy_checks(d.path(), false);
+        lazy_checks(d.path(), true); // trusted, but not a repository: the same
+    }
+
+    #[test]
+    fn a_huge_untracked_target_does_not_use_up_the_listing_in_a_repository() {
+        let d = tempfile::tempdir().unwrap();
+        rust_workspace(d.path());
+        run(d.path(), &["init", "-q"]);
+        lazy_checks(d.path(), true);
+        let g = scan_lazy(d.path(), &env(), true, Some(&[]));
+        assert!(g.listing.git);
+        assert_eq!(
+            g.rows.iter().find(|r| r.name == "target").unwrap().status,
+            Some('?')
+        );
+    }
+
+    #[test]
+    fn ignored_entries_are_hidden_but_an_ignored_build_directory_is_one_closed_row() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        run(w, &["init", "-q"]);
+        std::fs::write(w.join(".gitignore"), "target/\n*.log\nout/\n").unwrap();
+        for dir in ["target", "out", "build", "src"] {
+            std::fs::create_dir(w.join(dir)).unwrap();
+            std::fs::write(w.join(dir).join("f"), "x").unwrap();
+        }
+        std::fs::write(w.join("a.log"), "x").unwrap();
+        std::fs::write(w.join("build/tracked.txt"), "x").unwrap();
+        run(w, &["add", "build", "src", ".gitignore"]);
+        let d = scan_lazy(w, &env(), true, Some(&[]));
+        let row = |n: &str| d.rows.iter().find(|r| r.name == n);
+        assert!(
+            row("a.log").is_none() && row("out").is_none(),
+            "{:?}",
+            names(&d.rows)
+        );
+        assert!(row("target").unwrap().generated);
+        assert!(
+            !row("build").unwrap().generated,
+            "a tracked build/ is ordinary"
+        );
+        assert!(!row("src").unwrap().generated);
+        assert_eq!(row(".gitignore").unwrap().status, Some('A'));
+    }
+
+    #[test]
+    fn a_directory_of_thousands_of_entries_is_paged_by_a_more_row() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        std::fs::create_dir_all(w.join("big")).unwrap();
+        for i in 0..6000 {
+            std::fs::write(w.join(format!("big/f{i:05}")), "").unwrap();
+        }
+        let mut t = scan_lazy(w, &env(), false, Some(&[]));
+        let first = children_rows(w, "big", &t.listing, 0).unwrap();
+        t.put_children("big", first, false);
+        assert_eq!(t.rows.len(), 1 + DIR_ROWS + 1);
+        let last = t.rows.last().unwrap();
+        assert_eq!((last.more, last.depth), (6000 - DIR_ROWS, 1), "{last:?}");
+        assert!(last.name.contains("more"));
+        // the click: the next page goes after the loaded entries and replaces the more row
+        while t.rows.last().is_some_and(|r| r.more > 0) {
+            let kids = children_rows(w, "big", &t.listing, t.loaded("big")).unwrap();
+            t.put_children("big", kids, true);
+        }
+        assert_eq!(t.rows.len(), 1 + 6000);
+        assert_eq!(t.loaded("big"), 6000);
+        assert_eq!(t.rows[6000].name, "f05999");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_listed_as_links_and_never_entered() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path().join("w");
+        let out = d.path().join("out");
+        std::fs::create_dir_all(w.join("sub")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("secret.txt"), "x").unwrap();
+        std::fs::write(w.join("sub/a.rs"), "x").unwrap();
+        std::os::unix::fs::symlink(&out, w.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&w, w.join("sub/loop")).unwrap();
+        std::os::unix::fs::symlink(w.join("sub"), w.join("alias")).unwrap();
+        let t = scan_lazy(&w, &env(), false, Some(&[]));
+        for n in ["escape", "alias"] {
+            let r = t.rows.iter().find(|r| r.name == n).unwrap();
+            assert!(r.link && !r.dir, "{r:?}");
+        }
+        for dir in ["escape", "alias", "escape/x"] {
+            assert!(children_rows(&w, dir, &t.listing, 0).is_none(), "{dir}");
+        }
+        let sub = children_rows(&w, "sub", &t.listing, 0).unwrap();
+        assert_eq!(names(&sub), ["a.rs", "loop"]);
+        assert!(sub[1].link && !sub[1].dir);
+        assert!(children_rows(&w, "sub/loop", &t.listing, 0).is_none());
+        for bad in ["..", "sub/../..", ".git"] {
+            assert!(children_rows(&w, bad, &t.listing, 0).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_deleted_tracked_file_and_a_changed_one_are_listed_and_their_parents_open() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        run(w, &["init", "-q"]);
+        std::fs::create_dir_all(w.join("src/deep")).unwrap();
+        std::fs::write(w.join("src/a.rs"), "one\n").unwrap();
+        std::fs::write(w.join("src/gone.rs"), "x\n").unwrap();
+        std::fs::write(w.join("src/deep/b.rs"), "x\n").unwrap();
+        std::fs::write(w.join("top.txt"), "x\n").unwrap();
+        run(w, &["add", "."]);
+        run(w, &["commit", "-qm", "x"]);
+        std::fs::write(w.join("src/deep/b.rs"), "two\n").unwrap();
+        std::fs::remove_file(w.join("src/gone.rs")).unwrap();
+        let t = scan_lazy(w, &env(), true, None);
+        let seen: Vec<_> = t.rows.iter().map(|r| (r.name.as_str(), r.status)).collect();
+        assert_eq!(
+            seen,
+            [
+                ("src", None),
+                ("a.rs", None),
+                ("deep", None),
+                ("b.rs", Some('M')),
+                ("gone.rs", Some('D')),
+                ("top.txt", None)
+            ]
+        );
     }
 }
