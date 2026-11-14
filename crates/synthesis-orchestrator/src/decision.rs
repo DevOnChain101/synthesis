@@ -8,6 +8,7 @@
 //! stripped of control characters, and it never carries a pre-selected choice.
 
 use sha2::{Digest, Sha256};
+use synthesis_core::outcome::hidden_char;
 use synthesis_events::{Event, Record};
 use synthesis_session::outcome::{
     AttemptRecord, DecisionRecord, NewDecision, OutcomeWriter, WorkItemRecord,
@@ -20,24 +21,8 @@ use crate::compile_envelope;
 const MAX_TEXT: usize = 300;
 const MAX_RULES: usize = 10;
 
-/// Control characters and the invisible or direction-changing ones (bidi, zero-width, line and
-/// paragraph separators, the tag block): text from the model must not rewrite what a person reads.
-fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{E0000}'..='\u{E007F}'
-        )
-}
-
 fn clean(s: &str) -> String {
-    let t: String = s.chars().filter(|c| !hidden(*c)).collect();
+    let t: String = s.chars().filter(|c| !hidden_char(*c)).collect();
     if t.chars().count() > MAX_TEXT {
         format!("{}...", t.chars().take(MAX_TEXT).collect::<String>())
     } else {
@@ -74,7 +59,19 @@ struct Blocked {
 }
 
 fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreError> {
-    let records = store.reader()?.read_events(session_id, 0, 20_000)?;
+    // all of the session's events, a page at a time (a long session must not lose its `task.ended`)
+    let reader = store.reader()?;
+    let mut records = vec![];
+    let mut cursor = 0u64;
+    loop {
+        let page = reader.read_events(session_id, cursor, 5_000)?;
+        let Some(last) = page.last() else { break };
+        cursor = match last {
+            Record::Known(e) => e.seq,
+            Record::Unknown(r) => r.seq,
+        };
+        records.extend(page);
+    }
     let (mut ended, mut question) = (None, None);
     let mut requested = std::collections::BTreeMap::new();
     let (mut asked, mut denied) = (vec![], vec![]);
@@ -131,24 +128,50 @@ fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreE
     }))
 }
 
+/// `*` within a segment, `**` across segments, `?` one character.
+fn glob_matches(pat: &[u8], text: &[u8]) -> bool {
+    match pat {
+        [] => text.is_empty(),
+        [b'*', b'*', rest @ ..] => (0..=text.len()).any(|i| glob_matches(rest, &text[i..])),
+        [b'*', rest @ ..] => {
+            let end = text.iter().position(|c| *c == b'/').unwrap_or(text.len());
+            (0..=end).any(|i| glob_matches(rest, &text[i..]))
+        }
+        [b'?', rest @ ..] => !text.is_empty() && text[0] != b'/' && glob_matches(rest, &text[1..]),
+        [c, rest @ ..] => text.first() == Some(c) && glob_matches(rest, &text[1..]),
+    }
+}
+
 /// Is the rule the worker needed one that must not be offered as a grant: covered by a deny rule
-/// of the compiled contract (identical, or a bare deny of the tool; the edit tools count as one
-/// family) or a tool that does not exist in an attempt.
+/// of the compiled contract or a tool that does not exist in an attempt? Covered means: identical;
+/// a bare deny of the tool (the edit tools count as one family); a path deny whose glob matches
+/// the needed path (`Edit(/s/**)` covers `Edit(/s/k)`); a command-prefix deny (`Bash(git push:*)`
+/// covers `Bash(git push origin:*)`). This is a best-effort FILTER for what the brief offers, not
+/// an authority: PR-10 must check a grant against the contract itself.
 fn rule_denied(deny: &[String], rule: &str) -> bool {
     let family = |t: &str| match t {
         "Write" | "MultiEdit" | "NotebookEdit" => "Edit".to_owned(),
         t => t.to_owned(),
     };
-    let (tool, _) = rule.split_once('(').unwrap_or((rule, ""));
+    let split = |r: &str| -> (String, String) {
+        let (t, rest) = r.split_once('(').unwrap_or((r, ""));
+        (family(t), rest.strip_suffix(')').unwrap_or(rest).to_owned())
+    };
+    let (tool, need) = split(rule);
     // an attempt has no browser and no MCP tools: a grant could never make them exist
     if tool.starts_with("browser_") || tool.starts_with("mcp__") {
         return true;
     }
     deny.iter().any(|d| {
-        d == rule || {
-            let (dt, spec) = d.split_once('(').unwrap_or((d, ""));
-            spec.is_empty() && family(dt) == family(tool)
-        }
+        let (dt, spec) = split(d);
+        d == rule
+            || (dt == tool
+                && (spec.is_empty()
+                    || spec == need
+                    || glob_matches(spec.as_bytes(), need.as_bytes())
+                    || spec
+                        .strip_suffix(":*")
+                        .is_some_and(|prefix| need.starts_with(prefix))))
     })
 }
 
@@ -188,7 +211,11 @@ pub fn record_blocked_decision(
     let denied_by_contract =
         |rule: &str| compiled.as_ref().is_none_or(|c| rule_denied(&c.deny, rule));
     let rules: Vec<String> = b.needed.iter().take(MAX_RULES).cloned().collect();
-    let grantable = !rules.is_empty() && !rules.iter().any(|r| denied_by_contract(r));
+    // every needed rule is checked, not only the first few shown; and a grant is not offered for
+    // a list too long to review
+    let grantable = !b.needed.is_empty()
+        && b.needed.len() <= MAX_RULES
+        && !b.needed.iter().any(|r| denied_by_contract(r));
     let shown_rules: Vec<String> = rules.iter().map(|r| clean(r)).collect();
     let refused: Vec<String> = b
         .asked
@@ -332,6 +359,18 @@ mod tests {
         assert!(rule_denied(&deny, "Edit(/src/x)"));
         assert!(rule_denied(&deny, "NotebookEdit(/n)"));
         assert!(rule_denied(&deny, "Read(/s/**)"));
+        // path and command-prefix coverage
+        assert!(rule_denied(&deny, "Read(/s/deep/k)"));
+        assert!(rule_denied(&deny, "Bash(git push origin main:*)"));
+        assert!(!rule_denied(&deny, "Read(/t/k)"));
+        assert!(!rule_denied(&deny, "Bash(git status:*)"));
+        let globs: Vec<String> = vec!["Edit(/src/*.rs)".into(), "Read(/a/**/k)".into()];
+        assert!(rule_denied(&globs, "Write(/src/lib.rs)"));
+        assert!(
+            !rule_denied(&globs, "Write(/src/sub/lib.rs)"),
+            "* stays in a segment"
+        );
+        assert!(rule_denied(&globs, "Read(/a/b/c/k)"));
         assert!(!rule_denied(&deny, "Read(/other)"));
         assert!(!rule_denied(&deny, "Bash(cargo test:*)"));
         assert!(rule_denied(&deny, "browser_navigate(domain:x)"));

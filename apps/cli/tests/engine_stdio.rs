@@ -578,9 +578,17 @@ fn start_refuses_a_relative_or_missing_cwd_and_a_new_session_keeps_the_folder() 
     let ws = e.ws.to_str().unwrap().to_string();
     let id = e.call("start", json!({ "cwd": ws }));
     let started = e.result(id).1["ok"].clone();
-    assert_eq!(started["cwd"], ws.as_str(), "{started}");
+    // the test's folder is canonical (`\\?\C:\...` on Windows); the engine reports the plain form
+    let plain = |v: &Value| {
+        v.as_str()
+            .unwrap_or_default()
+            .trim_start_matches(r"\\?\")
+            .to_string()
+    };
+    let want = ws.trim_start_matches(r"\\?\").to_string();
+    assert_eq!(plain(&started["cwd"]), want, "{started}");
     let v = e.ok("session.new", Value::Null);
-    assert_eq!(v["cwd"], ws.as_str(), "{v}");
+    assert_eq!(plain(&v["cwd"]), want, "{v}");
 }
 
 #[test]

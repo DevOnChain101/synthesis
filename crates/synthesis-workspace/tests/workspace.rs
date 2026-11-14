@@ -949,6 +949,18 @@ fn tampered_admin_files_and_pointer_forms_are_refused_without_running_git() {
 
 // ------------------------------------------------------------ attempt allocation (PR-04)
 
+/// `git worktree list` prints forward slashes and no `\\?\` prefix on Windows; compare the way
+/// the OS does (separators, verbatim prefix, case on Windows).
+fn norm_path(s: &str) -> String {
+    let t = s.replace('\\', "/");
+    let t = t.strip_prefix("//?/").unwrap_or(&t).to_string();
+    if cfg!(windows) { t.to_lowercase() } else { t }
+}
+
+fn has_path(listing: &str, p: &Path) -> bool {
+    norm_path(listing).contains(&norm_path(&p.to_string_lossy()))
+}
+
 fn art(f: &Fx, id: &str) -> PathBuf {
     f.base.join("art").join(id)
 }
@@ -1317,7 +1329,7 @@ fn reconcile_never_drops_the_registration_of_other_worktrees() {
         .unwrap();
     assert_eq!(o, Origin::Created);
     let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
-    assert!(list.contains(other_dir.to_str().unwrap()), "{list}");
+    assert!(has_path(&list, &other_dir), "{list}");
     assert!(list.contains("user-wt"), "{list}");
     // this attempt's own stale entry (its directory deleted by hand) is cleared and redone
     let own = f.base.join("never");
@@ -1341,7 +1353,7 @@ fn reconcile_never_drops_the_registration_of_other_worktrees() {
         .count();
     assert_eq!(entries, 1, "{list}");
     assert!(
-        list.contains(other_dir.to_str().unwrap()),
+        has_path(&list, &other_dir),
         "other registrations still there"
     );
 }

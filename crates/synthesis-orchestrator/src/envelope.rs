@@ -14,6 +14,12 @@
 //! `src` allows only a file named `src`; write `src/**` for a directory. A `denied_paths` entry
 //! that does not end in `**` denies the path and everything under it.
 //!
+//! `*` stays within a segment and `**` crosses segments; an entry such as `*.lock` or `.env`
+//! matches only at the worktree root (write `**/*.lock`, `**/.env` for any depth), and
+//! `src/**/x` also matches `src/ax` (the engine's `**/` is a prefix glob). Only printable ASCII
+//! is accepted; `[ ] { } !` are refused (the engine treats them as literals, so a deny using them
+//! would cover nothing); non-ASCII file names need a future explicit escape syntax.
+//!
 //! Residuals, stated: `repo.read: deny` leaves read-only shell commands (`cat`, `ls`) that the
 //! engine auto-allows; reads of a denied path through an interpreter (`python -c`, `node -e`)
 //! are not parsed; `secrets.read: deny` covers five path patterns, not every secret store. The OS
@@ -84,8 +90,10 @@ const TEST_RUNNERS: [&str; 14] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledEnvelope {
-    /// Sorted, deduplicated.
+    /// Sorted, deduplicated: the edit rules for the allowed paths and the test-command rules.
     pub allow: Vec<String>,
+    /// The entries of `allow` that come from the user's test commands (not from the envelope).
+    pub test_rules: Vec<String>,
     pub deny: Vec<String>,
     pub network: Network,
 }
@@ -94,11 +102,12 @@ impl CompiledEnvelope {
     /// Permission mode of every attempt (see the module comment).
     pub const MODE: &'static str = "default";
 
-    /// Hash of what the envelope compiled to (not of the user's test commands): the decision
-    /// binding names it so a decision made under another envelope is stale.
+    /// Hash of what the ENVELOPE compiled to: the test-command rules (the user's settings, not the
+    /// contract) are left out, so the hash is the same whether or not test commands were given.
+    /// A decision binding names it so a decision made under another envelope is stale.
     pub fn policy_hash(&self) -> String {
         let mut h = Sha256::new();
-        for l in &self.allow {
+        for l in self.allow.iter().filter(|l| !self.test_rules.contains(l)) {
             h.update(format!("allow {l}\n"));
         }
         for l in &self.deny {
@@ -135,7 +144,9 @@ impl CompiledEnvelope {
 fn rule_path(p: &str) -> Result<String, CompileError> {
     let bad = p.is_empty()
         || p.starts_with('/')
-        || p.contains(['(', ')', '\\'])
+        || !p.chars().all(|c| {
+            matches!(c, ' '..='~') && !matches!(c, '(' | ')' | '\\' | '[' | ']' | '{' | '}' | '!')
+        })
         || p.split('/').any(|s| s.is_empty() || s == "." || s == "..");
     let rule = format!("/{p}");
     if bad || rule.starts_with("//") {
@@ -165,6 +176,7 @@ pub fn compile_envelope(
 ) -> Result<CompiledEnvelope, CompileError> {
     validate_envelope(env)?;
     let mut allow = BTreeSet::new();
+    let mut test_rules = BTreeSet::new();
     let mut deny = BTreeSet::new();
     let mode = |c| env.mode(c);
     let add = |set: &mut BTreeSet<String>, rules: &[&str]| {
@@ -201,7 +213,9 @@ pub fn compile_envelope(
     }
     if mode(Capability::TestsRun) == CapabilityMode::Allow {
         for c in test_commands {
-            allow.insert(test_rule(c)?);
+            let r = test_rule(c)?;
+            test_rules.insert(r.clone());
+            allow.insert(r);
         }
     }
     // irreversible: `deny` (or unlisted) gets explicit deny rules; `approval_required` is left to
@@ -246,6 +260,7 @@ pub fn compile_envelope(
     };
     Ok(CompiledEnvelope {
         allow: allow.into_iter().collect(),
+        test_rules: test_rules.into_iter().collect(),
         deny: deny.into_iter().collect(),
         network,
     })

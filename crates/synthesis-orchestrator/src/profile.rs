@@ -69,8 +69,10 @@ pub struct Profile {
 impl Profile {
     /// The caps are the smallest of the contract's and the settings' (the per-attempt cap, and the
     /// outcome cap as an upper bound, so a cap always exists); the wall cap is the smaller of the
-    /// two or 30 minutes. `acceptEdits` when the envelope allows writing, else `default`; never
-    /// `auto` (no model is the authority) and never `bypassPermissions`.
+    /// two or 30 minutes. The permission mode is always `default` (see
+    /// [`CompiledEnvelope::MODE`]: writes are allowed by explicit rules for the allowed paths,
+    /// never by `acceptEdits`); never `auto` (no model is the authority) and never
+    /// `bypassPermissions`.
     pub fn build(
         program: PathBuf,
         env: &AttemptEnv,

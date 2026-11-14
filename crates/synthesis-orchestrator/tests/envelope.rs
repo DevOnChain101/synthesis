@@ -441,6 +441,24 @@ fn hostile_path_patterns_are_refused_twice() {
         "src/\u{FEFF}x",
         "src/\u{E0041}x",
         "src/(x)",
+        // not part of the glob language: the engine treats these as literals, a deny would cover nothing
+        "{secrets,keys}/**",
+        "cfg/[a-z]*.pem",
+        "src/[x]",
+        "!src/**",
+        "src/{a}",
+        // anything outside printable ASCII: invisible, lookalike or homoglyph
+        "src/a\u{00AD}b",
+        "src/\u{FF0A}",
+        "src/\u{0455}rc/**",
+        "src/a\u{FE0F}b",
+        "src/a\u{3164}b",
+        "src/a\u{115F}b",
+        "src/a\u{061C}b",
+        "src/a\u{2063}b",
+        "src/\u{00E9}",
+        " src",
+        "src ",
         "",
     ];
     for p in bad {
@@ -506,4 +524,53 @@ fn the_compiled_rules_cannot_reach_outside_the_worktree_and_directory_denies_cov
             "{f}"
         );
     }
+}
+
+/// The `LS(...)` deny rules are not redundant: a `Read(...)` deny alone leaves listing the
+/// directory allowed (checked against the engine).
+#[cfg(unix)]
+#[test]
+fn listing_a_denied_directory_is_denied_only_because_of_the_ls_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (cwd, home) = (base.join("wt"), base.join("home"));
+    std::fs::create_dir_all(cwd.join("src/secret")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let with = |deny: &[&str]| CompiledEnvelope {
+        allow: vec![],
+        test_rules: vec![],
+        deny: deny.iter().map(|s| s.to_string()).collect(),
+        network: Network::Deny,
+    };
+    let ls = |c: &CompiledEnvelope| {
+        verdict(
+            &engine(c, &cwd, &home),
+            "LS",
+            json!({"path": cwd.join("src/secret")}),
+        )
+    };
+    assert_eq!(ls(&with(&["Read(/src/secret/**)"])), Decision::Allow);
+    assert_eq!(ls(&with(&["LS(/src/secret/**)"])), Decision::Deny);
+    let mut e = envelope(&[(Capability::RepoRead, CapabilityMode::Allow)]);
+    e.denied_paths = vec!["src/secret".into()];
+    assert_eq!(ls(&compile_envelope(&e, &[]).unwrap()), Decision::Deny);
+}
+
+/// The policy hash is of the envelope: the user's test commands do not change it.
+#[test]
+fn the_policy_hash_ignores_the_users_test_commands() {
+    use Capability::*;
+    use CapabilityMode::*;
+    let e = envelope(&[(RepoRead, Allow), (RepoWrite, Allow), (TestsRun, Allow)]);
+    let none = compile_envelope(&e, &[]).unwrap();
+    let some = compile_envelope(&e, &["cargo test".into(), "pytest".into()]).unwrap();
+    assert_ne!(none.allow, some.allow, "the rules do differ");
+    assert_eq!(some.test_rules, ["Bash(cargo test:*)", "Bash(pytest:*)"]);
+    assert_eq!(none.policy_hash(), some.policy_hash());
+    let mut other = e.clone();
+    other.allowed_paths.push("docs/**".into());
+    assert_ne!(
+        none.policy_hash(),
+        compile_envelope(&other, &[]).unwrap().policy_hash()
+    );
 }

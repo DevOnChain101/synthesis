@@ -613,7 +613,10 @@ impl WorktreeManager {
                 })
             };
             let Some(p) = field("worktree") else { continue };
-            let same = synthesis_core::canonicalize(&p).ok() == want || Path::new(&p) == path;
+            // a directory that is missing right now cannot be canonicalised: compare the text the
+            // way the OS does (git prints forward slashes, no verbatim prefix)
+            let same = synthesis_core::canonicalize(&p).ok() == want
+                || lexical(&p) == lexical(&path.to_string_lossy());
             if same {
                 return Ok(Some((field("HEAD").unwrap_or_default(), field("branch"))));
             }
@@ -1505,6 +1508,17 @@ fn safe_rel(p: &str) -> bool {
         && Path::new(p)
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// A path as text for comparison only: on Windows separators, the verbatim prefix and case are
+/// not significant; elsewhere the text is the path.
+fn lexical(p: &str) -> String {
+    if cfg!(windows) {
+        let t = p.replace('\\', "/");
+        t.strip_prefix("//?/").unwrap_or(&t).to_lowercase()
+    } else {
+        p.to_owned()
+    }
 }
 
 #[cfg(test)]

@@ -242,28 +242,54 @@ impl std::fmt::Display for EnvelopeError {
 }
 impl std::error::Error for EnvelopeError {}
 
-/// Characters that look like a path separator or hide text (bidi controls, zero-width, tags): a
-/// pattern with one never matches the path it seems to name, which fails open for a deny.
-fn lookalike_or_invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2044}' | '\u{2215}' | '\u{2216}' | '\u{29F5}' | '\u{29F8}' | '\u{2571}' | '\u{FE68}'
-            | '\u{FF0F}' | '\u{FF3C}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}' | '\u{2060}'
-            | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-            | '\u{E0000}'..='\u{E007F}'
-    )
+/// Control characters and the invisible or direction-changing ones (soft hyphen, bidi, zero-width,
+/// variation selectors, fillers, line and paragraph separators, the tag block): text from a model
+/// must not rewrite what a person reads. One list, used for decision briefs; path patterns use an
+/// allow rule instead (see [`valid_pattern`]).
+pub fn hidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{17B4}'
+                | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E01EF}'
+        )
 }
 
-/// A worktree-relative pattern: `/`-separated segments, each non-empty and neither `.` nor
-/// `..` (so `.//x`, `a//b`, `./x`, `x/` and `x/.` are refused: a leading empty segment would
-/// become an absolute path in a permission rule).
+/// A worktree-relative pattern. Only printable ASCII is accepted: a deny-list of lookalike and
+/// invisible characters can never be complete (a fullwidth star or a Cyrillic letter would compile
+/// to a rule that matches nothing). Non-ASCII file names need a future, explicit escape syntax.
+/// The glob language is `*`, `**` and `?` only: `[ ] { } !` are refused because the permission
+/// engine treats them as literals, so a pattern using them would deny nothing. Segments between
+/// `/` must be non-empty and neither `.` nor `..` (`.//x`, `a//b`, `./x`, `x/` are refused: a
+/// leading empty segment would become an absolute path in a permission rule). Parentheses
+/// (rule syntax) and backslash (Windows separator) are refused.
 fn valid_pattern(p: &str) -> bool {
     let bytes = p.as_bytes();
     !p.is_empty()
         && p.chars().count() <= MAX_PATH_PATTERN_CHARS
-        && !p.chars().any(|c| c.is_control() || matches!(c, '\\' | '(' | ')') || lookalike_or_invisible(c))
+        && p.chars().all(|c| {
+            matches!(c, ' '..='~')
+                && !matches!(c, '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '!')
+        })
         && !p.starts_with('/')
         && !p.starts_with('~')
+        && !p.starts_with(' ')
+        && !p.ends_with(' ')
         // `C:...` drive paths
         && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
         && p.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
