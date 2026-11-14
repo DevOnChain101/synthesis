@@ -125,7 +125,7 @@ const USER_TOOL_DIRS: &[&str] = &[
     ".asdf/shims",
 ];
 
-/// `path` with the existing [`USER_TOOL_DIRS`] of `home` appended (never prepended: a system program is never
+/// `path` with the existing `USER_TOOL_DIRS` of `home` appended (never prepended: a system program is never
 /// shadowed). A fixed name, not a PATH entry the project or the environment supplied; only a real directory
 /// that resolves inside `home` and, on unix, that no other user can write to.
 pub fn with_user_tool_dirs(path: &str, home: &std::path::Path) -> String {
