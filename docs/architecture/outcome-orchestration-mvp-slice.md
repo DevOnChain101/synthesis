@@ -1,6 +1,8 @@
 # Outcome orchestration: vertical-slice MVP
 
-Status: Proposed (2026-11-14). Implementation starts only after the owner accepts ADR-016..021 (plan section 7). This slice is the design's section 31 scenario, adapted to this repo. It builds on, and does not repeat, the [ADRs](./adr/README.md), the [plan](./outcome-orchestration-plan.md) (PR order) and the [acceptance tests](../testing/outcome-orchestration-acceptance.md) (test specs).
+Status: Proposed (2026-11-14, rev 2). Implementation starts only after the owner accepts ADR-016..021 (plan section 7). This slice is the design's section 31 scenario, adapted to this repo. It builds on, and does not repeat, the [ADRs](./adr/README.md), the [plan](./outcome-orchestration-plan.md) (PR order) and the [acceptance tests](../testing/outcome-orchestration-acceptance.md) (test specs).
+
+**What the MVP proves (rev 2):** the full outcome lifecycle through the **CLI and the protocol** (owner points 13, 14): core crates, protocol v4 with the client library, the standalone orchestrator process, and the `synt outcome ...` commands as thin clients. The TUI is the next slice and the Super Agent is specified (ADR-021) but sliced later; nothing in the MVP depends on either. Every CLI command below is one protocol call (`synthesis_app::outcome_client`); the CLI holds no outcome logic.
 
 Scenario goal: "Implement a small endpoint with tests, without changing the public contract or deployment configuration."
 
@@ -10,9 +12,11 @@ Outcome, contract, plan, **work item** (the design's task), attempt, control ses
 
 ## 2. Scenario steps mapped to the repo
 
+Surface column = the CLI command and, after it, the protocol method of ADR-021 it wraps (`create` -> `outcome.create`, `approve` -> `outcome.contract.approve`, `start` -> `outcome.start`, `status` -> `outcome.get` + `events.subscribe`, `decisions` -> `decision.list`, `resolve` -> `decision.resolve`, `inspect` -> `attempt.inspect`/`evidence.get`, `resume` -> `outcome.resume`, `enable` -> `orchestrator.enable`).
+
 Work item kinds in MVP: `agent` (runs an attempt = a governed session in a worktree) and `verify` (host-side independent runner, no model, no session).
 
-| Step | What happens | Crates and types | Tables written | Events (additive, `v` = 1) | Surface |
+| Step | What happens | Crates and types | Tables written | Events (additive, `v` = 1) | CLI command (thin; the protocol method it calls) |
 |---|---|---|---|---|---|
 | 1 | Person creates a contract with criteria and an envelope (read, write `src/**` and `tests/**`, tests, no network, no secrets, no push, no deploy) and approves it | `synthesis_core::outcome::{Contract, Envelope, validate_envelope}`; `synthesis_orchestrator::contract` | `outcomes`, `contracts`, control row in `sessions(kind='outcome')` | `outcome.created`, `outcome.contract_approved {version, hash}` | `synt outcome create --goal ... --criteria-file ... --envelope-file ...`, `synt outcome approve ID --version 1 --hash H` |
 | 2 | Stub planner emits `inspect (agent, read-only) -> implement (agent, write) -> test (verify)` and the coverage map; validator checks it | `synthesis_core::outcome::{Plan, validate_plan}`; `synthesis_orchestrator::planner::StubPlanner` | `plans`, `work_items`, `work_item_deps` | `plan.created {version, items}` | `synt outcome plan ID` (print) |
@@ -103,6 +107,16 @@ CREATE TABLE grants(                                                       -- cr
   id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES decisions(id),
   action_hash TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT);
 
+CREATE TABLE outcome_commands(                                             -- every mutation from any surface (ADR-016 item 11)
+  id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
+  idempotency_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,               -- 'decision.resolve' | 'outcome.start' | 'outcome.cancel' | ...
+  params TEXT NOT NULL CHECK(json_valid(params)),
+  expected_revision INTEGER, from_surface TEXT NOT NULL,                  -- 'cli' | 'tui' | 'superagent'
+  state TEXT NOT NULL,                                                    -- 'queued' | 'applied' | 'stale' | 'already_resolved' | 'denied'
+  result TEXT CHECK(result IS NULL OR json_valid(result)),
+  created_at TEXT NOT NULL, applied_at TEXT);
+CREATE INDEX outcome_commands_queue ON outcome_commands(state, created_at);
+
 CREATE TABLE outbox(
   id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
   idempotency_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,               -- 'worktree.create' | 'worktree.cleanup' | 'verifier.run'
@@ -113,6 +127,8 @@ CREATE INDEX work_items_state ON work_items(outcome_id, state);
 ```
 
 Not in v5 (added by the feature that needs them): `inbox`, `resource_locks`, `policy_versions` (the MVP records the policy hash inside events and bindings), `attention_events`. The `grants` table may be left out of the first migration if no MVP step uses it; including it now avoids a v6 for PR-10 (decision for the implementer, not blocking).
+
+`needs_you` (ADR-021) is derived from `decisions.state`, `outcomes.state` and an acknowledgement stored in `outcome_commands` (`outcome.ack`); there is no separate attention table in the MVP.
 
 Transition API (pure SQL in `synthesis-session::outcome`): `transition(table, id, expected_revision, to_state, events, outbox) -> Result<NewRevision, Conflict>` executed in one IMMEDIATE transaction through the existing append path (ADR-016 item 3). Existing tables are untouched apart from `sessions.kind`.
 
@@ -187,12 +203,33 @@ sequenceDiagram
   O->>S: outcome.recovered report
 ```
 
+## 6b. Sequence: two surfaces, owner outlives both
+
+```mermaid
+sequenceDiagram
+  participant C1 as Surface 1 (CLI)
+  participant O as Orchestrator process (owner of the outcome)
+  participant S as synt.db
+  participant C2 as Surface 2 (later: TUI)
+  participant N as notify hook
+  C1->>O: outcome.start (auto-starts O if absent; lock decides ownership)
+  O->>S: command row applied, attempts run
+  C1--xO: surface closes (terminal exits)
+  Note over O: attempts continue, no cancel
+  O->>S: decision Pending
+  O->>N: decision.created {outcome_id, decision_id, kind} (ids and codes only)
+  C2->>O: outcome.list (needs_you: 1), events.subscribe after_event_id
+  C2->>O: decision.resolve(expected_revision)
+  O->>S: CAS: applied (a concurrent resolve from C1 gets already_resolved)
+  O-->>C2: applied
+```
+
 ## 7. Cut from the MVP (and why)
 
 - Merge, push, any external write (D8); the MVP stops at a branch and a patch.
 - Model planner and replanner; plan diff and impact analysis (stub planner only; contract or plan change needs a new version and re-approval).
-- Desktop UI and the single inspector (PR-12); the CLI and protocol v4 come first.
-- Inbox, GitHub and external events (AC-14); remote workers; daemon.
+- TUI surface (PR-14) and Super Agent surface (PR-15, needs the owner's design); the shared view models and inspector tab set exist (PR-11) but only the CLI renders them. The CLI-side second client for race tests is a protocol test, not a second UI.
+- Inbox, GitHub and external events (AC-14); remote workers.
 - Resource locks beyond a single orchestrator (no integration step yet), watchdog, Inline+Spill context.
 - Auto judge, MCP servers, browser in attempts.
 - Native Windows execution (WSL only).
@@ -201,9 +238,9 @@ sequenceDiagram
 
 ## 8. Definition of done
 
-1. All of PR-S1, PR-01, PR-02, PR-04, PR-05, PR-06, PR-07, PR-08, PR-09, PR-10, PR-11 merged, behind `synt.outcomes.enabled` (default off), CI `ci-ok` green on macOS, Ubuntu, Windows.
-2. The 11-step scenario runs as one e2e test (`apps/cli/tests/outcome_e2e.rs::mvp_scenario`) with the scripted model on macOS and Ubuntu, including a kill -9 at three points (step 11).
-3. AC-01, AC-02, AC-03, AC-04, AC-05, AC-06, AC-07, AC-08, AC-09, AC-10 (data), AC-12, AC-13, AC-15 pass as specified in the acceptance document; AC-11 passes at view-model level; AC-14 is explicitly deferred.
+1. All of PR-S1, PR-01, PR-02, PR-04, PR-05, PR-06, PR-07, PR-08, PR-09, PR-10, PR-11, PR-12, PR-13 merged, behind `synt.orchestrator.enabled` (default off), CI `ci-ok` green on macOS, Ubuntu, Windows.
+2. The 11-step scenario runs as one protocol-level test (`crates/synthesis-app/tests/outcome_proto.rs::mvp_scenario`, through `outcome_client`) with the scripted model on macOS and Ubuntu, including a kill -9 of the orchestrator process at three points (step 11) and a surface disconnect that does not cancel (MS-01); a thin CLI test (`apps/cli/tests/outcome_cmds.rs`) proves command dispatch and rendering only.
+3. Multi-surface tests MS-01..MS-13 (acceptance section 3b) pass, with a second client standing in for the TUI. AC-01, AC-02, AC-03, AC-04, AC-05, AC-06, AC-07, AC-08, AC-09, AC-10 (data), AC-12, AC-13, AC-15 pass as specified in the acceptance document; AC-11 passes at view-model level; AC-14 is explicitly deferred.
 4. Security rows T-01..T-14, T-16, T-17, T-24, T-27, T-28 pass; T-19, T-21 (Linux), T-23 are recorded as known gaps with the owner's acknowledgement.
 5. Security review completed for PR-S1, PR-08, PR-09, PR-10 with findings fixed or accepted in writing.
 6. `synt sessions verify` verifies the control session; a tampered outcome event is detected.

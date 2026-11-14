@@ -1,6 +1,6 @@
 # Outcome orchestration: threat model
 
-Status: Proposed (2026-11-14). Extends the threat model of `docs/SECURITY.md` (prompt injection, malicious repository, over-eager model; out of scope: malicious local user or root, compromised provider, a process that already escaped the sandbox, kernel exploits, side channels). Test specs for every row are in [acceptance](../testing/outcome-orchestration-acceptance.md); decisions in [ADR-018](./adr/ADR-018-execution-isolation.md), [ADR-019](./adr/ADR-019-outcome-policy.md), [ADR-020](./adr/ADR-020-outcome-verification.md).
+Status: Proposed (2026-11-14, rev 2: three surfaces, standalone orchestrator). Extends the threat model of `docs/SECURITY.md` (prompt injection, malicious repository, over-eager model; out of scope: malicious local user or root, compromised provider, a process that already escaped the sandbox, kernel exploits, side channels). Test specs for every row are in [acceptance](../testing/outcome-orchestration-acceptance.md); decisions in [ADR-018](./adr/ADR-018-execution-isolation.md), [ADR-019](./adr/ADR-019-outcome-policy.md), [ADR-020](./adr/ADR-020-outcome-verification.md).
 
 Status vocabulary: **Enforced** = exists today and a test covers it (cited); **Partial** = exists with a stated limit; **Planned PR-x** = the mitigation is part of that PR; **Gap** = known, not mitigated by this program (owner-accepted or later). Nothing was executed for this document; "tested" means the cited test exists at b230f4df.
 
@@ -21,8 +21,9 @@ Status vocabulary: **Enforced** = exists today and a test covers it (cited); **P
 
 | Actor | Trust |
 |---|---|
-| Person at the CLI/desktop | Trusted; the only source of approvals |
-| Orchestrator (host process) | Trusted code, runs as the user; **not** a model |
+| Person at a surface (CLI, TUI, Super Agent) | Trusted; the only source of approvals |
+| Surface process (CLI, desktop) | Trusted code but **thin**: renders, sends commands; holds no authority of its own and no database write path to aggregates |
+| Standalone orchestrator process | Trusted code, same OS user; owns outcomes through the control-session lock |
 | Attempt (agent session + its commands) | Untrusted: the model obeys injected text; commands run in the sandbox as the same OS user |
 | Repository content, PR/issue text, tool output, MCP results, web pages | Untrusted data, never authority (`docs/SECURITY.md:12`) |
 | Independent runner | Trusted code running untrusted project code in the sandbox |
@@ -35,8 +36,8 @@ Status vocabulary: **Enforced** = exists today and a test covers it (cited); **P
 ```mermaid
 flowchart LR
   subgraph HOST[Host process, trusted code]
-    UI[CLI / desktop / engine protocol]
-    ORCH[Orchestrator + gateway]
+    UI[Surfaces: CLI, TUI, Super Agent]
+    ORCH[Orchestrator process + gateway]
     VER[Independent runner]
     DB[(synt.db + chain.key)]
   end
@@ -46,7 +47,7 @@ flowchart LR
   REPO[(Repo content: untrusted data)]
   PROV[Model provider]
   NET[Network via egress proxy]
-  UI -- B1 person decisions --> ORCH
+  UI -- B1 person, B6 protocol v4 over local endpoint --> ORCH
   ORCH --> DB
   ORCH -- B2 launch profile, no input channel --> ATT
   ATT -- events, artifacts, exit status --> ORCH
@@ -57,7 +58,7 @@ flowchart LR
   VER -- B5 evidence rows written by host only --> DB
 ```
 
-Boundaries: B1 person to host (approvals only here); B2 host to attempt (sandbox, no database path, no gateway channel); B3 attempt to provider (keys stay in the host process); B4 attempt to network (deny by default, proxy allow-list); B5 runner to store (host writes evidence, never the attempt). Everything on the sandbox side of B2 is untrusted even though the OS user is the same, which is why file-system confinement strength per platform decides several rows.
+Boundaries: B1 person to surface (approvals originate only here); B6 surface to orchestrator (protocol v4: stdio, in-process for tests, or same-user socket/named pipe with mutual HMAC; commands are revision-checked); B2 host to attempt (sandbox, no database path, no gateway channel); B3 attempt to provider (keys stay in the host process); B4 attempt to network (deny by default, proxy allow-list); B5 runner to store (host writes evidence, never the attempt). Everything on the sandbox side of B2 is untrusted even though the OS user is the same, which is why file-system confinement strength per platform decides several rows.
 
 ## 4. Threats (STRIDE-oriented)
 
@@ -89,12 +90,19 @@ Test ids: existing red-team case ids are in `tests/redteam/cases.mjs`; ids with 
 | T-22 | Symlink or hard link from the worktree to the home directory | E/T | Path checks plus sandbox; hard-link refusal in tools | Enforced for tools; shell hard links documented gap | `path-traversal-write`, `outside-abs-write`, `bash-write-outside`, `prot-hardlink`; new `orch-symlink-worktree-to-home` |
 | T-23 | MCP server or browser worker acts outside the sandbox | E | MVP attempts run without MCP unless listed; destructive MCP asks escalate | **Gap** for listed servers (sandboxing planned in hardening PR-H2) | existing `inj-mcp-result-force-push` (injection only); new `pol-mcp-not-in-attempt-by-default` |
 | T-24 | Hostile or buggy engine over stdio fabricates decisions or results | S | Exact hello match; asks answered by persons only; unsolicited `restarted` treated as hostile; same rule for `decision.resolve` | Enforced for v3 asks; Planned PR-11 for decisions | `apps/cli/tests/engine_stdio.rs` (extend); new `proto-unsolicited-decision-resolve` |
-| T-25 | Unauthorized local process controls the runtime | S | No new listener; stdio and in-process only; peers socket is same-user (ADR-012) | Enforced by absence; same-user impersonation is a documented residual (`docs/Synthesis_Solution_Concept_and_Technical_Design.md` ADR-012) | none new |
+| T-25 | Unauthorized local process controls the runtime | S | No TCP or HTTP listener; the only endpoint is the same-user socket/pipe of T-32 | Planned PR-12 (was enforced by absence); same-user impersonation is a documented residual (ADR-012 in `docs/Synthesis_Solution_Concept_and_Technical_Design.md`) | see T-32 |
 | T-26 | Webhook replay or bad signature | S | Inbox with unique `(source, external_id)` | Out of MVP; **Gap** until the GitHub adapter | deferred (AC-14) |
 | T-27 | Provider outage or error used to skip verification | E | Gate treats unchecked work as `unverified`; verdict never `Verified` without evidence | Enforced per session; Planned PR-09 outcome level | new `orch-provider-down-never-verified` |
 | T-28 | Tampering with stored events by a same-user process | T | HMAC chain, tamper evidence only (`docs/UNATTENDED.md:49`) | Partial (detect, not prevent; covers events only) | `synthesis-session/tests/governance.rs`; extend over `outcome.*` events (PR-02) |
 | T-29 | Dependency or release compromise | T | cargo-deny, cargo-audit, pinned actions (`docs/SECURITY.md` Supply chain) | Enforced in CI | CI jobs `deny`, `audit` |
 | T-30 | Weakening checks via shell-only edits in non-test source | T | Size+mtime tracker; gate baseline | Partial (`docs/SECURITY.md:23`) | eval `gaming-*`; no new case |
+| T-31 | Two surfaces act on one outcome: simultaneous resolve, resolve vs invalidation or expiry, retry storms | T/E | One owner, commands applied by CAS on `revision`, idempotency keys, `already_resolved`/`stale` results (ADR-016 items 11-13, ADR-019 section 5) | Planned PR-02, PR-10, PR-11 | new protocol tests `proto-resolve-race`, `proto-resolve-vs-invalidate`, `proto-resolve-vs-expiry`, `proto-command-idempotent` |
+| T-32 | A local client other than a surface (a sandboxed attempt, another user's process) connects to the orchestrator endpoint | S/E | Socket under `$SYNT_HOME/run/` (sandbox-denied), 0700 directory, mutual HMAC handshake with `run/orch.key`; same OS user only | Planned PR-12; same-user processes outside the sandbox remain out of scope (ADR-012 residual) | new redteam `orch-endpoint-from-attempt` (connect and read `orch.key` must fail), Rust test for wrong-key handshake |
+| T-33 | Notification leaks decision content, or floods | I/D | Payload ids and codes only (`synthesis-app/src/notify.rs:158`), dedupe per `(decision_id, revision)`, existing caps (4 concurrent, 50 per process) | Planned PR-12; mechanism enforced today for governed runs | new `notify-no-brief-text`, `notify-dedup` (extend `notify.rs` tests) |
+| T-34 | Surface logic reinterprets or hides part of a decision brief, preselects an option, or computes its own verdict | R/E | Brief is structured server data; shared renderer field-coverage test per surface; dependency test keeps logic out of surfaces; no `recommended`/`selected` field | Planned PR-11, PR-13, PR-14, PR-15 | new `surface-brief-all-fields-shown`, `surface-no-preselection`, `deps-surfaces-do-not-import-orchestrator` |
+| T-35 | Older or mismatched binary corrupts or is locked out of the shared database; protocol version skew | T/D | Explicit opt-in migration with backup; `SchemaTooNew` refusal; exact protocol match (compatibility matrix, ADR-016) | Planned PR-02, PR-11 | new `migration-default-open-stays-v4`, `migration-v4-binary-refuses-v5`; existing hello-mismatch behaviour (`proto.rs:474`) |
+| T-36 | Orchestrator process orphaned, duplicated or stuck: two processes own one outcome; a dead one leaves attempts running | D/T | Control-session lock decides ownership; kernel releases it on death; recovery marks lost attempts; idle exit; `synt stop` path for attempts | Planned PR-12 | new `orch-two-owners-lock-decides`, `orch-owner-kill-recovery` |
+| T-37 | Surface-specific side path bypasses the gateway (a TUI `!cmd`, `/permissions allow`, a Super Agent shortcut) | E | Surfaces send commands only; chat-session features act on the surface's own chat session, never on a contract's compiled rules; gate before enabling (ADR-019 section 6) | Planned PR-08, PR-13..15 | new `pol-surface-cannot-touch-attempt-rules` (protocol level), `pol-attempt-has-no-user-input-channel` |
 
 ## 5. Residual risks (stated to the owner, not mitigated here)
 
@@ -103,8 +111,9 @@ Test ids: existing red-team case ids are in `tests/redteam/cases.mjs`; ids with 
 3. MCP stdio servers and the browser worker are outside the OS sandbox today.
 4. The hash chain is tamper evidence for events only; evidence rows are protected by being unreachable to the sandbox, not by a signature.
 5. A person can still approve something harmful; the design reduces rubber-stamping, it does not remove the human.
-6. No independent security audit exists for the repo (`docs/SECURITY.md` Known gaps).
+6. Any same-user process outside the sandbox can read `run/orch.key` and the database and so impersonate a surface; the endpoint raises the bar against sandboxed code and other users, not against the user's own processes.
+7. No independent security audit exists for the repo (`docs/SECURITY.md` Known gaps).
 
 ## 6. Review gates
 
-Mandatory read-only security review before merge for PR-S1, PR-08, PR-09, PR-10 and any change of `synthesis-permissions`, `synthesis-sandbox`, or secret handling; rerun the full red-team suite (`node tests/redteam/run.mjs --strict-gaps`) and the `sandbox-linux` job for each; new cases start as `enforced` when the PR claims the mitigation, otherwise as an explicit `known_gap` with a reason (the suite's `--strict-gaps` then forces promotion).
+Mandatory read-only security review before merge for PR-S1, PR-08, PR-09, PR-10, PR-12 (endpoint, key, process lifetime) and any change of `synthesis-permissions`, `synthesis-sandbox`, or secret handling; rerun the full red-team suite (`node tests/redteam/run.mjs --strict-gaps`) and the `sandbox-linux` job for each; new cases start as `enforced` when the PR claims the mitigation, otherwise as an explicit `known_gap` with a reason (the suite's `--strict-gaps` then forces promotion).

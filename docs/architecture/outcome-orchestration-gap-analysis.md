@@ -4,17 +4,20 @@ Status: Proposed, for owner review. Baseline: `origin/main` b230f4df (2026-11-14
 
 Method: every row below was checked by opening the cited file at this commit. "Read" means verified by reading code; nothing here was executed unless it says "ran". Anything not verifiable in code is marked **unverified**. Line numbers are for this commit and will drift; the function or type name is the stable anchor.
 
+Scope (revised 2026-11-14): the orchestrator serves **all three surfaces**: the CLI (the `synt` binary, subcommands and terminal app), the TUI (the desktop's terminal-style tab) and the Super Agent (the desktop's Agent tab, "Coming soon" today). Terminology follows `CLAUDE.md` strictly; "desktop" alone means the app that hosts TUI and Super Agent.
+
 Related documents: ADRs in [adr/](./adr/README.md), [plan](./outcome-orchestration-plan.md), [threat model](./outcome-orchestration-threat-model.md), [acceptance tests](../testing/outcome-orchestration-acceptance.md), [MVP slice](./outcome-orchestration-mvp-slice.md).
 
 ## 1. Summary
 
 The repo already owns most of the execution plane the design needs: a durable per-session store with a tamper-evident event chain, a worktree allocator, an OS sandbox with an egress proxy, a deny-first permission engine, an evidence-producing verification gate, cost/wall caps, stop and crash recovery. What does not exist is everything above one session: no Outcome, Plan, Attempt or Worker type, no scheduler, no revision-checked state transitions, no outbox, no decision objects bound to a revision, no UI surface. The proposed work is therefore an additive layer (new tables in `synt.db`, one new domain crate, one new orchestrator crate, protocol v4) over the existing crates, not a rewrite.
 
-Three conflicts between the design and this repo decide the shape of the work:
+Four conflicts between the design and this repo decide the shape of the work:
 
 1. **"Task" already means something else.** In this repo a Task is one prompt-run inside a session (`tasks` table, `task.started/ended`, `TaskStatus`). The design's Task is a DAG node. This document and the ADRs call the DAG node a **work item**; "Attempt" is new.
 2. **ADR-009 defers orchestrators.** ADR-009 ("Defer complex multi-agent orchestration", amended only for messaging by ADR-012) and design doc section 1.2 list multi-agent collaboration as a non-goal. The orchestration ADR must amend ADR-009 explicitly; this needs an owner decision (plan, section 7, D1).
 3. **Several guarantees the design assumes are weaker here:** no native Windows sandbox (so no unattended writable attempts on native Windows), the Linux sandbox reads the whole filesystem, `$SYNT_HOME/chain.key` is not on the sandbox deny list, MCP stdio servers and the browser worker run outside the sandbox.
+4. **Three surfaces, no shared runtime today.** The CLI runs its engine in process and does not use the engine protocol; the desktop uses the protocol only for WSL (`apps/desktop/src/remote.rs:20`); the only cross-process lock is per session (`store.rs:1597`); notifications exist only for governed runs and carry ids and codes (`synthesis-app/src/notify.rs:5-9`). Serving three surfaces needs one protocol, one owner process per outcome and revision-checked commands (ADR-016, ADR-017, ADR-021, section 9 below).
 
 ## 2. Requirement matrix: HARD-1..12
 
@@ -22,7 +25,7 @@ Legend: Have = exists and usable as is; Part = exists, needs extension; Gap = ab
 
 | Id | Requirement (short) | Current state, with evidence | Status | Gap / action |
 |---|---|---|---|---|
-| HARD-1 | Rust control plane, local-first, future remote boundary | Core is Rust (ADR-010, CLAUDE.md). The desktop runs the engine in process (`docs/specs/desktop.md` section 2) or as `synt engine --stdio` over JSONL, already the remote boundary used for WSL (`crates/synthesis-app/src/proto.rs:19` `PROTOCOL = 3`; ADR-015). | Have | A `WorkerTransport` trait is not needed for MVP; the stdio engine protocol is the seam (ADR-017). Remote workers deferred. |
+| HARD-1 | Rust control plane, local-first, future remote boundary | Core is Rust (ADR-010, CLAUDE.md). The desktop runs the engine in process (`docs/specs/desktop.md` section 2) or as `synt engine --stdio` over JSONL, already the remote boundary used for WSL (`crates/synthesis-app/src/proto.rs:19` `PROTOCOL = 3`; ADR-015). | Part | A `WorkerTransport` trait is not needed for MVP; the stdio engine protocol is the seam. Protocol v4 must also serve the CLI, which does not use it today (ADR-021). Remote workers deferred. |
 | HARD-2 | Separate Outcome / Plan / Task / Attempt / Worker / Agent / Session / Worktree | Session: `SessionId` String alias (`synthesis-core/src/session.rs:12`), 14-state machine (`session.rs:17-76`). Task: prompt-run (`synthesis-events/src/types.rs:118` `TaskStatus`; `tasks` table `synthesis-session/src/schema.rs:24`). Agent: `AgentDef` (`synthesis-harness/src/agents.rs:7`). Worktree: `GitInfo` (`synthesis-workspace/src/worktree.rs:43`). Workspace: `WorkspaceContext` (`synthesis-core/src/workspace.rs:22-38`). No Outcome, Plan, Attempt, Worker (read; grep over `crates/` and `apps/`). | Part | New domain types (ADR-017). Rename the design's Task to work item to avoid the collision. |
 | HARD-3 | Isolated worktree per concurrent writable task; a new session never inherits another's cwd | Worktree per **session**, branch `synthesis/<session_id>` (`worktree.rs:283`), stored under `$SYNT_HOME/worktrees` (`synthesis-app/src/wt.rs:136`; the crate default `<repo>/../.synt-worktrees` at `worktree.rs:276` is overridden). On by default for `synt run` and the stdio engine, not for the interactive CLI or `--host desktop` (`docs/UNATTENDED.md:14,19`). Distinct worktrees for concurrent sessions are tested (`synthesis-workspace/tests/workspace.rs:376`, `:417`). Process cwd is read in one place only (`synthesis-app/src/lib.rs:84`, enforced by `clippy.toml:1-6`). | Part | Attempt = new session, so it gets a unique worktree for free (ADR-018). cwd inheritance audit: see AC-03 row. |
 | HARD-4 | Durable state authoritative; LLM context is disposable | `synt.db` in WAL with foreign keys (`store.rs:243-247`); events append in an IMMEDIATE transaction (`store.rs:1863-1900`); `messages` table holds the exact provider history for resume (`docs/specs/session-store.md` B.2). Nothing above session level is stored. | Part | Outcome/plan/attempt/decision tables (ADR-016). |
@@ -32,7 +35,7 @@ Legend: Have = exists and usable as is; Part = exists, needs extension; Gap = ab
 | HARD-8 | Pause/resume/cancel/recovery, idempotency, replay safety, crash restart | Cancel via token; `synt stop` sets `sessions.stop_requested_at` (`store.rs:781`, `synthesis-app/src/sessions.rs:45`); resume (`store.rs:952`); startup recovery marks orphaned sessions and probes processes (`synthesis-session/src/recover.rs:163-190`); crash tests (`synthesis-session/tests/crash.rs:79,141`). No idempotency keys, no outbox (grep `idempot`: only doc comments). | Part | Revision CAS, outbox, unique natural keys (ADR-016); orchestrator recovery (ADR-017). |
 | HARD-9 | Audit all decisions and sensitive effects; redact secrets in logs and prompts | HMAC event chain: `events.prev`, `sessions.chain_head`, `chained` (migrations v3, v4, `schema.rs:68-80`; `store.rs:1183` `verify_chain`; key `<home>/chain.key`, `trust.rs:250-263`). Redactor (`synthesis-events/src/io.rs:11`). Chain covers events only (`docs/UNATTENDED.md:49`). | Part | Outcome events go through the same append path (ADR-016) so they are chained and redacted. |
 | HARD-10 | Providers pluggable | `synthesis-providers`: Anthropic and OpenAI-compatible adapters, failover (`synthesis-providers/src/failover.rs`; `docs/UNATTENDED.md:57`). | Have | Unchanged. API keys only (ADR-011). |
-| HARD-11 | UX keeps Workspace + Sessions, elevates Outcomes/Decisions, ONE right-side tabbed inspector | Desktop views `View { Tui, SuperAgent, Settings }` (`apps/desktop/src/ui.rs:29-33`); Super Agent is "Coming soon". The TUI view has left panels (Workspace, Running, Session, ...), centre tabs `ChatTab { Chat, Diff, Terminal, Browser, Files }` (`apps/desktop/src/tui_view/mod.rs:89-96`), right panels (Topology, Agent Status, Context, Usage) as a drawer (`docs/specs/desktop.md`, HANDOFF 1b). There is **no** single right-side tabbed inspector today (read). | Gap | ADR-021. Whether the owner's design sources define the inspector is **unverified** (`~/Vibe/synthesis-cli-ui/cli.html` not read). |
+| HARD-11 | UX keeps Workspace + Sessions, elevates Outcomes/Decisions, ONE right-side tabbed inspector | Desktop views `View { Tui, SuperAgent, Settings }` (`apps/desktop/src/ui.rs:29-33`); the Super Agent is "Coming soon" and the owner says its design comes later (HANDOFF 1b). The TUI has left panels, centre tabs `ChatTab { Chat, Diff, Terminal, Browser, Files }` (`apps/desktop/src/tui_view/mod.rs:89-96`) and a right panel stack as a drawer (`docs/specs/desktop.md`). The CLI app renders the same `synthesis-view` models. There is **no** single right-side tabbed inspector today (read). | Gap | ADR-021 section 3: per-surface Outcomes entry, one inspector tab set defined once in `synthesis-view`; Super Agent specified only. The owner's design files (`~/Vibe/synthesis-cli-ui/cli.html`) were not read: **unverified**. |
 | HARD-12 | No mandatory cloud or central server | Local store, no listener in the engine; peers use a per-session unix socket or named pipe, not TCP (ADR-012). | Have | Keep: no TCP/HTTP listener in any new component. |
 
 ## 3. Acceptance matrix: AC-01..15
@@ -43,7 +46,7 @@ Test specs are in [acceptance](../testing/outcome-orchestration-acceptance.md).
 |---|---|---|---|
 | AC-01 contract + validated DAG | Verification `Criterion {id, text, source, check, status, evidence}` (`synthesis-verification/src/types.rs:70`); `--criteria-file` JSON on `synt run` (`run.rs:386`). No contract versioning, no plan, no DAG validation. | Criterion shape | Contract, Plan, validator (pure code). |
 | AC-02 two parallel writable tasks, distinct dirs/branches/sessions | Distinct worktrees and ports for concurrent sessions are tested (`workspace.rs:376`). | Yes, for the isolation half | Scheduler that starts two attempts; task-scoped context. |
-| AC-03 new session never inherits cwd | CLI: `/new` opens the **selected** workspace, test `synthesis-cli-ui/src/app/tests.rs:2958` (`panels.rs:152-157`). Resume matches by exact cwd (`run.rs:498-558` `is_here`). Desktop `Action::New` takes the selected workspace root, **falls back to the previous engine's root** when the selection is missing (`driver.rs:2077-2092`); `switch` uses `cfg.project` (the launch folder) for non-`New` targets (`driver.rs:1616-1624`); WSL verifies the engine-reported folder (`apps/desktop/src/wsl.rs:509-520` `check_reported`). Design doc section 5.2 already states the invariant. I did **not** reproduce a failure: the bug the owner refers to is **unverified**. | CLI test; WSL check | Desktop test for each `Target` and a "no fallback to previous root" decision; audit of all three entry points (CLI launch, desktop, WSL) in PR-03. |
+| AC-03 new session never inherits cwd | CLI: `/new` opens the **selected** workspace, test `synthesis-cli-ui/src/app/tests.rs:2958` (`panels.rs:152-157`). Resume matches by exact cwd (`run.rs:498-558` `is_here`). Desktop (TUI) `Action::New` takes the selected workspace root, **falls back to the previous engine's root** when the selection is missing (`driver.rs:2077-2092`); `switch` uses `cfg.project` (the launch folder) for non-`New` targets (`driver.rs:1616-1624`); WSL verifies the engine-reported folder (`apps/desktop/src/wsl.rs:509-520` `check_reported`). Design doc section 5.2 already states the invariant. I did **not** reproduce a failure: the bug the owner refers to is **unverified**. | CLI test; WSL check | Desktop test for each `Target` and a "no fallback to previous root" decision; audit of the three entry points (CLI launch, desktop TUI, WSL; the Super Agent has none yet and must call the protocol) in PR-03; from then on the orchestrator passes cwd (multi-surface rule 8). |
 | AC-04 restart without duplicate effects or lost decisions | Session-level recovery (`recover.rs:163`) and crash tests exist. No outcome state, no outbox. | Recovery scan, crash test harness (`synthesis-session/tests/crash.rs`) | Outbox, revision CAS, orchestrator recovery. |
 | AC-05 in-scope read/reversible actions proceed, out-of-scope privileged stop | Permission modes, deny rules, irreversible table, read-only set. | Engine | Envelope -> rules compiler; escalation instead of terminal ask. |
 | AC-06 worker cannot change permissions via prompt, tool output or forged event | Hook allow ignored (`exec.rs:648`); `.synt/` is read-only to tools and sandbox (`synthesis-sandbox/src/lib.rs:217-226`); red-team cases `inj-*`, `prot-*`. | Red-team suite | Forged **orchestrator** events: the attempt must have no write path to outcome tables (sandbox denies `synt.db`, `lib.rs:484-487`). |
@@ -121,9 +124,9 @@ All are read from code. "Closed for attempts" means the ADR-019 decision removes
 | synthesis-events (ingress) | defer | none | No external events in MVP. |
 | synthesis-watchdog | defer | `desktop/remote.rs:691` is the only watchdog (engine silence); egress has idle timeouts | Liveness is the OS lock locally; progress watchdog is phase 6. |
 | synthesis-provider | reuse | `synthesis-providers` | |
-| synthesis-api | extend | `synthesis-app/src/proto.rs` v4 | |
+| synthesis-api | extend | `synthesis-app/src/proto.rs` v4, new `outcome_client` (InProc, Stdio, LocalSocket transports), orchestrator server in `engine_methods` style | One protocol for all surfaces. |
 | synthesis-observability | defer | events + `synt sessions show` | Metrics export deferred; local counters from events. |
-| synthesis-app (desktop) | extend | `apps/desktop`, `synthesis-view` | |
+| surfaces | thin | CLI (`apps/cli`, `synthesis-cli-ui*`), TUI and Super Agent (`apps/desktop`), shared models in `synthesis-view` | Rendering, input, dispatch only; no dependency on `synthesis-orchestrator` (checked by a test). |
 
 ## 8. Corrections the repo forces on the design
 
@@ -131,16 +134,36 @@ All are read from code. "Closed for attempts" means the ADR-019 decision removes
 2. **Credentials.** API keys only (ADR-011). No OAuth, no keychain. The design's "scoped credentials" for GitHub/MCP are out of scope; MVP has no external adapters.
 3. **Environment.** Only `SYNT_*` plus the standard variables listed in CLAUDE.md are read, through the injectable `Env`; orchestrator code takes `&Env`, never `std::env`.
 4. **No cloud.** No telemetry, no relay. Metrics stay local.
-5. **Naming.** Display name Synthesis, technical `synt`. Commands are `synt outcome ...`; tables and events use `outcome`, `work_item`, `attempt`, `decision`, `evidence`. The design's `.synthesis/worktrees` path is wrong here: worktrees are `$SYNT_HOME/worktrees/<session id>` (`wt.rs:136`). Pre-rename names (`.synthesis`, `SYNTHESIS_*`) are never read and fail `scripts/check-no-legacy-name.mjs`.
-6. **Windows.** Native Windows has no command confinement (`docs/SECURITY.md:45`); unattended runs refuse unless `--sandbox off` (`docs/UNATTENDED.md:17,88`). Orchestrated writable attempts therefore run on macOS, Linux and WSL2 (ADR-015); native Windows hosts the orchestrator UI only. State-machine, scheduler and store tests still run on all three OSes.
+5. **Naming.** Display name Synthesis, technical `synt`. Commands are `synt outcome ...`; tables and events use `outcome`, `work_item`, `attempt`, `decision`, `evidence`. The design's worktree path under the pre-rename product directory is wrong here: worktrees are `$SYNT_HOME/worktrees/<session id>` (`wt.rs:136`). Pre-rename names are never read and the check script `scripts/check-no-legacy-name.mjs` fails on them.
+6. **Windows.** Native Windows has no command confinement (`docs/SECURITY.md:45`); unattended runs refuse unless `--sandbox off` (`docs/UNATTENDED.md:17,88`). Orchestrated writable attempts therefore run on macOS, Linux and WSL2 (ADR-015), for the CLI and the desktop alike; elsewhere the refusal is explicit and names WSL2. State-machine, scheduler and store tests still run on all three OSes.
 7. **Remote workers** are out of scope; the design's own phase 7. `WorkerTransport` is not introduced; the stdio engine protocol is the future seam.
-8. **IPC.** No new listener. In-process (desktop), stdio (WSL/headless engine) and the existing peer socket are the only channels. The design's "loopback HTTP" option is rejected.
+8. **IPC (revised).** No TCP, no HTTP (design's "loopback HTTP" is rejected). Channels: stdio (WSL engine link), in-process (tests only) and a same-user unix socket or named pipe for the standalone orchestrator, reusing the peers' endpoint and mutual HMAC handshake (`synthesis-peers/src/net.rs`) with a new key in `run/` (sandbox-denied, `synthesis-sandbox/src/lib.rs:490-491`).
 9. **Risk labels.** The design's R0-R4 tiers map onto existing machinery: R0/R1 = read-only / sandboxed writes, R2 = `irreversible.rs` ask class, R3/R4 = hard deny or decision. No new classifier in MVP.
 10. **Decision "Always".** The existing "allow always" persists a rule in `settings.local.json`; inside orchestrated attempts it is disabled; policy changes are proposals reviewed by the person (design 16, "approval fatigue").
 11. **Worktrees alone are not isolation.** Agrees with the design's note; sandbox enforce is mandatory for attempts and stated per backend (`docs/SECURITY.md` sandbox table).
-12. **Task naming in the UI.** The desktop "Running" panel lists sessions (`synthesis-view` `RunningList`); work-item rows must not reuse the word "task".
+12. **Terminology and settings.** CLI / TUI / Super Agent as in `CLAUDE.md`; settings `synt.cli.*` and `synt.tui.*` only for rendering, shared behaviour under the new `synt.orchestrator.*` (plan, "Settings split"). The code anchors for the sections are `CLI_SECTION`, `TUI_SECTION` (`synthesis-settings/src/lib.rs:942-944`).
+13. **Task naming in the UI.** The desktop "Running" panel lists sessions (`synthesis-view` `RunningList`); work-item rows must not reuse the word "task".
 
-## 9. Risks
+## 9. Multi-surface rules
+
+Normative for every ADR, PR and test of this program. Each rule cites the repo fact that forces it.
+
+1. **One core.** Orchestrator, scheduler, decisions, evidence, policy compilation live only in `synthesis-core`, `synthesis-session`, `synthesis-orchestrator`, `synthesis-app`. Surfaces are thin clients. Test: a dependency check (cargo metadata) that `apps/*`, `synthesis-cli-ui*` and `synthesis-view` do not depend on `synthesis-orchestrator` or `synthesis-verification`'s evidence/verdict modules.
+2. **One protocol.** v4 (ADR-021) is the only way a surface reads or changes an outcome, the CLI included, even in process (today the CLI has no protocol path; `synthesis-app/src/proto.rs:19` is used by the desktop for WSL only).
+3. **Lifetime independent of surfaces.** A standalone orchestrator process owns outcomes; closing a surface never cancels; reopening elsewhere shows the same state (ADR-017). Today only per-session locks exist (`store.rs:1597-1615`); the control session's lock becomes the outcome owner lock.
+4. **Single owner, many viewers, revision-checked commands.** Optimistic revisions and the command table are Phase 1 (PR-02), not later (ADR-016 items 11-12).
+5. **Decisions are durable, not live asks.** `ask.approval` is live, has no expiry and no staleness (`proto.rs:308`, `asks.rs:55-59`); outcome decisions are rows, answerable from any surface, exactly one answerer by CAS (ADR-019 section 5).
+6. **Structured brief, surface-specific rendering.** Surfaces must show every field, must not reorder, preselect or reinterpret (ADR-021 section 2).
+7. **"Needs you" works with no surface open.** Derived signal plus the notify hook; payloads carry ids and codes only (`notify.rs:158`; ADR-021 section 4).
+8. **One policy gateway; no side paths.** Same launch profile, same closed bypass paths for every attempt whatever surface created it; the closure is a gate before the feature can be enabled (ADR-019 section 6).
+9. **cwd is the orchestrator's.** Surfaces send a workspace identity once; the orchestrator builds every attempt's cwd (ADR-018 item 4); tests for CLI, TUI(desktop) and WSL entry points.
+10. **Platform refusal is uniform.** Writable attempts only on macOS, Linux and WSL2; the same refusal text everywhere.
+11. **Settings split.** Rendering under `synt.cli.*` / `synt.tui.*` (and a proposed `synt.superagent.*`); behaviour, budgets and security under `synt.orchestrator.*`, user or managed only, never a project file (plan, "Settings split").
+12. **Compatibility.** The v5 migration is explicit and opt-in; older binaries refuse a v5 database; matrix in ADR-016.
+13. **Delivery order.** core, protocol, CLI, TUI, Super Agent (plan).
+14. **Acceptance is headless first.** Protocol-level tests prove lifecycle; per-surface tests cover rendering and command dispatch only (acceptance document).
+
+## 10. Risks
 
 | Id | Risk | Impact | Mitigation |
 |---|---|---|---|
@@ -155,12 +178,17 @@ All are read from code. "Closed for attempts" means the ADR-019 decision removes
 | R-9 | UX direction unclear (inspector, Outcomes placement) | Rework | Owner decisions D5, D6; CLI-first MVP. |
 | R-10 | Merge into protected branches | Irreversible | Merge is not wired today; MVP produces a patch/branch only; push stays in `irreversible.rs`. |
 | R-11 | Windows CI flakiness (SQLite lock on event append, `docs/STATUS.md`) | Flaky orchestrator tests | Reuse the retry in append; keep tests single-process. |
+| R-12 | Surfaces updated at different times; a v5 database locks out older CLI or desktop (`SchemaTooNew`, `schema.rs:88`) | Users blocked | Explicit opt-in migration, backup, compatibility matrix (ADR-016) |
+| R-13 | Standalone orchestrator process: lifecycle, endpoint auth, per-OS code, orphaned processes | New failure modes | Idle exit, recovery from durable state, sandbox-denied endpoint, explicit resume path (ADR-017) |
+| R-14 | Two surfaces act on one outcome | Double approvals, stale answers | CAS commands, one owner (ADR-016, ADR-019) |
+| R-15 | Logic drifts into a surface (a UI computes status or reinterprets a brief) | Three diverging behaviours | Shared view models, dependency test, renderer field-coverage test |
 
-## 10. Unverified in this review
+## 11. Unverified in this review
 
 - Any behaviour on Linux or Windows runners (nothing was run; the existing CI is the only evidence and was not consulted).
 - The cwd-inheritance bug the owner mentioned: no reproduction found (AC-03).
 - Whether the desktop dialog layer ever expires an ask.
 - Whether sandboxed commands on Linux need `$SYNT_HOME/sessions/` (relevant to widening the state deny list).
-- The owner's intended inspector layout (the design sources under `~/Vibe/synthesis-cli-ui` were not read).
+- That a unix socket or named pipe from the Windows desktop into the WSL distro works (the WSL link today is `wsl.exe` stdio).
+- The owner's intended inspector layout and the Super Agent design (the design sources under `~/Vibe/synthesis-cli-ui` were not read).
 - That `synthesis-peers` and `peer.rs` delegation cannot be reused as a scheduler: this is a design judgement from their interactive, asker-driven model (`peer.rs:732`), not a measured limit.

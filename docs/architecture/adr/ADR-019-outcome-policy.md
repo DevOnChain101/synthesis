@@ -55,9 +55,28 @@ A contract carries an envelope (design section 13 example): `allowed_paths`, `de
 
 - A Decision is created only by the orchestrator, from a recorded denial, a failed budget, an unresolved ambiguity raised by `AskUserQuestion`, or a `policy_change` proposal. Table `decisions` (ADR-016) holds kind, dedupe key, brief (JSON: why a human, delta from contract, alternatives with tradeoffs, evidence refs, unknowns, safe default = `HOLD`), and the **binding**: `contract_version`, `plan_version`, `subject_commit`, `policy_hash`, `action_hash` (sha256 of the canonical action), `expires_at`.
 - States: `Preparing -> Pending -> Approved | Rejected | Expired | Invalidated`, `NeedsMoreInfo -> Pending (new revision)`. A timer moves `Pending` to `Expired` (safe default HOLD; never an auto-approve).
-- Resolution is by a person only, through `decision.resolve(id, revision, choice)` (ADR-021). The choice set is alternatives plus `reject`, `defer`, `request_evidence`, `edit_scope`; never a bare approve; no default selection; no bulk resolve for kinds above R1.
+- Decisions are **durable data, not live asks** (owner point 5). Today `ask.approval` is live: it exists only while a process waits, has no expiry and no staleness check (`synthesis-app/src/asks.rs:55-59`, `proto.rs:308`; the in-attempt ask is denied when nobody can answer, `lib.rs:2455`). A Decision is a stored row any surface can list and answer, also after a restart or when the surface that was open has closed.
+- Resolution is by a person only, through the command `decision.resolve(id, expected_revision, choice)` (ADR-016 item 11, ADR-021). **Exactly one answerer**: the owner applies the first valid command by compare-and-swap on `decisions.revision`; every other command for the same decision receives `already_resolved` (with the stored choice and surface) or `stale`. The choice set is alternatives plus `reject`, `defer`, `request_evidence`, `edit_scope`; never a bare approve; no default selection; no bulk resolve for kinds above R1.
 - **Approval executes as a scoped one-shot grant.** The attempt had been denied (non-interactive); on approval the orchestrator starts a new attempt (new session) with exactly one extra allow rule whose text equals the approved action (the existing mechanism that lifts the irreversible table is a USER-level rule or CLI flag, `docs/SECURITY.md:21`). The grant row records `decision_id`, `action_hash`, expiry, and is consumed on use. A changed commit, plan, contract or policy hash invalidates the Decision and its unused grant (`Invalidated`, event `decision.invalidated`).
 - The existing per-tool `approvals` table (`schema.rs:57`) stays for interactive sessions; outcome Decisions are separate.
+
+### 5. Races (normative)
+
+| Race | Outcome |
+|---|---|
+| Two surfaces resolve the same decision at once | CAS on `revision`: one `applied`, the other `already_resolved`; one `decision_approvals` row; the loser's UI refetches and shows who and what |
+| Resolve vs invalidation (new commit, plan, contract or policy hash) | Invalidation bumps the revision: the resolve gets `stale`; nothing is granted |
+| Resolve vs expiry | Expiry is an owner transition, also CAS: whichever commits first wins; an expired decision is never approved |
+| Resolve while no owner runs | The command waits in `outcome_commands`; the owner re-checks bindings when it starts (stale -> `stale`); the surface shows "queued" |
+| Same command sent twice (retry, two clients behind one idempotency key) | Same stored result, one effect |
+| Resolve from an attempt, a hook or tool output | Impossible: attempts have no channel and the sandbox denies the endpoint and the DB; the command carries `from_surface` and only the protocol transport of a surface may set it |
+| Decision answered while its attempt was already restarted | Binding includes the attempt ordinal and `subject_commit`; mismatch is `stale` |
+
+### 6. One gateway for every attempt, no surface side paths (owner point 8)
+
+The gateway, the launch profile and the closed bypass paths above apply identically whatever surface created the outcome: the surface only names a workspace, a contract and a person's commands. Surfaces create no side paths: no surface-side `!cmd`, `/permissions allow` or `Always` choice affects an orchestrated attempt (those act on the surface's own chat session, not on the contract's compiled rules), and no surface applies decisions by editing settings.
+
+**Gate.** `synt.orchestrator.enabled` cannot be turned on, and PR-05's runner is not enabled in any surface, until the bypass table in section 2 is implemented and its tests pass: harness-runtime tools (`AskUserQuestion` -> decision), `bypassPermissions` never granted, no `!cmd` channel, hooks tighten-only, MCP stdio and browser **excluded** from attempts by the tool allow-list (so their lack of sandboxing, `docs/specs/sandbox-hardening.md` section 4, is not reachable), git aliases and repo scripts closed by not granting `auto` or `bypassPermissions` (the only modes where the red-team suite records them as known gaps, `docs/SECURITY.md:102`). This is a release gate, not a follow-up.
 
 ## Consequences
 

@@ -25,16 +25,33 @@ Option A.
 6. **Inbox.** Not built in MVP (no external events). The `(source, external_id)` unique table is specified for the GitHub adapter phase and added then.
 7. **Artifacts.** Reuse `artifacts` and `sessions/<id>/artifacts/` (write temp, fsync, rename, insert; `session-store.md` B.3). Evidence stores `(session_id, artifact_id, sha256)`. A global content-addressed store is deferred (revisit trigger below). Artifact bytes are raw, not redacted (`docs/SECURITY.md` "Artifacts are raw"); evidence shown in UI is redacted again on read.
 8. **Ids.** UUIDv4 TEXT like every other id (`docs/specs/workspace-context.md` section 1); ordering by `created_at` and per-session `seq`.
-9. **Migration and rollback.** Additive only (`CREATE TABLE`, `ALTER TABLE ADD COLUMN` with defaults). Before applying v5 the opener copies the DB with the existing consistent-backup path (`clean.rs:431` `backup_db`, extended to a `pre-v5` directory name). A binary older than v5 refuses the DB (`SchemaTooNew`, `schema.rs:88`); rollback is: install the old binary and restore the backup (outcome data created after the upgrade is lost) or keep both. This is documented in the release notes. A downgrade tool is not planned.
-10. **Tests.** A migration test from a v4 fixture DB, a CAS-conflict test, an outbox replay test with a crash between commit and dispatch (reuse `synthesis-session/tests/crash.rs` helper), a chain-verify test over outcome events (reuse `tests/governance.rs`).
+9. **Migration is explicit, never implicit** (revised for CLI, TUI and Super Agent updating at different times). `Store::open` migrates to `LATEST` on every open today (`store.rs:585`, `schema.rs:85`), so any new binary would upgrade the shared `synt.db` and lock every older CLI or desktop out (`SchemaTooNew`, `schema.rs:88`). Therefore: `StoreOptions` gains a target version; the default target stays **4** and v5 is applied only by the explicit step `synt outcome enable` (protocol method `orchestrator.enable`, TUI Settings toggle `synt.orchestrator.enabled`), which (a) prints what it does and the compatibility matrix below and needs confirmation (`--yes` for scripts), (b) takes a consistent backup first (`clean.rs:431` `backup_db`, directory `backups/pre-v5-<time>/`), (c) migrates, (d) writes the setting. A v5 binary with the flag off on a v4 database stays at v4. Rollback: install the old binary and restore the backup (outcome data created after the upgrade is lost); a downgrade tool is not planned.
+10. **Tests.** A migration test from a v4 fixture DB, a CAS-conflict test, an outbox replay test with a crash between commit and dispatch (reuse `synthesis-session/tests/crash.rs` helper), a chain-verify test over outcome events (reuse `tests/governance.rs`), command idempotency and stale-revision tests, a test that a default-target open leaves a v4 database at v4, and a test that a v4-target binary refuses a v5 database with the documented message.
+
+11. **Commands.** Surfaces never write aggregate rows. A mutating request is a row in `outcome_commands(id, outcome_id, idempotency_key UNIQUE, kind, params, expected_revision, from_surface, state, result, created_at)`. Any process may INSERT one (a plain insert, safe under WAL and the 5 s busy timeout); only the owner applies it, in one transaction, with compare-and-swap on the target's `revision`; the result (`applied`, `stale`, `already_resolved`, `denied`) is written back and returned to the caller. A retry with the same idempotency key returns the stored result. This makes actions work when no owner is running (applied at the next owner start) and makes two surfaces acting on one outcome well defined.
+12. **Optimistic revisions are Phase 1**: revision columns, CAS transitions and `outcome_commands` ship in PR-02, before any surface exists.
+13. **Ownership.** The single writer of an outcome is the holder of its control session's lock (ADR-017 "Where it runs"). There is no new lock type; the per-session lock is reused with the control session as the unit.
 
 ## Consequences
 
 - Positive: no second database, no second chain, `synt sessions verify` covers outcome events for free, recovery scan (`recover.rs:163`) already finds interrupted control sessions.
-- Negative: `synthesis-session` grows; a bad migration is user-visible; the `sessions.status` machine (14 states) is borrowed for the control session and must not be stretched to model outcome states (outcome state lives in `outcomes.state`).
+- Negative: `synthesis-session` grows; a bad migration is user-visible; the opt-in migration adds a step for users; the `sessions.status` machine (14 states) is borrowed for the control session and must not be stretched to model outcome states (outcome state lives in `outcomes.state`).
 - Neutral: events of different sessions are not ordered globally; an outcome view merges by `(ts, session, seq)` and never assumes a total order across sessions.
 
-## Revisit trigger
+## Compatibility matrix (binary version x database version)
+
+| Binary | DB v4 (not enabled) | DB v5 (enabled) |
+|---|---|---|
+| Released CLI or desktop before outcomes | works | refuses: `SchemaTooNew` (message names the supported version); restore `backups/pre-v5-*` or upgrade |
+| New CLI, flag off | works, stays v4, outcome commands say "run `synt outcome enable`" | works, outcome features off, sessions unaffected |
+| New CLI, flag on | offers the explicit upgrade | works |
+| New TUI or Super Agent (desktop), flag off | works, stays v4 | works, Outcomes hidden |
+| New TUI or Super Agent, flag on | offers the upgrade (Settings toggle) | works |
+| Windows desktop + WSL engine | the store lives in the distro and is opened only by the engine (ADR-015); the host never opens it; protocol versions must match exactly | same |
+| New CLI and old desktop (or the reverse) on the same `$SYNT_HOME` | both work while v4 | the older one refuses; the notice from `outcome enable` tells the person to update every surface first |
+
+`synt doctor` reports the database version, the flag and the surfaces' versions it can see (CLI only; **unverified** that the desktop version is discoverable from the CLI).
+
 
 - Writer contention: more than one orchestrator or UI writer per outcome, or measured `SQLITE_BUSY` retries above the existing 15 s budget (`store.rs` `update_status`).
 - Remote workers: artifact transfer needs a content-addressed store.
