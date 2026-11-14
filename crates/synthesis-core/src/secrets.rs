@@ -170,6 +170,7 @@ mod tests {
             (".dockerconfigjson", true),
             ("kubeconfig", true),
             ("home/.kube/config", true),
+            ("home/.KUBE/Config", true),
             ("config", false),
             ("README.md", false),
             ("keys.txt", false),
