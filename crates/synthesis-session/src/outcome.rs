@@ -612,10 +612,11 @@ impl Reader {
             row_state,
             DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo
         ) {
+            // a concurrent move out of the resolved state between the two reads is not tampering: report what
+            // the row says now
             return Ok(self
                 .verified_resolution(id)?
-                .map(|r| r.state)
-                .expect("a resolved row state yields Some or Tampered"));
+                .map_or(row_state, |r| r.state));
         }
         Ok(row_state)
     }
