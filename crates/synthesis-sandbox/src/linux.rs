@@ -2005,6 +2005,41 @@ mod tests {
         }
 
         #[test]
+        fn a_denied_key_file_reads_empty_inside() {
+            let Some(b) = bwrap() else { return };
+            // not under /tmp: bwrap mounts a fresh tmpfs there, which would hide the file anyway
+            let d = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let key = d.path().join("chain.key");
+            std::fs::write(&key, "KEYBYTES").unwrap();
+            let cat = |deny: Vec<PathBuf>| {
+                let c = SandboxedCommand {
+                    program: "/bin/cat".into(),
+                    args: vec![key.clone().into_os_string()],
+                    ..Default::default()
+                };
+                let pol = SandboxPolicy {
+                    deny_paths: deny,
+                    network: NetworkPolicy::Allow,
+                    ..Default::default()
+                };
+                let w = b.wrap_on(&pol, &c, None).unwrap();
+                let o = Command::new(&w.args[2])
+                    .args(&w.args[3..])
+                    .env_clear()
+                    .envs(w.env.iter().cloned())
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            };
+            assert_eq!(
+                cat(vec![]),
+                "KEYBYTES",
+                "control: readable without the deny"
+            );
+            assert_eq!(cat(vec![key.clone()]), "", "denied: reads empty");
+        }
+
+        #[test]
         fn env_path_and_run_are_clean_inside() {
             let f = fx();
             let path = format!("/usr/bin:/bin:{}/Windows", f.drive.display());
