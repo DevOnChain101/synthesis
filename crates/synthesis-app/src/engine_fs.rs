@@ -327,6 +327,23 @@ fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
     Ok(std::fs::File::from(cur))
 }
 
+/// A handle of the directory `rel` (relative, normal components only) beneath `root`, opened one component at
+/// a time with `NOFOLLOW | DIRECTORY`: a component swapped for a link is refused, never followed. Later work
+/// goes through this handle (`openat`, `renameat`, `unlinkat`), never through the path again.
+#[cfg(unix)]
+pub(crate) fn open_dir_beneath(root: &Path, rel: &Path) -> std::io::Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut cur = open(root, flags, Mode::empty())?;
+    for c in rel.components() {
+        let Component::Normal(name) = c else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        cur = openat(&cur, name, flags, Mode::empty())?;
+    }
+    Ok(cur)
+}
+
 // ---- images
 
 /// The kinds accepted, by their first bytes (the declared type must agree).
