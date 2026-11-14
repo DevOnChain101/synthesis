@@ -1,0 +1,44 @@
+# ADR-018: Execution isolation per attempt (worktree, sandbox, cwd scoping, locks, cleanup)
+
+Status: Proposed (2026-11-14).
+Related: ADR-005 (session-scoped workspace), ADR-015 (WSL), ADR-017, ADR-019. Specs: `docs/specs/sandbox.md`, `docs/specs/sandbox-hardening.md`, `docs/specs/workspace-context.md`.
+
+## Context
+
+The design requires every concurrent writable task to have its own working directory and branch, an explicit cwd that is never inherited, a documented lifecycle, and OS-level confinement because a worktree is not a security boundary.
+
+Facts: `WorktreeManager::create(source, session_id, artifact_root, include_uncommitted)` allocates `$SYNT_HOME/worktrees/<session_id>` on branch `synthesis/<session_id>` (`synthesis-workspace/src/worktree.rs:237,283`, `synthesis-app/src/wt.rs:136`), records `GitInfo` (`worktree.rs:43`) in `sessions.git_info`, takes a repo lock that is in-process **and** cross-process (`synt-worktree.lock`, `worktree.rs:704-757`), offers `changes`, `diff`, `commit_all` (`:494`), `plan_merge` (`:524`), `execute_merge` (`:581`, merges into the original tree's current branch; no caller outside tests), and `cleanup` that refuses dirty, gitignored-bearing or unmerged work without `force` (`:628-660`). The headless run and the stdio engine default to a worktree (`docs/UNATTENDED.md:14`). Sandbox: Seatbelt (macOS), bubblewrap/Landlock (Linux), bubblewrap+seccomp (WSL), none on native Windows; egress proxy for `--network hosts` (`docs/SECURITY.md` sandbox table; `docs/specs/sandbox-hardening.md` section 1).
+
+## Options
+
+A. One worktree per attempt, created by the existing manager; attempt = new session; sandbox profile = the existing unattended preset.
+B. One worktree per work item, reused across retries.
+C. Containers per attempt.
+
+## Decision
+
+Option A. Containers are rejected (no new runtime dependency; sandbox backends exist).
+
+1. **Allocation.** The orchestrator creates the attempt's session id first (UUIDv4), then the worktree with that id; the pair `(attempt_id, session_id, git_info)` is committed before the worker starts (outbox `worktree.create`, ADR-016). A crash between worktree creation and the commit is reconciled by probing `$SYNT_HOME/worktrees/<session_id>`: present and unrecorded = adopt, present and recorded = nothing, absent = redo. Design naming (`.synthesis/worktrees/<task>/<attempt>`) is not used: it breaks the `synt`/`SYNT_HOME` naming rules.
+2. **Base.** MVP: every attempt starts from the outcome's recorded base commit (`HEAD` at contract approval, `include_uncommitted = false`, so the baseline is a clean commit and the user's dirty tree is untouched). Dependent work items that need a predecessor's changes need `create` to start at a given commit; that is an extension (PR-04) and is **not** in the MVP slice (the MVP's second item reads the first item's artifact, not its code).
+3. **Subject commit.** When an attempt ends, the host runs `commit_all` (`worktree.rs:494`) in the attempt's worktree; the resulting commit id is the subject of evidence (ADR-020). The agent never commits on its own authority (git writes by the agent stay governed by `irreversible.rs`).
+4. **cwd scoping.** Orchestrated sessions get an explicit `WorkspaceContext` (root = the repo, cwd = the worktree subdirectory that matches the user's chosen subfolder, as `worktree.rs` already maps); no code path reads the process cwd (`clippy.toml:1-6`). The AC-03 audit covers the three entry points: CLI launch (`synthesis-app/src/lib.rs:84`), desktop (`apps/desktop/src/main.rs:14-22`, `tui_view/driver.rs:2077-2092` fallback and `:1616-1624`), WSL (`apps/desktop/src/wsl.rs:509-520`). The desktop fallback "previous engine's root when the selected workspace is missing" becomes a visible refusal ("/new: no workspace selected"), not a silent inherit (decision D7 in the plan; default: refuse). A pure `fn session_cwd(selection, ...) -> Result<PathBuf, _>` is extracted only if the audit finds a second copy of the rule.
+5. **Sandbox per attempt.** Profile = unattended preset: sandbox `enforce`, network `deny` or `hosts` from user/managed settings only, wall cap, cost cap, worktree mandatory, peers off, no `--trust-project` (`docs/UNATTENDED.md:25-27`). Write root = the worktree; `.git/hooks`, `.git/config`, `.git/modules`, `.gitmodules`, `.synt`, `AGENTS.md` read-only (`synthesis-sandbox/src/lib.rs:217-226`). The orchestrator refuses to start an attempt when `enforce` cannot be satisfied (as `--unattended` refuses): native Windows is excluded, WSL2 is the Windows route.
+6. **Read-only work items** (inspect, review) also get a worktree in MVP: sharing the user's checkout for reads would let a sandbox escape touch it, and the cost of a worktree is small. Revisit when a measurement says otherwise.
+7. **Locks.** Within a repo, `git worktree add/remove` is already serialised by the repo lock. Outcome-level exclusive resources (design section 10) are rows in `resource_locks(resource_key PK, holder_attempt_id, fence, state)`, acquired in sorted key order inside the transaction that leases the work item. MVP has one key: `integration:<outcome_id>`; the table is added with the first merge feature, not in MVP.
+8. **Cancel and cleanup.** Cancel = stop path then process-tree kill (`synthesis-terminal/src/lib.rs:493`). Cleanup runs only after the worker process has exited and, without `force`, only when `cleanup` accepts it. If it refuses (dirty, ignored files, unmerged commits) the worktree is **kept**, the attempt row records `retained_reason`, and the UI offers "open" and "discard" (discard needs a confirmation, never automatic). Retention default: until the outcome is closed, then 7 days (setting, owner decision D9). No automatic deletion of uncommitted user data.
+9. **Honesty about strength.** The design's note stands: worktree is not a sandbox. Per platform the guarantee is exactly what `docs/SECURITY.md` states (macOS Weak filesystem; Linux bubblewrap Weak filesystem because `/` is bound read-only; WSL Weak; Windows none). The Outcome UI shows the attempt's sandbox backend and guarantee next to the attempt; it never says "isolated" without the qualifier.
+10. **Merge is out of MVP.** The MVP ends with a branch and a patch. When merge arrives it needs a variant that merges into an outcome integration worktree, not into the user's current branch (`execute_merge`'s doc says it targets the original tree's current branch; confirm in code before building), and it is a policy action (ADR-019).
+
+## Consequences
+
+- Positive: isolation and recovery reuse code with tests (`synthesis-workspace/tests/workspace.rs:376,417`); attempts are inspectable as ordinary sessions.
+- Negative: worktree count grows with attempts (disk, `.git/worktrees` entries); submodules are not checked out unless the user enables `synt.worktree.submodules` (`docs/UNATTENDED.md:63`) and changes inside submodules are invisible to host-side git (`:65`); Linux reads the whole filesystem until the read allow-list lands (`docs/specs/sandbox-hardening.md` section 2).
+- Unverified: behaviour of ten or more concurrent worktrees on Windows/WSL; `NewSession` does not visibly validate that `cwd` lies inside `workspace_root` (not found in the code read; add a store-level check in PR-03 if absent).
+
+## Revisit trigger
+
+- Disk or git-metadata cost of per-attempt worktrees becomes noticeable (> 20 per repo): pool or reuse per work item (Option B).
+- A native Windows sandbox (AppContainer, ADR-010 exception) exists: lift the platform exclusion.
+- The Linux read allow-list ships: raise the documented guarantee.
+- Remote workers: environment allocation moves behind a transport.
