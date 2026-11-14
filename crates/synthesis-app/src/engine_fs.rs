@@ -158,7 +158,7 @@ fn git_scan(root: &Path, trusted: bool, env: &Env) -> Result<ProjectData, String
 /// whose link counts cannot be trusted, and a file that is not opened as a plain file (a pipe never blocks the
 /// engine, and the file never becomes a controlling terminal). The file is opened by its canonical relative
 /// path beneath a handle of the folder with no link followed (Linux: `openat2` `RESOLVE_BENEATH |
-/// RESOLVE_NO_SYMLINKS`; elsewhere cap-std), so a parent or the file swapped for a link meanwhile is refused;
+/// RESOLVE_NO_SYMLINKS`; elsewhere one NOFOLLOW openat per component), so a parent or the file swapped for a link meanwhile is refused;
 /// it must be the very file that was looked at before (device and inode), and on Linux the path of the open
 /// descriptor is checked once more. Reads at most [`PREVIEW_BYTES`], shows at most [`PREVIEW_LINES`] lines,
 /// made printable.
@@ -294,13 +294,34 @@ fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
     Ok(std::fs::File::from(fd))
 }
 
+/// One component at a time from a handle of the folder, each opened with `NOFOLLOW` (a parent swapped for a
+/// link, even one that stays inside the folder such as `d` -> `.git`, is refused, never followed).
 #[cfg(all(unix, not(target_os = "linux")))]
 fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
-    let dir = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
-    let mut open = cap_std::fs::OpenOptions::new();
-    open.read(true);
-    cap_std::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK | libc::O_NOCTTY);
-    Ok(dir.open_with(rel, &open)?.into_std())
+    use rustix::fs::{Mode, OFlags, open, openat};
+    let mut cur = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut parts = rel.components().peekable();
+    while let Some(c) = parts.next() {
+        let Component::Normal(name) = c else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        let flags = if parts.peek().is_some() {
+            OFlags::RDONLY | OFlags::DIRECTORY
+        } else {
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY
+        };
+        cur = openat(
+            &cur,
+            name,
+            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+    }
+    Ok(std::fs::File::from(cur))
 }
 
 // ---- images
@@ -814,6 +835,20 @@ mod tests {
         }
         assert_eq!(read(&w, "ok.txt").unwrap()["lines"][0], "fine");
         assert_eq!(read(&w, "d/config").unwrap()["lines"][0], "fine-d");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_that_is_a_link_is_refused_even_inside_the_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let w = synthesis_core::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(w.join("real")).unwrap();
+        std::fs::write(w.join("real/f"), "x").unwrap();
+        std::os::unix::fs::symlink("real", w.join("d")).unwrap();
+        assert!(open_beneath(&w, Path::new("real/f")).is_ok());
+        assert!(open_beneath(&w, Path::new("d/f")).is_err());
+        std::os::unix::fs::symlink("real/f", w.join("l")).unwrap();
+        assert!(open_beneath(&w, Path::new("l")).is_err());
     }
 
     #[cfg(target_os = "linux")]
