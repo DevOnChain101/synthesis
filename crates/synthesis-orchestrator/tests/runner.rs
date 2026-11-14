@@ -1328,15 +1328,18 @@ fn a_dropped_handle_kills_and_reaps_its_whole_tree() {
         .start(&mut w, &env, &profile(&r, &env, &policy()))
         .unwrap();
     let pid = run.pid();
+    // the file exists before the shell has written the pid into it: wait for a number
     let until = Instant::now() + Duration::from_secs(5);
-    while !pidfile.exists() && Instant::now() < until {
+    let child: u32 = loop {
+        if let Some(c) = fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            break c;
+        }
+        assert!(Instant::now() < until, "no pid written");
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let child: u32 = fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    };
     assert!(alive(pid) && alive(child));
     drop(run);
     assert!(gone(pid), "the worker is reaped");

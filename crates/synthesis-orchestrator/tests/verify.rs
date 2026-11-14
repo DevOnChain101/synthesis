@@ -9,7 +9,6 @@ use common::*;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-#[cfg(unix)]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -140,6 +139,26 @@ fn check(id: &str, command: &str) -> ContractCheck {
     }
 }
 
+/// A work directory for a sandboxed check. bubblewrap puts a fresh tmpfs over `/tmp`, so a
+/// directory there is invisible to the check (every "cannot read X" assertion would pass for the
+/// wrong reason, and the check could not even `cd` into its source): on Linux it lives under the
+/// build directory (or `RUNNER_TEMP`).
+#[cfg(unix)]
+fn work_dir(r: &Rig, name: &str) -> std::path::PathBuf {
+    let d = if cfg!(target_os = "linux") {
+        std::env::var_os("RUNNER_TEMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/verify-work")
+            })
+            .join(format!("{name}-{}", std::process::id()))
+    } else {
+        r.base.join(name)
+    };
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
 /// The real sandbox, where this host has one (macOS Seatbelt, Linux bubblewrap); elsewhere the
 /// runner must refuse (and the test says so).
 #[cfg(unix)]
@@ -147,7 +166,10 @@ fn check(id: &str, command: &str) -> ContractCheck {
 fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
     need_git!();
     let r = rig();
-    let runner = SandboxRunner::detect(r.home.clone());
+    let work = work_dir(&r, "sandboxed");
+    let home = work.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let runner = SandboxRunner::detect(home.clone());
     let fp = match runner.fingerprint() {
         Ok(fp) => fp,
         Err(e) => {
@@ -162,8 +184,8 @@ fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
     assert!(fp.contains("sandbox="), "{fp}");
     fs::write(r.repo.join("a.txt"), "hello\n").unwrap();
     let commit = commit_all(&r.repo, "c");
-    let src = r.base.join("run/src");
-    let scratch = r.base.join("run");
+    let src = work.join("run/src");
+    let scratch = work.join("run");
     fresh_checkout(&r.repo, &commit, &src).unwrap();
     let stop = AtomicBool::new(false);
     let run = |id: &str, cmd: &str, t: u64| {
@@ -197,13 +219,23 @@ fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
     assert_eq!(ro2.result(), "failed");
     assert!(!src.join("newfile").exists());
     // Synthesis's own state is not readable
-    fs::write(r.home.join("chain.key"), [7u8; 32]).unwrap();
+    fs::write(home.join("chain.key"), [7u8; 32]).unwrap();
+    fs::write(home.join("readable.txt"), "ok\n").unwrap();
+    if cfg!(target_os = "linux") {
+        // positive control: bubblewrap shows the rest of the home, only the state paths are denied
+        let ctl = run(
+            "ctl",
+            &format!(
+                "cat '{}' > \"$TMPDIR/c\"",
+                home.join("readable.txt").display()
+            ),
+            20,
+        );
+        assert_eq!(ctl.result(), "passed", "{:?}", ctl.problem);
+    }
     let key = run(
         "key",
-        &format!(
-            "cat '{}' > \"$TMPDIR/k\"",
-            r.home.join("chain.key").display()
-        ),
+        &format!("cat '{}' > \"$TMPDIR/k\"", home.join("chain.key").display()),
         20,
     );
     assert_eq!(key.result(), "failed", "the chain key was readable");
@@ -562,21 +594,22 @@ fn alive(pid: u32) -> bool {
 fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its_group() {
     need_git!();
     let r = rig();
-    let probe = SandboxRunner::detect(r.home.clone());
+    let work = work_dir(&r, "procs");
+    let probe = SandboxRunner::detect(work.join("home"));
     if probe.fingerprint().is_err() {
         println!("SKIP: no confining sandbox");
         return;
     }
     fs::write(r.repo.join("a.txt"), "x\n").unwrap();
     let commit = commit_all(&r.repo, "c");
-    let scratch = r.base.join("proc");
+    let scratch = work.join("proc");
     let src = scratch.join("src");
     fresh_checkout(&r.repo, &commit, &src).unwrap();
     let stop = AtomicBool::new(false);
 
     // the group of a check that exits is killed while the leader is still ours: a background
     // child it leaves behind does not survive the check
-    let real = SandboxRunner::detect(r.home.clone());
+    let real = SandboxRunner::detect(work.join("home"));
     let bg = real.run(
         &src,
         &scratch,
@@ -598,7 +631,7 @@ fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its
     // injected state: the kernel "reaped" the child, so nothing may be sent to that pid, even on a timeout
     let gone = SandboxRunner {
         state: always_gone,
-        ..SandboxRunner::detect(r.home.clone())
+        ..SandboxRunner::detect(work.join("home"))
     };
     let run = gone.run(
         &src,
