@@ -928,6 +928,7 @@ fn tree_row(r: &Value) -> Option<synthesis_view::project::TreeRow> {
         link: r[4].as_bool().unwrap_or(false),
         generated: r[5].as_bool().unwrap_or(false),
         more: usize::try_from(r[6].as_u64().unwrap_or(0)).unwrap_or(0),
+        notice: r[7].as_bool().unwrap_or(false),
     })
 }
 
@@ -983,8 +984,8 @@ impl Remote {
         dir: &str,
         skip: usize,
     ) -> Result<Vec<synthesis_view::project::TreeRow>, String> {
-        use synthesis_view::project::{DIR_ROWS, more_row};
-        let mut rows = vec![];
+        use synthesis_view::project::{DIR_ROWS, page_end};
+        let (mut rows, mut raw, mut partial) = (vec![], 0, false);
         let (mut offset, mut total) = (skip, 0);
         for _ in 0..10 {
             let v = self.call(
@@ -995,18 +996,18 @@ impl Remote {
                 SLOW_TIMEOUT,
             )?;
             total = usize::try_from(v["total"].as_u64().unwrap_or(0)).unwrap_or(0);
+            partial = v["partial"].as_bool().unwrap_or(false);
             let page = rows_of(&v, "rows", DIR_ROWS)?;
+            // counted as the engine counts them, whatever is dropped here
+            raw += page.len();
             rows.extend(page.iter().filter_map(tree_row));
             match v["next"].as_u64() {
                 Some(n) if rows.len() < DIR_ROWS && !page.is_empty() => offset = n as usize,
                 _ => break,
             }
         }
-        let left = total.saturating_sub(skip + rows.len());
-        if left > 0 {
-            let depth = rows.first().map_or(0, |r| r.depth);
-            rows.push(more_row(depth, left));
-        }
+        let depth = dir.split('/').filter(|c| !c.is_empty()).count() as u16;
+        page_end(&mut rows, depth, total.saturating_sub(skip + raw), partial);
         Ok(rows)
     }
 

@@ -180,6 +180,8 @@ struct Srv<'a> {
     heavy_running: bool,
     /// The scan the pages of `fs.list` are cut from.
     tree: Option<synthesis_view::project::ProjectData>,
+    /// The last folder `fs.list` read, so its pages cost one read of the folder.
+    dir_cache: Option<synthesis_view::project::Kids>,
 }
 
 /// The shortest gap between two methods that walk the folder, run git or check the installation.
@@ -349,6 +351,7 @@ impl Srv<'_> {
         self.images.clear();
         self.tokens.clear();
         self.tree = None;
+        self.dir_cache = None;
         *lock(&self.oob.cancel) = Some(live.cancel_slot());
         self.live = Some(live);
         self.trusted = trusted;
@@ -655,6 +658,7 @@ impl Srv<'_> {
                     self.heavy()?;
                     let root = self.files_root()?;
                     self.tree = Some(engine_fs::scan(&root, self.trusted, self.env));
+                    self.dir_cache = None;
                 }
                 let d = self.tree.as_ref().ok_or("no scan")?;
                 if dir.is_empty() {
@@ -667,6 +671,7 @@ impl Srv<'_> {
                         &dir,
                         offset as usize,
                         self.trusted,
+                        &mut self.dir_cache,
                     )?)
                 }
             }
@@ -1069,6 +1074,7 @@ pub fn serve(
         heavy_at: None,
         heavy_running: false,
         tree: None,
+        dir_cache: None,
     };
     wire.msg(&Out::hello());
     let mut closing = None;

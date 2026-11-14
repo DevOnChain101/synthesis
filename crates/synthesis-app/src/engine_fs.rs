@@ -62,7 +62,7 @@ pub fn scan(root: &Path, trusted: bool, env: &Env) -> ProjectData {
     project::scan_lazy(root, env, trusted, None)
 }
 
-/// `[depth, name, dir, status, link, generated, more]`: the last three are additions of the lazy tree.
+/// `[depth, name, dir, status, link, generated, more, notice]`: the last four are additions of the lazy tree.
 fn row_json(r: &project::TreeRow) -> Value {
     json!([
         r.depth,
@@ -71,26 +71,35 @@ fn row_json(r: &project::TreeRow) -> Value {
         r.status.map(String::from),
         r.link,
         r.generated,
-        r.more
+        r.more,
+        r.notice
     ])
 }
 
-/// The entries of the folder `dir` (a path of the project, not "") read from the disk now, from `offset`, at
-/// most [`PAGE_ROWS`]; `scan` supplies what git said. A link on the way is not entered.
+/// The entries of the folder `dir` (a path of the project, not "") from `offset`, at most [`PAGE_ROWS`]; `scan`
+/// supplies what git said. A link on the way is not entered. The disk is read at `offset` 0 (the folder was just
+/// opened or refreshed) or when `cache` holds another folder; the pages after the first come from `cache`, so
+/// the pages of one opening cost one read of the folder.
 pub fn list_dir(
     root: &Path,
     d: &ProjectData,
     dir: &str,
     offset: usize,
     trusted: bool,
+    cache: &mut Option<project::Kids>,
 ) -> Result<Value, String> {
     check_rel(dir, false)?;
-    let c =
-        project::list_children(root, dir, &d.listing, offset, PAGE_ROWS).ok_or("no such folder")?;
+    if offset == 0 || !cache.as_ref().is_some_and(|k| k.is_dir(dir)) {
+        *cache = project::read_children(root, dir, &d.listing);
+    }
+    let c = cache
+        .as_ref()
+        .and_then(|k| k.page(root, &d.listing, offset, PAGE_ROWS))
+        .ok_or("no such folder")?;
     let end = offset.saturating_add(c.rows.len());
     Ok(json!({
         "rows": c.rows.iter().map(row_json).collect::<Vec<_>>(), "total": c.total,
-        "next": (end < c.total).then_some(end),
+        "next": (end < c.total).then_some(end), "partial": c.partial,
         "truncated": d.truncated, "note": d.note.as_deref().map(clean), "trusted": trusted,
     }))
 }
@@ -675,14 +684,17 @@ mod tests {
                 .map(|r| r[1].as_str().unwrap().into())
                 .collect()
         };
-        let sub = list_dir(d.path(), &t, "src", 0, false).unwrap();
+        let sub = list_dir(d.path(), &t, "src", 0, false, &mut None).unwrap();
         assert_eq!(names(&sub), ["a.rs", "deep"]);
         assert_eq!(sub["rows"][1][0], 1, "depth of the entries of src");
-        let deep = list_dir(d.path(), &t, "src/deep", 0, false).unwrap();
+        let deep = list_dir(d.path(), &t, "src/deep", 0, false, &mut None).unwrap();
         assert_eq!(names(&deep), ["b.rs"]);
         // a folder that is not there, a file, or a hostile path is refused
         for bad in ["nope", "f001", "../..", "/", "", ".git", "src/../.."] {
-            assert!(list_dir(d.path(), &t, bad, 0, false).is_err(), "{bad}");
+            assert!(
+                list_dir(d.path(), &t, bad, 0, false, &mut None).is_err(),
+                "{bad}"
+            );
         }
         // git is never run for a folder that is not trusted
         assert!(

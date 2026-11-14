@@ -445,17 +445,34 @@ impl TuiView {
         let remote = lu.live.engine.clone().filter(|e| e.is_remote());
         let name = dir.clone();
         let job = cx.background_spawn(async move {
-            match remote {
-                Some(e) => e.remote().and_then(|r| r.fs_list_dir(&name, skip).ok()),
-                None => project::children_rows(&root, &name, &listing, skip),
-            }
+            let why = match remote {
+                Some(e) => match e.remote().ok_or("not a WSL engine".to_string()) {
+                    Ok(r) => match r.fs_list_dir(&name, skip) {
+                        Ok(rows) => return rows,
+                        Err(why) => why,
+                    },
+                    Err(why) => why,
+                },
+                None => match project::children_rows(&root, &name, &listing, skip) {
+                    Some(rows) => return rows,
+                    None => "it is not a folder of the project any more".to_string(),
+                },
+            };
+            let depth = name.split('/').filter(|c| !c.is_empty()).count() as u16;
+            vec![project::notice_row(
+                depth,
+                &format!(
+                    "could not read this folder: {}",
+                    synthesis_harness::sanitize_for_display(&why)
+                ),
+            )]
         });
         cx.spawn(async move |this, cx| {
             let rows = job.await;
             this.update(cx, |t, cx| {
                 let same =
                     t.tree.epoch == epoch && t.live.as_ref().is_some_and(|l| l.live.cwd == cwd);
-                if let (true, Some(rows), Some(d)) = (same, rows, t.tree.data.as_mut()) {
+                if let (true, Some(d)) = (same, t.tree.data.as_mut()) {
                     d.put_children(&dir, rows, append);
                     cx.notify();
                 }
@@ -518,7 +535,7 @@ impl TuiView {
             row_paths(d)
                 .iter()
                 .zip(&d.rows)
-                .any(|(p, r)| p == path && !r.dir && r.more == 0)
+                .any(|(p, r)| p == path && !r.dir && r.more == 0 && !r.notice)
         })
     }
 
@@ -576,7 +593,7 @@ impl TuiView {
         };
         let Some(&i) = next else { return true };
         let path = paths[i].clone();
-        if d.rows[i].dir || d.rows[i].more > 0 {
+        if d.rows[i].dir || d.rows[i].more > 0 || d.rows[i].notice {
             self.ts.tree_sel = Some(path);
             cx.notify();
         } else {
@@ -754,7 +771,7 @@ impl TuiView {
                 )
             });
             let click_path = path.clone();
-            let (dir, more) = (r.dir, r.more > 0);
+            let (dir, more, notice) = (r.dir, r.more > 0, r.notice);
             let tag = if r.link {
                 Some("link")
             } else if r.generated {
@@ -776,7 +793,9 @@ impl TuiView {
                     .when(sel, |d| d.bg(hsla(t::ELEVATED)))
                     .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if more {
+                        if notice {
+                            // text only
+                        } else if more {
                             // the page after the entries listed, in the directory this row ends
                             let parent = click_path.rsplit_once('/').map_or("", |(p, _)| p);
                             this.list_dir(parent.to_string(), true, cx);
@@ -804,7 +823,7 @@ impl TuiView {
                                 "\u{25B8}"
                             }),
                     )
-                    .when(!more, |d| {
+                    .when(!more && !notice, |d| {
                         d.child(icon(
                             if dir { "folder" } else { "file" },
                             14.,
@@ -816,7 +835,7 @@ impl TuiView {
                             .flex_1()
                             .min_w(px(0.))
                             .truncate()
-                            .text_color(if more {
+                            .text_color(if more || notice {
                                 dim()
                             } else if dir {
                                 hsla(t::INFO)

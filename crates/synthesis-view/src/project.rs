@@ -34,6 +34,8 @@ pub struct TreeRow {
     pub generated: bool,
     /// Not a file or a folder but the "... N more" row of a directory cut at [`DIR_ROWS`]: N entries are left.
     pub more: usize,
+    /// A line of text, not an entry (see [`notice_row`]): not selectable, not opened.
+    pub notice: bool,
 }
 
 /// What a lazy listing needs to know besides the disk: `git status` (letters, ignored paths) when the folder is
@@ -478,12 +480,141 @@ const MAX_OPEN: usize = 100;
 pub struct Children {
     pub rows: Vec<TreeRow>,
     pub total: usize,
+    /// Entries are missing from the directory: more than [`DIR_ENTRIES`], or names that are not printable text.
+    pub partial: bool,
 }
 
-fn has_cachedir_tag(dir: &Path) -> bool {
+/// A directory as it was read: the entries that are listed, sorted. The engine keeps the last one to page from.
+pub struct Kids {
+    dir: String,
+    names: Vec<(String, bool, bool)>,
+    partial: bool,
+}
+
+/// The directory `comps` of `root` and what is needed to look into it WITHOUT following a link, even one put
+/// in place after a check (unix: a handle, then one `openat` with NOFOLLOW per component and the entries read
+/// from the handle; elsewhere a path that was checked component by component).
+#[cfg(unix)]
+type Here = std::os::fd::OwnedFd;
+#[cfg(not(unix))]
+type Here = std::path::PathBuf;
+
+#[cfg(unix)]
+fn open_here(root: &Path, comps: &[&str]) -> Option<Here> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    // the folder itself may be a link (the person chose it); nothing below it may be one
+    let mut cur = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    for c in comps {
+        cur = openat(
+            &cur,
+            *c,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+    }
+    Some(cur)
+}
+
+#[cfg(not(unix))]
+fn open_here(root: &Path, comps: &[&str]) -> Option<Here> {
+    let mut here = root.to_path_buf();
+    for c in comps {
+        here.push(c);
+        if !std::fs::symlink_metadata(&here).ok()?.is_dir() {
+            return None;
+        }
+    }
+    Some(here)
+}
+
+/// `(name, dir, link)` of the entries (at most [`DIR_ENTRIES`]), whether more were left, and how many names are
+/// not text.
+type Names = (Vec<(String, bool, bool)>, bool, usize);
+
+#[cfg(unix)]
+fn read_names(h: &Here) -> Option<Names> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat};
+    let (mut out, mut cut, mut odd) = (vec![], false, 0);
+    for e in Dir::read_from(h).ok()? {
+        let Ok(e) = e else { continue };
+        let raw = e.file_name();
+        if matches!(raw.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if out.len() >= DIR_ENTRIES {
+            cut = true;
+            break;
+        }
+        let Ok(name) = raw.to_str() else {
+            odd += 1;
+            continue;
+        };
+        let ft = match e.file_type() {
+            FileType::Unknown => statat(h, raw, AtFlags::SYMLINK_NOFOLLOW)
+                .map_or(FileType::Unknown, |st| FileType::from_raw_mode(st.st_mode)),
+            t => t,
+        };
+        out.push((
+            name.to_string(),
+            ft == FileType::Directory,
+            ft == FileType::Symlink,
+        ));
+    }
+    Some((out, cut, odd))
+}
+
+#[cfg(not(unix))]
+fn read_names(h: &Here) -> Option<Names> {
+    let (mut out, mut cut, mut odd) = (vec![], false, 0);
+    for e in std::fs::read_dir(h).ok()?.flatten() {
+        if out.len() >= DIR_ENTRIES {
+            cut = true;
+            break;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        match e.file_name().into_string() {
+            Ok(n) => out.push((n, ft.is_dir(), ft.is_symlink())),
+            Err(_) => odd += 1,
+        }
+    }
+    Some((out, cut, odd))
+}
+
+/// Whether the directory `name` of `h` holds a valid `CACHEDIR.TAG` (a regular file: a pipe of that name
+/// must not block, so it is opened NONBLOCK and judged by `fstat`).
+#[cfg(unix)]
+fn has_cachedir_tag(h: &Here, name: &str) -> bool {
+    use rustix::fs::{Mode, OFlags, openat};
     use std::io::Read as _;
-    let tag = dir.join("CACHEDIR.TAG");
-    // a regular file only: opening a pipe of that name would block
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(sub) = openat(h, name, flags | OFlags::DIRECTORY, Mode::empty()) else {
+        return false;
+    };
+    let Ok(tag) = openat(
+        &sub,
+        "CACHEDIR.TAG",
+        flags | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let mut f = std::fs::File::from(tag);
+    let mut sig = [0u8; 43];
+    f.metadata().is_ok_and(|m| m.is_file())
+        && f.read_exact(&mut sig).is_ok()
+        && &sig == CACHEDIR_SIGNATURE
+}
+
+#[cfg(not(unix))]
+fn has_cachedir_tag(h: &Here, name: &str) -> bool {
+    use std::io::Read as _;
+    let tag = h.join(name).join("CACHEDIR.TAG");
     let mut sig = [0u8; 43];
     std::fs::symlink_metadata(&tag).is_ok_and(|m| m.is_file())
         && std::fs::File::open(&tag)
@@ -492,10 +623,110 @@ fn has_cachedir_tag(dir: &Path) -> bool {
         && &sig == CACHEDIR_SIGNATURE
 }
 
-/// The entries of the directory `dir` (relative, `/`-separated, "" is `root`) read NOW from the disk, so a
-/// closed or huge directory costs nothing until it is opened. `None`: it is not a directory of the project (a
-/// link on the way is not entered, it could lead out of the folder or round in a loop). Entries `git` ignores
-/// are left out except build directories; links are listed as links; names are made printable.
+fn comps_of(dir: &str) -> Option<Vec<&str>> {
+    let comps: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
+    (!comps.iter().any(|c| matches!(*c, "." | ".." | ".git"))).then_some(comps)
+}
+
+/// A build directory is not hidden by .gitignore but not listed either: it is one closed row. Where git
+/// answered, a directory of that name that is tracked is an ordinary directory. The label can come from a
+/// `CACHEDIR.TAG` the repository itself holds: it only collapses the row, nothing is run or trusted by it.
+fn is_generated(h: &Here, listing: &Listing, path: &str, name: &str) -> bool {
+    (GENERATED.contains(&name) || has_cachedir_tag(h, name))
+        && (!listing.git
+            || listing.ignored.contains(path)
+            || listing.status.get(path) == Some(&'?'))
+}
+
+/// Reads the directory `dir` (relative, `/`-separated, "" is `root`) NOW from the disk, so a closed or huge
+/// directory costs nothing until it is opened. `None`: it is not a directory of the project (a link on the way
+/// is not entered, it could lead out of the folder or round in a loop). Entries `git` ignores are left out
+/// except build directories; links are listed as links; a name that is not printable text cannot be opened
+/// again by the name shown, so it is left out and the directory is `partial`.
+pub fn read_children(root: &Path, dir: &str, listing: &Listing) -> Option<Kids> {
+    let here = open_here(root, &comps_of(dir)?)?;
+    let (mut names, cut, mut odd) = read_names(&here)?;
+    names.retain(|n| n.0 != ".git");
+    let all = names.len();
+    names.retain(|n| clean_line(&n.0) == n.0);
+    odd += all - names.len();
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    // files git reports as deleted are not on the disk but are still part of the project
+    let on_disk: HashSet<&str> = names.iter().map(|k| k.0.as_str()).collect();
+    let gone: Vec<(String, bool, bool)> = listing
+        .status
+        .iter()
+        .filter(|(_, c)| **c == 'D')
+        .filter_map(|(p, _)| p.strip_prefix(&prefix))
+        .filter(|n| !n.contains('/') && !on_disk.contains(n))
+        .map(|n| (n.to_string(), false, false))
+        .collect();
+    names.extend(gone);
+    names.sort();
+    names.retain(|(n, d, _)| {
+        let p = format!("{prefix}{n}");
+        !listing.ignored.contains(&p) || (*d && is_generated(&here, listing, &p, n))
+    });
+    Some(Kids {
+        dir: dir.to_string(),
+        names,
+        partial: cut || odd > 0,
+    })
+}
+
+impl Kids {
+    /// Whether this is the reading of `dir`.
+    pub fn is_dir(&self, dir: &str) -> bool {
+        self.dir == dir
+    }
+
+    /// The rows from entry `skip`, at most `limit`. `None`: the directory is no longer there.
+    pub fn page(
+        &self,
+        root: &Path,
+        listing: &Listing,
+        skip: usize,
+        limit: usize,
+    ) -> Option<Children> {
+        let comps = comps_of(&self.dir)?;
+        let here = open_here(root, &comps)?;
+        let depth = comps.len() as u16;
+        let prefix = if self.dir.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.dir)
+        };
+        let rows = self
+            .names
+            .iter()
+            .skip(skip)
+            .take(limit)
+            .map(|(n, d, l)| {
+                let p = format!("{prefix}{n}");
+                TreeRow {
+                    depth,
+                    name: n.clone(),
+                    dir: *d,
+                    status: listing.status.get(&p).copied(),
+                    link: *l,
+                    generated: *d && is_generated(&here, listing, &p, n),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        Some(Children {
+            rows,
+            total: self.names.len(),
+            partial: self.partial,
+        })
+    }
+}
+
+/// [`read_children`] and one page of it.
 pub fn list_children(
     root: &Path,
     dir: &str,
@@ -503,72 +734,7 @@ pub fn list_children(
     skip: usize,
     limit: usize,
 ) -> Option<Children> {
-    let mut here = root.to_path_buf();
-    let mut depth = 0u16;
-    for c in dir.split('/').filter(|c| !c.is_empty()) {
-        if matches!(c, "." | ".." | ".git") {
-            return None;
-        }
-        here.push(c);
-        depth = depth.saturating_add(1);
-        if !std::fs::symlink_metadata(&here).ok()?.is_dir() {
-            return None;
-        }
-    }
-    let prefix = if dir.is_empty() {
-        String::new()
-    } else {
-        format!("{dir}/")
-    };
-    let path_of = |n: &str| format!("{prefix}{n}");
-    let mut kids: Vec<(String, bool, bool)> = std::fs::read_dir(&here)
-        .ok()?
-        .flatten()
-        .take(DIR_ENTRIES)
-        .filter_map(|e| {
-            let ft = e.file_type().ok()?;
-            let name = e.file_name().into_string().ok()?;
-            (name != ".git").then_some((name, ft.is_dir(), ft.is_symlink()))
-        })
-        .collect();
-    // files git reports as deleted are not on the disk but are still part of the project
-    for (p, c) in &listing.status {
-        if let Some(n) = p
-            .strip_prefix(&prefix)
-            .filter(|n| *c == 'D' && !n.contains('/') && !kids.iter().any(|k| k.0 == *n))
-        {
-            kids.push((n.to_string(), false, false));
-        }
-    }
-    kids.sort();
-    // a build directory is not hidden by .gitignore but not listed either: it is one closed row. Where git
-    // answered, a tracked directory of that name is an ordinary directory.
-    let generated = |n: &str| {
-        let p = path_of(n);
-        (GENERATED.contains(&n) || has_cachedir_tag(&here.join(n)))
-            && (!listing.git
-                || listing.ignored.contains(&p)
-                || listing.status.get(&p) == Some(&'?'))
-    };
-    kids.retain(|(n, d, _)| !listing.ignored.contains(&path_of(n)) || (*d && generated(n)));
-    let rows = kids
-        .iter()
-        .skip(skip)
-        .take(limit)
-        .map(|(n, d, l)| TreeRow {
-            depth,
-            name: clean_line(n),
-            dir: *d,
-            status: listing.status.get(&path_of(n)).copied(),
-            link: *l,
-            generated: *d && generated(n),
-            more: 0,
-        })
-        .collect();
-    Some(Children {
-        rows,
-        total: kids.len(),
-    })
+    read_children(root, dir, listing)?.page(root, listing, skip, limit)
 }
 
 /// The "... N more" row that ends a directory cut after its first entries.
@@ -581,6 +747,29 @@ pub fn more_row(depth: u16, left: usize) -> TreeRow {
     }
 }
 
+/// A line of text in the tree that is not an entry (a folder that could not be read, entries left out).
+pub fn notice_row(depth: u16, text: &str) -> TreeRow {
+    TreeRow {
+        depth,
+        name: format!("\u{2026} {text}"),
+        notice: true,
+        ..Default::default()
+    }
+}
+
+/// What ends a page of a directory: the "... more" row when entries are left, else the note that some entries
+/// can never be shown.
+pub fn page_end(rows: &mut Vec<TreeRow>, depth: u16, left: usize, partial: bool) {
+    if left > 0 {
+        rows.push(more_row(depth, left));
+    } else if partial {
+        rows.push(notice_row(
+            depth,
+            "some entries are not shown (too many, or names that are not text)",
+        ));
+    }
+}
+
 /// [`list_children`] from `skip` for the window: one [`DIR_ROWS`] page, with the "... more" row when cut.
 pub fn children_rows(
     root: &Path,
@@ -590,14 +779,9 @@ pub fn children_rows(
 ) -> Option<Vec<TreeRow>> {
     let c = list_children(root, dir, listing, skip, DIR_ROWS)?;
     let left = c.total.saturating_sub(skip + c.rows.len());
-    let depth = c.rows.first().map_or_else(
-        || dir.split('/').filter(|c| !c.is_empty()).count() as u16,
-        |r| r.depth,
-    );
+    let depth = dir.split('/').filter(|c| !c.is_empty()).count() as u16;
     let mut rows = c.rows;
-    if left > 0 {
-        rows.push(more_row(depth, left));
-    }
+    page_end(&mut rows, depth, left, c.partial);
     Some(rows)
 }
 
@@ -637,7 +821,7 @@ impl ProjectData {
         self.rows[start..]
             .iter()
             .take_while(|r| r.depth >= depth)
-            .filter(|r| r.depth == depth && r.more == 0)
+            .filter(|r| r.depth == depth && r.more == 0 && !r.notice)
             .count()
     }
 
@@ -652,22 +836,26 @@ impl ProjectData {
 
     /// Lists `kids` as the children of `dir`: instead of what was listed (an opened directory, Refresh), or after
     /// it (`append`: the page the "... more" row asked for). A directory that is not in the tree changes nothing.
-    pub fn put_children(&mut self, dir: &str, kids: Vec<TreeRow>, append: bool) {
+    pub fn put_children(&mut self, dir: &str, mut kids: Vec<TreeRow>, append: bool) {
         let Some((start, depth)) = self.span(dir) else {
             return;
         };
+        // an engine that answers with a whole subtree (older than this one) gives deeper rows: not children
+        kids.retain(|r| r.depth == depth);
         let end = start
             + self.rows[start..]
                 .iter()
                 .take_while(|r| r.depth >= depth)
                 .count();
-        let from = if !append {
-            start
-        } else if end > start && self.rows[end - 1].more > 0 && self.rows[end - 1].depth == depth {
-            end - 1
-        } else {
-            end
-        };
+        let mut from = if append { end } else { start };
+        // the page asked for replaces the "... more" row and the notes that closed the last one
+        while append
+            && from > start
+            && self.rows[from - 1].depth == depth
+            && (self.rows[from - 1].more > 0 || self.rows[from - 1].notice)
+        {
+            from -= 1;
+        }
         self.rows.splice(from..end, kids);
     }
 
@@ -681,9 +869,13 @@ impl ProjectData {
         let mut open: Vec<&String> = open.iter().collect();
         open.sort_by_key(|d| (d.matches('/').count(), d.as_str()));
         for d in open.into_iter().take(MAX_OPEN) {
-            if self.dir_at(d).is_some()
-                && let Some(kids) = list(d)
-            {
+            if self.dir_at(d).is_some() {
+                let kids = list(d).unwrap_or_else(|| {
+                    vec![notice_row(
+                        d.matches('/').count() as u16 + 1,
+                        "could not read this folder",
+                    )]
+                });
                 self.put_children(d, kids, false);
             }
         }
@@ -1649,5 +1841,114 @@ mod tests {
                 ("top.txt", None)
             ]
         );
+    }
+
+    #[test]
+    fn fifty_thousand_deleted_files_in_one_directory_are_listed_in_linear_time() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        std::fs::create_dir_all(w.join("d")).unwrap();
+        for i in 0..2000 {
+            std::fs::write(w.join(format!("d/live{i}")), "").unwrap();
+        }
+        let mut l = Listing::default();
+        for i in 0..50_000 {
+            l.status.insert(format!("d/gone{i}"), 'D');
+        }
+        // a deleted file that is still on the disk is listed once
+        l.status.insert("d/live7".into(), 'D');
+        let t = Instant::now();
+        let c = list_children(w, "d", &l, 0, DIR_ROWS).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        assert_eq!(c.total, 52_000);
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_shown_as_it_is_leaves_the_directory_partial_and_says_so() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        std::fs::write(w.join("ok.txt"), "").unwrap();
+        std::fs::write(w.join("bad\u{1b}[31mname"), "").unwrap();
+        let rows = children_rows(w, "", &Listing::default(), 0).unwrap();
+        assert_eq!(names(&rows[..1]), ["ok.txt"]);
+        assert!(
+            rows[1].notice && rows[1].name.contains("not shown"),
+            "{rows:?}"
+        );
+        assert_eq!(rows.len(), 2);
+        // a page after it replaces the closing note
+        let mut t = ProjectData {
+            rows: rows.clone(),
+            ..Default::default()
+        };
+        t.put_children(
+            "",
+            vec![TreeRow {
+                name: "z".into(),
+                ..Default::default()
+            }],
+            true,
+        );
+        assert_eq!(names(&t.rows), ["ok.txt", "z"]);
+    }
+
+    #[test]
+    fn a_failed_listing_of_an_open_directory_leaves_a_row_that_says_so() {
+        let mut d = ProjectData {
+            rows: vec![TreeRow {
+                name: "gone".into(),
+                dir: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        d.load_open(&["gone".to_string()], |_| None);
+        assert_eq!(d.rows.len(), 2);
+        assert!(
+            d.rows[1].notice && d.rows[1].depth == 1 && d.rows[1].name.contains("could not read")
+        );
+    }
+
+    #[test]
+    fn rows_of_an_older_engine_that_sent_a_whole_subtree_keep_only_the_children() {
+        let r = |depth, name: &str, dir| TreeRow {
+            depth,
+            name: name.into(),
+            dir,
+            ..Default::default()
+        };
+        let mut d = ProjectData {
+            rows: vec![r(0, "src", true), r(0, "z", false)],
+            ..Default::default()
+        };
+        d.put_children(
+            "src",
+            vec![r(1, "a.rs", false), r(1, "deep", true), r(2, "b.rs", false)],
+            false,
+        );
+        assert_eq!(names(&d.rows), ["src", "a.rs", "deep", "z"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cachedir_tag_that_is_a_pipe_or_a_link_is_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        for n in ["pipe", "link", "real"] {
+            std::fs::create_dir(w.join(n)).unwrap();
+        }
+        std::fs::write(w.join("real/CACHEDIR.TAG"), SIG).unwrap();
+        std::os::unix::fs::symlink(w.join("real/CACHEDIR.TAG"), w.join("link/CACHEDIR.TAG"))
+            .unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .arg(w.join("pipe/CACHEDIR.TAG"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let rows = children_rows(w, "", &Listing::default(), 0).unwrap();
+        let g = |n: &str| rows.iter().find(|r| r.name == n).unwrap().generated;
+        assert!(g("real") && !g("link") && !g("pipe"));
     }
 }
