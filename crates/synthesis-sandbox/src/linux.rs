@@ -2031,9 +2031,15 @@ mod tests {
                     .envs(w.env.iter().cloned())
                     .output()
                     .unwrap();
-                assert!(o.status.success(), "bwrap failed: {o:?}");
+                // a bwrap setup failure is not a denial
+                assert!(
+                    !String::from_utf8_lossy(&o.stderr).contains("bwrap:"),
+                    "{o:?}"
+                );
                 String::from_utf8_lossy(&o.stdout).into_owned()
             };
+            // the denied file is a /dev/null bind on a nodev mount: `cat` fails with EACCES, which is
+            // fine; what matters is that no key byte comes out
             assert_eq!(
                 cat(vec![]),
                 "KEYBYTES",
