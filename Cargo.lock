@@ -7698,6 +7698,7 @@ name = "synthesis-view"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "synthesis-cli-ui-base",
