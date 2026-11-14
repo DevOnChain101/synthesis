@@ -246,6 +246,7 @@ fn without_a_confining_sandbox_the_runner_refuses() {
         home: std::env::temp_dir(),
         backend: Box::new(NullSandbox),
         state: child_state,
+        max_file_mb: 512,
     };
     let e = r.fingerprint().unwrap_err();
     assert!(e.to_string().contains("enforcing sandbox"), "{e}");
@@ -664,4 +665,57 @@ fn a_verifier_is_only_made_for_the_approved_current_contract() {
     .err()
     .expect("unapproved");
     assert!(err.to_string().contains("not approved"), "{err}");
+}
+
+#[test]
+fn a_nul_byte_cannot_turn_a_weakening_diff_into_a_binary_file() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    fs::write(repo.join("tests/calc.test.js"), "assert(1);\nassert(2);\n").unwrap();
+    let base = commit_all(repo, "base");
+    // an assertion removed AND a NUL appended: plain `git diff` says "Binary files differ"
+    fs::write(repo.join("tests/calc.test.js"), b"assert(2);\n\0").unwrap();
+    let weak = commit_all(repo, "nul");
+    assert_eq!(
+        change_flags(repo, &base, &weak).unwrap(),
+        ["tests_weakened"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_not_utf8_is_an_error_not_a_skipped_scan() {
+    need_git!();
+    use std::os::unix::ffi::OsStrExt;
+    let r = rig();
+    let repo = &r.repo;
+    let base = g(repo, &["rev-parse", "HEAD"]);
+    // macOS refuses a name that is not UTF-8; Linux CI exercises this
+    let odd = repo.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt"));
+    if fs::write(odd, "x\n").is_err() {
+        println!("SKIP: this file system refuses non-UTF-8 names");
+        return;
+    }
+    let c = commit_all(repo, "odd name");
+    let e = change_flags(repo, &base, &c).unwrap_err();
+    assert!(e.to_string().contains("UTF-8"), "{e}");
+}
+
+#[test]
+fn the_scratch_repository_has_no_template_files() {
+    need_git!();
+    let r = rig();
+    let stop = AtomicBool::new(false);
+    let dir = r.base.join("scratch-check");
+    let s = Scratch::new(&r.repo, dir.clone(), &stop).unwrap();
+    assert!(!dir.join("info/attributes").exists());
+    assert!(
+        !dir.join("hooks").exists(),
+        "an empty template: no hook samples"
+    );
+    assert!(dir.join("objects/info/alternates").is_file());
+    drop(s);
+    assert!(!dir.exists(), "removed when dropped");
 }

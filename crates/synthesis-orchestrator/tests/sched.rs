@@ -1241,6 +1241,10 @@ struct FakeRunner {
     /// What the same check prints at the base commit (its checkout dir is named `base`).
     base_output: Option<Vec<u8>>,
     ran_in: Mutex<Vec<(PathBuf, bool)>>,
+    /// The ids of the checks run, in order.
+    ids: Mutex<Vec<String>>,
+    /// This check errors (no exit status) the first time it runs.
+    fail_first: Option<String>,
 }
 
 impl FakeRunner {
@@ -1253,6 +1257,8 @@ impl FakeRunner {
             output: b"check output\n".to_vec(),
             base_output: None,
             ran_in: Mutex::new(vec![]),
+            ids: Mutex::new(vec![]),
+            fail_first: None,
         })
     }
 }
@@ -1292,17 +1298,39 @@ impl CheckRunner for FakeRunner {
             .lock()
             .unwrap()
             .push((dir.to_path_buf(), dir.join(".git").exists()));
+        let n = {
+            let mut ids = self.ids.lock().unwrap();
+            ids.push(check.id.clone());
+            ids.iter().filter(|i| **i == check.id).count()
+        };
+        if n == 1 && self.fail_first.as_deref() == Some(check.id.as_str()) {
+            return CheckRun {
+                id: check.id.clone(),
+                command_hash: String::new(),
+                exit_code: None,
+                problem: Some("the check timed out".into()),
+                output: vec![],
+            };
+        }
         CheckRun {
             id: check.id.clone(),
             command_hash: "unused".into(),
             exit_code: self.exit,
             problem: self.problem.clone(),
-            output: if dir.file_name().is_some_and(|n| n == "base") {
-                self.base_output
-                    .clone()
-                    .unwrap_or_else(|| self.output.clone())
-            } else {
-                self.output.clone()
+            // the output differs on every run (a timestamp, a temp path): a re-recorded row would not
+            // be identical
+            output: {
+                let mut out = if dir.file_name().is_some_and(|n| n == "base") {
+                    self.base_output
+                        .clone()
+                        .unwrap_or_else(|| self.output.clone())
+                } else {
+                    self.output.clone()
+                };
+                if !out.is_empty() {
+                    out.extend(format!("(run {n})\n").as_bytes());
+                }
+                out
             },
         }
     }
@@ -1478,6 +1506,8 @@ fn a_failing_or_stuck_check_and_a_forged_report_never_verify() {
             output: b"check output\n".to_vec(),
             base_output: None,
             ran_in: Mutex::new(vec![]),
+            ids: Mutex::new(vec![]),
+            fail_first: None,
         });
         let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
         let (stop, _) = sched
@@ -1511,6 +1541,8 @@ fn without_an_enforcing_sandbox_no_independent_evidence_is_produced() {
         output: b"check output\n".to_vec(),
         base_output: None,
         ran_in: Mutex::new(vec![]),
+        ids: Mutex::new(vec![]),
+        fail_first: None,
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
@@ -1548,6 +1580,8 @@ fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
         output: b"check output\n".to_vec(),
         base_output: None,
         ran_in: Mutex::new(vec![]),
+        ids: Mutex::new(vec![]),
+        fail_first: None,
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
     let mut slowest = Duration::ZERO;
@@ -1590,6 +1624,8 @@ fn runner_printing(candidate: Vec<u8>, base: Option<Vec<u8>>) -> Arc<FakeRunner>
         output: candidate,
         base_output: base,
         ran_in: Mutex::new(vec![]),
+        ids: Mutex::new(vec![]),
+        fail_first: None,
     })
 }
 
@@ -1703,6 +1739,8 @@ fn cancelling_stops_a_running_verification_promptly() {
         output: vec![],
         base_output: None,
         ran_in: Mutex::new(vec![]),
+        ids: Mutex::new(vec![]),
+        fail_first: None,
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
     while !sched.verifier.busy() {
@@ -1716,4 +1754,55 @@ fn cancelling_stops_a_running_verification_promptly() {
     // dropping the scheduler joins the verification thread, which the cancel already stopped
     drop(sched);
     assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn a_retry_after_a_partial_failure_runs_and_records_only_the_missing_checks() {
+    need_git!();
+    let r = rig();
+    let (mut c, p) = verified_contract(&["src/**"]);
+    c.checks = vec![
+        ContractCheck {
+            id: "alpha".into(),
+            command: "cargo test".into(),
+        },
+        ContractCheck {
+            id: "beta".into(),
+            command: "cargo clippy".into(),
+        },
+    ];
+    c.criteria[0].check_ids = vec!["alpha".into(), "beta".into()];
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = Arc::new(FakeRunner {
+        exit: Some(0),
+        problem: None,
+        enforcing: true,
+        delay: Duration::ZERO,
+        output: b"check output\n".to_vec(),
+        base_output: None,
+        ran_in: Mutex::new(vec![]),
+        ids: Mutex::new(vec![]),
+        fail_first: Some("beta".into()),
+    });
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded, "{reports:?}");
+    assert!(
+        !reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("already recorded")),
+        "{reports:?}"
+    );
+    let ids = runner.ids.lock().unwrap().clone();
+    assert_eq!(
+        ids.iter().filter(|i| *i == "alpha").count(),
+        1,
+        "alpha ran again: {ids:?}"
+    );
+    assert_eq!(ids.iter().filter(|i| *i == "beta").count(), 2, "{ids:?}");
+    to_verified(&mut w).unwrap();
 }

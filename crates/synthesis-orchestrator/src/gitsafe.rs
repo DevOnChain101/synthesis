@@ -165,7 +165,12 @@ impl Scratch {
         // where the user's objects are, found from the files themselves: no git command, and so
         // none of the repository's config, is read for this
         let objects = objects_dir(repo)?;
+        // `canonicalize` gives `\\?\C:\...` on Windows; git's alternates file wants the plain path
         let objects_text = objects.to_string_lossy().into_owned();
+        let objects_text = objects_text
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&objects_text)
+            .to_owned();
         if objects_text.contains('\n') {
             return err("the repository's object directory is not usable");
         }
@@ -173,7 +178,13 @@ impl Scratch {
             None,
             None,
             None,
-            &["init", "--bare", "-q", &this.dir.to_string_lossy()],
+            &[
+                "init",
+                "--bare",
+                "-q",
+                "--template=",
+                &this.dir.to_string_lossy(),
+            ],
             stop,
         )?;
         let info = this.dir.join("objects/info");
@@ -293,7 +304,7 @@ pub struct ChangeReport {
     pub flags: Vec<&'static str>,
 }
 
-fn parse_raw(out: &[u8]) -> Vec<Entry> {
+fn parse_raw(out: &[u8]) -> Result<Vec<Entry>, VerifyError> {
     // `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0`
     let mut parts = out.split(|b| *b == 0).filter(|p| !p.is_empty());
     let mut entries = vec![];
@@ -301,15 +312,18 @@ fn parse_raw(out: &[u8]) -> Vec<Entry> {
         let meta = String::from_utf8_lossy(meta);
         let f: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
         if f.len() >= 5 {
+            // a path that is not UTF-8 cannot be scanned or compared: the commit is not verified
+            let path = String::from_utf8(path.to_vec())
+                .map_err(|_| VerifyError("a changed path is not valid UTF-8".into()))?;
             entries.push(Entry {
                 old_mode: f[0].to_owned(),
                 new_mode: f[1].to_owned(),
                 status: f[4].chars().next().unwrap_or('?'),
-                path: String::from_utf8_lossy(path).into_owned(),
+                path,
             });
         }
     }
-    entries
+    Ok(entries)
 }
 
 fn entries(
@@ -335,7 +349,7 @@ fn entries(
         ],
         stop,
     )?;
-    Ok(parse_raw(&out))
+    parse_raw(&out)
 }
 
 /// The added and removed lines of each changed file, parsed from the hunks by their line counts
@@ -359,6 +373,7 @@ fn edits(
         let out = scratch.git(
             &[
                 "diff",
+                "-a",
                 "-U0",
                 "--no-renames",
                 "--no-ext-diff",
@@ -385,7 +400,8 @@ fn parse_hunks(path: &str, patch: &str) -> FileEdit {
     };
     let count = |s: &str| -> usize {
         // `-12,3` or `+7` (a missing count is 1)
-        s[1..]
+        s.get(1..)
+            .unwrap_or("")
             .split_once(',')
             .map_or(1, |(_, n)| n.parse().unwrap_or(0))
     };

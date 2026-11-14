@@ -41,7 +41,7 @@ use synthesis_core::outcome::{
 use synthesis_sandbox::{
     Guarantee, NetworkPolicy, SandboxBackend, SandboxPolicy, SandboxedCommand,
 };
-use synthesis_session::outcome::{NewEvidence, OutcomeWriter, WorkItemRecord};
+use synthesis_session::outcome::{AuthenticEvidence, NewEvidence, OutcomeWriter, WorkItemRecord};
 
 use crate::gitsafe::{ChangeReport, fresh_checkout_stoppable, inspect_change};
 use crate::proc::{ChildState, StateFn, child_state, kill_unreaped_tree};
@@ -52,9 +52,6 @@ pub const SCOPE_CHECK: &str = "envelope-scope";
 
 /// Most output kept of one check (the tail), in bytes.
 const OUTPUT_TAIL: usize = 64 * 1024;
-
-/// Largest file one check may write (blocks of 512 bytes: 64 MiB).
-const FILE_SIZE_LIMIT_BLOCKS: u64 = 131_072;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyError(pub String);
@@ -128,7 +125,13 @@ pub struct SandboxRunner {
     pub backend: Box<dyn SandboxBackend>,
     /// Where the child stands (tests substitute it, like the attempt runner's).
     pub state: StateFn,
+    /// Largest file a check may write, in MiB (`synt.orchestrator.verify.max_file_mb`, default
+    /// 512). A larger one (a big debug test binary) stops the check with SIGXFSZ: it fails closed.
+    pub max_file_mb: u64,
 }
+
+/// Default of [`SandboxRunner::max_file_mb`].
+pub const DEFAULT_MAX_FILE_MB: u64 = 512;
 
 impl SandboxRunner {
     pub fn detect(home: PathBuf) -> Self {
@@ -136,6 +139,7 @@ impl SandboxRunner {
             home,
             backend: synthesis_sandbox::detect(),
             state: child_state,
+            max_file_mb: DEFAULT_MAX_FILE_MB,
         }
     }
 }
@@ -197,9 +201,13 @@ impl CheckRunner for SandboxRunner {
         policy.network = NetworkPolicy::Deny;
         policy.required = Guarantee::Weak;
         policy.env_passthrough = ["PATH", "LANG", "LC_ALL"].map(String::from).to_vec();
-        // a check cannot fill the disk through its own output: files it writes stop at 64 MiB
+        // No single file a check writes can exceed the limit (this bounds one file, not the total
+        // it writes in its temp dir, and it is the check's own process that is limited). The
+        // sandbox has no registry cache and no network, so only a project whose dependencies are
+        // vendored (or already built into its toolchain) can be verified.
         let command = format!(
-            "ulimit -f {FILE_SIZE_LIMIT_BLOCKS} 2>/dev/null; {}",
+            "ulimit -f {} 2>/dev/null; {}",
+            self.max_file_mb.saturating_mul(2048),
             check.command
         );
         let wrapped = match self.backend.wrap(
@@ -346,8 +354,11 @@ fn sanitize_output(b: &[u8]) -> Vec<u8> {
         .into_bytes()
 }
 
-/// Total tests a runner's output says it ran (`test result: ok. N passed; M failed; ...` lines of
-/// `cargo test`, summed over test binaries); `None` when the output is not of a known runner.
+/// Total tests a runner's output says it ran. A HEURISTIC, not a control: it trusts any
+/// `test result:` line in the output tail, which a `harness = false` binary can print (so can the
+/// code under test). Its uses (zero tests, fewer than the base) raise flags for a person; none of
+/// them proves a test ran. It reads the `test result: ok. N passed; M failed; ...` lines of
+/// `cargo test`, summed over test binaries; `None` when the output is not of a known runner.
 fn test_count(output: &[u8]) -> Option<u64> {
     let text = String::from_utf8_lossy(output);
     let mut total = None;
@@ -382,10 +393,20 @@ struct JobOutput {
     runs: Vec<CheckRun>,
 }
 
+enum JobResult {
+    /// The contract's checks that had no result yet.
+    Checks(JobOutput),
+    /// The changed files of an attempt's commit.
+    Scope {
+        report: ChangeReport,
+        fingerprint: String,
+    },
+}
+
 struct Job {
     commit: String,
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<Result<JobOutput, VerifyError>>,
+    handle: JoinHandle<Result<JobResult, VerifyError>>,
 }
 
 /// The scratch directory of a job is removed on every way out.
@@ -484,11 +505,44 @@ impl IndependentVerifier {
         }
     }
 
+    /// A directory no other job (a stale one for the same item included) shares.
     fn scratch_dir(&self, name: &str) -> PathBuf {
-        self.home.join("verify").join(name)
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        self.home
+            .join("verify")
+            .join(format!("{name}-{}", &nonce[..8]))
     }
 
-    /// An `agent` item: its commit's changes against the envelope.
+    /// A job for another commit is stale: stop it and forget it.
+    fn drop_stale(&mut self, item: &WorkItemId, commit: &str) {
+        if self.jobs.get(item).is_some_and(|j| j.commit != commit)
+            && let Some(old) = self.jobs.remove(item)
+        {
+            old.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The rows for this item, check and commit that count (chained event and MAC).
+    fn rows_for(
+        &self,
+        w: &OutcomeWriter,
+        item: &WorkItemRecord,
+        commit: &str,
+        check: &str,
+    ) -> Result<Vec<AuthenticEvidence>, SchedError> {
+        Ok(w.authentic_evidence(w.id())?
+            .into_iter()
+            .filter(|e| {
+                e.work_item_id == item.id
+                    && e.subject_commit == commit
+                    && e.check_id == check
+                    && e.trust_class == TrustClass::IndependentCheck
+            })
+            .collect())
+    }
+
+    /// An `agent` item: its commit's changes against the envelope, inspected on a job thread (up to
+    /// hundreds of git commands) so the tick never waits and cancel reaches it.
     fn verify_agent(
         &mut self,
         w: &mut OutcomeWriter,
@@ -504,12 +558,56 @@ impl IndependentVerifier {
         let Some(commit) = att.subject_commit.clone() else {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));
         };
-        let base = w.get_outcome(w.id())?.base_commit;
-        let fp = self.runner.fingerprint().map_err(state_err)?;
-        let dir = self.scratch_dir(&format!("scope-{}", att.id.as_str()));
-        let _clean = Cleanup(dir.clone());
-        let report = inspect_change(&self.repo, dir, &base, &commit, &AtomicBool::new(false))
-            .map_err(state_err)?;
+        self.drop_stale(&item.id, &commit);
+        // already judged (a restart, a retry): decide from the authentic row
+        if let Some(row) = self.rows_for(w, item, &commit, SCOPE_CHECK)?.first() {
+            return Ok(if row.result == "passed" && row.flags.is_empty() {
+                Verdict::Passed
+            } else {
+                Verdict::Failed(format!(
+                    "the attempt's changes failed the envelope check (flags: {})",
+                    row.flags.join(", ")
+                ))
+            });
+        }
+        if !self.jobs.contains_key(&item.id) {
+            let fingerprint = self.runner.fingerprint().map_err(state_err)?;
+            let base = w.get_outcome(w.id())?.base_commit;
+            let repo = self.repo.clone();
+            let dir = self.scratch_dir(&format!("scope-{}", att.id.as_str()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (c2, s2) = (commit.clone(), stop.clone());
+            let handle = std::thread::spawn(move || {
+                let _clean = Cleanup(dir.clone());
+                let report = inspect_change(&repo, dir, &base, &c2, &s2)?;
+                Ok(JobResult::Scope {
+                    report,
+                    fingerprint,
+                })
+            });
+            self.jobs.insert(
+                item.id.clone(),
+                Job {
+                    commit,
+                    stop,
+                    handle,
+                },
+            );
+            return Ok(Verdict::Pending);
+        }
+        if !self.jobs[&item.id].handle.is_finished() {
+            return Ok(Verdict::Pending);
+        }
+        let done = self.jobs.remove(&item.id).expect("present");
+        let (report, fp) = match done.handle.join() {
+            Ok(Ok(JobResult::Scope {
+                report,
+                fingerprint,
+            })) => (report, fingerprint),
+            Ok(Ok(_)) => return Ok(Verdict::Failed("unexpected verification result".into())),
+            Ok(Err(e)) => return Ok(Verdict::Failed(e.to_string())),
+            Err(_) => return Ok(Verdict::Failed("the verification thread panicked".into())),
+        };
         let mut outside = outside_envelope(&report.files, &self.contract.envelope);
         outside.extend(report.special.iter().cloned());
         outside.sort();
@@ -530,7 +628,7 @@ impl IndependentVerifier {
                 exit_code: None,
                 fingerprint: &fp,
                 artifact: None,
-                flags: flags.clone(),
+                flags,
             },
         ))?;
         if !passed {
@@ -552,6 +650,8 @@ impl IndependentVerifier {
     }
 
     /// A `verify` item: the contract's checks on the candidate commit, on a background thread.
+    /// Only the checks without an authentic row for this commit are run and recorded, so a retry
+    /// after a partial failure never records a passing check twice.
     fn verify_checks(
         &mut self,
         w: &mut OutcomeWriter,
@@ -565,25 +665,15 @@ impl IndependentVerifier {
                 "the contract has no checks to run independently".into(),
             ));
         }
-        // a job for another commit is stale: stop it and forget it
-        if self.jobs.get(&item.id).is_some_and(|j| j.commit != commit)
-            && let Some(old) = self.jobs.remove(&item.id)
-        {
-            old.stop.store(true, Ordering::SeqCst);
-        }
+        self.drop_stale(&item.id, &commit);
         if !self.jobs.contains_key(&item.id) {
-            let existing: Vec<String> = w
-                .list_evidence(w.id())?
-                .into_iter()
-                .filter(|e| e.work_item_id == item.id && e.subject_commit == commit)
-                .map(|e| e.check_id)
-                .collect();
-            if self
-                .contract
-                .checks
-                .iter()
-                .all(|c| existing.contains(&c.id))
-            {
+            let mut todo = vec![];
+            for c in &self.contract.checks {
+                if self.rows_for(w, item, &commit, &c.id)?.is_empty() {
+                    todo.push(c.clone());
+                }
+            }
+            if todo.is_empty() {
                 return self.decide(w, item, &commit, &[]);
             }
             let fp = self.runner.fingerprint().map_err(state_err)?;
@@ -593,15 +683,12 @@ impl IndependentVerifier {
                 item.id.as_str(),
                 commit.get(..12).unwrap_or(&commit)
             ));
-            let (runner, checks, timeout) = (
-                self.runner.clone(),
-                self.contract.checks.clone(),
-                self.timeout,
-            );
+            let (runner, timeout) = (self.runner.clone(), self.timeout);
             let stop = Arc::new(AtomicBool::new(false));
             let (c2, s2) = (commit.clone(), stop.clone());
             let handle = std::thread::spawn(move || {
-                job(&*runner, &repo, &dir, &base, &c2, &checks, timeout, &s2, fp)
+                job(&*runner, &repo, &dir, &base, &c2, &todo, timeout, &s2, fp)
+                    .map(JobResult::Checks)
             });
             self.jobs.insert(
                 item.id.clone(),
@@ -618,7 +705,8 @@ impl IndependentVerifier {
         }
         let done = self.jobs.remove(&item.id).expect("present");
         let out = match done.handle.join() {
-            Ok(Ok(o)) => o,
+            Ok(Ok(JobResult::Checks(o))) => o,
+            Ok(Ok(_)) => return Ok(Verdict::Failed("unexpected verification result".into())),
             Ok(Err(e)) => return Ok(Verdict::Failed(e.to_string())),
             Err(_) => return Ok(Verdict::Failed("the verification thread panicked".into())),
         };
@@ -665,8 +753,8 @@ impl IndependentVerifier {
         self.decide(w, item, &done.commit, &unrecorded)
     }
 
-    /// The item passes when every contract check has unflagged `passed` independent evidence for
-    /// the commit and no run went unrecorded.
+    /// The item passes when every contract check has unflagged `passed` AUTHENTIC independent
+    /// evidence for the commit and no run went unrecorded.
     fn decide(
         &self,
         w: &mut OutcomeWriter,
@@ -674,7 +762,6 @@ impl IndependentVerifier {
         commit: &str,
         unrecorded: &[String],
     ) -> Result<Verdict, SchedError> {
-        let rows = w.list_evidence(w.id())?;
         let mut bad: Vec<String> = unrecorded.to_vec();
         for c in &self.contract.checks {
             if unrecorded
@@ -683,19 +770,13 @@ impl IndependentVerifier {
             {
                 continue;
             }
-            let row = rows.iter().find(|e| {
-                e.work_item_id == item.id
-                    && e.subject_commit == commit
-                    && e.check_id == c.id
-                    && e.trust_class == TrustClass::IndependentCheck
-            });
-            match row {
-                Some(e) if e.result == "passed" && e.flags.is_empty() => {}
-                Some(e) if !e.flags.is_empty() => {
-                    bad.push(format!("{} flagged ({})", c.id, e.flags.join(", ")));
-                }
-                Some(e) => bad.push(format!("{} {}", c.id, e.result)),
-                None => bad.push(format!("{} has no result", c.id)),
+            let rows = self.rows_for(w, item, commit, &c.id)?;
+            if rows.is_empty() {
+                bad.push(format!("{} has no result", c.id));
+            } else if let Some(r) = rows.iter().find(|r| !r.flags.is_empty()) {
+                bad.push(format!("{} flagged ({})", c.id, r.flags.join(", ")));
+            } else if let Some(r) = rows.iter().find(|r| r.result != "passed") {
+                bad.push(format!("{} {}", c.id, r.result));
             }
         }
         Ok(if bad.is_empty() {
@@ -732,14 +813,14 @@ fn job(
         if stop.load(Ordering::SeqCst) {
             return Err(VerifyError("verification was stopped".into()));
         }
-        let mut run = runner.run(&src, dir, c, timeout, stop);
+        let mut run = runner.run(&src, &dir.join("run"), c, timeout, stop);
         // zero tests is not a pass: a check that ran nothing proves nothing
         if run.result() == "passed" && test_count(&run.output) == Some(0) {
             run.problem = Some("the check ran no tests".into());
         }
         runs.push(run);
     }
-    // fewer tests than the base commit had is a weakening
+    // fewer tests than the base commit had is a weakening (a heuristic: see `test_count`)
     let counted: Vec<usize> = (0..runs.len())
         .filter(|i| runs[*i].result() == "passed" && test_count(&runs[*i].output).is_some())
         .collect();
@@ -750,7 +831,9 @@ fn job(
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let at_base = runner.run(&base_src, dir, &checks[i], timeout, stop);
+                // the base run has its own scratch (HOME, target dir): nothing is shared
+                let at_base =
+                    runner.run(&base_src, &dir.join("base-run"), &checks[i], timeout, stop);
                 if at_base.result() == "passed"
                     && let (Some(b), Some(n)) =
                         (test_count(&at_base.output), test_count(&runs[i].output))

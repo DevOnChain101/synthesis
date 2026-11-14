@@ -278,7 +278,7 @@ CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempoten
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
 -- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
-INSERT INTO schema_migrations(version, applied_at) VALUES (1006, 'outcome-ddl-rev-6');
+INSERT INTO schema_migrations(version, applied_at) VALUES (1007, 'outcome-ddl-rev-7');
 "#,
 ];
 
@@ -289,7 +289,7 @@ pub const OUTCOMES: i64 = 5;
 /// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
 /// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
 /// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
-pub const OUTCOME_DDL_MARKER: i64 = 1006;
+pub const OUTCOME_DDL_MARKER: i64 = 1007;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 

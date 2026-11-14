@@ -523,6 +523,30 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The evidence rows of the outcome that count (chained event AND valid MAC, the frozen
+    /// command's hash for a frozen check) under its current contract: what the verdict sees.
+    pub fn authentic_evidence(&self, id: &OutcomeId) -> Result<Vec<AuthenticEvidence>> {
+        need_v5(&self.conn)?;
+        let o = self.get_outcome(id)?;
+        let (contract, ..) = self.get_contract(id, o.contract_version)?;
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            return Ok(vec![]);
+        };
+        authentic_evidence(&self.conn, &key, id, &contract)?
+            .into_iter()
+            .map(|r| {
+                Ok(AuthenticEvidence {
+                    work_item_id: WorkItemId::parse(&r.item).map_err(refuse)?,
+                    check_id: r.fact.check_id,
+                    subject_commit: r.fact.commit,
+                    trust_class: r.fact.trust,
+                    result: r.fact.result,
+                    flags: r.flags,
+                })
+            })
+            .collect()
+    }
+
     pub fn list_evidence(&self, id: &OutcomeId) -> Result<Vec<EvidenceRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
@@ -1900,10 +1924,12 @@ struct EvMac<'a> {
     fence: &'a str,
     captured_at: &'a str,
     flags: &'a str,
+    kind: &'a str,
+    tree: &'a str,
 }
 
 impl EvMac<'_> {
-    fn parts(&self) -> [&str; 18] {
+    fn parts(&self) -> [&str; 20] {
         [
             self.id,
             self.outcome,
@@ -1923,6 +1949,8 @@ impl EvMac<'_> {
             self.fence,
             self.captured_at,
             self.flags,
+            self.kind,
+            self.tree,
         ]
     }
 }
@@ -1933,7 +1961,20 @@ impl EvMac<'_> {
 /// MAC failing.
 struct AuthRow {
     item: String,
+    flags: Vec<String>,
     fact: synthesis_core::outcome::EvidenceFact,
+}
+
+/// An evidence row that passed the authenticity checks (chained event and MAC), for the
+/// verifier's decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticEvidence {
+    pub work_item_id: WorkItemId,
+    pub check_id: String,
+    pub subject_commit: String,
+    pub trust_class: TrustClass,
+    pub result: String,
+    pub flags: Vec<String>,
 }
 
 fn authentic_evidence(
@@ -1947,12 +1988,12 @@ fn authentic_evidence(
                 e.check_id,COALESCE(e.command_hash,''),e.criteria_ids,e.result,COALESCE(e.exit_code,''), \
                 e.env_fingerprint,COALESCE(e.artifact_session_id,'')||'|'||COALESCE(e.artifact_id,''), \
                 COALESCE(e.sha256,''),e.fence,e.captured_at,e.flags,COALESCE(e.mac,''), \
-                {FENCE_CURRENT} \
+                e.kind,COALESCE(e.subject_tree,''), {FENCE_CURRENT} \
          FROM evidence e WHERE e.outcome_id=?1 AND {EVENT_BACKED}"
     ))?;
     let rows = st.query_map([id.as_str()], |r| {
-        let mut v: Vec<String> = Vec::with_capacity(18);
-        for i in 0..18 {
+        let mut v: Vec<String> = Vec::with_capacity(20);
+        for i in 0..20 {
             // numbers (exit code, fence) and text are all compared as text
             v.push(match r.get_ref(i)? {
                 rusqlite::types::ValueRef::Integer(n) => n.to_string(),
@@ -1960,7 +2001,7 @@ fn authentic_evidence(
                 _ => String::new(),
             });
         }
-        Ok((v, r.get::<_, bool>(18)?))
+        Ok((v, r.get::<_, bool>(20)?))
     })?;
     let mut out = vec![];
     for row in rows {
@@ -1984,6 +2025,8 @@ fn authentic_evidence(
             fence: &v[14],
             captured_at: &v[15],
             flags: &v[16],
+            kind: &v[18],
+            tree: &v[19],
         };
         if !mac_ok(key, "evidence", &m.parts(), &v[17]) {
             continue; // forged, altered or from an old build: counts for nothing
@@ -1997,6 +2040,7 @@ fn authentic_evidence(
         let flags: Vec<String> = serde_json::from_str(&v[16])?;
         out.push(AuthRow {
             item: v[1].clone(),
+            flags: flags.clone(),
             fact: synthesis_core::outcome::EvidenceFact {
                 trust: serde_json::from_value(Value::String(v[3].clone()))?,
                 result: v[9].clone(),
@@ -3301,6 +3345,8 @@ impl OutcomeTx<'_, '_> {
                 fence: &fence,
                 captured_at: &captured,
                 flags: &flags_json,
+                kind: "check",
+                tree: "",
             };
             mac(self.et.key(), "evidence", &m.parts())
         };
