@@ -1689,6 +1689,11 @@ pub fn prepare(
             child_env.insert(k.clone(), v.clone());
         }
     }
+    // commands and verification checks find the user's own toolchains (`cargo`) even when the app was
+    // started with a minimal PATH (a desktop launch)
+    if let Some(p) = child_env.get_mut("PATH") {
+        *p = synthesis_config::with_user_tool_dirs(p, &h.user);
+    }
     let rt = Arc::new(TerminalRuntime::new(sandbox_mode));
     let notify_policy = policy.as_ref().ok().cloned();
     rt.open_session_sandboxed(&sid, ws.clone(), child_env.clone(), policy.ok());
@@ -2193,6 +2198,21 @@ pub fn prepare(
     } else {
         Arc::new(crate::login::CliHost { sink: sink.clone() })
     };
+    // the interactive app shows the agent's browser (a person watches) unless `synt.browser.headed` says false
+    let mut browser = browser;
+    let headed = browser.headed.unwrap_or(is_cli);
+    browser.headed = Some(headed);
+    if headed
+        && let Err(why) =
+            synthesis_browser::profile::display_available(env, synthesis_browser::Os::current())
+    {
+        let note = format!("browser: no visible window ({why}); the agent's browser runs headless");
+        if is_cli {
+            notices.push(note);
+        } else {
+            eprintln!("synt: {note}");
+        }
+    }
     let registry = Registry::with_terminal_policy(rt.clone(), make_policy).with_new_tools();
     // an outcome attempt has no browser tools (the browser worker is outside the OS sandbox)
     let registry = if c.attempt_session {

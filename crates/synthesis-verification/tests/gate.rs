@@ -361,6 +361,60 @@ async fn timeout_is_failed() {
     assert!(r.duration_ms < 10_000);
 }
 
+/// Three checks that all need `cargo` (not on the sandbox PATH) are one limitation with one hint, and the
+/// gate still stops `blocked` (nothing was verified).
+#[tokio::test]
+async fn a_program_missing_from_the_sandbox_path_is_named_once() {
+    let f = fx_path(&[("a.test.js", NODE_OK)], Some("/nonexistent"));
+    let mut results = vec![];
+    for (id, cmd) in [
+        ("k1", "cargo fmt --check"),
+        ("k2", "cargo clippy"),
+        ("k3", "cargo test"),
+    ] {
+        let mut c = check(&f, id, cmd, 5000);
+        c.kind = CheckKind::Unit;
+        c.declared_by = Declarer::Harness;
+        results.push(f.runner().run_one(&c, &CancellationToken::new()).await);
+    }
+    let (s, lim) = aggregate(&mut [], &results, InferredOnlyPolicy::default());
+    assert_eq!(s, VerificationStatus::Unverified);
+    let named: Vec<_> = lim
+        .iter()
+        .filter(|l| l.contains("program not found in the sandbox PATH"))
+        .collect();
+    assert_eq!(named.len(), 1, "{lim:?}");
+    assert!(
+        named[0].starts_with("blocked: ")
+            && named[0].contains("cargo (checks k1, k2, k3)")
+            && named[0].contains("PATH"),
+        "{named:?}"
+    );
+    assert!(
+        !lim.iter()
+            .any(|l| l.contains("command not found") || l.contains("planned test")),
+        "{lim:?}"
+    );
+}
+
+/// The program named is the one the shell could not find, not the first word of the command line.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_missing_program_is_named_from_the_shell_message() {
+    let f = fx_path(&[], Some("/nonexistent"));
+    for cmd in [
+        "cd . && definitely-missing-xyz test",
+        "/bin/sh -c 'definitely-missing-xyz'",
+    ] {
+        let r = f
+            .runner()
+            .run_one(&check(&f, "k1", cmd, 5000), &CancellationToken::new())
+            .await;
+        let why = r.blocked_reason.unwrap_or_default();
+        assert!(why.ends_with("definitely-missing-xyz"), "{cmd}: {why}");
+    }
+}
+
 #[tokio::test]
 async fn missing_binary_is_blocked_not_failed() {
     let f = fx(&[]);
@@ -372,7 +426,10 @@ async fn missing_binary_is_blocked_not_failed() {
         )
         .await;
     assert_eq!(r.status, VerificationStatus::Blocked);
-    assert!(r.blocked_reason.unwrap().contains("tool missing"));
+    assert_eq!(
+        r.blocked_reason.unwrap(),
+        "program not found in the sandbox PATH: definitely-not-a-real-tool-xyz"
+    );
     assert!(r.failure_fingerprint.is_none());
 
     // Each language tool, when it is absent from PATH, is blocked; gate stops `blocked`.

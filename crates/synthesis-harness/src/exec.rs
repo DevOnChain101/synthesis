@@ -1434,13 +1434,17 @@ impl Harness {
                         .get("command")
                         .and_then(Value::as_str)
                         .is_some_and(synthesis_permissions::is_auto_safe_bash);
-                if !inert {
-                    task.side_effects.store(true, Ordering::SeqCst);
-                }
                 task.pending_user_need.store(false, Ordering::SeqCst);
                 task.pending_approval.store(false, Ordering::SeqCst);
                 // A shell may have changed anything, even when it fails.
-                for f in self.tracker.changed(&task.workspace, &task.task_id).await {
+                let changed = self.tracker.changed(&task.workspace, &task.task_id).await;
+                // With a gate only files the task changed ask for verification: a browser lookup or a `curl`
+                // leaves nothing to check, and the gate's own workspace snapshot still catches a change the
+                // tracker missed. Without a gate nothing could tell, so any such command counts.
+                if !inert && (self.gate.is_none() || !changed.is_empty()) {
+                    task.side_effects.store(true, Ordering::SeqCst);
+                }
+                for f in changed {
                     self.add_changed(task, f);
                 }
             }

@@ -96,9 +96,31 @@ pub fn aggregate(
         };
     }
     let mut lim = vec![];
+    // Checks whose program is not on the sandbox PATH say so once per program, not once per check.
+    let missing = |k: &CheckResult| {
+        k.blocked_reason
+            .as_deref()
+            .and_then(|r| r.strip_prefix(MISSING_PROGRAM))
+            .map(|p| p.trim_start_matches(": ").to_string())
+    };
+    let mut programs: Vec<(String, Vec<&str>)> = vec![];
+    for k in checks.iter().filter(|k| k.status == Blocked) {
+        let Some(p) = missing(k) else { continue };
+        match programs.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, ids)) => ids.push(&k.id),
+            None => programs.push((p, vec![&k.id])),
+        }
+    }
+    for (p, ids) in &programs {
+        lim.push(format!(
+            "{BLOCKED_MISSING}: {p} (checks {}); put its directory on PATH or install it",
+            ids.join(", ")
+        ));
+    }
     for k in checks
         .iter()
         .filter(|k| k.status != Passed && k.status != Failed)
+        .filter(|k| missing(k).is_none())
     {
         if let Some(t) = k.tests.as_ref().filter(|t| t.skipped + t.todo > 0) {
             lim.push(format!(
@@ -141,6 +163,7 @@ pub fn aggregate(
         .iter()
         .filter(test_kind)
         .filter(|k| k.status != Passed && k.status != Failed)
+        .filter(|k| missing(k).is_none())
     {
         lim.push(format!(
             "{PLANNED_TEST}: {} ({}) was {}; lint or build results do not verify a task with tests planned",
@@ -372,7 +395,7 @@ impl CompletionGate {
                 || !d.defs.is_empty()
                 || d.changed.iter().any(|f| !self.preexisting.contains(f))
         });
-        if !has_user && !st.side_effects && !drifted {
+        if !has_user && !st.side_effects && !drifted && st.model_checks.is_empty() {
             return GateDecision::Complete(None);
         }
         self.attempt += 1;

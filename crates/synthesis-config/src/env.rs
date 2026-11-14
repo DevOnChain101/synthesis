@@ -112,6 +112,46 @@ impl Env {
     }
 }
 
+/// Per-user toolchain directories (relative to the home) that a GUI launch lacks on its `PATH` (launchd gives
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, so `cargo` is "not found"). The sandbox already makes them readable.
+const USER_TOOL_DIRS: &[&str] = &[
+    ".cargo/bin",
+    ".local/bin",
+    ".volta/bin",
+    ".bun/bin",
+    ".deno/bin",
+    ".pyenv/shims",
+    ".rbenv/shims",
+    ".asdf/shims",
+];
+
+/// `path` with the existing `USER_TOOL_DIRS` of `home` appended (never prepended: a system program is never
+/// shadowed). A fixed name, not a PATH entry the project or the environment supplied; only a real directory
+/// that resolves inside `home` and, on unix, that no other user can write to.
+pub fn with_user_tool_dirs(path: &str, home: &std::path::Path) -> String {
+    let Ok(real_home) = std::fs::canonicalize(home) else {
+        return path.to_string();
+    };
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(path).collect();
+    for rel in USER_TOOL_DIRS {
+        let Ok(d) = std::fs::canonicalize(home.join(rel)) else {
+            continue;
+        };
+        #[cfg(unix)]
+        let shared = std::fs::metadata(&d).map_or(true, |m| {
+            std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o022 != 0
+        });
+        #[cfg(not(unix))]
+        let shared = false;
+        if d.is_dir() && d.starts_with(&real_home) && !shared && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(dirs)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 /// `^SYNT_(?:[A-Z0-9]+_)*(?:API_KEY|AUTH_TOKEN|TOKEN)$`
 pub fn is_secret_env_name(name: &str) -> bool {
     let Some(mut rest) = name.strip_prefix("SYNT_") else {
@@ -248,6 +288,35 @@ pub fn looks_like_key(s: &str) -> bool {
 mod tests {
     use super::*;
     use synthesis_platform::wsl::{WslHost, WslVersion};
+
+    #[cfg(unix)]
+    #[test]
+    fn user_tool_dirs_are_appended_only_when_real_private_and_inside_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::set_permissions(
+            home.join(".local/bin"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        // a link out of the home is not followed in
+        std::os::unix::fs::symlink("/usr/bin", home.join(".bun")).unwrap();
+        let out = with_user_tool_dirs("/usr/bin:/bin", &home);
+        let got: Vec<_> = std::env::split_paths(&out).collect();
+        assert_eq!(got[..2], ["/usr/bin", "/bin"].map(std::path::PathBuf::from));
+        assert!(got.contains(&home.join(".cargo/bin")), "{out}");
+        assert!(
+            !got.contains(&home.join(".local/bin")),
+            "world-writable: {out}"
+        );
+        assert_eq!(got.len(), 3, "{out}");
+        // already there: not doubled
+        let again = with_user_tool_dirs(&out, &home);
+        assert_eq!(again, out);
+    }
 
     #[test]
     fn child_env_on_wsl_drops_windows_dirs_and_interop_names() {

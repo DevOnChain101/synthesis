@@ -7,6 +7,7 @@ pub mod close_ws;
 pub mod doctor_ui;
 pub mod engine;
 pub mod folder;
+pub mod last_session;
 pub mod live;
 pub mod memory_ui;
 pub mod menu;

@@ -37,6 +37,8 @@ pub struct BrowserSettings {
     pub login_timeout: Option<Duration>,
     pub allow_unsandboxed: bool,
     pub allow_with_mcp: bool,
+    /// `synt.browser.headed`; unset: the front-end's default (visible in the interactive app).
+    pub headed: Option<bool>,
     pub approved_profiles: BTreeSet<String>,
     pub approved_secrets: BTreeSet<(String, String)>,
     pub warnings: Vec<String>,
@@ -69,6 +71,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
     }
     s.allow_unsandboxed = raw.get("allow_unsandboxed") == Some(&Value::Bool(true));
     s.allow_with_mcp = raw.get("allow_with_mcp") == Some(&Value::Bool(true));
+    s.headed = raw.get("headed").and_then(Value::as_bool);
     // Pre-approval for runs nobody can answer: named profiles, and (secret, origin) pairs that the
     // secret is already bound to.
     if let Some(a) = raw.get("approved").and_then(Value::as_object) {
@@ -166,6 +169,7 @@ impl BrowserSettings {
             allow_unsandboxed: self.allow_unsandboxed,
             mcp_stdio,
             allow_with_mcp: self.allow_with_mcp,
+            headed: self.headed == Some(true),
             pre_approved_profiles: self.approved_profiles,
             pre_approved_secrets: self.approved_secrets,
             host: Some(host),
@@ -755,6 +759,11 @@ mod tests {
         assert_eq!(s.secrets.len(), 1);
         assert_eq!(s.profile_domains["acme"], ["cdn.acme.com"]);
         assert_eq!(s.login_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            parse_settings(json!({"headed": false}).as_object().unwrap()).headed,
+            Some(false)
+        );
+        assert_eq!(parse_settings(&Map::new()).headed, None);
         assert!(s.allow_unsandboxed);
         assert_eq!(s.approved_profiles, BTreeSet::from(["acme".to_string()]));
         assert_eq!(

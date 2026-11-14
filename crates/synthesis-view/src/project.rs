@@ -493,16 +493,8 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
         ],
         0,
     ) else {
-        let note = if git.exe.is_some() {
-            "not a git repository"
-        } else {
-            "git was not found"
-        };
-        return ProjectData {
-            loaded: true,
-            note: Some(note.into()),
-            ..Default::default()
-        };
+        // not a repository (or no git): the folder is still listed, by the walk that runs nothing
+        return scan_plain(cwd);
     };
     let mut paths = split_nul(&files);
     paths.sort();
@@ -676,11 +668,15 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_folder_is_a_note_not_an_empty_tree() {
+    fn a_folder_without_git_lists_its_files_not_an_empty_tree() {
         let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "a").unwrap();
         let p = scan(d.path(), &env());
-        assert!(p.loaded && p.rows.is_empty());
-        assert!(p.note.is_some());
+        assert!(p.loaded && p.note.is_none());
+        assert_eq!(
+            p.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["a.txt"]
+        );
     }
 
     #[test]
