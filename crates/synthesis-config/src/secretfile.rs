@@ -17,6 +17,22 @@ fn norm(p: &Path) -> String {
     n.strip_prefix("//?/").map(str::to_string).unwrap_or(n)
 }
 
+/// A UNC share (`//host/s`, `//?/UNC/host/s`) or a device path (`//./x`, `//?/GLOBALROOT/..`, `/dev/`): reading
+/// it would contact a host or open a device. A verbatim DRIVE path (`//?/C:/Users/..`, what `canonicalize`
+/// returns on Windows) is an ordinary local path.
+fn network_or_device(slashed: &str) -> bool {
+    let r = slashed.to_lowercase();
+    if let Some(rest) = r.strip_prefix("//?/") {
+        let drive = rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && rest.as_bytes().get(1) == Some(&b':');
+        return !drive;
+    }
+    r.starts_with("//")
+        || ["/dev/", "/proc/", "/sys/"]
+            .iter()
+            .any(|p| r.starts_with(p))
+}
+
 fn under(path: &str, dir: &str) -> bool {
     let d = dir.trim_end_matches('/');
     // an empty directory (a home of `/` or `""`) must not make every absolute path "inside" it
@@ -86,11 +102,7 @@ pub fn check_credential_file(
 ) -> Result<PathBuf, String> {
     let bad = |why: &str| Err(format!("file path: {why}"));
     let raw = full.to_string_lossy().replace('\\', "/");
-    if raw.starts_with("//")
-        || raw.starts_with("/dev/")
-        || raw.starts_with("/proc/")
-        || raw.starts_with("/sys/")
-    {
+    if network_or_device(&raw) {
         return bad("network and device paths are refused");
     }
     if raw.split('/').any(|c| c == "..") {
@@ -167,5 +179,40 @@ mod tests {
         // SYNT_HOME == the user's home
         assert!(check_credential_file(&home.join(".ssh/id_rsa"), &home, &home, false).is_err());
         assert!(check_credential_file(&home.join("mykey"), &home, &home, false).is_ok());
+    }
+
+    /// Literal Windows strings, judged without a Windows machine (the paths do not exist here).
+    #[test]
+    fn windows_paths_verbatim_drive_ok_unc_device_and_secrets_refused() {
+        let home = Path::new(r"C:\Users\runner\.synt");
+        let uh = Path::new(r"C:\Users\runner");
+        let ok = |p: &str, strict| check_credential_file(Path::new(p), home, uh, strict);
+        // what canonicalize returns for an ordinary path
+        assert!(ok(r"\\?\C:\Users\runner\.synt\keys\k", true).is_ok());
+        assert!(ok(r"\\?\C:\Users\runner\.synt\mykey", false).is_ok());
+        assert!(ok(r"\\?\C:\Users\runner\.synt\mykey", true).is_err());
+        assert!(ok(r"C:\Users\runner\secrets\k.txt", true).is_ok());
+        assert!(ok("//?/c:/users/runner/secrets/k.txt", true).is_ok());
+        for bad in [
+            r"\\?\C:\Users\runner\.ssh\id_rsa",
+            r"\\?\C:\Users\runner\.synt\chain.key",
+            r"\\?\UNC\srv\share\k",
+            r"\\?\unc\srv\share\k",
+            r"\\?\GLOBALROOT\Device\x",
+            r"\\?\Volume{1234}\k",
+            r"\\.\pipe\x",
+            r"\\srv\share\k",
+            "//srv/share/k",
+            "//?/c:/users/other/k",
+            r"C:\Users\other\k",
+            r"\\?\C:\Windows\system32\k",
+        ] {
+            assert!(ok(bad, false).is_err(), "{bad}");
+        }
+        assert!(
+            network_or_device("//?/unc/h/s")
+                && network_or_device("//./c:/x")
+                && !network_or_device("//?/c:/x")
+        );
     }
 }

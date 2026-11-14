@@ -298,7 +298,7 @@ fn parse_ref(input: &str, ctx: &Ctx<'_>) -> Result<Ref, String> {
     ))
 }
 
-/// The reference text for `input` (see [`parse_ref`]).
+/// The reference text for `input` (`{env:NAME}` or `{file:path}`).
 pub fn parse_key_ref(input: &str, ctx: &Ctx<'_>) -> Result<String, String> {
     parse_ref(input, ctx).map(|r| r.render())
 }
