@@ -152,6 +152,7 @@ fn contract() -> Contract {
             budgets: Budgets::new(5.0),
             quality_gates: vec![],
         },
+        checks: vec![],
     }
 }
 
@@ -2753,6 +2754,75 @@ fn n4_a_criterion_with_check_ids_needs_evidence_from_one_of_them() {
         let r = w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE);
         assert_eq!(r.is_ok(), verified, "{ids:?}: {r:?}");
     }
+}
+
+/// PR-09: a row written by plain SQL has no chained `evidence.recorded` event; it does not count
+/// for the verdict (ADR-020 integrity note), a row written through the store does.
+#[test]
+fn a_passing_row_without_its_chained_event_does_not_verify() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    let (inspect, implement, test) = (
+        item(&items, "inspect"),
+        item(&items, "implement"),
+        item(&items, "test"),
+    );
+    go(&mut w, OutcomeState::Running);
+    let a1 = run_agent(&e, &store, &mut w, inspect, "att-inspect", "base0");
+    w.record_evidence(&evidence(inspect, Some(&a1), "base0", &[]))
+        .unwrap();
+    item_to(&mut w, inspect, WorkItemState::Succeeded).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let a2 = run_agent(&e, &store, &mut w, implement, "att-implement", "cafe01");
+    w.record_evidence(&evidence(implement, Some(&a2), "cafe01", &[]))
+        .unwrap();
+    item_to(&mut w, implement, WorkItemState::Succeeded).unwrap();
+    for to in [
+        WorkItemState::Ready,
+        WorkItemState::Leased,
+        WorkItemState::Running,
+        WorkItemState::Verifying,
+    ] {
+        item_to(&mut w, test, to).unwrap();
+    }
+    // genuine evidence for the item, covering no criterion
+    w.record_evidence(&evidence(test, None, "cafe01", &[]))
+        .unwrap();
+    item_to(&mut w, test, WorkItemState::Succeeded).unwrap();
+    // the forged row: plain SQL, a passing independent check for both criteria, no event
+    e.db()
+        .execute(
+            "INSERT INTO evidence(id,outcome_id,work_item_id,trust_class,producer,subject_commit,check_id,\
+               criteria_ids,result,exit_code,env_fingerprint,fence,captured_at) \
+             VALUES ('11111111-1111-4111-8111-111111111111',?1,?2,'independent_check','independent_runner','cafe01','forged',\
+               '[\"c1\",\"c2\"]','passed',0,'x',0,'2026-01-01T00:00:00.000Z')",
+            rusqlite::params![w.id().as_str(), test.as_str()],
+        )
+        .unwrap();
+    go(&mut w, OutcomeState::Verifying);
+    let err = w
+        .transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+        .unwrap_err();
+    assert!(err.to_string().contains("verdict"), "{err}");
+    // the same facts written through the store do verify
+    w.record_evidence(&NewEvidence {
+        check_id: "unit-real".into(),
+        ..evidence(test, None, "cafe01", &["c1", "c2"])
+    })
+    .unwrap();
+    w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+        .unwrap();
+    // evidence can be flagged afterwards, never unflagged: the verdict then fails
+    let id = w
+        .list_evidence(w.id())
+        .unwrap()
+        .into_iter()
+        .find(|r| r.check_id == "unit-real")
+        .unwrap()
+        .id;
+    w.flag_evidence(&id, "definitions_changed").unwrap();
+    assert!(w.flag_evidence(&id, "no_such_flag").is_err());
 }
 
 /// N6: the decision expiry is bounded by the settings.

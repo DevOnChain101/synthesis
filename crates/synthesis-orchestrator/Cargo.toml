@@ -14,7 +14,9 @@ workspace = true
 [dependencies]
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
+synthesis-sandbox = { path = "../synthesis-sandbox" }
 synthesis-session = { path = "../synthesis-session" }
+synthesis-verification = { path = "../synthesis-verification" }
 synthesis-workspace = { path = "../synthesis-workspace" }
 serde_json = "1.0.154"
 sha2 = "0.10"

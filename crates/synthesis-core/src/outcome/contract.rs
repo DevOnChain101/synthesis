@@ -353,6 +353,19 @@ pub struct ContractCriterion {
     pub check_ids: Vec<String>,
 }
 
+/// A check the independent runner runs on a fresh checkout of the attempt's commit. It is part of
+/// the contract the person approves (the hash covers it): the runner runs nothing else, and the
+/// evidence names the command's hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractCheck {
+    pub id: String,
+    pub command: String,
+}
+
+pub const MAX_CHECKS: usize = 32;
+pub const MAX_CHECK_COMMAND_CHARS: usize = 512;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
@@ -361,6 +374,9 @@ pub struct Contract {
     pub goal: String,
     pub criteria: Vec<ContractCriterion>,
     pub envelope: Envelope,
+    /// Frozen at approval. Absent from the stored JSON when empty (older contracts keep their hash).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<ContractCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,6 +389,8 @@ pub enum ContractError {
     /// A trust requirement that no evidence class could honestly meet, or that weakens the gate.
     Trust(String),
     Envelope(EnvelopeError),
+    /// A check with a bad id or command, a duplicate, or a criterion naming an unknown check.
+    Check(String),
 }
 
 impl std::fmt::Display for ContractError {
@@ -391,6 +409,7 @@ impl std::fmt::Display for ContractError {
                 "criterion {i:?}: required_trust must be independent_check, or human_review with manual = true"
             ),
             Self::Envelope(e) => write!(f, "{e}"),
+            Self::Check(m) => write!(f, "checks: {m}"),
         }
     }
 }
@@ -445,6 +464,43 @@ pub fn validate_contract(c: &Contract) -> Result<(), ContractError> {
         ));
     }
     validate_envelope(&c.envelope)?;
+    if c.checks.len() > MAX_CHECKS {
+        return Err(ContractError::Check(format!(
+            "more than {MAX_CHECKS} checks"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    for k in &c.checks {
+        if !valid_key(&k.id) || !ids.insert(k.id.to_ascii_lowercase()) {
+            return Err(ContractError::Check(format!(
+                "check id {:?} is invalid or repeated",
+                k.id
+            )));
+        }
+        if k.command.trim().is_empty()
+            || k.command.chars().count() > MAX_CHECK_COMMAND_CHARS
+            || k.command.chars().any(char::is_control)
+            || k.command != k.command.trim()
+        {
+            return Err(ContractError::Check(format!(
+                "check {:?}: the command must be 1 to {MAX_CHECK_COMMAND_CHARS} printable characters, one line",
+                k.id
+            )));
+        }
+    }
+    // with frozen checks, a criterion may only name those (without them `check_ids` are free labels)
+    for k in c.criteria.iter().filter(|_| !c.checks.is_empty()) {
+        if let Some(bad) = k
+            .check_ids
+            .iter()
+            .find(|i| !ids.contains(&i.to_ascii_lowercase()))
+        {
+            return Err(ContractError::Check(format!(
+                "criterion {:?} names the unknown check {bad:?}",
+                k.id
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -480,6 +536,7 @@ pub(crate) mod fixtures {
                 budgets: Budgets::new(5.0),
                 quality_gates: vec![],
             },
+            checks: vec![],
         }
     }
 }
@@ -700,5 +757,51 @@ mod tests {
         k.criteria[1].required_trust = TrustClass::HumanReview;
         assert_eq!(validate_contract(&k), Ok(()));
         assert!(TrustClass::ClaimedByWorker < TrustClass::IndependentCheck);
+    }
+
+    #[test]
+    fn frozen_checks_are_validated_and_do_not_change_the_hash_of_contracts_without_them() {
+        let check = |id: &str, cmd: &str| ContractCheck {
+            id: id.into(),
+            command: cmd.into(),
+        };
+        let mut k = contract(&["c1"]);
+        // no checks: the stored JSON has no `checks` key (older contracts keep their hash)
+        assert!(!serde_json::to_string(&k).unwrap().contains("checks"));
+        k.checks = vec![check("unit", "cargo test")];
+        k.criteria[0].check_ids = vec!["unit".into()];
+        assert_eq!(validate_contract(&k), Ok(()));
+        assert!(serde_json::to_string(&k).unwrap().contains("\"checks\""));
+        for bad in [
+            vec![check("unit", "")],
+            vec![check("unit", "a\nb")],
+            vec![check("unit", " lead")],
+            vec![check("bad id", "x")],
+            vec![check("unit", "x"), check("UNIT", "y")],
+            vec![check("unit", &"x".repeat(MAX_CHECK_COMMAND_CHARS + 1))],
+        ] {
+            let mut b = k.clone();
+            b.checks = bad;
+            assert!(
+                matches!(validate_contract(&b), Err(ContractError::Check(_))),
+                "{:?}",
+                b.checks
+            );
+        }
+        // a criterion may only name checks that exist
+        let mut b = k.clone();
+        b.criteria[0].check_ids = vec!["lint".into()];
+        assert!(matches!(
+            validate_contract(&b),
+            Err(ContractError::Check(_))
+        ));
+        let mut many = k.clone();
+        many.checks = (0..=MAX_CHECKS)
+            .map(|i| check(&format!("c{i}"), "x"))
+            .collect();
+        assert!(matches!(
+            validate_contract(&many),
+            Err(ContractError::Check(_))
+        ));
     }
 }

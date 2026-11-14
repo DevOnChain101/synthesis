@@ -87,6 +87,7 @@ pub fn contract() -> Contract {
             budgets: Budgets::new(5.0),
             quality_gates: vec![],
         },
+        checks: vec![],
     }
 }
 
@@ -150,6 +151,15 @@ impl Rig {
 
     /// A running outcome with its plan stored and every work item still `created`.
     pub fn fresh(&self) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
+        self.fresh_with(&contract(), &plan())
+    }
+
+    /// [`Rig::fresh`] with another contract and plan.
+    pub fn fresh_with(
+        &self,
+        contract: &Contract,
+        plan: &Plan,
+    ) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
         let ws = WorkspaceContext::open(
             "w",
             &self.repo,
@@ -164,7 +174,7 @@ impl Rig {
             .create_outcome(NewOutcome {
                 workspace: &ws,
                 base_commit: self.head.clone(),
-                contract: &contract(),
+                contract,
                 policy: &policy(),
             })
             .unwrap();
@@ -176,7 +186,7 @@ impl Rig {
         go(&mut w, OutcomeState::ContractPending);
         let h = w.get_contract(w.id(), 1).unwrap().1;
         w.approve_contract(1, &h, "user").unwrap();
-        let items = w.insert_plan(&plan()).unwrap();
+        let items = w.insert_plan(plan).unwrap();
         go(&mut w, OutcomeState::Ready);
         go(&mut w, OutcomeState::Running);
         (w, items)

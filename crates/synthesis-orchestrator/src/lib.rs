@@ -19,6 +19,7 @@ mod recover;
 mod retention;
 mod runner;
 mod sched;
+mod verify;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
 pub use decision::record_blocked_decision;
@@ -36,4 +37,8 @@ pub use runner::{
 pub use sched::{
     Control, HandOff, SchedConfig, SchedError, Scheduler, Stop, TickReport, Verdict, Verifier,
     WorkerHost, pick_in_order,
+};
+pub use verify::{
+    CheckRun, CheckRunner, IndependentVerifier, SCOPE_CHECK, SandboxRunner, VerifyError,
+    change_flags, changed_files, file_edits, fresh_checkout,
 };

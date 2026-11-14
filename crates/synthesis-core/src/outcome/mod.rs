@@ -10,9 +10,13 @@
 mod contract;
 mod ids;
 mod plan;
+mod scope;
 mod state;
+mod verdict;
 
 pub use contract::*;
 pub use ids::*;
 pub use plan::*;
+pub use scope::*;
 pub use state::*;
+pub use verdict::*;

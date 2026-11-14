@@ -114,6 +114,12 @@ pub trait Verifier {
         w: &mut OutcomeWriter,
         item: &WorkItemRecord,
     ) -> Result<Verdict, SchedError>;
+
+    /// Verification is running in the background: the walk keeps ticking (heartbeats, cancel and
+    /// the wall cap advance only in `tick`) instead of stopping as `WaitingVerification`.
+    fn busy(&self) -> bool {
+        false
+    }
 }
 
 /// No verifier yet: items stay in `verifying` ("unverified handoff"). The walk ends as
@@ -624,6 +630,9 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
             return Ok(Some(Stop::Paused));
         }
         if any(WorkItemState::Verifying) {
+            if self.verifier.busy() {
+                return Ok(None);
+            }
             return Ok(Some(Stop::WaitingVerification));
         }
         if any(WorkItemState::RetryableFailure) {

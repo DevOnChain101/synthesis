@@ -1479,6 +1479,43 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.record_evidence(e))
     }
 
+    pub fn flag_evidence(&mut self, id: &EvidenceId, flag: &str) -> Result<()> {
+        self.atomically(|tx| tx.flag_evidence(id, flag))
+    }
+
+    /// Stores a check's output as an artifact of the control session (redacted like every text
+    /// artifact) and returns `(session id, artifact id, sha256)` for [`NewEvidence::artifact`].
+    pub fn put_check_output(&mut self, bytes: &[u8]) -> Result<(String, String, String)> {
+        let r = self.w.put_artifact(
+            "check_output",
+            "text/plain",
+            bytes,
+            crate::store::Retention::Keep,
+        )?;
+        Ok((self.w.id().to_owned(), r.artifact_id, r.sha256))
+    }
+
+    /// The commit the outcome would be verified at: the newest finished attempt of the current
+    /// plan (the same rule the store's verdict uses).
+    pub fn candidate_commit(&self) -> Result<Option<String>> {
+        let o = self.get_outcome(&self.id)?;
+        let Some(pv) = o.plan_version else {
+            return Ok(None);
+        };
+        Ok(self
+            .w
+            .conn
+            .query_row(
+                "SELECT a.subject_commit FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+                 WHERE w.outcome_id=?1 AND w.plan_version=?2 AND a.state='finished' \
+                   AND a.subject_commit IS NOT NULL \
+                 ORDER BY a.ended_at DESC, a.ordinal DESC LIMIT 1",
+                params![self.id.as_str(), pv],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Applies one queued command exactly once. `f` does the work through the transaction and
     /// returns the result state and body; a lost revision race, a stale brief or a moved
     /// binding inside `f` becomes `stale`. A command that is no longer queued is returned as
@@ -1811,13 +1848,90 @@ pub struct OutcomeTx<'a, 'e> {
     now: OffsetDateTime,
 }
 
-const FLAG_FREE: &str =
-    "NOT EXISTS (SELECT 1 FROM json_each(e.flags) f WHERE f.value='definitions_changed')";
+/// No flag at all: `definitions_changed`, `tests_weakened` and `outside_envelope` each disqualify.
+const FLAG_FREE: &str = "json_array_length(e.flags) = 0";
+/// The row has its chained `evidence.recorded` event in the control session, with the same
+/// content: a row written by plain SQL (no event) or altered afterwards does not count.
+const EVENT_BACKED: &str = "EXISTS (SELECT 1 FROM events ev WHERE ev.type='evidence.recorded' \
+   AND ev.session_id=(SELECT control_session_id FROM outcomes WHERE id=e.outcome_id) \
+   AND json_extract(ev.payload,'$.evidence_id')=e.id \
+   AND json_extract(ev.payload,'$.work_item_id')=e.work_item_id \
+   AND json_extract(ev.payload,'$.check_id')=e.check_id \
+   AND json_extract(ev.payload,'$.trust_class')=e.trust_class \
+   AND json_extract(ev.payload,'$.result')=e.result \
+   AND json_extract(ev.payload,'$.subject_commit')=e.subject_commit \
+   AND json_extract(ev.payload,'$.fence')=e.fence \
+   AND json_extract(ev.payload,'$.sha256') IS e.sha256)";
 /// The evidence is for the newest attempt of its item (a late one from a superseded attempt
 /// does not count).
 const FENCE_CURRENT: &str = "e.fence >= COALESCE((SELECT MAX(a.fence) FROM attempts a WHERE a.work_item_id=e.work_item_id),0)";
 
+/// The evidence facts of an outcome for the pure verdict: only rows that are backed by their
+/// chained event count.
+fn evidence_facts(
+    conn: &Connection,
+    id: &OutcomeId,
+) -> Result<Vec<synthesis_core::outcome::EvidenceFact>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT e.trust_class,e.result,e.subject_commit,e.check_id,e.criteria_ids, \
+                NOT ({FLAG_FREE}), {FENCE_CURRENT} \
+         FROM evidence e WHERE e.outcome_id=?1 AND {EVENT_BACKED}"
+    ))?;
+    let rows = st.query_map([id.as_str()], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, bool>(5)?,
+            r.get::<_, bool>(6)?,
+        ))
+    })?;
+    let mut out = vec![];
+    for row in rows {
+        let (trust, result, commit, check_id, criteria, flagged, fence_current) = row?;
+        out.push(synthesis_core::outcome::EvidenceFact {
+            trust: serde_json::from_value(Value::String(trust))?,
+            result,
+            commit,
+            check_id,
+            criteria: serde_json::from_str(&criteria)?,
+            flagged,
+            fence_current,
+        });
+    }
+    Ok(out)
+}
+
 impl OutcomeTx<'_, '_> {
+    /// Marks an evidence row as disqualified (`definitions_changed`, `tests_weakened`,
+    /// `outside_envelope`): the only change evidence allows after it is written. A flag is added,
+    /// never removed.
+    pub fn flag_evidence(&mut self, id: &EvidenceId, flag: &str) -> Result<()> {
+        if !matches!(
+            flag,
+            "definitions_changed" | "tests_weakened" | "outside_envelope"
+        ) {
+            return Err(Error::Invalid(format!("unknown evidence flag {flag:?}")));
+        }
+        let n = self.et.tx.execute(
+            "UPDATE evidence SET flags=json_insert(flags,'$[#]',?3) WHERE id=?1 AND outcome_id=?2 \
+               AND NOT EXISTS (SELECT 1 FROM json_each(flags) f WHERE f.value=?3)",
+            params![id.as_str(), self.id.as_str(), flag],
+        )?;
+        let exists: bool = self.et.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM evidence WHERE id=?1 AND outcome_id=?2)",
+            params![id.as_str(), self.id.as_str()],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(Error::NotFound(format!("evidence {id}")));
+        }
+        let _ = n;
+        Ok(())
+    }
+
     pub fn emit(&mut self, kind: &str, payload: Value) -> Result<u64> {
         self.et.append(kind, payload)
     }
@@ -2222,7 +2336,7 @@ impl OutcomeTx<'_, '_> {
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.work_item_id=?1 \
                    AND e.trust_class='independent_check' AND e.result='passed' \
-                   AND e.subject_commit=?2 AND {FLAG_FREE} AND {FENCE_CURRENT})"
+                   AND e.subject_commit=?2 AND {FLAG_FREE} AND {FENCE_CURRENT} AND {EVENT_BACKED})"
             ),
             params![item.as_str(), commit],
             |r| r.get(0),
@@ -2258,31 +2372,8 @@ impl OutcomeTx<'_, '_> {
             return Ok(false);
         };
         let contract = self.stored_contract(o.contract_version)?;
-        for c in contract.criteria.iter().filter(|c| c.mandatory) {
-            let class = if c.manual {
-                "human_review"
-            } else {
-                "independent_check"
-            };
-            let check_ids = serde_json::to_string(&c.check_ids)?;
-            let any = |result: &str| -> Result<bool> {
-                Ok(self.et.tx.query_row(
-                    &format!(
-                        "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.outcome_id=?1 \
-                           AND e.subject_commit=?2 AND e.trust_class=?3 AND e.result IN ({result}) \
-                           AND EXISTS (SELECT 1 FROM json_each(e.criteria_ids) j WHERE j.value=?4) \
-                           AND (?5='[]' OR e.check_id IN (SELECT value FROM json_each(?5))) \
-                           AND {FLAG_FREE} AND {FENCE_CURRENT})"
-                    ),
-                    params![self.id.as_str(), commit, class, c.id, check_ids],
-                    |r| r.get(0),
-                )?)
-            };
-            if any("'failed','error'")? || !any("'passed'")? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        let facts = evidence_facts(self.et.tx, self.id)?;
+        Ok(synthesis_core::outcome::verdict(&contract, &facts, &commit).verified)
     }
 
     // ---- transitions

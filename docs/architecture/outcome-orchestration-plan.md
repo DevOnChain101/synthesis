@@ -154,6 +154,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: High (security). Rollback: flag. Size: L. Security review: mandatory, two rounds expected.
 
 ### PR-09 Evidence, independent runner, verdict
+- **Status (implemented):** pure `verdict` and `outside_envelope` (core), `Contract.checks`, event-backed evidence facts and `flag_evidence` (store), `IndependentVerifier`/`SandboxRunner` (orchestrator), `Verifier::busy`. See ADR-020 implementation notes. Not done: the process that wires the verifier for real outcomes (PR-12), merge/integration of parallel branches, the definitions exemption.
 - Scope: `evidence` writes, host-side runner on a detached checkout, trust classes, pure `verdict`, stale marking, environment fingerprint.
 - Crates: `synthesis-verification`, `synthesis-orchestrator`, `synthesis-session`.
 - Tests: exhaustive verdict table; forged report file does not clear the gate; `definitions_changed` blocks; stale commit rejected; fence rejection; runner refuses without enforce.

@@ -1223,3 +1223,323 @@ fn errors_every_tick_do_not_stop_a_healthy_worker() {
         .unwrap_err();
     assert!(err.to_string().contains("deadline"), "not stalled: {err}");
 }
+
+// ---- PR-09: the independent verifier on the scheduler's seam ----
+
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+
+/// A check runner that records where it ran and answers from a table (no sandbox needed).
+struct FakeRunner {
+    exit: Option<i32>,
+    problem: Option<String>,
+    enforcing: bool,
+    delay: Duration,
+    ran_in: Mutex<Vec<(PathBuf, bool)>>,
+}
+
+impl FakeRunner {
+    fn new(exit: Option<i32>) -> Arc<Self> {
+        Arc::new(Self {
+            exit,
+            problem: None,
+            enforcing: true,
+            delay: Duration::ZERO,
+            ran_in: Mutex::new(vec![]),
+        })
+    }
+}
+
+impl CheckRunner for FakeRunner {
+    fn fingerprint(&self) -> Result<String, VerifyError> {
+        if self.enforcing {
+            Ok("fake-os sandbox=fake".into())
+        } else {
+            Err(VerifyError("the none sandbox cannot confine a check: independent evidence needs an enforcing sandbox".into()))
+        }
+    }
+
+    fn run(
+        &self,
+        dir: &std::path::Path,
+        _: &std::path::Path,
+        check: &ContractCheck,
+        _: Duration,
+        _: &AtomicBool,
+    ) -> CheckRun {
+        std::thread::sleep(self.delay);
+        // what a check would see: the committed tree, with no repository in it
+        self.ran_in
+            .lock()
+            .unwrap()
+            .push((dir.to_path_buf(), dir.join(".git").exists()));
+        CheckRun {
+            id: check.id.clone(),
+            command_hash: "unused".into(),
+            exit_code: self.exit,
+            problem: self.problem.clone(),
+            output: b"check output\n".to_vec(),
+        }
+    }
+}
+
+fn verified_contract(allowed: &[&str]) -> (Contract, Plan) {
+    let mut c = small_attempts_contract();
+    c.envelope.allowed_paths = allowed.iter().map(|s| (*s).to_owned()).collect();
+    c.checks = vec![ContractCheck {
+        id: "unit".into(),
+        command: "cargo test".into(),
+    }];
+    c.criteria[0].check_ids = vec!["unit".into()];
+    (c, common::plan())
+}
+
+fn small_attempts_contract() -> Contract {
+    let mut c = common::contract();
+    c.envelope.budgets.attempt_max_cost_usd = Some(0.01);
+    c
+}
+
+fn real_verifier(r: &Rig, c: &Contract, runner: Arc<FakeRunner>) -> IndependentVerifier {
+    IndependentVerifier::new(
+        r.repo.clone(),
+        r.home.clone(),
+        c.clone(),
+        runner,
+        Duration::from_secs(30),
+    )
+}
+
+fn evidence_of(w: &OutcomeWriter) -> Vec<EvidenceRecord> {
+    w.list_evidence(w.id()).unwrap()
+}
+
+fn to_verified(w: &mut OutcomeWriter) -> Result<(), synthesis_session::Error> {
+    for to in [OutcomeState::Verifying, OutcomeState::Verified] {
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(rev, to, None, &Effects::default())?;
+    }
+    Ok(())
+}
+
+const WRITE_INSIDE: &str = "mkdir -p src; echo made > src/ok.txt";
+
+#[test]
+fn ac08_an_outcome_is_verified_only_through_independent_evidence() {
+    need_git!();
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = FakeRunner::new(Some(0));
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded, "{reports:?}");
+    // the check ran in a fresh checkout under <home>/verify, never in an attempt's worktree
+    let ran = runner.ran_in.lock().unwrap().clone();
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert!(
+        ran[0].0.starts_with(r.home.join("verify")),
+        "{:?}",
+        ran[0].0
+    );
+    assert!(!ran[0].1, "the checkout has no .git");
+    // evidence: independent runner, bound to the contract's frozen command, with its output stored
+    let ev = evidence_of(&w);
+    let check = ev
+        .iter()
+        .find(|e| e.check_id == "unit")
+        .expect("check evidence");
+    assert_eq!(check.trust_class, TrustClass::IndependentCheck);
+    assert_eq!(check.producer, "independent_runner");
+    assert_eq!(check.result, "passed");
+    assert_eq!(check.criteria_ids, ["c1"]);
+    assert!(check.sha256.is_some(), "output stored as an artifact");
+    assert!(
+        ev.iter()
+            .any(|e| e.check_id == SCOPE_CHECK && e.result == "passed")
+    );
+    to_verified(&mut w).expect("every mandatory criterion has current independent evidence");
+}
+
+#[test]
+fn a_write_outside_the_envelope_fails_verification_even_if_the_check_passes() {
+    need_git!();
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    // a shell redirect the permission rules never saw
+    let s = Script("echo pwned > README.md".into());
+    let runner = FakeRunner::new(Some(0));
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert!(matches!(&stop, Stop::Blocked(_)), "{stop:?} {reports:?}");
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("outside its envelope") && e.contains("README.md")),
+        "{reports:?}"
+    );
+    assert!(
+        runner.ran_in.lock().unwrap().is_empty(),
+        "no code of the violating attempt was run"
+    );
+    assert!(
+        evidence_of(&w)
+            .iter()
+            .any(|e| e.check_id == SCOPE_CHECK && e.result == "failed")
+    );
+    assert!(to_verified(&mut w).is_err());
+}
+
+#[test]
+fn changed_definitions_are_flagged_and_the_outcome_is_not_verified() {
+    need_git!();
+    let r = rig();
+    // the envelope allows everything, so the scope passes: only the flag stands in the way
+    let (c, p) = verified_contract(&["**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script("mkdir -p src; echo made > src/ok.txt; echo '{\"scripts\":{\"test\":\"true\"}}' > package.json".into());
+    let runner = FakeRunner::new(Some(0));
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert!(matches!(&stop, Stop::Blocked(_)), "{stop:?}");
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("definitions_changed")),
+        "{reports:?}"
+    );
+    let ev = evidence_of(&w);
+    assert!(
+        ev.iter()
+            .any(|e| e.check_id == SCOPE_CHECK && e.result == "passed")
+    );
+    assert!(
+        runner.ran_in.lock().unwrap().is_empty(),
+        "the checks of a flagged change are not run"
+    );
+    assert!(to_verified(&mut w).is_err());
+}
+
+#[test]
+fn a_failing_or_stuck_check_and_a_forged_report_never_verify() {
+    need_git!();
+    for (exit, problem) in [
+        (Some(1), None),
+        (None, Some("the check timed out".to_string())),
+    ] {
+        let r = rig();
+        let (c, p) = verified_contract(&["src/**"]);
+        let (mut w, _) = r.fresh_with(&c, &p);
+        // the worker also leaves a report claiming everything passed
+        let s = Script(format!(
+            "{WRITE_INSIDE}; echo '{{\"status\":\"passed\",\"checks\":[{{\"id\":\"unit\",\"ok\":true}}]}}' > src/verification-report.json"
+        ));
+        let runner = Arc::new(FakeRunner {
+            exit,
+            problem: problem.clone(),
+            enforcing: true,
+            delay: Duration::ZERO,
+            ran_in: Mutex::new(vec![]),
+        });
+        let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner), cfg());
+        let (stop, _) = sched
+            .run(&mut w, &clock, Duration::from_millis(30))
+            .unwrap();
+        assert!(matches!(&stop, Stop::Blocked(_)), "{exit:?}: {stop:?}");
+        let ev = evidence_of(&w);
+        let unit = ev.iter().find(|e| e.check_id == "unit").unwrap();
+        assert_ne!(unit.result, "passed");
+        assert_eq!(
+            unit.result,
+            if problem.is_some() { "error" } else { "failed" }
+        );
+        assert!(to_verified(&mut w).is_err(), "{exit:?}");
+    }
+}
+
+#[test]
+fn without_an_enforcing_sandbox_no_independent_evidence_is_produced() {
+    need_git!();
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = Arc::new(FakeRunner {
+        exit: Some(0),
+        problem: None,
+        enforcing: false,
+        delay: Duration::ZERO,
+        ran_in: Mutex::new(vec![]),
+    });
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    // verification cannot start: the items wait in `verifying` and say why
+    assert_eq!(stop, Stop::WaitingVerification, "{reports:?}");
+    assert!(runner.ran_in.lock().unwrap().is_empty());
+    assert!(
+        evidence_of(&w).is_empty(),
+        "nothing was recorded: {:?}",
+        evidence_of(&w)
+    );
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("enforcing sandbox")),
+        "{reports:?}"
+    );
+}
+
+#[test]
+fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
+    need_git!();
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = Arc::new(FakeRunner {
+        exit: Some(0),
+        problem: None,
+        enforcing: true,
+        delay: Duration::from_millis(900),
+        ran_in: Mutex::new(vec![]),
+    });
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner), cfg());
+    let mut slowest = Duration::ZERO;
+    let mut waiting_ticks = 0;
+    let stop = loop {
+        let busy = sched.verifier.busy();
+        let t = std::time::Instant::now();
+        let rep = sched.tick(&mut w, clock()).unwrap();
+        if busy {
+            slowest = slowest.max(t.elapsed());
+        }
+        if let Some(s) = rep.stop {
+            break s;
+        }
+        waiting_ticks += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(stop, Stop::Succeeded);
+    assert!(
+        waiting_ticks > 5,
+        "the walk ticked while the check ran ({waiting_ticks})"
+    );
+    assert!(
+        slowest < Duration::from_millis(600),
+        "no tick waited for the check: {slowest:?}"
+    );
+}

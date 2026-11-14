@@ -152,6 +152,7 @@ fn contract() -> Contract {
             budgets: Budgets::new(5.0),
             quality_gates: vec![],
         },
+        checks: vec![],
     }
 }
 

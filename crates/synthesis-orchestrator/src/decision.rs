@@ -8,7 +8,7 @@
 //! stripped of control characters, and it never carries a pre-selected choice.
 
 use sha2::{Digest, Sha256};
-use synthesis_core::outcome::hidden_char;
+use synthesis_core::outcome::{glob_matches, hidden_char};
 use synthesis_events::{Event, Record};
 use synthesis_session::outcome::{
     AttemptRecord, DecisionRecord, NewDecision, OutcomeWriter, WorkItemRecord,
@@ -21,7 +21,7 @@ use crate::compile_envelope;
 const MAX_TEXT: usize = 300;
 const MAX_RULES: usize = 10;
 
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     let t: String = s.chars().filter(|c| !hidden_char(*c)).collect();
     if t.chars().count() > MAX_TEXT {
         format!("{}...", t.chars().take(MAX_TEXT).collect::<String>())
@@ -128,80 +128,9 @@ fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreE
     }))
 }
 
-/// Longest needed rule (or deny spec) the coverage check will look at, and the work it may do:
-/// beyond either the answer is "covered", i.e. no grant is offered.
+/// Longest needed rule (or deny spec) the coverage check will look at: beyond it (or when the glob
+/// matcher's work budget is spent) the answer is "covered", i.e. no grant is offered.
 const MAX_RULE_LEN: usize = 1_000;
-const MAX_MATCH_STEPS: usize = 2_000_000;
-
-#[derive(Clone, Copy, PartialEq)]
-enum Tok {
-    Lit(u8),
-    One,
-    Star,
-    Deep,
-}
-
-/// `*` within a segment, `**` across segments, `?` one character. Iterative (a set of reachable
-/// text positions per token, no backtracking), consecutive wildcards collapsed. `None` when the
-/// work budget is spent: callers read that as "covered".
-fn glob_matches(pat: &[u8], text: &[u8]) -> Option<bool> {
-    let mut toks: Vec<Tok> = vec![];
-    let mut i = 0;
-    while i < pat.len() {
-        let t = match pat[i] {
-            b'*' => {
-                let mut j = i;
-                while j < pat.len() && pat[j] == b'*' {
-                    j += 1;
-                }
-                let t = if j - i >= 2 { Tok::Deep } else { Tok::Star };
-                i = j;
-                match (toks.last().copied(), t) {
-                    (Some(Tok::Deep), _) | (Some(Tok::Star), Tok::Star) => continue,
-                    (Some(Tok::Star), Tok::Deep) => {
-                        toks.pop();
-                    }
-                    _ => {}
-                }
-                t
-            }
-            b'?' => {
-                i += 1;
-                Tok::One
-            }
-            c => {
-                i += 1;
-                Tok::Lit(c)
-            }
-        };
-        toks.push(t);
-    }
-    if toks.len().saturating_mul(text.len() + 1) > MAX_MATCH_STEPS {
-        return None;
-    }
-    let n = text.len();
-    let mut cur = vec![false; n + 1];
-    cur[0] = true;
-    for t in toks {
-        let mut next = vec![false; n + 1];
-        match t {
-            Tok::Lit(c) => (0..n).for_each(|k| next[k + 1] = cur[k] && text[k] == c),
-            Tok::One => (0..n).for_each(|k| next[k + 1] = cur[k] && text[k] != b'/'),
-            Tok::Star | Tok::Deep => {
-                let mut open = false;
-                for k in 0..=n {
-                    open = open || cur[k];
-                    next[k] = open;
-                    if k < n && t == Tok::Star && text[k] == b'/' {
-                        open = false;
-                    }
-                }
-            }
-        }
-        cur = next;
-    }
-    Some(cur[n])
-}
 
 /// Is the rule the worker needed one that must not be offered as a grant: covered by a deny rule
 /// of the compiled contract or a tool that does not exist in an attempt? Covered means:
