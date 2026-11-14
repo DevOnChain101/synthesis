@@ -480,7 +480,7 @@ const MAX_OPEN: usize = 100;
 pub struct Children {
     pub rows: Vec<TreeRow>,
     pub total: usize,
-    /// Entries are missing from the directory: more than [`DIR_ENTRIES`], or names that are not printable text.
+    /// Entries are missing from the directory: more than 200 000, or names that are not printable text.
     pub partial: bool,
 }
 
@@ -1863,6 +1863,8 @@ mod tests {
         assert_eq!(c.total, 52_000);
     }
 
+    // Windows cannot create a file name with a control character
+    #[cfg(unix)]
     #[test]
     fn a_name_that_cannot_be_shown_as_it_is_leaves_the_directory_partial_and_says_so() {
         let d = tempfile::tempdir().unwrap();
