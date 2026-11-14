@@ -79,6 +79,9 @@ const SECRET_PATHS: [&str; 17] = [
     ".local/share/keyrings",
 ];
 
+/// Folders whose children are accounts' homes.
+const ACCOUNT_ROOTS: [&str; 3] = ["/home", "/users", "c:/users"];
+
 const SYSTEM_DIRS: [&str; 15] = [
     "/etc",
     "/proc",
@@ -139,13 +142,29 @@ pub fn check_credential_file(
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let homes = [norm(&canon(home)), norm(home)];
     let uhs = [norm(&canon(user_home)), norm(user_home)];
+    // A synt home INSIDE an account dir (`/home/x/.synt`, `c:/users/x/appdata/local/temp/y`) is that account's own
+    // place: its subtree is not "another account's home", and the secret stores of that account dir are guarded too.
+    // A synt home that is the account root or above it (`/home`, `c:/users`, `/etc`) gets no such exemption.
+    let account = |h: &String| {
+        ACCOUNT_ROOTS.iter().find_map(|b| {
+            let mut it = h.strip_prefix(&format!("{b}/"))?.split('/');
+            let name = it.next().filter(|n| !n.is_empty())?;
+            it.next().filter(|n| !n.is_empty())?;
+            Some(format!("{b}/{name}"))
+        })
+    };
+    let bases: Vec<String> = uhs
+        .iter()
+        .cloned()
+        .chain(homes.iter().filter_map(account))
+        .collect();
     for cand in std::iter::once(full).chain(real.as_deref()) {
         let n = norm(cand);
         if n.starts_with("//") {
             return bad("network and device paths are refused");
         }
         let own = uhs.iter().any(|u| under(&n, u));
-        let secret = uhs.iter().any(|u| {
+        let secret = bases.iter().any(|u| {
             SECRET_PATHS.iter().any(|d| {
                 let dir = format!("{u}/{d}");
                 under(&n, &dir) || (d.ends_with("credentials") && n.starts_with(&dir))
@@ -153,9 +172,10 @@ pub fn check_credential_file(
         });
         // another account's home (a key of someone else), a system folder or a secret store is refused BEFORE the
         // synt-home exemption: a synt home that contains them (`SYNT_HOME=$HOME`, `/home`, `/etc`) must not open them
-        let other_home = ["/home", "/users", "c:/users"]
+        let in_account_home = homes.iter().any(|h| under(&n, h) && account(h).is_some());
+        let other_home = ACCOUNT_ROOTS
             .iter()
-            .any(|b| n.strip_prefix(&format!("{b}/")).is_some() && !own);
+            .any(|b| n.strip_prefix(&format!("{b}/")).is_some() && !own && !in_account_home);
         if secret || other_home || SYSTEM_DIRS.iter().any(|d| under(&n, d)) {
             return bad("that location holds credentials or system files; use a file of its own");
         }
@@ -213,6 +233,27 @@ mod tests {
         assert!(ck("/home/bob/notes", "/home").is_err());
         assert!(ck("/etc/shadow", "/etc").is_err());
         assert!(ck("/home/me/.synt/mykey", "/home/me/.synt").is_ok());
+    }
+
+    #[test]
+    fn a_synt_home_inside_an_account_dir_is_not_another_account_but_one_above_it_is() {
+        let ck = |p: &str, sh: &str, uh: &str| {
+            check_credential_file(Path::new(p), Path::new(sh), Path::new(uh), true)
+        };
+        let t = "c:/users/runneradmin/appdata/local/temp/x";
+        assert!(ck(&format!("{t}/keys/acme"), t, "d:/other").is_ok());
+        assert!(ck(&format!("{t}/../x/keys/acme"), t, "d:/other").is_err());
+        // secret stores of the account that holds the synt home
+        assert!(ck("c:/users/runneradmin/.ssh/id_rsa", t, "d:/other").is_err());
+        assert!(ck("/home/me/.synt/keys/k", "/home/me/.synt", "/elsewhere").is_ok());
+        assert!(ck("/home/me/.aws/credentials", "/home/me/.synt", "/elsewhere").is_err());
+        // the account root or above it, or a system folder: no exemption
+        assert!(ck("c:/users/bob/.ssh/id_rsa", "c:/users", "d:/other").is_err());
+        assert!(ck("/home/bob/.ssh/id_rsa", "/home", "/home/me").is_err());
+        assert!(ck("/Users/bob/.ssh/id_rsa", "/Users", "/Users/me").is_err());
+        assert!(ck("/etc/passwd", "/etc", "/home/me").is_err());
+        // SYNT_HOME == $HOME
+        assert!(ck("/home/me/.ssh/id_rsa", "/home/me", "/home/me").is_err());
     }
 
     #[test]
