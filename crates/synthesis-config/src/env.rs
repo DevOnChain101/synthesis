@@ -193,6 +193,57 @@ pub fn is_secret_shaped(name: &str) -> bool {
     })
 }
 
+/// Text that is an API key (or token) itself rather than a name or a path: known vendor and CI token
+/// prefixes (case-insensitive, with at least 8 more characters), an AWS access key id, or an unbroken
+/// upper-case/digit run of 20+ characters that is not an `UPPER_SNAKE` name. Used to keep such text out of
+/// config written by a UI and out of diagnostics.
+pub fn looks_like_key(s: &str) -> bool {
+    const PREFIXES: [&str; 24] = [
+        "sk-",
+        "sk_",
+        "gsk_",
+        "xai-",
+        "pplx-",
+        "hf_",
+        "ya29.",
+        "sg.",
+        "accountkey=",
+        "github_pat_",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "glpat-",
+        "xoxa-",
+        "xoxb-",
+        "xoxp-",
+        "xoxs-",
+        "npm_",
+        "aiza",
+        "eyj",
+        "bearer ",
+        "basic ",
+    ];
+    let s = s.trim();
+    let snake = !s.is_empty()
+        && s.contains('_')
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    if snake {
+        return false; // an environment variable name by shape
+    }
+    let l = s.to_ascii_lowercase();
+    let aws = (l.starts_with("akia") || l.starts_with("asia"))
+        && s.len() >= 20
+        && s.bytes().all(|b| b.is_ascii_alphanumeric());
+    aws || PREFIXES
+        .iter()
+        .any(|p| l.starts_with(p) && l.len() >= p.len() + 8)
+        || (s.len() >= 20
+            && s.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+}
+
 #[cfg(all(test, unix))] // PATH entries are canonicalised against the real filesystem
 mod tests {
     use super::*;
