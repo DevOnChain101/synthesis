@@ -23,4 +23,4 @@ The kit's brand boards (`04-brand-boards`, about 6 MB of PNG), the extras (`05-e
 
 ## App icons
 
-`swift scripts/make-icons.swift` (macOS) regenerates `01-brand/app-icons/*` and `apps/desktop/assets/icons/*` (.icns, .ico, PNGs) from `01-brand/logo/png/synthesis-symbol-transparent-1024.png` on a monochrome graphite gradient with a silver-lit symbol.
+The art is the owner's icon image, `01-brand/app-icons/source/owner-icon-master.jpg` (294x296 JPEG supplied by the owner, 2026-11-14; it is the master, do not repaint it). `swift scripts/make-icons.swift` (macOS) crops it inside its old rounded edge, lightly denoises, upscales to 1024 (Lanczos), sharpens (unsharp mask) and cuts it to the Apple continuous-corner squircle. It writes `01-brand/app-icons/*` (full bleed, for Linux and Windows) and `apps/desktop/assets/icons/*` (the `.icns` uses the Apple grid, an 824 px body in 1024, with no shadow). A higher-resolution master would give a sharper result: replace the JPEG and re-run the script.

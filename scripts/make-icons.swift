@@ -1,15 +1,13 @@
 // Regenerates the app icons (macOS only: CoreGraphics + iconutil). Run from the repo root: swift scripts/make-icons.swift
-// Art: the transparent brand symbol on a monochrome graphite gradient (no pure black).
+// Art: the owner's icon image (design/01-brand/app-icons/source/owner-icon-master.jpg), cropped, denoised, upscaled and sharpened, then cut to the macOS squircle.
 // Writes design/01-brand/app-icons/* (full-bleed rounded square, Linux/Windows) and apps/desktop/assets/icons/* (.icns uses the Apple grid: 824 body in 1024).
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
 let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-func rgb(_ r: Int, _ g: Int, _ b: Int, _ a: CGFloat = 1) -> CGColor {
-    CGColor(colorSpace: cs, components: [CGFloat(r) / 255, CGFloat(g) / 255, CGFloat(b) / 255, a])!
-}
 func load(_ p: String) -> CGImage {
     CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(URL(fileURLWithPath: p) as CFURL, nil)!, 0, nil)!
 }
@@ -26,72 +24,84 @@ func png(_ img: CGImage) -> Data {
     CGImageDestinationFinalize(dest)
     return d as Data
 }
-func glow(_ c: CGContext, _ x: CGFloat, _ y: CGFloat, _ r: CGFloat, _ col: (Int, Int, Int), _ a: CGFloat) {
-    let g = CGGradient(colorsSpace: cs, colors: [rgb(col.0, col.1, col.2, a), rgb(col.0, col.1, col.2, 0)] as CFArray, locations: [0, 1])!
-    c.drawRadialGradient(g, startCenter: CGPoint(x: x, y: y), startRadius: 0, endCenter: CGPoint(x: x, y: y), endRadius: r, options: [])
+
+// Master: the owner's icon (294x296 JPEG). Its body fills the image, with the surround only at the corners; the crop
+// below is inset past the old rounded edge and its rim so the new mask is clean. Colours are never altered.
+let masterPath = "design/01-brand/app-icons/source/owner-icon-master.jpg"
+let crop = CGRect(x: 4, y: 5, width: 286, height: 286)  // x, y from the top-left of the JPEG
+let ci = CIContext(options: [.workingColorSpace: cs, .outputColorSpace: cs])
+
+func resample(_ img: CIImage, to n: Int, sharpen radius: Double, _ intensity: Double) -> CIImage {
+    let lan = CIFilter(name: "CILanczosScaleTransform")!
+    lan.setValue(img, forKey: kCIInputImageKey)
+    lan.setValue(CGFloat(n) / img.extent.width, forKey: kCIInputScaleKey)
+    lan.setValue(1.0, forKey: kCIInputAspectRatioKey)
+    let up = lan.outputImage!.cropped(to: CGRect(x: 0, y: 0, width: n, height: n))
+    let u = CIFilter(name: "CIUnsharpMask")!
+    u.setValue(up, forKey: kCIInputImageKey)
+    u.setValue(radius, forKey: kCIInputRadiusKey)
+    u.setValue(intensity, forKey: kCIInputIntensityKey)
+    return u.outputImage!.cropped(to: up.extent)
+}
+func render(_ img: CIImage) -> CGImage { ci.createCGImage(img, from: img.extent, format: .RGBA8, colorSpace: cs)! }
+
+/// Light JPEG-block denoise, then a 1024 Lanczos upscale and a mild unsharp mask (radius 2.5 px, intensity 0.45).
+let master1024: CGImage = {
+    let src = load(masterPath).cropping(to: crop)!
+    let dn = CIFilter(name: "CINoiseReduction")!
+    dn.setValue(CIImage(cgImage: src), forKey: kCIInputImageKey)
+    dn.setValue(0.01, forKey: "inputNoiseLevel")
+    dn.setValue(0.4, forKey: kCIInputSharpnessKey)
+    let clean = dn.outputImage!.cropped(to: CIImage(cgImage: src).extent)
+    return render(resample(clean, to: 1024, sharpen: 2.5, 0.45))
+}()
+
+/// Apple-style continuous-corner rounded square filling `rect` (radius 22.37% of the side; the standard "iOS 7" bezier construction).
+func squircle(_ rect: CGRect) -> CGPath {
+    let r = rect.width * 0.2237, p = CGMutablePath()
+    // (corner, direction along the incoming edge, direction along the outgoing edge), clockwise
+    let corners: [(CGPoint, CGPoint, CGPoint)] = [
+        (CGPoint(x: rect.maxX, y: rect.minY), CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1)),
+        (CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: 0, y: 1), CGPoint(x: -1, y: 0)),
+        (CGPoint(x: rect.minX, y: rect.maxY), CGPoint(x: -1, y: 0), CGPoint(x: 0, y: -1)),
+        (CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: 0, y: -1), CGPoint(x: 1, y: 0)),
+    ]
+    for (i, (c, e1, e2)) in corners.enumerated() {
+        func q(_ a: CGFloat, _ b: CGFloat) -> CGPoint {
+            CGPoint(x: c.x - a * r * e1.x + b * r * e2.x, y: c.y - a * r * e1.y + b * r * e2.y)
+        }
+        i == 0 ? p.move(to: q(1.52866483, 0)) : p.addLine(to: q(1.52866483, 0))
+        p.addCurve(to: q(0.63149379, 0.07491139), control1: q(1.08849296, 0), control2: q(0.86840694, 0))
+        p.addCurve(to: q(0.07491139, 0.63149379), control1: q(0.37282383, 0.16905956), control2: q(0.16905956, 0.37282383))
+        p.addCurve(to: q(0, 1.52866483), control1: q(0, 0.86840694), control2: q(0, 1.08849296))
+    }
+    p.closeSubpath()
+    return p
 }
 
-// Palette: monochrome graphite, no pure black. Change the look here.
-let baseTop = (74, 74, 77), baseBottom = (27, 27, 30)  // top-left warm grey to bottom-right charcoal
-let bloomAlpha: CGFloat = 0.16                          // neutral white bloom behind the symbol
-let glyphLift: CGFloat = 0.42                           // white veil over the symbol: frosted silver
-let specularAlpha: CGFloat = 0.55                       // bright specular on the upper-left of the symbol
-
-/// 1024 master; `body` is the side of the rounded square, centred (1024 = full bleed).
-func master(body: CGFloat) -> CGImage {
-    let c = ctx(1024)
-    let o = (1024 - body) / 2
-    let rect = CGRect(x: o, y: o, width: body, height: body)
-    let path = CGPath(roundedRect: rect, cornerWidth: body * 0.2237, cornerHeight: body * 0.2237, transform: nil)
-    c.saveGState()
-    c.addPath(path); c.clip()
-    // CG origin is bottom-left: start top-left, end bottom-right
-    let base = CGGradient(colorsSpace: cs, colors: [rgb(baseTop.0, baseTop.1, baseTop.2), rgb(baseBottom.0, baseBottom.1, baseBottom.2)] as CFArray, locations: [0, 1])!
-    c.drawLinearGradient(base, start: CGPoint(x: o, y: o + body), end: CGPoint(x: o + body * 0.8, y: o + body * 0.1), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-    glow(c, 512, 512, body * 0.5, (255, 255, 255), bloomAlpha)
-    // soft inner shadow at the bottom
-    let sh = CGGradient(colorsSpace: cs, colors: [rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.14)] as CFArray, locations: [0, 1])!
-    c.drawLinearGradient(sh, start: CGPoint(x: 0, y: o + body * 0.14), end: CGPoint(x: 0, y: o), options: [])
-    // symbol on its own layer so the lift and specular only touch the symbol; soft shadow below it
-    let s = body * 0.80
-    let g = ctx(1024)
-    g.draw(load("design/01-brand/logo/png/synthesis-symbol-transparent-1024.png"),
-           in: CGRect(x: 512 - s / 2, y: 512 - s / 2, width: s, height: s))
-    g.setBlendMode(.sourceAtop)
-    g.setFillColor(rgb(255, 255, 255, glyphLift)); g.fill(CGRect(x: 0, y: 0, width: 1024, height: 1024))
-    let spec = CGGradient(colorsSpace: cs, colors: [rgb(255, 255, 255, specularAlpha), rgb(255, 255, 255, 0)] as CFArray, locations: [0, 1])!
-    g.drawLinearGradient(spec, start: CGPoint(x: 512 - s * 0.45, y: 512 + s * 0.45), end: CGPoint(x: 512, y: 512), options: [])
-    c.setShadow(offset: CGSize(width: 0, height: -body * 0.025), blur: body * 0.04, color: rgb(0, 0, 0, 0.35))
-    c.draw(g.makeImage()!, in: CGRect(x: 0, y: 0, width: 1024, height: 1024))
-    c.setShadow(offset: .zero, blur: 0)
-    c.restoreGState()
-    // thin rim, lighter at the top
-    c.saveGState()
-    c.addPath(path); c.clip()
-    c.addPath(path); c.setLineWidth(body * 0.008)
-    c.replacePathWithStrokedPath(); c.clip()
-    let hi = CGGradient(colorsSpace: cs, colors: [rgb(255, 255, 255, 0.30), rgb(255, 255, 255, 0.05)] as CFArray, locations: [0, 1])!
-    c.drawLinearGradient(hi, start: CGPoint(x: 0, y: o + body), end: CGPoint(x: 0, y: o), options: [])
-    c.restoreGState()
-    return c.makeImage()!
-}
-func scaled(_ m: CGImage, _ n: Int) -> CGImage {
-    if n == 1024 { return m }
+/// n px canvas with the squircle body at `fraction` of it (1.0 = full bleed, 824/1024 = Apple grid); no shadow.
+/// Each size is resampled from the master and lightly sharpened before the mask, so the mask edge gets no halo.
+func icon(_ n: Int, fraction: CGFloat) -> CGImage {
+    let b = (CGFloat(n) * fraction).rounded()
+    let body = n == 1024 && fraction == 1 ? master1024
+        : render(resample(CIImage(cgImage: master1024), to: Int(b), sharpen: 0.8, b <= 256 ? 0.35 : 0.15))
     let c = ctx(n)
-    c.draw(m, in: CGRect(x: 0, y: 0, width: n, height: n))
+    let o = (CGFloat(n) - b) / 2
+    let rect = CGRect(x: o, y: o, width: b, height: b)
+    c.addPath(squircle(rect)); c.clip()
+    c.draw(body, in: rect)
     return c.makeImage()!
 }
 func write(_ d: Data, _ p: String) { try! d.write(to: URL(fileURLWithPath: p)) }
 
-let full = master(body: 1024), mac = master(body: 824)
 let brand = "design/01-brand/app-icons", assets = "apps/desktop/assets/icons"
-for n in [16, 32, 64, 128, 256, 512, 1024] { write(png(scaled(full, n)), "\(brand)/synthesis-app-icon-\(n).png") }
-write(png(scaled(full, 256)), "\(assets)/synthesis-256.png")
-write(png(scaled(full, 512)), "\(assets)/synthesis-512.png")
+for n in [16, 32, 64, 128, 256, 512, 1024] { write(png(icon(n, fraction: 1)), "\(brand)/synthesis-app-icon-\(n).png") }
+write(png(icon(256, fraction: 1)), "\(assets)/synthesis-256.png")
+write(png(icon(512, fraction: 1)), "\(assets)/synthesis-512.png")
 
 // .ico with PNG-compressed entries
 let sizes = [16, 24, 32, 48, 64, 128, 256]
-let imgs = sizes.map { png(scaled(full, $0)) }
+let imgs = sizes.map { png(icon($0, fraction: 1)) }
 var ico = Data([0, 0, 1, 0, UInt8(sizes.count), 0])
 var off = 6 + 16 * sizes.count
 func le<T: FixedWidthInteger>(_ v: T) -> [UInt8] { withUnsafeBytes(of: v.littleEndian) { Array($0) } }
@@ -108,8 +118,8 @@ let set = NSTemporaryDirectory() + "synthesis.iconset"
 try? FileManager.default.removeItem(atPath: set)
 try! FileManager.default.createDirectory(atPath: set, withIntermediateDirectories: true)
 for n in [16, 32, 128, 256, 512] {
-    write(png(scaled(mac, n)), "\(set)/icon_\(n)x\(n).png")
-    write(png(scaled(mac, n * 2)), "\(set)/icon_\(n)x\(n)@2x.png")
+    write(png(icon(n, fraction: 824.0 / 1024)), "\(set)/icon_\(n)x\(n).png")
+    write(png(icon(n * 2, fraction: 824.0 / 1024)), "\(set)/icon_\(n)x\(n)@2x.png")
 }
 let p = Process()
 p.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
