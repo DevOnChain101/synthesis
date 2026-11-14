@@ -20,3 +20,7 @@ Brand kit and design references for Synthesis. Provenance: the owner's "Synthesi
 ## Not included
 
 The kit's brand boards (`04-brand-boards`, about 6 MB of PNG), the extras (`05-extras`, including the nested `Synthesis_Design_Concept_original.zip`) were left out to keep this folder small (about 3 MB). They remain in the owner's original zip.
+
+## App icons
+
+`swift scripts/make-icons.swift` (macOS) regenerates `01-brand/app-icons/*` and `apps/desktop/assets/icons/*` (.icns, .ico, PNGs) from `01-brand/logo/png/synthesis-symbol-transparent-1024.png` on a navy gradient with teal, violet and warm points.
