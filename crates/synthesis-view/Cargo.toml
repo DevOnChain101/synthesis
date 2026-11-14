@@ -24,5 +24,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 time = { version = "0.3", features = ["parsing"] }
 
+[target.'cfg(unix)'.dependencies]
+# the explorer lists a folder through a directory handle and one NOFOLLOW openat per component
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

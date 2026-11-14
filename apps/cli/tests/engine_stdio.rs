@@ -1271,11 +1271,33 @@ fn the_files_methods_list_read_and_refuse_what_must_not_leave() {
         .iter()
         .map(|r| r[1].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"src") && names.contains(&"a.rs"), "{l}");
-    assert!(
-        !names.contains(&"link.txt") && !names.contains(&"etc"),
-        "links are not listed: {l}"
-    );
+    // lazy: the first level only; a folder is read when it is opened
+    assert!(names.contains(&"src") && !names.contains(&"a.rs"), "{l}");
+    let src = e.ok("fs.list", json!({"dir": "src"}));
+    assert_eq!(src["rows"][0][1], "a.rs", "{src}");
+    assert_eq!(src["rows"][0][0], 1, "{src}");
+    // links are listed as links (never as folders) and never entered
+    #[cfg(unix)]
+    {
+        let link = |n: &str| {
+            l["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r[1] == n)
+                .unwrap_or_else(|| panic!("{n} listed: {l}"))
+                .clone()
+        };
+        for n in ["link.txt", "etc"] {
+            let r = link(n);
+            assert!(r[2] == false && r[4] == true, "{r}");
+        }
+        calm();
+        assert!(
+            e.err("fs.list", json!({"dir": "etc"}))
+                .contains("no such folder")
+        );
+    }
     assert_eq!(
         l["trusted"], false,
         "an untrusted folder is walked, git is not run"

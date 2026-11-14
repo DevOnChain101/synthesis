@@ -909,11 +909,34 @@ fn rows_of(v: &Value, key: &str, max: usize) -> Result<Vec<Value>, String> {
         .collect())
 }
 
+/// One row of the engine's tree, or `None` for one that could corrupt a path (a `/` in a name, an empty name).
+fn tree_row(r: &Value) -> Option<synthesis_view::project::TreeRow> {
+    let name = text(&r[1]);
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(synthesis_view::project::TreeRow {
+        depth: u16::try_from(r[0].as_u64().unwrap_or(0))
+            .unwrap_or(0)
+            .min(64),
+        name,
+        dir: r[2].as_bool().unwrap_or(false),
+        status: r[3]
+            .as_str()
+            .and_then(|s| s.chars().next())
+            .filter(|c| "MADR?".contains(*c)),
+        link: r[4].as_bool().unwrap_or(false),
+        generated: r[5].as_bool().unwrap_or(false),
+        more: usize::try_from(r[6].as_u64().unwrap_or(0)).unwrap_or(0),
+        notice: r[7].as_bool().unwrap_or(false),
+    })
+}
+
 impl Remote {
     /// The project tree of the session folder, as the engine scanned it (git in a trusted folder, a plain walk
     /// otherwise: the engine decides). A row that could corrupt a path (a `/` in a name) is dropped.
     pub fn fs_list(&self) -> Result<synthesis_view::project::ProjectData, String> {
-        use synthesis_view::project::{ProjectData, TreeRow};
+        use synthesis_view::project::ProjectData;
         let mut data = ProjectData {
             loaded: true,
             ..Default::default()
@@ -937,21 +960,11 @@ impl Remote {
             }
             let v = v?;
             for r in rows_of(&v, "rows", MAX_TREE_ROWS)? {
-                let name = text(&r[1]);
-                if data.rows.len() >= MAX_TREE_ROWS || name.is_empty() || name.contains('/') {
-                    continue;
+                if data.rows.len() < MAX_TREE_ROWS
+                    && let Some(row) = tree_row(&r)
+                {
+                    data.rows.push(row);
                 }
-                data.rows.push(TreeRow {
-                    depth: u16::try_from(r[0].as_u64().unwrap_or(0))
-                        .unwrap_or(0)
-                        .min(64),
-                    name,
-                    dir: r[2].as_bool().unwrap_or(false),
-                    status: r[3]
-                        .as_str()
-                        .and_then(|s| s.chars().next())
-                        .filter(|c| "MADR?".contains(*c)),
-                });
             }
             data.note = v["note"].as_str().map(clean);
             data.truncated |= v["truncated"].as_bool().unwrap_or(false);
@@ -962,6 +975,40 @@ impl Remote {
         }
         data.truncated = true;
         Ok(data)
+    }
+
+    /// The entries of the folder `dir` of the tree, read by the engine now, from entry `skip`: one page of
+    /// [`synthesis_view::project::DIR_ROWS`] and, when cut, the "... more" row. `None`: the engine refused it.
+    pub fn fs_list_dir(
+        &self,
+        dir: &str,
+        skip: usize,
+    ) -> Result<Vec<synthesis_view::project::TreeRow>, String> {
+        use synthesis_view::project::{DIR_ROWS, page_end};
+        let (mut rows, mut raw, mut partial) = (vec![], 0, false);
+        let (mut offset, mut total) = (skip, 0);
+        for _ in 0..10 {
+            let v = self.call(
+                Call::FsList {
+                    dir: dir.into(),
+                    offset: offset as u32,
+                },
+                SLOW_TIMEOUT,
+            )?;
+            total = usize::try_from(v["total"].as_u64().unwrap_or(0)).unwrap_or(0);
+            partial = v["partial"].as_bool().unwrap_or(false);
+            let page = rows_of(&v, "rows", DIR_ROWS)?;
+            // counted as the engine counts them, whatever is dropped here
+            raw += page.len();
+            rows.extend(page.iter().filter_map(tree_row));
+            match v["next"].as_u64() {
+                Some(n) if rows.len() < DIR_ROWS && !page.is_empty() => offset = n as usize,
+                _ => break,
+            }
+        }
+        let depth = dir.split('/').filter(|c| !c.is_empty()).count() as u16;
+        page_end(&mut rows, depth, total.saturating_sub(skip + raw), partial);
+        Ok(rows)
     }
 
     /// A text preview of `rel` (a path of the tree): `(lines, size, cut)`. The engine refuses secrets, links,
