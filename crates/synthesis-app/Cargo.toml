@@ -17,7 +17,6 @@ test-provider = ["synthesis-sandbox/test-backend"]
 clap = { version = "4.6.7", features = ["derive"] }
 url = "2.5.8"
 base64 = "0.22"
-cap-std = "4.0.3"
 synthesis-browser = { path = "../synthesis-browser" }
 synthesis-config = { path = "../synthesis-config" }
 synthesis-context = { path = "../synthesis-context" }
