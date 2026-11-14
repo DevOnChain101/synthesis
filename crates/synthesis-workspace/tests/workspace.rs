@@ -1334,7 +1334,11 @@ fn reconcile_never_drops_the_registration_of_other_worktrees() {
     assert_eq!(o, Origin::Created);
     assert!(b.git.unwrap().worktree.is_dir());
     let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
-    assert_eq!(list.matches("att-stale").count(), 1, "{list}");
+    let entries = list
+        .lines()
+        .filter(|l| l.starts_with("worktree ") && l.contains("att-stale"))
+        .count();
+    assert_eq!(entries, 1, "{list}");
     assert!(
         list.contains(other_dir.to_str().unwrap()),
         "other registrations still there"
