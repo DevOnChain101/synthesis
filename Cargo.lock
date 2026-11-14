@@ -7512,6 +7512,7 @@ dependencies = [
  "synthesis-config",
  "synthesis-core",
  "synthesis-events",
+ "synthesis-orchestrator",
  "synthesis-session",
  "synthesis-workspace",
  "tempfile",
