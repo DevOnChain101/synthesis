@@ -52,6 +52,7 @@ pub mod models;
 pub mod notify;
 pub mod peers;
 pub mod proto;
+pub mod provider_cfg;
 pub mod rename;
 pub mod rewind;
 pub mod run;

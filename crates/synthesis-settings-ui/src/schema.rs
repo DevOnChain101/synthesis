@@ -14,6 +14,8 @@ pub enum Section {
     Execution,
     Guards,
     Hooks,
+    /// Custom providers of the user `synt.json` (not `settings.json` keys): the desktop draws the editor.
+    Providers,
     Mcp,
     Skills,
     SubAgents,
@@ -24,12 +26,13 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::UserPrompt,
         Section::Memory,
         Section::Execution,
         Section::Guards,
         Section::Hooks,
+        Section::Providers,
         Section::Mcp,
         Section::Skills,
         Section::SubAgents,
@@ -44,6 +47,7 @@ impl Section {
             Section::Execution => "EXECUTION",
             Section::Guards => "GUARDS",
             Section::Hooks => "HOOKS",
+            Section::Providers => "PROVIDERS",
             Section::Mcp => "MCP",
             Section::Skills => "SKILLS",
             Section::SubAgents => "SUB-AGENTS",
@@ -513,7 +517,7 @@ pub fn group_of(key: &str, section: Section) -> &'static str {
         Mcp if key == "synt.mcp.toolSearch" => "Tool search",
         Mcp => "Servers",
         SubAgents => "Peers",
-        UserPrompt | Skills => "General",
+        UserPrompt | Skills | Providers => "General",
     }
 }
 
