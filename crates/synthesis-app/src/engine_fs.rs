@@ -56,73 +56,76 @@ pub fn check_rel(p: &str, allow_empty: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The tree of the session folder: git (hardened) when `trusted`, else a plain walk. The client never decides.
+/// The first level of the session folder (and the parents of changed files): git (hardened) only when
+/// `trusted`. Every other folder is read by [`list_dir`] when the client opens it. The client never decides.
 pub fn scan(root: &Path, trusted: bool, env: &Env) -> ProjectData {
-    if trusted {
-        project::scan(root, env)
-    } else {
-        project::scan_plain(root)
+    project::scan_lazy(root, env, trusted, None)
+}
+
+/// `[depth, name, dir, status, link, generated, more, notice]`: the last four are additions of the lazy tree.
+fn row_json(r: &project::TreeRow) -> Value {
+    json!([
+        r.depth,
+        clean(&r.name),
+        r.dir,
+        r.status.map(String::from),
+        r.link,
+        r.generated,
+        r.more,
+        r.notice
+    ])
+}
+
+/// The entries of the folder `dir` (a path of the project, not "") from `offset`, at most [`PAGE_ROWS`]; `scan`
+/// supplies what git said. A link on the way is not entered. The disk is read at `offset` 0 (the folder was just
+/// opened or refreshed) or when `cache` holds another folder; the pages after the first come from `cache`, so
+/// the pages of one opening cost one read of the folder.
+pub fn list_dir(
+    root: &Path,
+    d: &ProjectData,
+    dir: &str,
+    offset: usize,
+    trusted: bool,
+    cache: &mut Option<project::Kids>,
+) -> Result<Value, String> {
+    check_rel(dir, false)?;
+    if offset == 0 || !cache.as_ref().is_some_and(|k| k.is_dir(dir)) {
+        *cache = project::read_children(root, dir, &d.listing);
     }
+    let c = cache
+        .as_ref()
+        .and_then(|k| k.page(root, &d.listing, offset, PAGE_ROWS))
+        .ok_or("no such folder")?;
+    let end = offset.saturating_add(c.rows.len());
+    Ok(json!({
+        "rows": c.rows.iter().map(row_json).collect::<Vec<_>>(), "total": c.total,
+        "next": (end < c.total).then_some(end), "partial": c.partial,
+        "truncated": d.truncated, "note": d.note.as_deref().map(clean), "trusted": trusted,
+    }))
 }
 
-/// The paths (`a/b/c`) of the rows, in row order.
-fn row_paths(d: &ProjectData) -> Vec<String> {
-    let mut stack: Vec<&str> = vec![];
-    d.rows
-        .iter()
-        .map(|r| {
-            stack.truncate(usize::from(r.depth));
-            let p = stack
-                .iter()
-                .copied()
-                .chain([r.name.as_str()])
-                .collect::<Vec<_>>()
-                .join("/");
-            if r.dir {
-                stack.push(&r.name);
-            }
-            p
-        })
-        .collect()
-}
-
-/// `[depth, name, dir, status]` rows of the scan under `dir` ("" is all of it), from `offset`, at most
-/// [`PAGE_ROWS`].
-pub fn list_of(d: &ProjectData, dir: &str, offset: usize, trusted: bool) -> Result<Value, String> {
-    check_rel(dir, true)?;
-    let paths = row_paths(d);
-    let prefix = format!("{dir}/");
-    let picked: Vec<usize> = if dir.is_empty() {
-        (0..d.rows.len()).collect()
-    } else {
-        let at = (0..d.rows.len())
-            .find(|i| d.rows[*i].dir && paths[*i] == dir)
-            .ok_or("no such folder")?;
-        (at + 1..d.rows.len())
-            .take_while(|i| paths[*i].starts_with(&prefix))
-            .collect()
-    };
-    let page: Vec<Value> = picked
+/// `[depth, name, dir, status, ...]` rows of the scan (the first level and what was opened by itself), from
+/// `offset`, at most [`PAGE_ROWS`].
+pub fn list_of(d: &ProjectData, offset: usize, trusted: bool) -> Value {
+    let page: Vec<Value> = d
+        .rows
         .iter()
         .skip(offset)
         .take(PAGE_ROWS)
-        .map(|i| {
-            let r = &d.rows[*i];
-            json!([r.depth, clean(&r.name), r.dir, r.status.map(String::from)])
-        })
+        .map(row_json)
         .collect();
     let end = offset.saturating_add(page.len());
-    Ok(json!({
-        "rows": page, "total": picked.len(),
-        "next": (end < picked.len()).then_some(end),
+    json!({
+        "rows": page, "total": d.rows.len(),
+        "next": (end < d.rows.len()).then_some(end),
         "truncated": d.truncated, "note": d.note.as_deref().map(clean), "trusted": trusted,
-    }))
+    })
 }
 
 /// The changed files (`[path, letter]`) of a trusted folder, through the hardened git wrapper.
 pub fn git_status(root: &Path, trusted: bool, env: &Env) -> Result<Value, String> {
     let d = git_scan(root, trusted, env)?;
-    let files: Vec<Value> = row_paths(&d)
+    let files: Vec<Value> = project::row_paths(&d)
         .into_iter()
         .zip(&d.rows)
         .filter(|(_, r)| !r.dir && r.status.is_some())
@@ -657,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_is_paged_and_a_folder_is_a_row_of_it() {
+    fn the_tree_is_paged_and_a_folder_is_read_when_it_is_opened() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("src/deep")).unwrap();
         for i in 0..250 {
@@ -666,26 +669,33 @@ mod tests {
         std::fs::write(d.path().join("src/a.rs"), "x").unwrap();
         std::fs::write(d.path().join("src/deep/b.rs"), "x").unwrap();
         let env = Env::from_pairs::<&str, &str>([]);
-        let p0 = list_of(&scan(d.path(), false, &env), "", 0, false).unwrap();
+        let t = scan(d.path(), false, &env);
+        // the scan holds the first level only: 250 files and `src`
+        let p0 = list_of(&t, 0, false);
         assert_eq!(p0["rows"].as_array().unwrap().len(), PAGE_ROWS);
         assert_eq!(p0["next"], PAGE_ROWS);
-        let p1 = list_of(&scan(d.path(), false, &env), "", PAGE_ROWS, false).unwrap();
-        assert!(p1["next"].is_null() && p1["total"] == p0["total"]);
-        let sub = list_of(&scan(d.path(), false, &env), "src", 0, false).unwrap();
-        let names: Vec<String> = sub["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r[1].as_str().unwrap().into())
-            .collect();
-        assert_eq!(names, ["a.rs", "deep", "b.rs"]);
-        // a folder that is not in the tree, or a hostile one, is refused without touching the disk
-        assert!(list_of(&scan(d.path(), false, &env), "nope", 0, false).is_err());
-        assert!(list_of(&scan(d.path(), false, &env), "../..", 0, false).is_err());
-        assert!(
-            list_of(&scan(d.path(), false, &env), "f001", 0, false).is_err(),
-            "a file is not a folder"
-        );
+        let p1 = list_of(&t, PAGE_ROWS, false);
+        assert!(p1["next"].is_null() && p1["total"] == 251 && p1["total"] == p0["total"]);
+        let names = |v: &Value| -> Vec<String> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r[1].as_str().unwrap().into())
+                .collect()
+        };
+        let sub = list_dir(d.path(), &t, "src", 0, false, &mut None).unwrap();
+        assert_eq!(names(&sub), ["a.rs", "deep"]);
+        assert_eq!(sub["rows"][1][0], 1, "depth of the entries of src");
+        let deep = list_dir(d.path(), &t, "src/deep", 0, false, &mut None).unwrap();
+        assert_eq!(names(&deep), ["b.rs"]);
+        // a folder that is not there, a file, or a hostile path is refused
+        for bad in ["nope", "f001", "../..", "/", "", ".git", "src/../.."] {
+            assert!(
+                list_dir(d.path(), &t, bad, 0, false, &mut None).is_err(),
+                "{bad}"
+            );
+        }
         // git is never run for a folder that is not trusted
         assert!(
             git_diff(d.path(), false, &env).is_err() && git_status(d.path(), false, &env).is_err()
