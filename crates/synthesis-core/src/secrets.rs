@@ -33,7 +33,14 @@ pub fn is_secret_path(path: &Path) -> bool {
         .contains(&n)
         || n.ends_with(".tfvars")
         || n.starts_with("secrets.")
-        || path.ends_with(".kube/config")
+        || {
+            // `.kube/config` compared lowercase like the rest (case-insensitive volumes)
+            let mut c = path
+                .components()
+                .rev()
+                .map(|c| c.as_os_str().to_ascii_lowercase());
+            c.next().is_some_and(|f| f == "config") && c.next().is_some_and(|d| d == ".kube")
+        }
 }
 
 /// A secret file by name, or anything under a credential directory (`.ssh`, `.aws`, `.gnupg`),
