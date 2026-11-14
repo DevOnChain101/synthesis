@@ -166,7 +166,7 @@ impl Tree {
     }
 
     /// A scan of `cwd` landed: kept only when it began under the current session and its folder is still the
-    /// one shown (`now_cwd`); false means it was dropped (a stale result changes nothing, not even `loading`).
+    /// one shown (`now_cwd`); false means it was dropped (a result of an older session changes nothing; one of another folder only ends `loading`).
     pub fn land(
         &mut self,
         epoch: u64,
@@ -176,7 +176,13 @@ impl Tree {
         changes: usize,
         trusted: bool,
     ) -> bool {
-        if epoch != self.epoch || cwd != now_cwd {
+        if epoch != self.epoch {
+            return false;
+        }
+        if cwd != now_cwd {
+            // the folder changed under the same session: not kept, and `loading` must not stay set or the
+            // tab reads "reading..." for ever (the next tick scans the folder now shown)
+            self.loading = false;
             return false;
         }
         *self = Tree {
@@ -1058,6 +1064,18 @@ mod tests {
             rows,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_scan_of_a_folder_no_longer_shown_does_not_leave_the_tab_reading_for_ever() {
+        let mut t = Tree::default();
+        let e = t.begin();
+        assert!(t.loading);
+        assert!(!t.land(e, "/b", of(vec![]), "/a".into(), 0, true));
+        assert!(
+            !t.loading && t.data.is_none(),
+            "dropped, and the next tick may scan again"
+        );
     }
 
     #[test]

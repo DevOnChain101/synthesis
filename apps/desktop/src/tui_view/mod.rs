@@ -286,9 +286,25 @@ impl TuiView {
 
     /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
     /// stuck to the newest row unless the person scrolled up.
-    fn refresh(&mut self, window: &mut Window) {
+    fn refresh(&mut self, window: &mut Window, cx: &gpui::App) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
+        // The agent's own requests (approval, plan, question) are ready for Enter the moment they show, when
+        // nothing is typed in the prompt: while the dialog is up the keys do not reach the prompt, so an empty
+        // prompt means no Enter in flight was meant for it. Text typed ahead keeps the old guard (arrows/Tab/click).
+        if lu.prompt.read(cx).value().is_empty()
+            && let Some(d) = lu.live.dialogs.first_mut()
+            && matches!(
+                d.kind,
+                crate::live::DialogKind::Approval(_)
+                    | crate::live::DialogKind::Plan { .. }
+                    | crate::live::DialogKind::Question { .. }
+            )
+            && !d.engaged
+        {
+            d.engaged = true;
+            lu.dirty = true;
+        }
         // the tabs belong to the session: leaving one keeps them, coming back finds them
         if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
             let prev = std::mem::replace(&mut self.tab_sid, lu.live.sid.clone());
@@ -1055,7 +1071,7 @@ impl Render for TuiView {
         {
             chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
-        self.refresh(window);
+        self.refresh(window, cx);
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
@@ -1403,6 +1419,65 @@ mod tests {
         });
     }
 
+    /// A trusted folder that is not a git repository (and one with a huge dot directory) lists its files on the
+    /// first look at the Files tab, and again after /new (another session id, same folder).
+    #[gpui::test]
+    fn the_file_explorer_lists_a_trusted_folder_without_git_first_time_and_after_new(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let a = tempfile::tempdir().unwrap();
+        let w = a.path();
+        std::fs::create_dir_all(w.join(".cache")).unwrap();
+        for i in 0..6000 {
+            std::fs::write(w.join(format!(".cache/f{i}")), "x").unwrap();
+        }
+        std::fs::write(w.join("main.rs"), "fn main() {}").unwrap();
+        let live = |sid: &str| {
+            let mut l = Live::new();
+            l.starting = false;
+            l.trusted = true;
+            l.sid = sid.into();
+            l.cwd = w.to_string_lossy().into_owned();
+            l
+        };
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let top = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                t.tree.data.as_ref().map_or(vec![], |d| {
+                    d.rows
+                        .iter()
+                        .filter(|r| r.depth == 0)
+                        .map(|r| r.name.clone())
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        view.update(vcx, |t, _| t.set_live(live("a")));
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        draw(vcx);
+        assert_eq!(top(&view, vcx), [".cache", "main.rs"]);
+        view.update(vcx, |t, _| t.set_live(live("b")));
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        draw(vcx);
+        assert_eq!(top(&view, vcx), [".cache", "main.rs"], "after /new");
+    }
+
     #[gpui::test]
     fn a_long_chat_builds_only_the_rows_near_the_viewport(cx: &mut TestAppContext) {
         use crate::live::Live;
@@ -1583,8 +1658,8 @@ mod tests {
         assert!(view.read_with(vcx, |t, _| t.attention()).is_some());
     }
 
-    /// The keys of a pending approval: ignored under Settings, and Enter or a digit answers only after the
-    /// person engaged the dialog (arrow, Tab or a click); Esc rejects at once.
+    /// The keys of a pending approval: ignored under Settings; on screen they answer it (the guard for text
+    /// typed ahead is the test below); Esc rejects at once.
     #[gpui::test]
     fn dialog_keys_need_the_tui_view_and_an_engaged_dialog(cx: &mut TestAppContext) {
         use crate::live::{Dialog, DialogKind, Live};
@@ -1618,11 +1693,7 @@ mod tests {
         assert!(!press(&view, vcx, "enter"));
         assert!(!press(&view, vcx, "1"));
         assert_eq!(pending(&view, vcx), 1);
-        // on screen but untouched: swallowed, nothing answered
         view.update(vcx, |t, _| t.shown = true);
-        assert!(press(&view, vcx, "enter"));
-        assert!(press(&view, vcx, "1"));
-        assert_eq!(pending(&view, vcx), 1);
         // no slide-over column while a dialog waits
         view.update(vcx, |t, cx| t.toggle_drawer(Side::Left, cx));
         assert!(view.read_with(vcx, |t, _| t.drawer.is_none()));
@@ -1630,6 +1701,47 @@ mod tests {
         press(&view, vcx, "down");
         press(&view, vcx, "enter");
         assert_eq!(pending(&view, vcx), 0);
+    }
+
+    /// An approval is ready for Enter the moment it shows (no arrow key first) when nothing is typed in the
+    /// prompt; with text typed ahead the guard stays (that Enter was meant for the prompt).
+    #[gpui::test]
+    fn an_approval_answers_enter_at_once_unless_text_was_typed_ahead(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind, Live};
+        cx.update(gpui_component::init);
+        let dialog = || Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        };
+        for typed in [false, true] {
+            let (view, vcx) = cx.add_window_view(|window, cx| {
+                TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+            });
+            let mut l = Live::new();
+            l.starting = false;
+            view.update(vcx, |t, _| t.set_live(l));
+            if typed {
+                view.update_in(vcx, |t, window, cx| {
+                    let p = t.live.as_ref().unwrap().prompt.clone();
+                    p.update(cx, |s, cx| s.set_value("half a sentence", window, cx));
+                });
+            }
+            view.update(vcx, |t, _| {
+                t.live.as_mut().unwrap().live.dialogs.push(dialog())
+            });
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+            let ks = gpui::Keystroke::parse("enter").unwrap();
+            view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx));
+            let left = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
+            assert_eq!(left, usize::from(typed), "typed ahead = {typed}");
+        }
     }
 
     /// The send picker is a dialog like the others: under Settings no key reaches it (no typing into its
