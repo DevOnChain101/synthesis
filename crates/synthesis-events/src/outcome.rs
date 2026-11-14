@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const OUTCOME_CREATED: &str = "outcome.created";
+pub const CONTRACT_CREATED: &str = "contract.created";
 pub const PLAN_CREATED: &str = "plan.created";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";

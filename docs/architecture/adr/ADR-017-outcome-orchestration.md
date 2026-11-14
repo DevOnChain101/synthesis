@@ -127,3 +127,18 @@ The standalone process (L2) gives lifetime independence and a single owner per o
 - A start that can never work (not the outcome's repository, native Windows, no budget) blocks the item with the reason in the tick report instead of retrying in a loop.
 - Not in this PR (plan section 6): resource locks beyond one owner, priorities, fairness across outcomes. The plan limit of 256 work items bounds a walk; the tests drive the maximum (250 agent items plus a verify item) and assert the cap never exceeded and the lease order sorted.
 
+## Implementation notes (PR-07: contract versions and the planner)
+
+- **Contract approval and immutability** were already the store's (PR-02): the approval MAC covers outcome, version, body hash and approver, stored contracts and plans are immutable by trigger. New here: `OutcomeWriter::new_contract_version(&Contract)` stores a changed contract as the **next version**, unapproved (event `contract.created`), only while the outcome is `draft` or `contract_pending`. The plan made for the version before then no longer satisfies the `ready` guard (it must be a plan for the approved current contract), the old hash is refused for the new version, and `insert_plan` refuses a plan for an unapproved contract: a change in the contract invalidates the approval and the plan by construction. Changing the contract after the work started is not supported yet (it needs the decision flow, PR-13).
+- **Planner interface.** `Planner::plan(contract, version) -> Plan` is a proposal. `make_plan` is the only door: it runs `validate_plan` (unknown dependency, cycle, unknown capability, capability denied by the envelope, unknown or uncovered criterion, a mandatory criterion no `verify` item covers, size caps) and returns the plan with its canonical order and coverage. `parse_plan(json, contract)` does the same for a planner's JSON (256 KiB cap, unknown fields refused). `StubPlanner` is deterministic: `inspect` (agent, `repo.read`) then `implement` (agent, `repo.read`, `repo.write`, `tests.run`, each only if the envelope does not deny it) then `test` (verify, covers every criterion). The **model planner is not built** (D13): it will implement `Planner` after the bypass gate and go through the same door.
+- **Replanning** is `replan(planner, contract, old)`: plan version `old + 1`, validated, with `PlanDiff` (added, removed, changed, unchanged, and `rerun`: the added and changed items plus everything that requires them). It stores nothing; `insert_plan` stores the new version as new work items and leaves the old plan row, its work items and their attempts as they were (the walk reads only the current plan version). What to do with the old version's open items (cancel, carry over succeeded ones) is the caller's decision from `diff`; the scheduler does not carry results over.
+- Plan JSON as a planner emits it:
+
+```json
+{"version": 1, "contract_version": 1,
+ "items": [
+   {"key": "inspect", "kind": "agent", "capabilities": ["repo.read"]},
+   {"key": "implement", "kind": "agent", "requires": ["inspect"],
+    "capabilities": ["repo.read", "repo.write", "tests.run"]},
+   {"key": "test", "kind": "verify", "requires": ["implement"], "covers": ["c1", "c2", "c3"]}]}
+```

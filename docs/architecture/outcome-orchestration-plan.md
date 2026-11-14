@@ -138,6 +138,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: Medium. Rollback: flag. Size: M.
 
 ### PR-07 Contract and planner schema
+- **Status (implemented):** `new_contract_version` (store), `parse_plan`/`diff_plans`/`PlanDiff` (core), `Planner`/`StubPlanner`/`make_plan`/`replan` (orchestrator). Approval hash and immutability were PR-02's. The model planner is not built (D13). See ADR-017 implementation notes.
 - Scope: contract model (goal, criteria with optional check commands, envelope), approval records the contract hash (surface-independent; the CLI form comes in PR-13); deterministic stub planner (inspect -> implement -> test); planner JSON schema validation; model planner behind the same schema later.
 - Crates: `synthesis-orchestrator`.
 - Tests: schema rejections; approval hash stability; contract immutability.

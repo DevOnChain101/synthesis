@@ -1349,6 +1349,10 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.approve_contract(version, hash, approver))
     }
 
+    pub fn new_contract_version(&mut self, contract: &Contract) -> Result<()> {
+        self.atomically(|tx| tx.new_contract_version(contract))
+    }
+
     pub fn insert_plan(&mut self, plan: &Plan) -> Result<Vec<(String, WorkItemId)>> {
         self.atomically(|tx| tx.insert_plan(plan))
     }
@@ -1965,6 +1969,43 @@ impl OutcomeTx<'_, '_> {
         self.et.append(
             "outcome.contract_approved",
             json!({"outcome_id": self.id, "version": version, "hash": hash, "approver": approver}),
+        )?;
+        Ok(())
+    }
+
+    /// A changed contract is a NEW version (stored versions are immutable): unapproved, and the
+    /// current plan (made for the version before) no longer lets the outcome become `ready`, so
+    /// the approval of the old version never covers the new text. Only before the work starts
+    /// (`draft`, `contract_pending`); the next version only.
+    pub fn new_contract_version(&mut self, contract: &Contract) -> Result<()> {
+        let o = self.outcome()?;
+        if !matches!(o.state, OutcomeState::Draft | OutcomeState::ContractPending) {
+            return Err(Error::Invalid(format!(
+                "the contract cannot change while the outcome is {}",
+                enum_str(&o.state)
+            )));
+        }
+        if contract.version != o.contract_version + 1 {
+            return Err(Error::Invalid(
+                "a contract version must follow the current one".into(),
+            ));
+        }
+        validate_contract(contract).map_err(refuse)?;
+        self.policy.check(contract)?;
+        let mut body = serde_json::to_value(contract)?;
+        self.et.redact_value(&mut body);
+        let hash = body_hash(&body);
+        self.et.tx.execute(
+            "INSERT INTO contracts(outcome_id,version,hash,body) VALUES (?1,?2,?3,?4)",
+            params![self.id.as_str(), contract.version, hash, body.to_string()],
+        )?;
+        self.et.tx.execute(
+            "UPDATE outcomes SET contract_version=?2, revision=revision+1, updated_at=?3 WHERE id=?1",
+            params![self.id.as_str(), contract.version, now()],
+        )?;
+        self.et.append(
+            ev::CONTRACT_CREATED,
+            json!({"outcome_id": self.id, "version": contract.version, "contract_hash": hash}),
         )?;
         Ok(())
     }

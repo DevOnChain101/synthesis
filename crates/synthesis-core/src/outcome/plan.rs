@@ -14,6 +14,9 @@ use crate::outcome::contract::{
 /// A planner is untrusted input (a model, later): bound what it can make us allocate.
 pub const MAX_PLAN_ITEMS: usize = 256;
 
+/// A plan as JSON (from a planner that is a model, later) is never larger than this.
+pub const MAX_PLAN_JSON_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemKind {
@@ -59,6 +62,9 @@ pub struct ValidPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    /// The planner's JSON is too large, not JSON, or not shaped like a [`Plan`] (unknown fields
+    /// are refused).
+    Json(String),
     Contract(ContractError),
     Version,
     ContractVersionMismatch {
@@ -104,6 +110,7 @@ pub enum PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Json(e) => write!(f, "plan JSON: {e}"),
             Self::Contract(e) => write!(f, "contract: {e}"),
             Self::Version => write!(f, "plan version must be 1 or more"),
             Self::ContractVersionMismatch { plan, contract } => {
@@ -287,6 +294,87 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
         return Err(PlanError::NotIndependentlyVerifiable(c.id.clone()));
     }
     Ok(ValidPlan { order, coverage })
+}
+
+/// The planner's output as JSON, checked: size cap, strict shape (unknown fields refused), then
+/// [`validate_plan`] against the contract. The same door for the stub planner and, later, a model.
+pub fn parse_plan(json: &str, contract: &Contract) -> Result<(Plan, ValidPlan), PlanError> {
+    if json.len() > MAX_PLAN_JSON_BYTES {
+        return Err(PlanError::Json(format!(
+            "larger than {MAX_PLAN_JSON_BYTES} bytes"
+        )));
+    }
+    let plan: Plan = serde_json::from_str(json).map_err(|e| PlanError::Json(e.to_string()))?;
+    let valid = validate_plan(&plan, contract)?;
+    Ok((plan, valid))
+}
+
+/// What a new plan version changes against the one it replaces, by item key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanDiff {
+    pub added: Vec<String>,
+    /// In the old plan only: its work items are not carried over.
+    pub removed: Vec<String>,
+    /// Same key, different kind, dependencies, capabilities or coverage.
+    pub changed: Vec<String>,
+    /// Same item and nothing upstream of it changed: it can be carried over as it is.
+    pub unchanged: Vec<String>,
+    /// Items of the new plan that must run (again): added, changed, and everything that requires
+    /// them, directly or not. Sorted.
+    pub rerun: Vec<String>,
+}
+
+/// Compares two plans (both valid). Pure: neither is modified; the new plan is a new version with
+/// new work items, the old records stay as they are.
+pub fn diff_plans(old: &Plan, new: &Plan) -> PlanDiff {
+    let old_by: BTreeMap<&str, &PlanItem> = old.items.iter().map(|i| (i.key.as_str(), i)).collect();
+    let mut d = PlanDiff::default();
+    let mut dirty: BTreeSet<&str> = BTreeSet::new();
+    for it in &new.items {
+        match old_by.get(it.key.as_str()) {
+            None => {
+                d.added.push(it.key.clone());
+                dirty.insert(&it.key);
+            }
+            Some(o) if **o != *it => {
+                d.changed.push(it.key.clone());
+                dirty.insert(&it.key);
+            }
+            Some(_) => d.unchanged.push(it.key.clone()),
+        }
+    }
+    let new_keys: BTreeSet<&str> = new.items.iter().map(|i| i.key.as_str()).collect();
+    d.removed = old
+        .items
+        .iter()
+        .filter(|i| !new_keys.contains(i.key.as_str()))
+        .map(|i| i.key.clone())
+        .collect();
+    // everything downstream of a dirty item reruns (fixed point; the plan is a DAG of at most 256)
+    loop {
+        let more: Vec<&str> = new
+            .items
+            .iter()
+            .filter(|i| !dirty.contains(i.key.as_str()))
+            .filter(|i| i.requires.iter().any(|r| dirty.contains(r.as_str())))
+            .map(|i| i.key.as_str())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        dirty.extend(more);
+    }
+    d.rerun = dirty.into_iter().map(str::to_owned).collect();
+    for v in [
+        &mut d.added,
+        &mut d.removed,
+        &mut d.changed,
+        &mut d.unchanged,
+    ] {
+        v.sort();
+    }
+    d.unchanged.retain(|k| !d.rerun.contains(k));
+    d
 }
 
 #[cfg(test)]
@@ -673,5 +761,102 @@ mod tests {
             validate_plan(&base, &c3),
             Err(PlanError::Contract(ContractError::DuplicateCriterion(_)))
         ));
+    }
+
+    /// The shape a planner emits (documented in ADR-017).
+    const EXAMPLE: &str = r#"{
+        "version": 1, "contract_version": 1,
+        "items": [
+            {"key": "inspect", "kind": "agent", "capabilities": ["repo.read"]},
+            {"key": "implement", "kind": "agent", "requires": ["inspect"],
+             "capabilities": ["repo.read", "repo.write", "tests.run"]},
+            {"key": "test", "kind": "verify", "requires": ["implement"],
+             "covers": ["c1", "c2", "c3"]}
+        ]}"#;
+
+    #[test]
+    fn the_documented_json_parses_and_every_bad_shape_is_refused() {
+        let c = contract(&["c1", "c2", "c3"]);
+        let (plan, valid) = parse_plan(EXAMPLE, &c).unwrap();
+        assert_eq!(valid.order, ["inspect", "implement", "test"]);
+        assert_eq!(plan.items.len(), 3);
+        let bad = |json: &str| parse_plan(json, &c).unwrap_err();
+        assert!(matches!(bad("not json"), PlanError::Json(_)));
+        assert!(matches!(
+            bad(&EXAMPLE.replace("\"version\": 1,", "\"version\": 1, \"x\": 1,")),
+            PlanError::Json(_)
+        ));
+        assert!(matches!(
+            bad(&" ".repeat(MAX_PLAN_JSON_BYTES + 1)),
+            PlanError::Json(_)
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace("\"requires\": [\"inspect\"]", "\"requires\": [\"nope\"]")),
+            PlanError::UnknownDependency { .. }
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace(
+                "\"inspect\", \"kind\": \"agent\", \"capabilities\"",
+                "\"inspect\", \"requires\": [\"test\"], \"kind\": \"agent\", \"capabilities\""
+            )),
+            PlanError::Cycle(_)
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace("repo.read\"]},", "repo.teleport\"]},")),
+            PlanError::UnknownCapability { .. }
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace("\"c3\"]", "\"c9\"]")),
+            PlanError::UnknownCriterion { .. }
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace(", \"c3\"]", "]")),
+            PlanError::UncoveredCriterion(_)
+        ));
+        assert!(matches!(
+            bad(&EXAMPLE.replace("\"contract_version\": 1", "\"contract_version\": 2")),
+            PlanError::ContractVersionMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn a_capability_the_envelope_denies_is_refused() {
+        let mut c = contract(&["c1", "c2", "c3"]);
+        c.envelope
+            .capabilities
+            .insert(Capability::RepoWrite, CapabilityMode::Deny);
+        assert!(matches!(
+            parse_plan(EXAMPLE, &c).unwrap_err(),
+            PlanError::CapabilityDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn a_diff_names_what_was_added_removed_changed_and_what_reruns_downstream() {
+        let c = contract(&["c1", "c2", "c3"]);
+        let (old, _) = parse_plan(EXAMPLE, &c).unwrap();
+        // identical: nothing reruns
+        let mut same = old.clone();
+        same.version = 2;
+        let d = diff_plans(&old, &same);
+        assert_eq!((d.rerun.len(), d.unchanged.len()), (0, 3));
+        // `implement` changes: it and `test` rerun, `inspect` is carried over
+        let mut new = same.clone();
+        new.items[1].capabilities.pop();
+        let d = diff_plans(&old, &new);
+        assert_eq!(d.changed, ["implement"]);
+        assert_eq!(d.rerun, ["implement", "test"]);
+        assert_eq!(d.unchanged, ["inspect"]);
+        // an item added before `implement`, `inspect` dropped
+        let mut new = same.clone();
+        new.items.remove(0);
+        new.items[0].requires = vec!["lint".into()];
+        new.items.push(item("lint", WorkItemKind::Agent, &[], &[]));
+        let d = diff_plans(&old, &new);
+        assert_eq!(d.added, ["lint"]);
+        assert_eq!(d.removed, ["inspect"]);
+        assert_eq!(d.rerun, ["implement", "lint", "test"]);
+        // the inputs are untouched (pure)
+        assert_eq!(old.items.len(), 3);
     }
 }
