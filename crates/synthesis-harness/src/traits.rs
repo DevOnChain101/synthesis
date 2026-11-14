@@ -127,6 +127,12 @@ impl Approver for HeadlessApprover {
 /// cannot read from their input (`Bash`). Implemented over the workspace snapshot/diff in the
 /// interface layer; the default reports nothing.
 pub trait ChangeTracker: Send + Sync {
+    /// `false` for a tracker that cannot see changes (the default [`NoChangeTracker`]): the harness then
+    /// treats every non-inert shell command as a possible change.
+    fn tracks(&self) -> bool {
+        true
+    }
+
     /// Called once when a task starts: take the baseline.
     fn begin<'a>(&'a self, _ws: &'a WorkspaceContext, _task_id: &'a str) -> BoxFut<'a, ()> {
         Box::pin(async {})
@@ -145,7 +151,11 @@ pub trait ChangeTracker: Send + Sync {
 
 pub struct NoChangeTracker;
 
-impl ChangeTracker for NoChangeTracker {}
+impl ChangeTracker for NoChangeTracker {
+    fn tracks(&self) -> bool {
+        false
+    }
+}
 
 // ---- user input (AskUserQuestion / ExitPlanMode) -------------------------------------------
 

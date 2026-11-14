@@ -239,6 +239,27 @@ thread_local! {
     static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Opens the judged file. Unix: a link at the last place is refused (`O_NOFOLLOW`) and the opened file must be
+/// the regular, single-name file the path names now. Windows: opened as is (shortcut: a link swapped in after
+/// the check is not caught there; upgrade with a reparse-point check on the handle).
+fn open_checked(real: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(real)?;
+        let (m, now) = (f.metadata()?, std::fs::symlink_metadata(real)?);
+        if !m.is_file() || m.nlink() != 1 || (m.dev(), m.ino()) != (now.dev(), now.ino()) {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        Ok(f)
+    }
+    #[cfg(not(unix))]
+    std::fs::File::open(real)
+}
+
 fn braced<'a>(raw: &'a str, prefix: &str) -> Option<&'a str> {
     let inner = raw.strip_prefix(prefix)?.strip_suffix('}')?;
     (!inner.is_empty() && !inner.contains('}')).then_some(inner)
@@ -312,7 +333,7 @@ pub fn substitute_string(raw: &str, ctx: &SubstCtx<'_>) -> Substituted {
                 f();
             }
         });
-        let read = std::fs::File::open(&real).and_then(|f| {
+        let read = open_checked(&real).and_then(|f| {
             use std::io::Read;
             let mut b = vec![];
             f.take(crate::secretfile::MAX_KEY_FILE + 1)
@@ -588,5 +609,23 @@ mod tests {
         });
         let r = subst(&format!("{{file:{}}}", base.join("l").display()), &base);
         assert_eq!(r.value.as_deref(), Some("sk-good"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_last_component_swapped_for_a_link_after_the_check_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().canonicalize().unwrap();
+        std::fs::write(base.join("key"), "sk-good").unwrap();
+        std::fs::write(base.join("other"), "sk-other").unwrap();
+        let (k, o) = (base.join("key"), base.join("other"));
+        AFTER_CHECK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&k).unwrap();
+                std::os::unix::fs::symlink(&o, &k).unwrap();
+            }))
+        });
+        let r = subst(&format!("{{file:{}}}", base.join("key").display()), &base);
+        assert!(r.value.is_none() && r.warning.unwrap().contains("could not read"));
     }
 }

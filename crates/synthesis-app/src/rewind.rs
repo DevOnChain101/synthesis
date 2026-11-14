@@ -17,6 +17,7 @@
 //! On unix the write itself goes through a handle of the parent directory (walked from the root with
 //! no link followed; temp, `renameat`, `unlinkat` relative to it; hard links refused; the state hash
 //! is taken from the opened file), so a directory swapped for a link after the checks is refused.
+//! A crash can leave a `.synt-rewind-<uuid>` temp file next to the target (removed on every error path, not on a kill).
 //! shortcut: no merge, `--force` overwrites later edits; on Windows the write is still by path (a
 //! junction swapped in between the last check and the rename is not caught; upgrade: handle-relative
 //! NT calls); a concurrent writer to the file itself can still change it between the hash and the rename; the hashes live in the same store as the checkpoint rows, so whoever can write
@@ -69,8 +70,8 @@ fn hook(stage: &str) {
 }
 
 /// Unix: the write goes through a handle of the parent directory walked from the workspace root with no link
-/// followed (temp file, `renameat` and `unlinkat` relative to it), the protected names are checked again on
-/// the walked components, and the file's state hash is taken from the opened file, so a directory swapped
+/// followed (temp file, `renameat` and `unlinkat` relative to it), the protected names are checked again (and a
+/// protected folder renamed onto a checked name is recognised by inode, on the walked folder and each one above it), and the file's state hash is taken from the opened file, so a directory swapped
 /// for a link after the checks cannot redirect it. `bytes`: restore these; `None`: remove.
 #[cfg(unix)]
 fn write_back(l: &Loaded, e: &Entry, bytes: Option<&[u8]>) -> Result<(), String> {
@@ -94,9 +95,42 @@ fn write_back(l: &Loaded, e: &Entry, bytes: Option<&[u8]>) -> Result<(), String>
     if synthesis_permissions::is_protected_path(std::slice::from_ref(&root), &parent.join(name)) {
         return fail(&protected_reason());
     }
+    // identities of the protected folders next to the path, taken before the walk: one renamed onto a checked
+    // name afterwards (so the name check above no longer describes it) is recognised by inode
+    let mut protected = vec![];
+    let mut cur = root.clone();
+    for c in std::iter::once(None).chain(rel.components().map(Some)) {
+        cur.extend(c);
+        for ent in std::fs::read_dir(&cur).into_iter().flatten().flatten() {
+            let p = ent.path();
+            if synthesis_permissions::is_protected_path(std::slice::from_ref(&root), &p)
+                && let Ok(m) = std::fs::symlink_metadata(&p)
+                && m.is_dir()
+            {
+                protected.push((m.dev(), m.ino()));
+            }
+        }
+    }
     #[cfg(test)]
     hook("checked");
     let dir = crate::engine_fs::open_dir_beneath(&root, &rel).map_err(io)?;
+    // the walked folder and every folder above it, through the handle
+    let mut up = dir.try_clone().map_err(io)?;
+    for _ in 0..=rel.components().count() {
+        let m = std::fs::File::from(up.try_clone().map_err(io)?)
+            .metadata()
+            .map_err(io)?;
+        if protected.contains(&(m.dev(), m.ino())) {
+            return fail(&protected_reason());
+        }
+        up = openat(
+            &up,
+            "..",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|x| io(x.into()))?;
+    }
     #[cfg(test)]
     hook("opened");
     let flags = OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -172,15 +206,10 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".synt-rewind-{}", uuid::Uuid::new_v4()));
     let r = (|| {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            // private from the first byte; the original's mode is applied before any content is written
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(0o600);
-        }
-        let mut f = o.open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         if let Ok(m) = std::fs::metadata(path) {
             f.set_permissions(m.permissions())?;
         }
@@ -237,6 +266,20 @@ fn protected_reason() -> String {
         "a protected path: a rewind never writes it, revert it by hand (git checkout, or your editor). Protected: {}",
         synthesis_permissions::PROTECTED_SUMMARY
     )
+}
+
+/// A regular file with more than one name (pnpm stores, `cp -l` trees): replacing it would not change the other names.
+fn hard_linked(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        false
+    }
 }
 
 fn is_link(p: &Path) -> bool {
@@ -388,6 +431,11 @@ pub fn plan(l: &Loaded, checkpoint: Option<&str>, force: bool) -> Result<Vec<Ent
             skip("outside the session's workspace", false)
         } else if let Some(why) = path_problem(&path, &l.roots) {
             skip(why, false)
+        } else if hard_linked(&path) {
+            skip(
+                "a hard link (also reachable under another name): not touched",
+                false,
+            )
         } else if f.lossy_sha256.is_some() {
             skip(
                 "the snapshot is not the exact file (secrets were masked)",
@@ -1198,9 +1246,14 @@ mod tests {
         let b = g.run_wrote("b.txt", "new");
         fs::hard_link(&b, g.ws.join("alias.txt")).unwrap();
         let l = g.loaded();
-        let v = plan(&l, None, false).unwrap();
-        let r = apply_entry(&l, &v[0]);
-        assert!(r.unwrap_err().contains("hard link"));
+        assert!(skip_reason(&plan(&l, None, false).unwrap()[0]).contains("hard link"));
+        // the write itself refuses it too (a link made after the plan)
+        let e = entry(&g, "b.txt", &sha_hex(b"new"));
+        assert!(
+            write_back(&l, &e, Some(b"old"))
+                .unwrap_err()
+                .contains("hard link")
+        );
         assert_eq!(fs::read_to_string(&b).unwrap(), "new");
         assert_eq!(fs::read_to_string(g.ws.join("alias.txt")).unwrap(), "new");
     }
@@ -1258,5 +1311,34 @@ mod tests {
         t.join().unwrap();
         assert_eq!(fs::read_to_string(out.join("f.txt")).unwrap(), "new");
         assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_protected_folder_renamed_onto_the_checked_name_is_recognised_by_inode() {
+        let (g, _out) = swap_rig();
+        fs::create_dir_all(g.ws.join(".git")).unwrap();
+        fs::write(g.ws.join(".git/f.txt"), "new").unwrap();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        let ws = g.ws.clone();
+        set_hook(move |stage| {
+            if stage == "checked" {
+                fs::rename(ws.join("d"), ws.join("d_moved")).unwrap();
+                fs::rename(ws.join(".git"), ws.join("d")).unwrap();
+            }
+        });
+        let r = apply_entry(&l, &v[0]);
+        assert!(r.unwrap_err().contains("protected"));
+        assert_eq!(fs::read_to_string(g.ws.join("d/f.txt")).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_file_is_skipped_in_the_dry_run() {
+        let mut g = rig();
+        let b = g.run_wrote("b.txt", "new");
+        fs::hard_link(&b, g.ws.join("alias.txt")).unwrap();
+        assert!(skip_reason(&g.plan()[0]).contains("hard link"));
     }
 }

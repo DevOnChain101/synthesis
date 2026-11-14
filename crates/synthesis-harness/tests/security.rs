@@ -638,6 +638,12 @@ impl synthesis_harness::ChangeTracker for Nothing {}
 
 /// Non-inert command (`touch` is not in the auto-safe list) so only the tracker can tell.
 async fn bash_run(h_tracker: bool) -> synthesis_harness::TaskOutcome {
+    bash_run_with(h_tracker.then(|| Arc::new(Tracker(Default::default())) as _)).await
+}
+
+async fn bash_run_with(
+    tracker: Option<Arc<dyn synthesis_harness::ChangeTracker>>,
+) -> synthesis_harness::TaskOutcome {
     let mut rig = Rig::build(
         Opts {
             tools: ToolBox::empty().with_tool(Probe::new("Bash", SideEffectClass::Execute, 0, "r")),
@@ -648,13 +654,7 @@ async fn bash_run(h_tracker: bool) -> synthesis_harness::TaskOutcome {
             Turn::tool("b", "Bash", json!({"command": "touch out.txt"})),
             Turn::text("ok"),
         ],
-        move |h, _| {
-            if h_tracker {
-                h.with_change_tracker(Arc::new(Tracker(Default::default())))
-            } else {
-                h.with_change_tracker(Arc::new(Nothing))
-            }
-        },
+        move |h, _| h.with_change_tracker(tracker.unwrap_or(Arc::new(Nothing))),
     );
     rig.run("x").await
 }
@@ -668,5 +668,13 @@ async fn a_lookup_that_changed_nothing_without_a_gate_is_not_unverified() {
 #[tokio::test]
 async fn a_command_that_changed_files_without_a_gate_stays_unverified() {
     let out = bash_run(true).await;
+    assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
+}
+
+#[tokio::test]
+async fn without_a_tracker_that_sees_changes_a_shell_edit_stays_unverified() {
+    let none: Arc<dyn synthesis_harness::ChangeTracker> =
+        Arc::new(synthesis_harness::NoChangeTracker);
+    let out = bash_run_with(Some(none)).await;
     assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
 }

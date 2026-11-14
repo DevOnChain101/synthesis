@@ -22,7 +22,7 @@ fn norm(p: &Path) -> String {
 /// A DOS device name (`CON`, `NUL.txt`, `COM1`, `CONIN$` ...) that a non-verbatim Windows path opens instead of a file.
 fn windows_device(comp: &str) -> bool {
     let stem = comp
-        .split('.')
+        .split(['.', ':'])
         .next()
         .unwrap_or("")
         .trim_end()
@@ -232,6 +232,9 @@ mod tests {
             r"C:\h\lpt9.log",
             r"C:\h\CONIN$",
             r"C:\h\nul .txt",
+            r"C:\h\NUL:",
+            r"C:\h\com1:",
+            r"C:\h\NUL:x",
             "c:/h/Aux",
             r"\\?\C:\h\ok\..\x",
         ] {
