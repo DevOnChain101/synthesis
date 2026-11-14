@@ -19,6 +19,8 @@ fn write_edit_multiedit_and_notebookedit_are_denied_on_the_trust_store_and_key_i
         state.join("synt.db"),
         state.join("synt.db-wal"),
         state.join("synt.db-journal"),
+        state.join("chain.key"),
+        state.join("backups/clean-1/synt.db"),
         state.join("run/trust.key"),
         state.join("run/new-file"),
     ];

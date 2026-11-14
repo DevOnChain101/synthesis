@@ -71,8 +71,8 @@ function git(cwd, ...a) {
 export function fixtureDir(task) { return path.join(ROOT, 'fixtures', task.fixture); }
 
 // Copies repo/, optionally applies bug.patch, runs setup, commits the baseline.
-export async function prepareRepo(task, { bug = true } = {}) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `eval-${task.id}-`)));
+export async function prepareRepo(task, { bug = true, base = os.tmpdir() } = {}) {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(base, `eval-${task.id}-`)));
   const repo = path.join(dir, 'repo');
   fs.cpSync(path.join(fixtureDir(task), 'repo'), repo, { recursive: true });
   git(repo, 'init', '-q');

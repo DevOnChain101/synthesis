@@ -267,9 +267,11 @@ fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
     let (o, ev) = rig.run(json!([{"text": "ok"}]), &[]);
     assert_eq!(o.status.code(), Some(0));
     assert!(!types(&ev).iter().any(|t| t.starts_with("peer.")));
+    // run/ may exist empty (the chain key's temporary file is made there); no peer file or socket without peers
     assert!(
-        !rig.home().join("run").exists(),
-        "no run dir unless peers are on"
+        std::fs::read_dir(rig.home().join("run")).is_ok_and(|mut d| d.next().is_none())
+            || !rig.home().join("run").exists(),
+        "no peer files unless peers are on"
     );
 
     let (o, ev) = rig.run(

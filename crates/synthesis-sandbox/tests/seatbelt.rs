@@ -410,12 +410,20 @@ fn synthesis_state_db_and_memory_are_unreadable() {
     .unwrap();
     std::fs::write(home.join("projects/p/s.jsonl"), "TRANSCRIPT").unwrap();
     std::fs::write(home.join("synt.db"), "SESSIONS").unwrap();
+    std::fs::write(home.join("chain.key"), "CHAINKEY").unwrap();
+    std::fs::create_dir_all(home.join("backups/clean-1")).unwrap();
+    std::fs::write(home.join("backups/clean-1/synt.db"), "BACKUPDB").unwrap();
+    std::fs::create_dir_all(home.join("run")).unwrap();
+    std::fs::write(home.join("run/trust.key"), "TRUSTKEY").unwrap();
     std::fs::write(home.join("memory/memory.db"), "MEMORIES").unwrap();
     std::fs::write(home.join("other.txt"), "fine").unwrap();
     let mut p = pol(a.path());
     // control first: nothing denied, everything under the workspace root is readable
     for f in [
         "synt.db",
+        "chain.key",
+        "run/trust.key",
+        "backups/clean-1/synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
         "other.txt",
@@ -431,6 +439,9 @@ fn synthesis_state_db_and_memory_are_unreadable() {
     );
     for f in [
         "synt.db",
+        "chain.key",
+        "run/trust.key",
+        "backups/clean-1/synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
         "browser-profiles/acme/Default/Cookies",
@@ -441,6 +452,9 @@ fn synthesis_state_db_and_memory_are_unreadable() {
             !r.status.success()
                 && !out.contains("COOKIES")
                 && !out.contains("SESSIONS")
+                && !out.contains("CHAINKEY")
+                && !out.contains("TRUSTKEY")
+                && !out.contains("BACKUPDB")
                 && !out.contains("MEMORIES")
                 && !out.contains("TRANSCRIPT"),
             "{f} must be unreadable"

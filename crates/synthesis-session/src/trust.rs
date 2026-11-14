@@ -224,7 +224,13 @@ fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u
     }
     let mut key = [0u8; 32];
     getrandom::getrandom(&mut key).map_err(|e| Error::Invalid(format!("no random bytes: {e}")))?;
-    let tmp = dir.join(format!(".trust.key.{}", uuid::Uuid::new_v4().simple()));
+    // the temporary lives under run/ (hidden from sandboxed commands as a whole): a crash between the write and the
+    // remove must not leave a readable copy of chain.key next to it in the home
+    // (if run/ cannot be made, e.g. it is a file, the home itself: chain.key must not fail where it worked before)
+    let tmp_dir = Some(dir.join("run"))
+        .filter(|r| !make_private && fs::create_dir_all(r).is_ok())
+        .unwrap_or_else(|| dir.clone());
+    let tmp = tmp_dir.join(format!(".trust.key.{}", uuid::Uuid::new_v4().simple()));
     let mut o = fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
