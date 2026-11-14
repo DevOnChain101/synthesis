@@ -567,29 +567,6 @@ fn always_gone(_: u32) -> ChildState {
 }
 
 #[cfg(unix)]
-fn pid_from(file: &Path) -> Option<u32> {
-    for _ in 0..200 {
-        if let Some(p) = fs::read_to_string(file)
-            .ok()
-            .and_then(|t| t.trim().parse().ok())
-        {
-            return Some(p);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    None
-}
-
-#[cfg(unix)]
-fn alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-#[cfg(unix)]
 #[test]
 fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its_group() {
     need_git!();
@@ -610,25 +587,26 @@ fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its
     // the group of a check that exits is killed while the leader is still ours: a background
     // child it leaves behind does not survive the check
     let real = SandboxRunner::detect(work.join("home"));
+    // (a marker file, not a pid: inside bubblewrap's pid namespace `$$` is not the host's pid)
     let bg = real.run(
         &src,
         &scratch,
-        &check("bg", "sleep 60 & echo $! > \"$TMPDIR/bg.pid\"; exit 0"),
+        &check(
+            "bg",
+            "(sleep 2; echo survived > \"$TMPDIR/bg-survived\") & exit 0",
+        ),
         Duration::from_secs(20),
         &stop,
     );
     assert_eq!(bg.result(), "passed", "{:?}", bg.problem);
-    let bgpid = pid_from(&scratch.join("tmp-bg/bg.pid")).expect("pid file");
-    let t0 = std::time::Instant::now();
-    while alive(bgpid) && t0.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    std::thread::sleep(Duration::from_secs(4));
     assert!(
-        !alive(bgpid),
+        !scratch.join("tmp-bg/bg-survived").exists(),
         "the background child of an exited check survived"
     );
 
-    // injected state: the kernel "reaped" the child, so nothing may be sent to that pid, even on a timeout
+    // injected state: the kernel "reaped" the child, so nothing may be sent to it, even on a
+    // timeout: the check keeps running and finishes by itself (the control for the case above)
     let gone = SandboxRunner {
         state: always_gone,
         ..SandboxRunner::detect(work.join("home"))
@@ -636,14 +614,20 @@ fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its
     let run = gone.run(
         &src,
         &scratch,
-        &check("gone", "echo $$ > \"$TMPDIR/gone.pid\"; sleep 60"),
+        &check("gone", "sleep 2; echo survived > \"$TMPDIR/gone-survived\""),
         Duration::from_millis(100),
         &stop,
     );
     assert_eq!(run.result(), "error");
-    let pid = pid_from(&scratch.join("tmp-gone/gone.pid")).expect("pid file");
-    assert!(alive(pid), "a pid that was reported gone was signalled");
-    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    let marker = scratch.join("tmp-gone/gone-survived");
+    let t0 = std::time::Instant::now();
+    while !marker.exists() && t0.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        marker.exists(),
+        "a child that was reported gone was signalled"
+    );
 }
 
 // ---- review fixes: only an approved contract is verified ----
