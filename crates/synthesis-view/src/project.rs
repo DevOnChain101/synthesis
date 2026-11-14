@@ -135,6 +135,8 @@ pub fn diff_lines(p: &ProjectData, which: &str) -> Vec<String> {
 }
 
 const MAX_ROWS: usize = 400;
+/// Rows of the project tree (every directory and file, collapsed in the window until opened).
+const TREE_ROWS: usize = 5000;
 const MAX_DIFF_LINES: usize = 600;
 const MAX_BYTES: usize = 1 << 20;
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -332,21 +334,18 @@ fn filter_guards_from(o: Option<Output>) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The tree rows of sorted `/`-separated file paths, cut at [`MAX_ROWS`] (and whether it was).
+/// The tree rows of sorted `/`-separated file paths, cut at [`TREE_ROWS`] (and whether it was). The cut drops
+/// the DEEPEST rows first, so every top-level entry stays listed: cutting in path order would spend the whole
+/// budget on the first directories (`.claude/...` sorts before everything) and hide the rest of the project.
 fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>, bool) {
-    let mut truncated = false;
     let mut rows: Vec<TreeRow> = vec![];
     let mut open: Vec<&str> = vec![];
-    'files: for p in paths {
+    for p in paths {
         let parts: Vec<&str> = p.split('/').collect();
         let dirs = &parts[..parts.len() - 1];
         let common = open.iter().zip(dirs).take_while(|(a, b)| a == b).count();
         open.truncate(common);
         for (d, name) in dirs.iter().enumerate().skip(common) {
-            if rows.len() >= MAX_ROWS {
-                truncated = true;
-                break 'files;
-            }
             rows.push(TreeRow {
                 depth: d as u16,
                 name: (*name).to_string(),
@@ -355,10 +354,6 @@ fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>,
             });
             open.push(name);
         }
-        if rows.len() >= MAX_ROWS {
-            truncated = true;
-            break;
-        }
         rows.push(TreeRow {
             depth: dirs.len() as u16,
             name: parts[parts.len() - 1].to_string(),
@@ -366,7 +361,18 @@ fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>,
             status: status.get(p).copied(),
         });
     }
-    (rows, truncated)
+    if rows.len() <= TREE_ROWS {
+        return (rows, false);
+    }
+    let fits = |cap: u16| rows.iter().filter(|r| r.depth <= cap).count() <= TREE_ROWS;
+    match (0..=rows.iter().map(|r| r.depth).max().unwrap_or(0))
+        .take_while(|c| fits(*c))
+        .last()
+    {
+        Some(cap) => rows.retain(|r| r.depth <= cap),
+        None => rows.truncate(TREE_ROWS),
+    }
+    (rows, true)
 }
 
 /// Most files the plain walk collects, and the deepest directory it enters.
@@ -594,6 +600,31 @@ mod tests {
             [(0, "b.txt", false), (0, "src", true), (1, "a.rs", false)]
         );
         assert!(d.loaded && d.note.is_none() && !d.truncated);
+    }
+
+    #[test]
+    fn a_big_dot_directory_does_not_use_up_the_listing_of_the_project() {
+        let paths: Vec<String> = (0..TREE_ROWS + 50)
+            .map(|i| format!(".claude/worktrees/w{i}/f"))
+            .chain([
+                "README.md".into(),
+                "src/main.rs".into(),
+                "src/lib/a.rs".into(),
+            ])
+            .collect();
+        let mut paths = paths;
+        paths.sort();
+        let (rows, cut) = tree_rows(&paths, &HashMap::new());
+        let top: Vec<_> = rows
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(cut && rows.len() <= TREE_ROWS);
+        assert_eq!(top, [".claude", "README.md", "src"]);
+        // under the limit nothing is cut
+        let (rows, cut) = tree_rows(&paths[paths.len() - 3..], &HashMap::new());
+        assert!(!cut && rows.len() == 5, "{rows:?}");
     }
 
     #[test]

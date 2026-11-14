@@ -70,6 +70,35 @@ pub fn env_credential(id: &str, env: &Env) -> Option<Credential> {
     mk(CredentialKind::Token, "SYNT_AUTH_TOKEN").or_else(|| mk(CredentialKind::Api, "SYNT_API_KEY"))
 }
 
+/// `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` go to the provider named by `SYNT_PROVIDER`. When that is only the
+/// implicit default (`anthropic`, `SYNT_PROVIDER` unset), the provider must still point at the vendor (no
+/// `baseURL`, the vendor's host, or the `SYNT_BASE_URL` the user set): a `synt.json` entry that re-uses the
+/// id with another URL would otherwise receive a key meant for the vendor.
+fn env_may_target(provider: Option<&Provider>, env: &Env) -> bool {
+    if env.get_nonempty("SYNT_PROVIDER").is_some() {
+        return true;
+    }
+    let Some(url) = provider.and_then(|p| p.base_url.as_deref()) else {
+        return true;
+    };
+    if env.get_nonempty("SYNT_BASE_URL") == Some(url) {
+        return true;
+    }
+    url::Url::parse(url).ok().is_some_and(|u| {
+        u.scheme() == "https"
+            && u.host_str()
+                .is_some_and(|h| h.eq_ignore_ascii_case("api.anthropic.com"))
+    })
+}
+
+/// Why `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` were not used for a provider they name by default.
+pub const ENV_CREDENTIAL_BLOCKED: &str = "SYNT_API_KEY is only sent to the vendor URL; set SYNT_PROVIDER=<id> or SYNT_BASE_URL, or use a {env:NAME} apiKey";
+
+/// True when the flat env credential exists for `id` but [`resolve_credential`] withholds it (see above).
+pub fn env_credential_blocked(id: &str, provider: Option<&Provider>, env: &Env) -> bool {
+    env_credential(id, env).is_some() && !env_may_target(provider, env)
+}
+
 /// Tier 3: legacy `<synthesis_home>/auth.json` written by the Node CLI. Read-only.
 pub fn file_credential(id: &str, synthesis_home: &Path) -> Option<Credential> {
     let data: Value =
@@ -102,7 +131,7 @@ pub fn resolve_credential(
     synthesis_home: &Path,
     env: &Env,
 ) -> Option<Credential> {
-    if let Some(c) = env_credential(id, env) {
+    if let Some(c) = env_credential(id, env).filter(|_| env_may_target(provider, env)) {
         return Some(c);
     }
     if let Some(p) = provider {

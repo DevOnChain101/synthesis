@@ -53,6 +53,7 @@ pub mod notify;
 pub mod outcome_policy;
 pub mod peers;
 pub mod proto;
+pub mod provider_cfg;
 pub mod rename;
 pub mod rewind;
 pub mod run;

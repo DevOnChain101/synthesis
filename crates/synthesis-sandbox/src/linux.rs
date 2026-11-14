@@ -1280,6 +1280,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // renders POSIX mount arguments
+    #[test]
+    fn bwrap_blanks_a_denied_key_file_and_a_denied_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let (key, run) = (t.path().join("chain.key"), t.path().join("run"));
+        std::fs::write(&key, "K").unwrap();
+        std::fs::create_dir(&run).unwrap();
+        let pol = SandboxPolicy {
+            deny_paths: vec![key.clone(), run.clone()],
+            ..Default::default()
+        };
+        let j = BwrapBackend::args(&pol, &SandboxedCommand::default())
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            j.contains(&format!("--ro-bind /dev/null {}", key.display())),
+            "{j}"
+        );
+        assert!(j.contains(&format!("--tmpfs {}", run.display())), "{j}");
+    }
+
     #[cfg(unix)] // renders POSIX mount arguments (`--bind /work /work`)
     #[test]
     fn bwrap_worktree_git_pin_is_readonly() {
@@ -1979,6 +2002,56 @@ mod tests {
                 &w.args[3..]
             );
             Some(String::from_utf8_lossy(&o.stdout).into_owned())
+        }
+
+        #[test]
+        fn a_denied_key_file_reads_empty_inside() {
+            let Some(b) = bwrap() else { return };
+            // not under /tmp: bwrap mounts a fresh tmpfs there, which would hide the file anyway
+            let d = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let key = d.path().join("chain.key");
+            std::fs::write(&key, "KEYBYTES").unwrap();
+            let bk = d.path().join("backups");
+            std::fs::create_dir_all(bk.join("x")).unwrap();
+            std::fs::write(bk.join("x/synt.db"), "DBBYTES").unwrap();
+            let cat = |target: &Path, deny: Vec<PathBuf>| {
+                let c = SandboxedCommand {
+                    program: "/bin/cat".into(),
+                    args: vec![target.as_os_str().to_owned()],
+                    ..Default::default()
+                };
+                let pol = SandboxPolicy {
+                    deny_paths: deny,
+                    network: NetworkPolicy::Allow,
+                    ..Default::default()
+                };
+                let w = b.wrap_on(&pol, &c, None).unwrap();
+                // no WSL and no proxy: not behind the helper, so `program` is bwrap itself
+                assert_eq!(w.program, b.path.clone().into_os_string());
+                let o = Command::new(&w.program)
+                    .args(&w.args)
+                    .env_clear()
+                    .envs(w.env.iter().cloned())
+                    .output()
+                    .unwrap();
+                // a bwrap setup failure is not a denial
+                assert!(
+                    !String::from_utf8_lossy(&o.stderr).contains("bwrap:"),
+                    "{o:?}"
+                );
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            };
+            // the denied file is a /dev/null bind on a nodev mount: `cat` fails with EACCES, which is
+            // fine; what matters is that no key byte comes out
+            let db = bk.join("x/synt.db");
+            assert_eq!(
+                cat(&key, vec![]),
+                "KEYBYTES",
+                "control: readable without the deny"
+            );
+            assert_eq!(cat(&key, vec![key.clone()]), "", "denied: reads empty");
+            assert_eq!(cat(&db, vec![]), "DBBYTES", "control: dir readable");
+            assert_eq!(cat(&db, vec![bk.clone()]), "", "denied dir: reads empty");
         }
 
         #[test]

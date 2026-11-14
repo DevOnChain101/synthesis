@@ -19,6 +19,7 @@ use gpui::{
     Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
+use gpui_component::text::TextView;
 use synthesis_cli_ui_render::theme as t;
 use synthesis_view::project::{self, ProjectData};
 
@@ -118,6 +119,8 @@ pub struct TabState {
     pub tree_open: HashSet<String>,
     pub tree_init: bool,
     pub tree_sel: Option<String>,
+    /// A Markdown file shows as its source instead of formatted.
+    pub md_raw: bool,
     pub preview: Option<Preview>,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
@@ -469,6 +472,62 @@ impl TuiView {
         cx.notify();
     }
 
+    /// The Refresh button: the tree of the ACTIVE session's folder is read again now (same epoch guard as every
+    /// scan), and the file shown is read again. A scan already running is not doubled.
+    pub(super) fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        if self.previewing() || self.tree.loading {
+            return;
+        }
+        self.request_scan(cx);
+        if let Some(sel) = self.ts.tree_sel.clone().filter(|p| self.is_file(p)) {
+            self.open_preview(sel, cx);
+        }
+    }
+
+    /// Whether `path` names a file (not a directory) of the tree shown.
+    fn is_file(&self, path: &str) -> bool {
+        self.tree.data.as_ref().is_some_and(|d| {
+            row_paths(d)
+                .iter()
+                .zip(&d.rows)
+                .any(|(p, r)| p == path && !r.dir)
+        })
+    }
+
+    /// The header of the tree column: the title and the Refresh button.
+    fn fx_header(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .px(px(10.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(hsla(t::RULE))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(dim())
+                    .child(if self.tree.loading {
+                        "reading..."
+                    } else {
+                        "FILES"
+                    }),
+            )
+            .child(
+                div()
+                    .id("fx-refresh")
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .text_color(strong())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
+                    .child("refresh")
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
+            )
+    }
+
     /// Up/Down in the file explorer: the next visible row; a file opens its preview, a directory is only marked.
     pub(super) fn step_tree(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
         if self.previewing() {
@@ -642,7 +701,11 @@ impl TuiView {
             })));
         };
         if let Some(n) = &d.note {
-            return shell(div().p(px(14.)).child(note(n.clone())));
+            return shell(
+                div()
+                    .child(self.fx_header(cx))
+                    .child(div().p(px(14.)).child(note(n.clone()))),
+            );
         }
         let paths = row_paths(d);
         let vis = visible_rows(d, &self.ts.tree_open);
@@ -744,14 +807,22 @@ impl TuiView {
             );
         }
         let tree = div()
-            .id("fx-tree")
             .w(px(250.))
             .flex_none()
             .h_full()
-            .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .border_r_1()
             .border_color(hsla(t::RULE))
-            .child(rows);
+            .child(self.fx_header(cx))
+            .child(
+                div()
+                    .id("fx-tree")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .child(rows),
+            );
         let body = div()
             .id("fx-body")
             .flex_1()
@@ -812,10 +883,41 @@ impl TuiView {
             Ok(b) => {
                 let n = b.lines.len();
                 let w = format!("{}", n).len().max(3) as f32 * 7.5 + 12.;
+                let md = is_markdown(&p.path);
+                let toggle = div()
+                    .id("md-toggle")
+                    .flex_none()
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .text_color(strong())
+                    .cursor_pointer()
+                    .child(if self.ts.md_raw { "rendered" } else { "raw" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ts.md_raw = !this.ts.md_raw;
+                        (this.ts.sel, this.ts.menu) = (None, None);
+                        cx.notify();
+                    }));
+                let info = format!("{n} lines \u{b7} {}", human_size(b.size));
+                if md && !self.ts.md_raw {
+                    // formatted: the chat's own Markdown view (selectable text; no line-wise quote here, use raw)
+                    let id = p
+                        .path
+                        .bytes()
+                        .fold(0usize, |h, c| h.wrapping_mul(31) ^ c as usize);
+                    return div()
+                        .flex()
+                        .flex_col()
+                        .child(head(info).child(toggle))
+                        .child(div().p(px(14.)).text_color(text()).child(
+                            TextView::markdown(("fx-md", id), b.lines.join("\n")).selectable(true),
+                        ));
+                }
                 div()
                     .flex()
                     .flex_col()
-                    .child(head(format!("{n} lines \u{b7} {}", human_size(b.size))).child(copy))
+                    .child(head(info).when(md, |h| h.child(toggle)).child(copy))
                     .child(
                         div()
                             .py(px(6.))
@@ -918,6 +1020,12 @@ impl TuiView {
             }
         }
     }
+}
+
+/// A file the preview can show formatted.
+pub fn is_markdown(path: &str) -> bool {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str());
+    ext.is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
 fn human_size(n: u64) -> String {

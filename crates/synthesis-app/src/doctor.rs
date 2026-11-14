@@ -303,6 +303,13 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
                         Level::Ok,
                         format!("provider {id}: no authentication required"),
                     ),
+                    None if synthesis_config::env_credential_blocked(&id, Some(p), env) => add(
+                        Level::Warn,
+                        format!(
+                            "provider {id}: {}",
+                            synthesis_config::ENV_CREDENTIAL_BLOCKED
+                        ),
+                    ),
                     None => add(
                         Level::Warn,
                         format!(

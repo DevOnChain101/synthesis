@@ -1343,6 +1343,66 @@ mod tests {
         });
     }
 
+    /// Every entry of the workspace is listed (dot directories included, none of them crowding out the rest),
+    /// Refresh reads the folder again, and a Markdown file has a Rendered/Raw toggle.
+    #[gpui::test]
+    fn the_file_explorer_lists_everything_refreshes_and_toggles_markdown(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let a = tempfile::tempdir().unwrap();
+        let w = a.path();
+        std::fs::create_dir_all(w.join(".claude/worktrees")).unwrap();
+        std::fs::create_dir_all(w.join("src")).unwrap();
+        std::fs::write(w.join(".claude/worktrees/x"), "x").unwrap();
+        std::fs::write(w.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(w.join("README.md"), "# Title\n\n**bold**").unwrap();
+        let mut l = Live::new();
+        l.starting = false;
+        l.sid = "a".into();
+        l.cwd = w.to_string_lossy().into_owned();
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        draw(vcx);
+        let top = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                t.tree
+                    .data
+                    .as_ref()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .filter(|r| r.depth == 0)
+                    .map(|r| r.name.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(top(&view, vcx), [".claude", "README.md", "src"]);
+        // a file made after the scan shows up with Refresh, not before
+        std::fs::write(w.join("new.txt"), "n").unwrap();
+        assert!(!top(&view, vcx).contains(&"new.txt".to_string()));
+        view.update(vcx, |t, cx| t.refresh_tree(cx));
+        draw(vcx);
+        assert!(top(&view, vcx).contains(&"new.txt".to_string()));
+        // Markdown: formatted by default, the toggle shows the source
+        view.update(vcx, |t, cx| t.select_file("README.md", cx));
+        draw(vcx);
+        view.read_with(vcx, |t, _| {
+            assert!(tabs::is_markdown("a/README.MD") && !tabs::is_markdown("a.rs") && !t.ts.md_raw);
+            assert!(t.ts.preview.as_ref().is_some_and(|p| p.path == "README.md"));
+        });
+    }
+
     #[gpui::test]
     fn a_long_chat_builds_only_the_rows_near_the_viewport(cx: &mut TestAppContext) {
         use crate::live::Live;

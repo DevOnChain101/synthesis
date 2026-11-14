@@ -8,7 +8,7 @@ pub const SCHEMA_V1: &str = "config.json/v1";
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 12;
 const MAX_COLLECTION_ITEMS: usize = 4096;
-const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const TOP_LEVEL: [&str; 14] = [
     "$schema",
     "provider",

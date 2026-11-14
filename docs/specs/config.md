@@ -40,6 +40,7 @@ Only `SYNT_*` is read for Synthesis's own settings and keys (ADR-011); the Node 
 | `SYNT_HOME` | data directory |
 | `SYNT_PROVIDER` | provider id targeted by the flat vars below (default `anthropic`, case-insensitive) [auth.js:89-100] |
 | `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` | credential for `SYNT_PROVIDER` only; the token wins over the key [auth.js:94-100] |
+| (gate) | when `SYNT_PROVIDER` is unset the target is the default `anthropic`, and these two are sent only while its URL is `https://api.anthropic.com`, `SYNT_BASE_URL`, or unset; otherwise `synt run` and `synt doctor` say "SYNT_API_KEY is only sent to the vendor URL; set SYNT_PROVIDER=<id> or SYNT_BASE_URL, or use a {env:NAME} apiKey". A `{file:}` credential is also refused for another tool's secret stores (~/.ssh, ~/.aws, ...), system and network paths, the state files of the synt home, and anything that is not a regular file of at most 4 KB. |
 | `SYNT_BASE_URL` | base URL for `SYNT_PROVIDER`; creates that provider entry if missing [config.js:180-196] |
 | `SYNT_CUSTOM_HEADERS` | `Name: value` lines, merged into the provider's headers [config.js:137-145] |
 | `SYNT_MODEL` / `SYNT_SMALL_MODEL` | model overrides (explicit, never swapped) [config.js:293-299] |

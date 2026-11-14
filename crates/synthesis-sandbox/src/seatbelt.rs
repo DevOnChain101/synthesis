@@ -109,7 +109,7 @@ fn xcode_contents(p: &Path) -> Option<PathBuf> {
 }
 
 fn canon(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    crate::canon_lossy(p) // a not-yet-existing path resolves through its symlinked parent
 }
 
 /// Returns the SBPL text and the `-D` params it references.
@@ -282,6 +282,21 @@ impl SandboxBackend for SeatbeltBackend {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn a_deny_path_that_does_not_exist_yet_resolves_through_a_symlinked_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().canonicalize().unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, t.path().join("link")).unwrap();
+        let want = real.join("chain.key");
+        let p = SandboxPolicy {
+            deny_paths: vec![t.path().join("link/chain.key")],
+            ..Default::default()
+        };
+        assert!(seatbelt_profile(&p, None).1.iter().any(|(_, v)| *v == want));
+    }
+
     #[test]
     fn hostile_paths_never_reach_profile_text() {
         let evil =
@@ -293,7 +308,7 @@ mod tests {
         };
         let (s, params) = seatbelt_profile(&p, None);
         assert!(!s.contains("allow default") && !s.contains('é'));
-        assert!(params.iter().any(|(_, v)| *v == evil));
+        assert!(params.iter().any(|(_, v)| *v == canon(&evil)));
         assert!(s.trim_end().ends_with(')'));
     }
 
