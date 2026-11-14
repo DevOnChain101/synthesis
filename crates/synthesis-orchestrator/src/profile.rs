@@ -1,0 +1,167 @@
+//! The launch profile of an attempt's worker (ADR-018 item 5, ADR-019 section 2).
+//!
+//! The worker is `synt run --unattended ... --resume <session> --attempt-session`: the existing
+//! governed headless path, so the sandbox (enforce, or the run refuses to start), the network
+//! (deny), the cost and wall caps, the inferred-checks rule and "no project trust" are the ones
+//! `synt run --unattended` already keeps. This module only decides the arguments, from the stored
+//! contract and the settings, and refuses to build anything weaker. It is pure: no process is
+//! started here.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use synthesis_core::outcome::{Capability, CapabilityMode, Contract};
+use synthesis_session::outcome::OutcomePolicy;
+
+use crate::AttemptEnv;
+
+/// Default wall cap of an attempt when neither the contract nor the settings name one.
+pub const DEFAULT_WALL_SECS: u64 = 1800;
+
+#[derive(Debug)]
+pub enum ProfileError {
+    /// No usable cost cap (the contract always names one; this guards a hand-built value).
+    NoCostCap,
+    /// A flag outside the allow-list was offered for the worker.
+    Forbidden(String),
+}
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCostCap => write!(f, "an attempt needs a cost cap and none is usable"),
+            Self::Forbidden(a) => write!(
+                f,
+                "{a:?} is not allowed for an outcome attempt: sandbox, network, trust, MCP, hooks and permission mode come from the profile, never from the caller"
+            ),
+        }
+    }
+}
+impl std::error::Error for ProfileError {}
+
+/// What the caller may add: the model choice and the turn/tool-call bounds. Everything else that
+/// shapes the worker's authority is fixed here.
+const EXTRA_WITH_VALUE: [&str; 4] = ["--provider", "--model", "--max-turns", "--max-tool-calls"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Profile {
+    program: PathBuf,
+    cwd: PathBuf,
+    session_id: String,
+    prompt: String,
+    max_cost_usd: f64,
+    max_wall_secs: u64,
+    permission_mode: &'static str,
+    extra: Vec<String>,
+}
+
+impl Profile {
+    /// The caps are the smallest of the contract's and the settings' (the per-attempt cap, and the
+    /// outcome cap as an upper bound, so a cap always exists); the wall cap is the smaller of the
+    /// two or 30 minutes. `acceptEdits` when the envelope allows writing, else `default`; never
+    /// `auto` (no model is the authority) and never `bypassPermissions`.
+    pub fn build(
+        program: PathBuf,
+        env: &AttemptEnv,
+        contract: &Contract,
+        policy: &OutcomePolicy,
+        prompt: String,
+    ) -> Result<Self, ProfileError> {
+        let b = &contract.envelope.budgets;
+        let cap = [
+            Some(b.max_cost_usd),
+            b.attempt_max_cost_usd,
+            policy.max_cost_usd,
+            policy.attempt_max_cost_usd,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
+        if !cap.is_finite() || cap <= 0.0 {
+            return Err(ProfileError::NoCostCap);
+        }
+        let wall = [b.attempt_max_wall_secs, policy.attempt_max_wall_secs]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(DEFAULT_WALL_SECS);
+        let writes = contract.envelope.mode(Capability::RepoWrite) == CapabilityMode::Allow;
+        Ok(Self {
+            program,
+            cwd: env.context.cwd.clone(),
+            session_id: env.session_id.clone(),
+            prompt,
+            max_cost_usd: cap,
+            max_wall_secs: wall,
+            permission_mode: if writes { "acceptEdits" } else { "default" },
+            extra: vec![],
+        })
+    }
+
+    /// Adds allow-listed options (`--provider X`, `--model X`, `--max-turns N`,
+    /// `--max-tool-calls N`, each with its value). Anything else is refused.
+    pub fn with_extra(mut self, args: &[&str]) -> Result<Self, ProfileError> {
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let value = it.next();
+            match value {
+                Some(v) if EXTRA_WITH_VALUE.contains(a) && !v.starts_with('-') => {
+                    self.extra.push((*a).to_string());
+                    self.extra.push((*v).to_string());
+                }
+                _ => return Err(ProfileError::Forbidden((*a).to_string())),
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn program(&self) -> &PathBuf {
+        &self.program
+    }
+
+    pub fn cwd(&self) -> &PathBuf {
+        &self.cwd
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn max_wall_secs(&self) -> u64 {
+        self.max_wall_secs
+    }
+
+    pub fn max_cost_usd(&self) -> f64 {
+        self.max_cost_usd
+    }
+
+    pub fn permission_mode(&self) -> &'static str {
+        self.permission_mode
+    }
+
+    /// The arguments after the program name. No `--sandbox`, `--network`, `--trust-project`,
+    /// `--approve-mcp`, `--allow-host`, `--settings`, `--add-dir` or `--no-worktree`: the defaults
+    /// of `--unattended` stand (sandbox enforce or refuse, network deny, no project trust).
+    pub fn argv(&self) -> Vec<OsString> {
+        let mut v: Vec<OsString> = vec!["run".into(), "--unattended".into()];
+        v.extend(["--cwd".into(), self.cwd.clone().into()]);
+        v.extend([
+            "--resume".into(),
+            self.session_id.clone().into(),
+            "--attempt-session".into(),
+        ]);
+        v.extend([
+            "--max-cost-usd".into(),
+            format!("{}", self.max_cost_usd).into(),
+        ]);
+        v.extend([
+            "--max-wall-secs".into(),
+            self.max_wall_secs.to_string().into(),
+        ]);
+        v.extend(["--permission-mode".into(), self.permission_mode.into()]);
+        v.extend(["--output-format".into(), "json".into()]);
+        v.extend(self.extra.iter().map(OsString::from));
+        v.extend(["--prompt".into(), self.prompt.clone().into()]);
+        v
+    }
+}

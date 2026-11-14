@@ -7246,6 +7246,7 @@ dependencies = [
  "synthesis-hooks",
  "synthesis-mcp",
  "synthesis-memory",
+ "synthesis-orchestrator",
  "synthesis-peers",
  "synthesis-permissions",
  "synthesis-providers",
@@ -7506,6 +7507,7 @@ name = "synthesis-orchestrator"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "rustix",
  "serde_json",
  "synthesis-config",
  "synthesis-core",

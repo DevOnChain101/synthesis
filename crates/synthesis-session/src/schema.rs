@@ -118,6 +118,7 @@ CREATE TABLE attempts(
   worker_kind TEXT NOT NULL,
   state TEXT NOT NULL, revision INTEGER NOT NULL, fence INTEGER NOT NULL,
   task_status TEXT, subject_commit TEXT, retained_reason TEXT,
+  worker_pid INTEGER, worker_start TEXT, heartbeat_at TEXT,   -- the worker process and its lease
   started_at TEXT NOT NULL, ended_at TEXT,
   UNIQUE(work_item_id, ordinal));
 CREATE TABLE evidence(
@@ -258,6 +259,8 @@ CREATE TRIGGER attempts_identity_immutable BEFORE UPDATE OF id, work_item_id, or
 CREATE TRIGGER attempts_commit_once BEFORE UPDATE OF subject_commit ON attempts
   WHEN OLD.subject_commit IS NOT NULL AND NEW.subject_commit IS NOT OLD.subject_commit
   BEGIN SELECT RAISE(ABORT, 'an attempt commit is set once'); END;
+CREATE TRIGGER attempts_worker_once BEFORE UPDATE OF worker_pid, worker_start ON attempts
+  WHEN OLD.worker_pid IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a worker is recorded once'); END;
 CREATE TRIGGER grants_consume_once BEFORE UPDATE OF consumed_at ON grants
   WHEN OLD.consumed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a grant is consumed once'); END;
 -- a finished command keeps its request and result
@@ -267,7 +270,7 @@ CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempoten
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
 -- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
-INSERT INTO schema_migrations(version, applied_at) VALUES (1002, 'outcome-ddl-rev-2');
+INSERT INTO schema_migrations(version, applied_at) VALUES (1003, 'outcome-ddl-rev-3');
 "#,
 ];
 
@@ -278,7 +281,7 @@ pub const OUTCOMES: i64 = 5;
 /// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
 /// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
 /// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
-pub const OUTCOME_DDL_MARKER: i64 = 1002;
+pub const OUTCOME_DDL_MARKER: i64 = 1003;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 

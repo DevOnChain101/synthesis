@@ -1094,6 +1094,32 @@ impl Store {
     pub fn resume_session(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
         check_id(id)?;
         refuse_hidden(&connect(&self.home, true)?, id)?;
+        self.resume_inner(id, accept_external_changes)
+    }
+
+    /// `synt run --attempt-session`: the worker of an attempt continues the session the
+    /// orchestrator allocated. Only a session of a live (`starting` or `running`) attempt is
+    /// accepted, so this is not a way into a control session or a finished attempt's.
+    pub fn resume_attempt_session(&self, id: &str) -> Result<SessionWriter> {
+        check_id(id)?;
+        let conn = connect(&self.home, true)?;
+        if schema::user_version(&conn)? < schema::OUTCOMES {
+            return Err(Error::OutcomesNotEnabled);
+        }
+        let live: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attempts WHERE session_id=?1 AND state IN ('starting','running'))",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !live {
+            return Err(Error::Invalid(format!(
+                "session {id} is not the session of a live outcome attempt"
+            )));
+        }
+        self.resume_inner(id, true)
+    }
+
+    fn resume_inner(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
         let mut w = self.open_locked(id)?;
         let rec = w.get_session(id)?;
         if let (Some(p), false) = (&rec.legacy_transcript_path, accept_external_changes)

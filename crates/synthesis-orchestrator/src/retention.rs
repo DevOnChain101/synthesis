@@ -82,3 +82,13 @@ pub fn retention_due(ended_at: &str, now: OffsetDateTime, days: u32) -> bool {
         .map(time::PrimitiveDateTime::assume_utc)
         .is_ok_and(|t| now >= t + time::Duration::days(i64::from(days)))
 }
+
+/// Parses a store timestamp.
+pub(crate) fn parse_store_time(t: &str) -> Option<OffsetDateTime> {
+    let fmt = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    time::PrimitiveDateTime::parse(t, &fmt)
+        .ok()
+        .map(time::PrimitiveDateTime::assume_utc)
+}

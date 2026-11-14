@@ -287,6 +287,11 @@ pub struct Common {
     /// Set by `synt run` and `synt engine`: the unattended defaults apply (not a flag).
     #[arg(skip)]
     pub governed: bool,
+    /// Internal (the outcome orchestrator launches `synt run` with it): `--resume` names the
+    /// session of a live outcome attempt, which a plain resume refuses. The attempt runs with no MCP
+    /// servers and no browser tools, never in auto or bypass mode, and only unattended.
+    #[arg(long, hide = true, requires = "resume", requires = "unattended")]
+    pub attempt_session: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -1259,6 +1264,9 @@ pub fn prepare(
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
+    if c.attempt_session && matches!(mode, Mode::Auto | Mode::BypassPermissions) {
+        return Err("an outcome attempt runs in default, acceptEdits, plan or dontAsk mode: never auto (no model is the authority) and never bypassPermissions".into());
+    }
     let mut budget = budget_from_settings(&settings);
     if let Some(v) = limits.max_turns {
         budget.max_turns = v;
@@ -1525,6 +1533,9 @@ pub fn prepare(
         let w = SessionStore::open(&h.synthesis, opts)
             .and_then(|s| {
                 if in_place {
+                    if c.attempt_session {
+                        return s.resume_attempt_session(&sid);
+                    }
                     return s.resume_session(&sid, true);
                 }
                 s.create_session(NewSession {
@@ -2093,6 +2104,16 @@ pub fn prepare(
         eprintln!("synt: warning: {w}");
         notices.push(w);
     }
+    if c.attempt_session && !mplan.servers.is_empty() {
+        // D12: an attempt starts no MCP server (stdio servers run outside the sandbox)
+        let n = format!(
+            "outcome attempt: {} MCP server(s) not started",
+            mplan.servers.len()
+        );
+        eprintln!("synt: {n}");
+        notices.push(n);
+        mplan.servers.clear();
+    }
     mplan.env_passthrough = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
@@ -2172,19 +2193,21 @@ pub fn prepare(
     } else {
         Arc::new(crate::login::CliHost { sink: sink.clone() })
     };
-    let mut toolbox = ToolBox::new(
-        Registry::with_terminal_policy(rt.clone(), make_policy)
-            .with_new_tools()
-            .with_browser(browser.config(
-                synthesis_tools::BrowserConfig::default(),
-                &h.synthesis,
-                env,
-                browser_host,
-                sandbox_mode == SandboxMode::Enforce,
-                stdio,
-            ))
-            .with_background_on_timeout(is_cli),
-    );
+    let registry = Registry::with_terminal_policy(rt.clone(), make_policy).with_new_tools();
+    // an outcome attempt has no browser tools (the browser worker is outside the OS sandbox)
+    let registry = if c.attempt_session {
+        registry
+    } else {
+        registry.with_browser(browser.config(
+            synthesis_tools::BrowserConfig::default(),
+            &h.synthesis,
+            env,
+            browser_host,
+            sandbox_mode == SandboxMode::Enforce,
+            stdio,
+        ))
+    };
+    let mut toolbox = ToolBox::new(registry.with_background_on_timeout(is_cli));
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
     }

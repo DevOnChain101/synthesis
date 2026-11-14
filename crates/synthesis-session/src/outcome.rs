@@ -122,6 +122,11 @@ pub struct AttemptRecord {
     pub task_status: Option<String>,
     pub subject_commit: Option<String>,
     pub retained_reason: Option<String>,
+    /// The worker process (`synt run`) and the start-time token that tells it from a pid reuser.
+    pub worker_pid: Option<u32>,
+    pub worker_start: Option<String>,
+    /// Last sign of life of the worker; a lease that is older than the owner's limit is expired.
+    pub heartbeat_at: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
 }
@@ -273,7 +278,7 @@ fn item_row(r: &Row<'_>) -> rusqlite::Result<WorkItemRecord> {
     })
 }
 
-const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.started_at,a.ended_at";
+const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.started_at,a.ended_at";
 fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
     Ok(AttemptRecord {
         id: id_col(r, 0)?,
@@ -287,8 +292,11 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         task_status: r.get(8)?,
         subject_commit: r.get(9)?,
         retained_reason: r.get(10)?,
-        started_at: r.get(11)?,
-        ended_at: r.get(12)?,
+        worker_pid: r.get(11)?,
+        worker_start: r.get(12)?,
+        heartbeat_at: r.get(13)?,
+        started_at: r.get(14)?,
+        ended_at: r.get(15)?,
     })
 }
 
@@ -1350,6 +1358,20 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.set_attempt_retained(id, reason))
     }
 
+    pub fn record_worker(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        pid: u32,
+        start: Option<&str>,
+    ) -> Result<()> {
+        self.atomically(|tx| tx.record_worker(id, fence, pid, start))
+    }
+
+    pub fn heartbeat(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
+        self.atomically(|tx| tx.heartbeat(id, fence))
+    }
+
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
         self.atomically(|tx| tx.new_decision(d))
     }
@@ -2374,6 +2396,13 @@ impl OutcomeTx<'_, '_> {
         self.conflict_or(ev::Aggregate::Attempt, id.as_str(), expected_revision, rev)?;
         let from: AttemptState = enum_from(&state)?;
         from.transition(to).map_err(refuse)?;
+        // the orchestrator may still mark a superseded attempt lost or cancelled; it may not
+        // finish it as if its worker were current
+        if to == AttemptState::Finished && self.superseded(id)? {
+            return Err(Error::Stale(
+                "a newer attempt of this work item exists".into(),
+            ));
+        }
         let ended = to.is_terminal().then(now);
         let changed = self.et.tx.execute(
             "UPDATE attempts SET state=?2, revision=revision+1, ended_at=COALESCE(?4,ended_at), \
@@ -2422,6 +2451,80 @@ impl OutcomeTx<'_, '_> {
         } else {
             Err(Error::NotFound(format!("attempt {id}")))
         }
+    }
+
+    /// Is there an attempt of the same work item with a higher fence? A worker of an older attempt
+    /// is stale: nothing it reports is accepted any more.
+    fn superseded(&self, id: &AttemptId) -> Result<bool> {
+        Ok(self.et.tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attempts n JOIN attempts a ON a.work_item_id=n.work_item_id \
+             WHERE a.id=?1 AND n.fence > a.fence)",
+            [id.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn live_attempt(&self, id: &AttemptId, fence: i64) -> Result<AttemptRecord> {
+        let a = self
+            .et
+            .tx
+            .query_row(
+                &format!(
+                    "SELECT {ATTEMPT_COLS} FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+                     WHERE a.id=?1 AND w.outcome_id=?2"
+                ),
+                params![id.as_str(), self.id.as_str()],
+                attempt_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("attempt {id}")))?;
+        if a.fence != fence {
+            return Err(Error::Stale(format!(
+                "fence {fence} is not attempt {id}'s fence {}",
+                a.fence
+            )));
+        }
+        if self.superseded(id)? {
+            return Err(Error::Stale(
+                "a newer attempt of this work item exists".into(),
+            ));
+        }
+        if !matches!(a.state, AttemptState::Starting | AttemptState::Running) {
+            return Err(Error::Stale(format!(
+                "the attempt is {}",
+                enum_str(&a.state)
+            )));
+        }
+        Ok(a)
+    }
+
+    /// Records the worker process of a live attempt, once. The fence must be the attempt's own and
+    /// no newer attempt may exist (a stale worker's writes are refused).
+    pub fn record_worker(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        pid: u32,
+        start: Option<&str>,
+    ) -> Result<()> {
+        self.live_attempt(id, fence)?;
+        let at = ts(self.now);
+        self.et.tx.execute(
+            "UPDATE attempts SET worker_pid=?2, worker_start=?3, heartbeat_at=?4 WHERE id=?1",
+            params![id.as_str(), pid, start, at],
+        )?;
+        Ok(())
+    }
+
+    /// The worker's sign of life (extends its lease). Refused for a stale fence, a superseded or
+    /// finished attempt.
+    pub fn heartbeat(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
+        self.live_attempt(id, fence)?;
+        self.et.tx.execute(
+            "UPDATE attempts SET heartbeat_at=?2 WHERE id=?1",
+            params![id.as_str(), ts(self.now)],
+        )?;
+        Ok(())
     }
 
     // ---- decisions

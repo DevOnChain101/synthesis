@@ -355,7 +355,16 @@ impl OutboxEffect for WorktreeEffect<'_> {
             title: None,
         };
         match self.store.create_session(new) {
-            Ok(w) => drop(w), // release the session lock: the runner takes it later
+            Ok(mut w) => {
+                // idle, the state a resume continues from; the worker takes the lock later
+                for to in [
+                    synthesis_core::SessionStatus::Preparing,
+                    synthesis_core::SessionStatus::Idle,
+                ] {
+                    w.update_status(to, Some("allocated for an outcome attempt"))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             Err(StoreError::AlreadyExists(_)) => {}
             Err(e) => return Err(e.to_string()),
         }

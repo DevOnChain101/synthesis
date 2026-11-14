@@ -121,6 +121,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: Medium (git on three OSes, long paths on Windows). Rollback: revert; worktrees are plain git. Size: M.
 
 ### PR-05 Attempt runner, cancel and recovery
+- **Status (implemented):** `Profile`, `Runner`, `recover_attempts`, `CancelFlag`, `SyntSpawn` in `synthesis-orchestrator`; `--attempt-session` in `synt run`; schema additions `attempts.worker_pid/worker_start/heartbeat_at`, `Store::resume_attempt_session`, fence checks (`record_worker`, `heartbeat`). See ADR-017 implementation notes. Not done here: envelope-to-rules compile and the OrchGateway (PR-08), the scheduler that decides when to run (PR-06), the independent verifier (PR-09), the standalone process (PR-12).
 - Scope: start a governed session for an attempt through `run::prepare`/host with the unattended profile; map `TaskStatus` to attempt state; cancel via stop path and process-tree kill; orchestrator startup recovery (lost attempts, outbox replay) with a recovery report event.
 - Crates: `synthesis-orchestrator`, `synthesis-app`.
 - Tests: fake provider (`test-provider` feature) attempt end-to-end; kill -9 the orchestrator mid-attempt and recover (new e2e `outcome_recovery`); cancel kills a spawning tree within a bound (AC-13).
