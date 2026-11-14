@@ -1218,11 +1218,12 @@ fn a_file_credential_is_read_unless_it_is_a_secret_store_a_state_file_or_not_a_s
         "~/.ssh/id_rsa",
         "~/secrets/big",
         "./chain.key",
-        "/etc/passwd",
         "//host/share/k",
         "~/secrets",
     ];
     if cfg!(unix) {
+        // on Windows `/etc/passwd` is `C:/etc/passwd`: a path that does not exist, not a system file
+        bad.push("/etc/passwd");
         bad.push("~/secrets/later");
     }
     for b in bad {
