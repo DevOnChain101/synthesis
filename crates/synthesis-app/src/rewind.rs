@@ -14,9 +14,12 @@
 //! directory and a rename. A file whose current state differs from the one the run left is refused
 //! unless `--force`; the dry run lists those. Every path is checked again (inside, no links, same
 //! state) right before its own write, and one rewind per session runs at a time (lock file).
-//! shortcut: no merge, `--force` overwrites later edits; check-then-rename leaves a short race
-//! window against a concurrent writer (a directory swapped for a link between the last check and
-//! the rename); the hashes live in the same store as the checkpoint rows, so whoever can write
+//! On unix the write itself goes through a handle of the parent directory (walked from the root with
+//! no link followed; temp, `renameat`, `unlinkat` relative to it; hard links refused; the state hash
+//! is taken from the opened file), so a directory swapped for a link after the checks is refused.
+//! shortcut: no merge, `--force` overwrites later edits; on Windows the write is still by path (a
+//! junction swapped in between the last check and the rename is not caught; upgrade: handle-relative
+//! NT calls); a concurrent writer to the file itself can still change it between the hash and the rename; the hashes live in the same store as the checkpoint rows, so whoever can write
 //! `synt.db` can forge both: they detect damage and a changed artifact file, not a forged row.
 
 use std::path::{Component, Path, PathBuf};
@@ -48,7 +51,122 @@ pub struct RewindArgs {
     pub allow_wide_root: bool,
 }
 
+// Test seam: runs between the checks and the write (`"checked"`) and right after the parent handle is open
+// (`"opened"`), where a hostile process would swap a directory.
+#[cfg(test)]
+type Hook = std::cell::RefCell<Option<Box<dyn Fn(&str)>>>;
+#[cfg(test)]
+thread_local! {
+    static HOOK: Hook = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn hook(stage: &str) {
+    HOOK.with(|h| {
+        if let Some(f) = h.borrow().as_ref() {
+            f(stage);
+        }
+    });
+}
+
+/// Unix: the write goes through a handle of the parent directory walked from the workspace root with no link
+/// followed (temp file, `renameat` and `unlinkat` relative to it), the protected names are checked again on
+/// the walked components, and the file's state hash is taken from the opened file, so a directory swapped
+/// for a link after the checks cannot redirect it. `bytes`: restore these; `None`: remove.
+#[cfg(unix)]
+fn write_back(l: &Loaded, e: &Entry, bytes: Option<&[u8]>) -> Result<(), String> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, unlinkat};
+    use std::io::{Read, Write};
+    use std::os::unix::fs::MetadataExt;
+    let fail = |why: &str| Err(format!("{}: {why}", e.shown));
+    let io = |x: std::io::Error| format!("{}: {x}", e.shown);
+    let (Some(name), Some(parent)) = (e.path.file_name(), e.path.parent()) else {
+        return fail("not a file path");
+    };
+    let parent = synthesis_core::canonicalize(parent).map_err(io)?;
+    let Some((root, rel)) = l.roots.iter().find_map(|r| {
+        let r = synthesis_core::canonicalize(r).ok()?;
+        let rel = parent.strip_prefix(&r).ok()?.to_path_buf();
+        Some((r, rel))
+    }) else {
+        return fail("outside the session's workspace");
+    };
+    // the strictest (case-insensitive) policy, on the names the handle walk will use
+    if synthesis_permissions::is_protected_path(std::slice::from_ref(&root), &parent.join(name)) {
+        return fail(&protected_reason());
+    }
+    #[cfg(test)]
+    hook("checked");
+    let dir = crate::engine_fs::open_dir_beneath(&root, &rel).map_err(io)?;
+    #[cfg(test)]
+    hook("opened");
+    let flags = OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let state = match openat(
+        &dir,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | flags,
+        Mode::empty(),
+    ) {
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(x) => return Err(io(x.into())), // a symlink in the last place (ELOOP) lands here
+        Ok(fd) => Some(std::fs::File::from(fd)),
+    };
+    let now = match &state {
+        None => "absent".to_string(),
+        Some(f) => {
+            let m = f.metadata().map_err(io)?;
+            if !m.is_file() {
+                return fail("not a regular file");
+            }
+            if m.nlink() > 1 {
+                return fail("a hard link: not touched");
+            }
+            let mut b = vec![];
+            (&*f).read_to_end(&mut b).map_err(io)?;
+            sha_hex(&b)
+        }
+    };
+    if now != e.state {
+        return fail("changed while the rewind was running: not touched");
+    }
+    let Some(bytes) = bytes else {
+        return unlinkat(&dir, name, AtFlags::empty()).map_err(|x| io(x.into()));
+    };
+    let tmp = format!(".synt-rewind-{}", uuid::Uuid::new_v4());
+    let r = (|| {
+        // private from the first byte; the original's mode is applied before any content is written
+        let fd = openat(
+            &dir,
+            &tmp,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | flags,
+            Mode::from_raw_mode(0o600),
+        )?;
+        let mut f = std::fs::File::from(fd);
+        if let Some(o) = &state {
+            f.set_permissions(o.metadata()?.permissions())?;
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        renameat(&dir, &tmp, &dir, name).map_err(std::io::Error::from)
+    })();
+    if r.is_err() {
+        let _ = unlinkat(&dir, &tmp, AtFlags::empty());
+    }
+    r.map_err(io)
+}
+
+/// Not unix: path-based (shortcut: a junction swapped in after `path_problem`'s check is not caught; there is
+/// no portable `openat` on Windows, upgrade with handle-relative NT calls).
+#[cfg(not(unix))]
+fn write_back(_l: &Loaded, e: &Entry, bytes: Option<&[u8]>) -> Result<(), String> {
+    match bytes {
+        Some(b) => replace_file(&e.path, b),
+        None => std::fs::remove_file(&e.path),
+    }
+    .map_err(|x| format!("{}: {x}", e.shown))
+}
+
 /// Writes `bytes` next to `path` and renames over it, keeping the mode of the file it replaces.
+#[cfg(not(unix))]
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -363,6 +481,8 @@ pub fn apply_entry(l: &Loaded, e: &Entry) -> Result<(), String> {
         }
         _ => {}
     }
+    #[cfg(all(test, not(unix)))]
+    hook("checked");
     match &e.step {
         Step::Restore {
             artifact_id,
@@ -375,10 +495,10 @@ pub fn apply_entry(l: &Loaded, e: &Entry) -> Result<(), String> {
             if sha256.as_ref().is_some_and(|h| *h != sha_hex(&bytes)) {
                 return fail("the snapshot no longer matches its recorded hash: not written");
             }
-            replace_file(&e.path, &bytes).map_err(|x| format!("{}: {x}", e.shown))
+            write_back(l, e, Some(&bytes))
         }
         Step::Remove if e.state == "absent" => Ok(()),
-        _ => std::fs::remove_file(&e.path).map_err(|x| format!("{}: {x}", e.shown)),
+        _ => write_back(l, e, None),
     }
 }
 
@@ -907,5 +1027,236 @@ mod tests {
         assert!(lock(&l).unwrap_err().contains("another rewind"));
         drop(first);
         assert!(lock(&l).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn set_hook(f: impl Fn(&str) + 'static) {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    #[cfg(unix)]
+    fn entry(g: &Rig, rel: &str, state: &str) -> Entry {
+        Entry {
+            path: g.ws.join(rel),
+            shown: rel.into(),
+            step: Step::Remove,
+            size: 0,
+            state: state.into(),
+        }
+    }
+
+    /// `ws/d/f.txt` written by the run ("new"), the snapshot "old", and an outside folder holding a file
+    /// with the same bytes ("new") that a redirected write would hit.
+    #[cfg(unix)]
+    fn swap_rig() -> (Rig, PathBuf) {
+        let mut g = rig();
+        fs::create_dir_all(g.ws.join("d")).unwrap();
+        fs::write(g.ws.join("d/f.txt"), "old").unwrap();
+        g.run_wrote("d/f.txt", "new");
+        let out = g.base.join("ssh");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("f.txt"), "new").unwrap();
+        (g, out)
+    }
+
+    #[cfg(unix)]
+    fn swap_d_for_link(ws: PathBuf, out: PathBuf) -> impl Fn(&str) {
+        move |stage| {
+            if stage == "checked" {
+                fs::rename(ws.join("d"), ws.join("d_moved")).unwrap();
+                std::os::unix::fs::symlink(&out, ws.join("d")).unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_swapped_for_a_link_between_the_checks_and_the_write_is_not_followed() {
+        let (g, out) = swap_rig();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        assert!(matches!(v[0].step, Step::Restore { .. }));
+        set_hook(swap_d_for_link(g.ws.clone(), out.clone()));
+        let r = apply_entry(&l, &v[0]);
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(fs::read_to_string(out.join("f.txt")).unwrap(), "new");
+        let names: Vec<_> = fs::read_dir(&out).unwrap().collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "no temp file in the folder the link leads to"
+        );
+        assert_eq!(
+            fs::read_to_string(g.ws.join("d_moved/f.txt")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_through_a_swapped_parent_deletes_nothing_outside() {
+        let mut g = rig();
+        fs::create_dir_all(g.ws.join("d")).unwrap();
+        g.run_wrote("d/made.txt", "x");
+        let out = g.base.join("ssh");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("made.txt"), "x").unwrap();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        assert!(matches!(v[0].step, Step::Remove));
+        set_hook(swap_d_for_link(g.ws.clone(), out.clone()));
+        assert!(apply_entry(&l, &v[0]).is_err());
+        assert!(out.join("made.txt").exists());
+        assert!(g.ws.join("d_moved/made.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_swapped_after_it_was_opened_still_writes_the_original_folder() {
+        let (g, out) = swap_rig();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        let (ws, o) = (g.ws.clone(), out.clone());
+        set_hook(move |stage| {
+            if stage == "opened" {
+                fs::rename(ws.join("d"), ws.join("d_moved")).unwrap();
+                std::os::unix::fs::symlink(&o, ws.join("d")).unwrap();
+            }
+        });
+        apply_entry(&l, &v[0]).unwrap();
+        assert_eq!(
+            fs::read_to_string(g.ws.join("d_moved/f.txt")).unwrap(),
+            "old"
+        );
+        assert_eq!(fs::read_to_string(out.join("f.txt")).unwrap(), "new");
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_renamed_onto_git_after_the_checks_is_not_written() {
+        let (g, _out) = swap_rig();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        let ws = g.ws.clone();
+        set_hook(move |stage| {
+            if stage == "checked" {
+                fs::rename(ws.join("d"), ws.join(".git")).unwrap();
+            }
+        });
+        assert!(apply_entry(&l, &v[0]).is_err());
+        assert_eq!(fs::read_to_string(g.ws.join(".git/f.txt")).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_names_are_checked_again_on_the_walked_path_in_any_case() {
+        let g = rig();
+        let l = g.loaded();
+        let h = sha_hex(b"x");
+        for rel in [
+            ".git/hooks/pre-commit",
+            ".GIT/hooks/pre-commit",
+            ".Husky/pre-commit",
+            ".ENV",
+        ] {
+            let p = g.ws.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "x").unwrap();
+            let e = entry(&g, rel, &h);
+            assert!(
+                write_back(&l, &e, None).unwrap_err().contains("protected"),
+                "{rel}"
+            );
+            assert!(write_back(&l, &e, Some(b"y")).is_err(), "{rel}");
+            assert_eq!(fs::read_to_string(&p).unwrap(), "x", "{rel}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_final_component_turned_into_a_link_or_a_hard_link_is_not_touched() {
+        let mut g = rig();
+        let a = g.run_wrote("a.txt", "new");
+        let out = g.base.join("secret.txt");
+        fs::write(&out, "new").unwrap();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        let (ap, o) = (a.clone(), out.clone());
+        set_hook(move |stage| {
+            if stage == "checked" {
+                fs::remove_file(&ap).unwrap();
+                std::os::unix::fs::symlink(&o, &ap).unwrap();
+            }
+        });
+        let r = apply_entry(&l, &v[0]);
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), "new");
+        assert!(fs::symlink_metadata(&a).unwrap().file_type().is_symlink());
+        // a hard link: the other name would keep the old inode, or the secret would be replaced
+        let mut g = rig();
+        let b = g.run_wrote("b.txt", "new");
+        fs::hard_link(&b, g.ws.join("alias.txt")).unwrap();
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        let r = apply_entry(&l, &v[0]);
+        assert!(r.unwrap_err().contains("hard link"));
+        assert_eq!(fs::read_to_string(&b).unwrap(), "new");
+        assert_eq!(fs::read_to_string(g.ws.join("alias.txt")).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_and_mixed_case_names_restore_normally() {
+        let mut g = rig();
+        let long = "n".repeat(255);
+        fs::write(g.ws.join(&long), "old").unwrap();
+        g.run_wrote(&long, "new");
+        fs::write(g.ws.join("Mixed Ünï.TXT"), "old").unwrap();
+        g.run_wrote("Mixed Ünï.TXT", "new");
+        let l = g.loaded();
+        for e in plan(&l, None, false).unwrap() {
+            apply_entry(&l, &e).unwrap();
+        }
+        assert_eq!(fs::read_to_string(g.ws.join(&long)).unwrap(), "old");
+        assert_eq!(
+            fs::read_to_string(g.ws.join("Mixed Ünï.TXT")).unwrap(),
+            "old"
+        );
+        assert_eq!(fs::read_dir(&g.ws).unwrap().count(), 2, "no temp left");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stress_a_parent_flipped_to_a_link_while_writing_never_reaches_outside() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (g, out) = swap_rig();
+        let l = g.loaded();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ws, o, s) = (g.ws.clone(), out.clone(), stop.clone());
+        let t = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                if fs::rename(ws.join("d"), ws.join("d2")).is_ok() {
+                    let _ = std::os::unix::fs::symlink(&o, ws.join("d"));
+                    let _ = fs::remove_file(ws.join("d"));
+                    let _ = fs::rename(ws.join("d2"), ws.join("d"));
+                }
+            }
+        });
+        let (new, old) = (sha_hex(b"new"), sha_hex(b"old"));
+        let e = entry(&g, "d/f.txt", &new);
+        let back = entry(&g, "d/f.txt", &old);
+        for _ in 0..400 {
+            if write_back(&l, &e, Some(b"old")).is_ok() {
+                while write_back(&l, &back, Some(b"new")).is_err() {}
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        t.join().unwrap();
+        assert_eq!(fs::read_to_string(out.join("f.txt")).unwrap(), "new");
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
     }
 }
