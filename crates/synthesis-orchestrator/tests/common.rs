@@ -148,6 +148,40 @@ impl Rig {
         contract()
     }
 
+    /// A running outcome with its plan stored and every work item still `created`.
+    pub fn fresh(&self) -> (OutcomeWriter, Vec<(String, WorkItemId)>) {
+        let ws = WorkspaceContext::open(
+            "w",
+            &self.repo,
+            &self.repo,
+            &[],
+            self.base.join("cart"),
+            "pg",
+        )
+        .unwrap();
+        let mut w = self
+            .store
+            .create_outcome(NewOutcome {
+                workspace: &ws,
+                base_commit: self.head.clone(),
+                contract: &contract(),
+                policy: &policy(),
+            })
+            .unwrap();
+        let go = |w: &mut OutcomeWriter, to| {
+            let r = w.get_outcome(w.id()).unwrap().revision;
+            w.transition_outcome(r, to, None, &Effects::default())
+                .unwrap();
+        };
+        go(&mut w, OutcomeState::ContractPending);
+        let h = w.get_contract(w.id(), 1).unwrap().1;
+        w.approve_contract(1, &h, "user").unwrap();
+        let items = w.insert_plan(&plan()).unwrap();
+        go(&mut w, OutcomeState::Ready);
+        go(&mut w, OutcomeState::Running);
+        (w, items)
+    }
+
     pub fn allocator(&self) -> Allocator<'_> {
         Allocator {
             store: &self.store,

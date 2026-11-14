@@ -9,17 +9,25 @@
 //! crate holds no switch of its own, the store's `OutcomePolicy` gate does.
 
 mod alloc;
+mod host;
 mod proc;
 mod profile;
 mod recover;
 mod retention;
 mod runner;
+mod sched;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
+pub use host::ProcessHost;
 pub use proc::kill_verified;
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError};
 pub use recover::{RecoveryReport, recover_attempts};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};
 pub use runner::{
-    CancelFlag, RunError, Runner, Settled, Spawn, SyntSpawn, WorkerEnd, map_exit, settle_item,
+    CancelFlag, RunError, Runner, Running, Settled, Spawn, SyntSpawn, WorkerEnd, map_exit,
+    settle_item,
+};
+pub use sched::{
+    Control, HandOff, SchedConfig, SchedError, Scheduler, Stop, TickReport, Verdict, Verifier,
+    WorkerHost, pick_in_order,
 };

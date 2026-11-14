@@ -428,6 +428,18 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn get_work_item(&self, id: &WorkItemId) -> Result<WorkItemRecord> {
+        need_v5(&self.conn)?;
+        self.conn
+            .query_row(
+                &format!("SELECT {ITEM_COLS} FROM work_items WHERE id=?1"),
+                [id.as_str()],
+                item_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("work item {id}")))
+    }
+
     /// Keys of the items a work item requires.
     pub fn work_item_deps(&self, id: &WorkItemId) -> Result<Vec<String>> {
         need_v5(&self.conn)?;

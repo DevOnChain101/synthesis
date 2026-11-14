@@ -239,10 +239,33 @@ pub fn settle_item(
     }
 }
 
+/// A started worker that [`Runner::poll`] watches. Several can be watched by one owner.
+pub struct Running {
+    env: AttemptEnv,
+    child: std::process::Child,
+    pid: u32,
+    began: Instant,
+    wall: Duration,
+    stop_at: Option<Instant>,
+    cancelled: bool,
+    wall_hit: bool,
+    last_beat: Instant,
+    missed: u32,
+}
+
+impl Running {
+    pub fn env(&self) -> &AttemptEnv {
+        &self.env
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
 impl Runner<'_> {
-    /// Runs the attempt's worker to its end and records everything. The attempt must be
-    /// `starting` with its worktree allocated. On any error after the worker was started its whole
-    /// tree is killed and reaped before the error is returned: no worker outlives a failed runner.
+    /// Runs the attempt's worker to its end and records everything (`start`, then `poll` until it
+    /// settles). The attempt must be `starting` with its worktree allocated.
     pub fn run_attempt(
         &self,
         w: &mut OutcomeWriter,
@@ -250,7 +273,24 @@ impl Runner<'_> {
         profile: &Profile,
         cancel: &CancelFlag,
     ) -> Result<Settled, RunError> {
-        // from here on `allocate_unstarted` refuses this worktree
+        let mut run = self.start(w, env, profile)?;
+        loop {
+            if let Some(s) = self.poll(w, &mut run, cancel)? {
+                return Ok(s);
+            }
+            std::thread::sleep(self.poll.min(Duration::from_millis(50)));
+        }
+    }
+
+    /// Starts the worker: the worktree is marked started (nothing resets it from now on), the
+    /// attempt goes `running`, the process is spawned and recorded. A worker that cannot start
+    /// fails the attempt (the item retries within its budget) instead of leaving it `running`.
+    pub fn start(
+        &self,
+        w: &mut OutcomeWriter,
+        env: &AttemptEnv,
+        profile: &Profile,
+    ) -> Result<Running, RunError> {
         self.worktrees
             .mark_started(&env.git)
             .map_err(AllocError::from)?;
@@ -268,35 +308,56 @@ impl Runner<'_> {
         let mut child = match self.spawn.spawn(profile) {
             Ok(c) => c,
             Err(e) => {
-                // it never started: the attempt fails (the item retries within its budget) instead
-                // of staying `running` forever
                 let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
                 return Err(RunError::Io(e));
             }
         };
         let pid = child.id();
-        match self.supervise(w, env, profile, cancel, &mut child, pid) {
-            Ok(end) => self.settle(w, &env.attempt, &env.git, end),
-            Err(e) => {
-                crate::proc::kill_child_tree(self.probe, pid);
-                let _ = child.wait();
-                // best effort: a stale worker's attempt is not ours to touch, a broken store cannot
-                // be written; recovery finds the rest
-                let stale = matches!(e, RunError::Store(StoreError::Stale(_)));
-                if !stale && let Ok(a) = attempt_row(w, &env.attempt) {
-                    let _ = w.transition_attempt(
-                        &a.id,
-                        a.revision,
-                        AttemptState::Lost,
-                        &AttemptEnd {
-                            retained_reason: Some(format!("lost: {e}")),
-                            ..AttemptEnd::default()
-                        },
-                        &Effects::default(),
-                    );
-                }
-                Err(e)
-            }
+        let start = self.probe.start_time(pid);
+        if let Err(e) = w.record_worker(&env.attempt.id, env.attempt.fence, pid, start.as_deref()) {
+            self.abandon(w, env, &mut child, pid, &RunError::Store(e));
+            return Err(RunError::Store(StoreError::Invalid(
+                "the worker could not be recorded and was stopped".into(),
+            )));
+        }
+        Ok(Running {
+            env: env.clone(),
+            child,
+            pid,
+            began: Instant::now(),
+            wall: Duration::from_secs(profile.max_wall_secs()),
+            stop_at: None,
+            cancelled: false,
+            wall_hit: false,
+            last_beat: Instant::now(),
+            missed: 0,
+        })
+    }
+
+    /// Kills and reaps a worker after an error of ours, and (unless the worker is stale) marks its
+    /// attempt lost with the reason. No worker outlives a failed runner.
+    fn abandon(
+        &self,
+        w: &mut OutcomeWriter,
+        env: &AttemptEnv,
+        child: &mut std::process::Child,
+        pid: u32,
+        e: &RunError,
+    ) {
+        crate::proc::kill_child_tree(self.probe, pid);
+        let _ = child.wait();
+        let stale = matches!(e, RunError::Store(StoreError::Stale(_)));
+        if !stale && let Ok(a) = attempt_row(w, &env.attempt) {
+            let _ = w.transition_attempt(
+                &a.id,
+                a.revision,
+                AttemptState::Lost,
+                &AttemptEnd {
+                    retained_reason: Some(format!("lost: {e}")),
+                    ..AttemptEnd::default()
+                },
+                &Effects::default(),
+            );
         }
     }
 
@@ -307,66 +368,77 @@ impl Runner<'_> {
         }
     }
 
-    /// Watches one worker until it has exited and its tree is gone; returns how it ended.
-    fn supervise(
+    /// One look at the worker: `Ok(None)` while it runs, `Ok(Some(..))` once it has exited, its
+    /// tree is gone and the attempt and work item are settled. The cancel flag becomes a stop
+    /// request; the tree is killed after the grace period, at the wall cap, or when the heartbeat
+    /// says the worker is stale. On an error of ours the tree is killed and reaped first.
+    pub fn poll(
         &self,
         w: &mut OutcomeWriter,
-        env: &AttemptEnv,
-        profile: &Profile,
+        run: &mut Running,
         cancel: &CancelFlag,
-        child: &mut std::process::Child,
-        pid: u32,
-    ) -> Result<WorkerEnd, RunError> {
-        let start = self.probe.start_time(pid);
-        w.record_worker(&env.attempt.id, env.attempt.fence, pid, start.as_deref())?;
-        let began = Instant::now();
-        let wall = Duration::from_secs(profile.max_wall_secs());
-        let (mut stop_sent, mut stop_at) = (false, Instant::now());
-        let (mut cancelled, mut wall_hit, mut last_beat) = (false, false, Instant::now());
-        let mut missed = 0u32;
-        let code = loop {
-            // The tree is swept BEFORE the child is reaped: an unreaped pid cannot be reused.
-            if crate::proc::exited_unreaped(pid) {
-                crate::proc::kill_child_tree(self.probe, pid);
-                break child.wait().ok().and_then(|s| s.code());
+    ) -> Result<Option<Settled>, RunError> {
+        match self.look(w, run, cancel) {
+            Ok(None) => Ok(None),
+            Ok(Some(end)) => self
+                .settle(w, &run.env.attempt, &run.env.git, end)
+                .map(Some),
+            Err(e) => {
+                let env = run.env.clone();
+                self.abandon(w, &env, &mut run.child, run.pid, &e);
+                Err(e)
             }
-            #[cfg(not(unix))]
-            if let Ok(Some(s)) = child.try_wait() {
-                crate::proc::kill_child_tree(self.probe, pid);
-                break s.code();
-            }
-            if cancel.is_set() && !stop_sent {
-                // cooperative: the worker polls the stop request, cancels, kills its commands
-                self.store.stop_attempt(w, &env.session_id)?;
-                (stop_sent, stop_at, cancelled) = (true, Instant::now(), true);
-            }
-            if !wall_hit && began.elapsed() > wall + self.grace {
-                wall_hit = true;
-                crate::proc::kill_child_tree(self.probe, pid);
-            }
-            if stop_sent && stop_at.elapsed() > self.grace {
-                crate::proc::kill_child_tree(self.probe, pid);
-            }
-            if last_beat.elapsed() >= self.poll {
-                last_beat = Instant::now();
-                match self.beat(w, env) {
-                    Ok(()) => missed = 0,
-                    // this worker was superseded: it must not go on
-                    Err(e @ StoreError::Stale(_)) => return Err(RunError::Store(e)),
-                    // a busy or failing database says nothing about the worker: try again
-                    Err(e) => {
-                        missed += 1;
-                        if missed >= MAX_MISSED_BEATS {
-                            return Err(RunError::Store(StoreError::Invalid(format!(
-                                "the heartbeat failed {missed} times in a row (last: {e}); the attempt is given up"
-                            ))));
-                        }
+        }
+    }
+
+    fn look(
+        &self,
+        w: &mut OutcomeWriter,
+        r: &mut Running,
+        cancel: &CancelFlag,
+    ) -> Result<Option<WorkerEnd>, RunError> {
+        // The tree is swept BEFORE the child is reaped: an unreaped pid cannot be reused.
+        if crate::proc::exited_unreaped(r.pid) {
+            crate::proc::kill_child_tree(self.probe, r.pid);
+            let code = r.child.wait().ok().and_then(|s| s.code());
+            return Ok(Some(map_exit(code, r.cancelled, r.wall_hit)));
+        }
+        #[cfg(not(unix))]
+        if let Ok(Some(s)) = r.child.try_wait() {
+            crate::proc::kill_child_tree(self.probe, r.pid);
+            return Ok(Some(map_exit(s.code(), r.cancelled, r.wall_hit)));
+        }
+        if cancel.is_set() && r.stop_at.is_none() {
+            // cooperative: the worker polls the stop request, cancels, kills its commands
+            self.store.stop_attempt(w, &r.env.session_id)?;
+            (r.stop_at, r.cancelled) = (Some(Instant::now()), true);
+        }
+        if !r.wall_hit && r.began.elapsed() > r.wall + self.grace {
+            r.wall_hit = true;
+            crate::proc::kill_child_tree(self.probe, r.pid);
+        }
+        if r.stop_at.is_some_and(|t| t.elapsed() > self.grace) {
+            crate::proc::kill_child_tree(self.probe, r.pid);
+        }
+        if r.last_beat.elapsed() >= self.poll {
+            r.last_beat = Instant::now();
+            match self.beat(w, &r.env) {
+                Ok(()) => r.missed = 0,
+                // this worker was superseded: it must not go on
+                Err(e @ StoreError::Stale(_)) => return Err(RunError::Store(e)),
+                // a busy or failing database says nothing about the worker: try again
+                Err(e) => {
+                    r.missed += 1;
+                    if r.missed >= MAX_MISSED_BEATS {
+                        return Err(RunError::Store(StoreError::Invalid(format!(
+                            "the heartbeat failed {} times in a row (last: {e}); the attempt is given up",
+                            r.missed
+                        ))));
                     }
                 }
             }
-            std::thread::sleep(self.poll.min(Duration::from_millis(50)));
-        };
-        Ok(map_exit(code, cancelled, wall_hit))
+        }
+        Ok(None)
     }
 
     /// Records the end of an attempt whose worker is gone (also used by recovery).

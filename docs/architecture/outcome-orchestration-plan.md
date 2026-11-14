@@ -129,6 +129,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: High (concurrency, process lifetime, Windows flake pattern at `docs/STATUS.md` SQLite lock). Rollback: feature flag `synt.orchestrator.enabled` default off. Size: L.
 
 ### PR-06 Scheduler and retry budgets
+- **Status (implemented):** `Scheduler`, `SchedConfig`, `Control`, `WorkerHost`/`ProcessHost`, `Verifier`/`HandOff`, `Runner::start/poll`. See ADR-017 implementation notes. The gate "1,000 queued items" is exercised at the plan limit of 256 items (250 agent items plus a verify item): a plan cannot hold 1,000.
 - Scope: bounded-parallel DAG walk, canonical ordering, retry budget per work item, blocked state with reason; no resource locks yet.
 - Crates: `synthesis-orchestrator`.
 - Tests: synthetic DAG with injected failures (design Phase 3 gate): no duplicate assignment, no cycle, retries bounded, 1,000 queued items do not spawn more than the cap (stub attempts).
