@@ -58,6 +58,36 @@ pub enum Target {
     Trust(Option<synthesis_app::engine_methods::Mode>),
 }
 
+/// The folder `/new` opens a session in (decision D7, AC-03). It is the folder of the SELECTED
+/// workspace, `(key, root, available)` per row. The running session's folder is used only when it
+/// is the selected one (`live` = its workspace key and root): when the selection is empty or names
+/// a workspace that is gone, `/new` refuses. It never falls back to whichever folder the previous
+/// engine happened to be in, which would put the new session in a folder the person did not pick.
+pub fn new_session_root<'a>(
+    rows: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+    selected: &str,
+    live: Option<(&str, &str)>,
+) -> Result<PathBuf, String> {
+    if selected.is_empty() {
+        return Err("/new: no workspace is selected; select a folder first".into());
+    }
+    if let Some((_, root, available)) = rows.into_iter().find(|(k, _, _)| *k == selected) {
+        return if available {
+            Ok(PathBuf::from(root))
+        } else {
+            Err(format!("/new: the folder {root} no longer exists"))
+        };
+    }
+    match live {
+        Some((key, root)) if key == selected => Ok(PathBuf::from(root)),
+        Some(_) => Err(
+            "/new: the selected workspace is not in the list any more; select a folder first"
+                .into(),
+        ),
+        None => Err("/new: the session is still starting".into()),
+    }
+}
+
 /// `/config`: asks the shell to show the Settings view.
 pub struct OpenSettings;
 
@@ -2076,22 +2106,20 @@ impl TuiView {
             }
             Action::New => {
                 let l = &lu.live;
-                let root = l
+                let live = l.engine.as_ref().map(|e| (l.live_ws_key(), e.root.clone()));
+                let rows = l
                     .view
                     .workspaces
                     .workspaces
                     .iter()
-                    .find(|w| w.key == l.ws_key)
-                    .map(|w| (w.root.clone(), w.available))
-                    .or_else(|| l.engine.as_ref().map(|e| (e.root.clone(), true)));
-                match root {
-                    Some((r, true)) => {
-                        return self.switch(Target::New(PathBuf::from(r)), "new".into(), cx);
-                    }
-                    Some((r, false)) => lu
-                        .live
-                        .note(format!("/new: the folder {r} no longer exists"), true),
-                    None => lu.live.note("/new: the session is still starting", true),
+                    .map(|w| (w.key.as_str(), w.root.as_str(), w.available));
+                match new_session_root(
+                    rows,
+                    &l.ws_key,
+                    live.as_ref().map(|(k, r)| (k.as_str(), r.as_str())),
+                ) {
+                    Ok(root) => return self.switch(Target::New(root), "new".into(), cx),
+                    Err(why) => lu.live.note(why, true),
                 }
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),

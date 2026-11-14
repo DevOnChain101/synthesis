@@ -984,6 +984,14 @@ impl Store {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         check_id(&id)?;
         let ws = new.workspace;
+        // AC-03: a session's folder lies inside its workspace (the root or an added folder). A
+        // context assembled by hand with another cwd is refused here, whatever the caller meant.
+        if !std::iter::once(&ws.root)
+            .chain(&ws.additional_dirs)
+            .any(|r| contains(r, &ws.cwd, ws.path_policy))
+        {
+            return Err(Error::OutsideWorkspace(ws.cwd.clone()));
+        }
         let (root, cwd) = (utf8(&ws.root)?, utf8(&ws.cwd)?);
         let dirs = ws
             .additional_dirs

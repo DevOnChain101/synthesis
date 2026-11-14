@@ -136,6 +136,7 @@ fn relaunches_keep_or_change_the_session() {
     let mut a = start(&r, None, None, None);
     run_prompt(&mut a, "first");
     let sid = a.engine.sid.clone();
+    let cwd_a = a.engine.cwd.clone();
     let label = a.engine.label.clone();
     assert!(label.starts_with("fake"), "{label}");
 
@@ -147,6 +148,7 @@ fn relaunches_keep_or_change_the_session() {
         None,
     );
     assert_eq!(b.engine.sid, sid, "same session");
+    assert_eq!(b.engine.cwd, cwd_a, "/model keeps the session's folder");
     assert!(b.engine.label.ends_with("other"), "{}", b.engine.label);
     assert_eq!(b.model.as_deref(), Some("fake/other"));
     assert!(b.replay.is_some(), "the conversation comes back");
@@ -191,6 +193,12 @@ fn relaunches_keep_or_change_the_session() {
         d.model,
     );
     assert_eq!(e.engine.sid, sid);
+    // AC-03: the session of folder A, resumed while a session of folder B was active, runs in A
+    assert_eq!(
+        e.engine.cwd, cwd_a,
+        "/resume uses the stored folder, not the active one"
+    );
+    assert_ne!(e.engine.cwd, other.to_string_lossy());
     assert!(e.model.is_none());
     let replay = e.replay.expect("replayed");
     assert!(
@@ -566,4 +574,45 @@ fn rename_sets_the_stored_title_and_the_first_prompt_never_overwrites_it() {
     );
     assert_eq!(titles(&r, &e), ["Second name"]);
     finish(e, &mut live);
+}
+
+/// D7 / AC-03: `/new` opens the SELECTED workspace's folder and never falls back to the running
+/// engine's folder when the selection is empty or gone.
+#[test]
+fn new_session_root_follows_the_selection_and_refuses_instead_of_falling_back() {
+    use synthesis_desktop::tui_view::driver::new_session_root;
+    let rows = [
+        ("/a", "/work/a", true),
+        ("/b", "/work/b", true),
+        ("/gone", "/work/gone", false),
+    ];
+    // the selected row wins over the folder the engine happens to be in
+    assert_eq!(
+        new_session_root(rows, "/b", Some(("/a", "/work/a"))).unwrap(),
+        PathBuf::from("/work/b")
+    );
+    // a deleted folder is refused, with the folder named
+    let e = new_session_root(rows, "/gone", Some(("/a", "/work/a"))).unwrap_err();
+    assert!(
+        e.contains("no longer exists") && e.contains("/work/gone"),
+        "{e}"
+    );
+    // no selection: refused, whatever is running
+    let e = new_session_root(rows, "", Some(("/a", "/work/a"))).unwrap_err();
+    assert!(e.contains("no workspace is selected"), "{e}");
+    // a selection that names nothing in the list, while another folder runs: refused (the old code
+    // started the session in the running engine's folder here)
+    let e = new_session_root(rows, "/stale", Some(("/a", "/work/a"))).unwrap_err();
+    assert!(e.contains("not in the list"), "{e}");
+    // the running session's own folder is the selected one and not listed yet: that folder
+    assert_eq!(
+        new_session_root(rows, "/fresh", Some(("/fresh", "/work/fresh"))).unwrap(),
+        PathBuf::from("/work/fresh")
+    );
+    // nothing running and nothing listed
+    assert!(
+        new_session_root(rows, "/stale", None)
+            .unwrap_err()
+            .contains("still starting")
+    );
 }
