@@ -80,6 +80,25 @@ fn matches_pattern(pattern: &str, path: &str) -> Option<bool> {
     glob_matches(pattern.as_bytes(), path.as_bytes())
 }
 
+/// A denied pattern in the BROAD reading, a superset of what the permission engine denies: `**/`
+/// stands for zero or more segments AND is read as a prefix glob (`**/.env` matches the root-level
+/// `.env`, `**/*.lock` matches `x.lock`, `src/**/secret` matches `src/secret` and `src/asecret`);
+/// a pattern ending in `/**` also denies the directory itself, and any entry denies what is
+/// under it. Undecidable counts as a match. (An allow stays narrow: it needs the plain match.)
+fn denied_by(pattern: &str, path: &str) -> bool {
+    let broad = pattern.replace("**/", "**");
+    let mut forms = vec![pattern.to_owned(), broad.clone()];
+    for p in [pattern, broad.as_str()] {
+        forms.push(format!("{p}/**"));
+        if let Some(dir) = p.strip_suffix("/**") {
+            forms.push(dir.to_owned());
+        }
+    }
+    forms
+        .iter()
+        .any(|f| matches_pattern(f, path).unwrap_or(true))
+}
+
 /// The changed files (worktree-relative, `/` separators) that the envelope does not allow. A file
 /// is allowed only if the envelope allows `repo.write`, some `allowed_paths` pattern matches it and
 /// no `denied_paths` entry matches it (a denied entry also denies what is under it). A path the
@@ -96,11 +115,7 @@ pub fn outside_envelope(changed: &[String], env: &Envelope) -> Vec<String> {
                 && !p.starts_with('/')
                 && !p.contains('\\')
                 && p.split('/').all(|s| !s.is_empty() && s != "." && s != "..");
-            let denied = env.denied_paths.iter().any(|d| {
-                let d = lower(d);
-                matches_pattern(&d, &p).unwrap_or(true)
-                    || matches_pattern(&format!("{d}/**"), &p).unwrap_or(true)
-            });
+            let denied = env.denied_paths.iter().any(|d| denied_by(&lower(d), &p));
             let allowed = env
                 .allowed_paths
                 .iter()
@@ -174,6 +189,31 @@ mod tests {
             ],
             "case is folded: SRC/A.RS is src/a.rs"
         );
+        // a deny is read broadly: root-level files, `**/` as a prefix glob, the directory itself
+        let e2 = env(
+            &["**"],
+            &["**/.env", "**/*.lock", "src/**/secret", "vendor/**"],
+            true,
+        );
+        assert_eq!(
+            out(
+                &[
+                    ".env",
+                    "a/b/.env",
+                    "x.lock",
+                    "deep/y.lock",
+                    "src/secret",
+                    "src/asecret",
+                    "src/a/secret",
+                    "vendor",
+                    "vendor/x"
+                ],
+                &e2
+            )
+            .len(),
+            9
+        );
+        assert!(out(&["src/other", "README.md", "env"], &e2).is_empty());
         // not allowed to write at all: every change is outside
         assert_eq!(
             out(&["src/a.rs"], &env(&["src/**"], &[], false)),

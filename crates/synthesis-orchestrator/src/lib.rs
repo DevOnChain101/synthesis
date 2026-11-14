@@ -11,6 +11,7 @@
 mod alloc;
 mod decision;
 mod envelope;
+mod gitsafe;
 mod host;
 mod planner;
 mod proc;
@@ -24,9 +25,13 @@ mod verify;
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
+pub use gitsafe::{
+    ChangeReport, Entry, Scratch, change_flags, changed_files, file_edits, fresh_checkout,
+    inspect_change,
+};
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
-pub use proc::{ChildState, StateFn, kill_verified};
+pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError};
 pub use recover::{RecoveryReport, recover_attempts};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};
@@ -40,5 +45,4 @@ pub use sched::{
 };
 pub use verify::{
     CheckRun, CheckRunner, IndependentVerifier, SCOPE_CHECK, SandboxRunner, VerifyError,
-    change_flags, changed_files, file_edits, fresh_checkout,
 };

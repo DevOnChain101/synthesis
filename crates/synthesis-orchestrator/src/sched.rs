@@ -120,6 +120,9 @@ pub trait Verifier {
     fn busy(&self) -> bool {
         false
     }
+
+    /// The walk is cancelled or shutting down: stop background work now.
+    fn cancel(&mut self) {}
 }
 
 /// No verifier yet: items stay in `verifying` ("unverified handoff"). The walk ends as
@@ -309,6 +312,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         self.running = still;
 
         if cancel.is_set() {
+            self.verifier.cancel();
             return self.finish_cancel(w, rep);
         }
 
@@ -682,6 +686,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
     /// frees the work item). Called on every way out of [`Scheduler::run_until`]; a scheduler that
     /// is dropped instead stops them through the handles' own drop.
     pub fn shutdown(&mut self, w: &mut OutcomeWriter, why: &str) {
+        self.verifier.cancel();
         for (_, mut h) in std::mem::take(&mut self.running) {
             self.host.abort(w, &mut h, why);
         }

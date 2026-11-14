@@ -282,3 +282,8 @@ External event adapters and inbox (the design's GitHub PR, AC-14); remote worker
 - PR-05 and PR-08 together carry most of the risk; do not merge PR-05 without the flag.
 - The desktop job and `design_tests` are the slowest and flakiest gates; the plan keeps the engine testable without them.
 - Estimates do not include owner review latency or CI reruns of known flaky jobs (`docs/STATUS.md`).
+
+## Owner decisions recorded during PR-09 review (not decided silently)
+
+- **User-configured git filters (git-lfs and similar) at verification time: DISABLED.** The independent checkout is made through a scratch repository that never reads the user's repository config, so no filter driver runs on the host outside the sandbox. A repository that needs LFS content for its checks verifies those files as pointers (the check will usually fail or be flagged); enabling filters would need an explicit, per-contract opt-in decided by the owner.
+- **Wording of "independent".** "Independent" = the repository's own frozen checks exit 0 on a clean checkout of attacker-writable code, under a sandbox, run by the host. It is not "the requirement was tested". Use this wording in UIs and docs; a flagged change escalates to a person.

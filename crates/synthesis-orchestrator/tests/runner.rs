@@ -387,6 +387,7 @@ fn a_stale_worker_cannot_write_through_a_wrong_fence_or_after_it_was_superseded(
         env_fingerprint: "fp".into(),
         artifact: None,
         fence: 1,
+        flags: vec![],
     };
     assert!(
         w.record_evidence(&late)

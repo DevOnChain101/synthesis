@@ -104,6 +104,7 @@ impl Verifier for EvidenceVerifier {
             env_fingerprint: "fp".into(),
             artifact: None,
             fence: attempt.map_or(0, |a| a.fence),
+            flags: vec![],
         };
         let attempts = w.list_attempts(&item.id)?;
         if let Some(last) = attempts.last() {
@@ -1236,6 +1237,9 @@ struct FakeRunner {
     problem: Option<String>,
     enforcing: bool,
     delay: Duration,
+    output: Vec<u8>,
+    /// What the same check prints at the base commit (its checkout dir is named `base`).
+    base_output: Option<Vec<u8>>,
     ran_in: Mutex<Vec<(PathBuf, bool)>>,
 }
 
@@ -1246,6 +1250,8 @@ impl FakeRunner {
             problem: None,
             enforcing: true,
             delay: Duration::ZERO,
+            output: b"check output\n".to_vec(),
+            base_output: None,
             ran_in: Mutex::new(vec![]),
         })
     }
@@ -1266,9 +1272,21 @@ impl CheckRunner for FakeRunner {
         _: &std::path::Path,
         check: &ContractCheck,
         _: Duration,
-        _: &AtomicBool,
+        stop: &AtomicBool,
     ) -> CheckRun {
-        std::thread::sleep(self.delay);
+        let until = std::time::Instant::now() + self.delay;
+        while std::time::Instant::now() < until && !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return CheckRun {
+                id: check.id.clone(),
+                command_hash: String::new(),
+                exit_code: None,
+                problem: Some("verification was stopped".into()),
+                output: vec![],
+            };
+        }
         // what a check would see: the committed tree, with no repository in it
         self.ran_in
             .lock()
@@ -1279,7 +1297,13 @@ impl CheckRunner for FakeRunner {
             command_hash: "unused".into(),
             exit_code: self.exit,
             problem: self.problem.clone(),
-            output: b"check output\n".to_vec(),
+            output: if dir.file_name().is_some_and(|n| n == "base") {
+                self.base_output
+                    .clone()
+                    .unwrap_or_else(|| self.output.clone())
+            } else {
+                self.output.clone()
+            },
         }
     }
 }
@@ -1301,14 +1325,15 @@ fn small_attempts_contract() -> Contract {
     c
 }
 
-fn real_verifier(r: &Rig, c: &Contract, runner: Arc<FakeRunner>) -> IndependentVerifier {
-    IndependentVerifier::new(
+fn real_verifier(w: &OutcomeWriter, r: &Rig, runner: Arc<FakeRunner>) -> IndependentVerifier {
+    IndependentVerifier::for_outcome(
+        w,
         r.repo.clone(),
         r.home.clone(),
-        c.clone(),
         runner,
         Duration::from_secs(30),
     )
+    .expect("the contract is approved")
 }
 
 fn evidence_of(w: &OutcomeWriter) -> Vec<EvidenceRecord> {
@@ -1333,7 +1358,7 @@ fn ac08_an_outcome_is_verified_only_through_independent_evidence() {
     let (mut w, _) = r.fresh_with(&c, &p);
     let s = Script(WRITE_INSIDE.into());
     let runner = FakeRunner::new(Some(0));
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
         .run(&mut w, &clock, Duration::from_millis(30))
         .unwrap();
@@ -1374,7 +1399,7 @@ fn a_write_outside_the_envelope_fails_verification_even_if_the_check_passes() {
     // a shell redirect the permission rules never saw
     let s = Script("echo pwned > README.md".into());
     let runner = FakeRunner::new(Some(0));
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
         .run(&mut w, &clock, Duration::from_millis(30))
         .unwrap();
@@ -1407,7 +1432,7 @@ fn changed_definitions_are_flagged_and_the_outcome_is_not_verified() {
     let (mut w, _) = r.fresh_with(&c, &p);
     let s = Script("mkdir -p src; echo made > src/ok.txt; echo '{\"scripts\":{\"test\":\"true\"}}' > package.json".into());
     let runner = FakeRunner::new(Some(0));
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
         .run(&mut w, &clock, Duration::from_millis(30))
         .unwrap();
@@ -1450,20 +1475,23 @@ fn a_failing_or_stuck_check_and_a_forged_report_never_verify() {
             problem: problem.clone(),
             enforcing: true,
             delay: Duration::ZERO,
+            output: b"check output\n".to_vec(),
+            base_output: None,
             ran_in: Mutex::new(vec![]),
         });
-        let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner), cfg());
+        let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
         let (stop, _) = sched
             .run(&mut w, &clock, Duration::from_millis(30))
             .unwrap();
         assert!(matches!(&stop, Stop::Blocked(_)), "{exit:?}: {stop:?}");
         let ev = evidence_of(&w);
-        let unit = ev.iter().find(|e| e.check_id == "unit").unwrap();
-        assert_ne!(unit.result, "passed");
-        assert_eq!(
-            unit.result,
-            if problem.is_some() { "error" } else { "failed" }
-        );
+        let unit = ev.iter().find(|e| e.check_id == "unit");
+        if problem.is_some() {
+            // a run with no exit status is not evidence: no row, and the same commit can be retried
+            assert!(unit.is_none(), "{ev:?}");
+        } else {
+            assert_eq!(unit.unwrap().result, "failed");
+        }
         assert!(to_verified(&mut w).is_err(), "{exit:?}");
     }
 }
@@ -1480,9 +1508,11 @@ fn without_an_enforcing_sandbox_no_independent_evidence_is_produced() {
         problem: None,
         enforcing: false,
         delay: Duration::ZERO,
+        output: b"check output\n".to_vec(),
+        base_output: None,
         ran_in: Mutex::new(vec![]),
     });
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner.clone()), cfg());
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
         .run(&mut w, &clock, Duration::from_millis(30))
         .unwrap();
@@ -1515,9 +1545,11 @@ fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
         problem: None,
         enforcing: true,
         delay: Duration::from_millis(900),
+        output: b"check output\n".to_vec(),
+        base_output: None,
         ran_in: Mutex::new(vec![]),
     });
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&r, &c, runner), cfg());
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
     let mut slowest = Duration::ZERO;
     let mut waiting_ticks = 0;
     let stop = loop {
@@ -1542,4 +1574,146 @@ fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
         slowest < Duration::from_millis(600),
         "no tick waited for the check: {slowest:?}"
     );
+}
+
+fn cargo_summary(n: u32) -> Vec<u8> {
+    format!("running {n} tests\ntest result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+        .into_bytes()
+}
+
+fn runner_printing(candidate: Vec<u8>, base: Option<Vec<u8>>) -> Arc<FakeRunner> {
+    Arc::new(FakeRunner {
+        exit: Some(0),
+        problem: None,
+        enforcing: true,
+        delay: Duration::ZERO,
+        output: candidate,
+        base_output: base,
+        ran_in: Mutex::new(vec![]),
+    })
+}
+
+#[test]
+fn a_check_that_ran_zero_tests_is_not_evidence_and_fewer_tests_than_the_base_are_flagged() {
+    need_git!();
+    // zero tests: no row (an error is not evidence), the item fails, nothing verifies
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = runner_printing(cargo_summary(0), None);
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert!(matches!(&stop, Stop::Blocked(_)), "{stop:?}");
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("ran no tests")),
+        "{reports:?}"
+    );
+    assert!(evidence_of(&w).iter().all(|e| e.check_id != "unit"));
+    assert!(to_verified(&mut w).is_err());
+
+    // fewer tests than the base commit had: the evidence is flagged and the item fails
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let runner = runner_printing(cargo_summary(3), Some(cargo_summary(5)));
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert!(matches!(&stop, Stop::Blocked(_)), "{stop:?}");
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("flagged") && e.contains("tests_weakened")),
+        "{reports:?}"
+    );
+    assert!(
+        evidence_of(&w)
+            .iter()
+            .any(|e| e.check_id == "unit" && e.flags == ["tests_weakened"])
+    );
+    assert!(to_verified(&mut w).is_err());
+
+    // the same count as the base is fine
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let runner = runner_printing(cargo_summary(5), Some(cargo_summary(5)));
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
+    let (stop, _) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded);
+}
+
+#[test]
+fn a_symlink_or_a_changed_file_mode_fails_the_envelope_check() {
+    need_git!();
+    for (script, what) in [
+        ("mkdir -p src; ln -s /etc/passwd src/link", "src/link"),
+        ("mkdir -p src; echo x > src/run.sh; chmod +x src/run.sh", ""),
+    ] {
+        let r = rig();
+        let (c, p) = verified_contract(&["src/**"]);
+        let (mut w, _) = r.fresh_with(&c, &p);
+        let s = Script(script.into());
+        let mut sched = Scheduler::new(
+            host(&r, &s),
+            real_verifier(&w, &r, FakeRunner::new(Some(0))),
+            cfg(),
+        );
+        let (stop, reports) = sched
+            .run(&mut w, &clock, Duration::from_millis(30))
+            .unwrap();
+        if what.is_empty() {
+            // a new executable file is an addition, not a mode change: it passes the scope
+            assert_eq!(stop, Stop::Succeeded, "{reports:?}");
+        } else {
+            assert!(matches!(&stop, Stop::Blocked(_)), "{stop:?}");
+            assert!(
+                reports
+                    .iter()
+                    .flat_map(|r| &r.errors)
+                    .any(|e| e.contains(what) && e.contains("links")),
+                "{reports:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelling_stops_a_running_verification_promptly() {
+    need_git!();
+    let r = rig();
+    let (c, p) = verified_contract(&["src/**"]);
+    let (mut w, _) = r.fresh_with(&c, &p);
+    let s = Script(WRITE_INSIDE.into());
+    let runner = Arc::new(FakeRunner {
+        exit: Some(0),
+        problem: None,
+        enforcing: true,
+        delay: Duration::from_secs(60),
+        output: vec![],
+        base_output: None,
+        ran_in: Mutex::new(vec![]),
+    });
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
+    while !sched.verifier.busy() {
+        sched.tick(&mut w, clock()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let t0 = std::time::Instant::now();
+    sched.control.cancel.cancel();
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert_eq!(rep.stop, Some(Stop::Cancelled), "{rep:?}");
+    // dropping the scheduler joins the verification thread, which the cancel already stopped
+    drop(sched);
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
 }

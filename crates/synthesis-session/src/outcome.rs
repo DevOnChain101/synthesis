@@ -171,6 +171,9 @@ pub struct EvidenceRecord {
     pub sha256: Option<String>,
     pub fence: i64,
     pub captured_at: String,
+    /// Disqualifying flags written with the row (`definitions_changed`, `tests_weakened`,
+    /// `outside_envelope`, `mode_changed`).
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,7 +331,7 @@ fn decision_row(r: &Row<'_>) -> rusqlite::Result<DecisionRecord> {
     })
 }
 
-const EVIDENCE_COLS: &str = "id,work_item_id,attempt_id,trust_class,producer,subject_commit,check_id,criteria_ids,result,exit_code,sha256,fence,captured_at";
+const EVIDENCE_COLS: &str = "id,work_item_id,attempt_id,trust_class,producer,subject_commit,check_id,criteria_ids,result,exit_code,sha256,fence,captured_at,flags";
 fn evidence_row(r: &Row<'_>) -> rusqlite::Result<EvidenceRecord> {
     let attempt: Option<String> = r.get(2)?;
     Ok(EvidenceRecord {
@@ -345,6 +348,7 @@ fn evidence_row(r: &Row<'_>) -> rusqlite::Result<EvidenceRecord> {
         sha256: r.get(10)?,
         fence: r.get(11)?,
         captured_at: r.get(12)?,
+        flags: serde_json::from_value(json_col(r, 13)?).map_err(bad)?,
     })
 }
 
@@ -1297,7 +1301,18 @@ pub struct NewEvidence {
     pub artifact: Option<(String, String, String)>,
     /// The fence of the attempt that produced it; an older one is rejected (ADR-017).
     pub fence: i64,
+    /// Disqualifying flags, part of the row from the start (and of its MAC): a flag can neither
+    /// be added nor removed later.
+    pub flags: Vec<String>,
 }
+
+/// Flags a row may carry; each one keeps it from satisfying a criterion.
+pub const EVIDENCE_FLAGS: [&str; 4] = [
+    "definitions_changed",
+    "tests_weakened",
+    "outside_envelope",
+    "mode_changed",
+];
 
 impl OutcomeWriter {
     fn new(w: SessionWriter, id: OutcomeId, policy: OutcomePolicy) -> Self {
@@ -1477,10 +1492,6 @@ impl OutcomeWriter {
 
     pub fn record_evidence(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
         self.atomically(|tx| tx.record_evidence(e))
-    }
-
-    pub fn flag_evidence(&mut self, id: &EvidenceId, flag: &str) -> Result<()> {
-        self.atomically(|tx| tx.flag_evidence(id, flag))
     }
 
     /// Stores a check's output as an artifact of the control session (redacted like every text
@@ -1848,10 +1859,8 @@ pub struct OutcomeTx<'a, 'e> {
     now: OffsetDateTime,
 }
 
-/// No flag at all: `definitions_changed`, `tests_weakened` and `outside_envelope` each disqualify.
-const FLAG_FREE: &str = "json_array_length(e.flags) = 0";
-/// The row has its chained `evidence.recorded` event in the control session, with the same
-/// content: a row written by plain SQL (no event) or altered afterwards does not count.
+/// The row has its chained `evidence.recorded` event in the control session with the same content.
+/// Necessary, not sufficient: the MAC below is what makes a row authentic.
 const EVENT_BACKED: &str = "EXISTS (SELECT 1 FROM events ev WHERE ev.type='evidence.recorded' \
    AND ev.session_id=(SELECT control_session_id FROM outcomes WHERE id=e.outcome_id) \
    AND json_extract(ev.payload,'$.evidence_id')=e.id \
@@ -1861,77 +1870,148 @@ const EVENT_BACKED: &str = "EXISTS (SELECT 1 FROM events ev WHERE ev.type='evide
    AND json_extract(ev.payload,'$.result')=e.result \
    AND json_extract(ev.payload,'$.subject_commit')=e.subject_commit \
    AND json_extract(ev.payload,'$.fence')=e.fence \
-   AND json_extract(ev.payload,'$.sha256') IS e.sha256)";
+   AND json_extract(ev.payload,'$.sha256') IS e.sha256 \
+   AND json_extract(ev.payload,'$.command_hash') IS e.command_hash \
+   AND json_extract(ev.payload,'$.exit_code') IS e.exit_code \
+   AND json_extract(ev.payload,'$.env_fingerprint')=e.env_fingerprint \
+   AND json_extract(ev.payload,'$.criteria_ids')=json(e.criteria_ids) \
+   AND json_extract(ev.payload,'$.flags')=json(e.flags))";
 /// The evidence is for the newest attempt of its item (a late one from a superseded attempt
 /// does not count).
 const FENCE_CURRENT: &str = "e.fence >= COALESCE((SELECT MAX(a.fence) FROM attempts a WHERE a.work_item_id=e.work_item_id),0)";
 
-/// The evidence facts of an outcome for the pure verdict: only rows that are backed by their
-/// chained event count.
-fn evidence_facts(
+/// Everything an evidence row says, as text, for its MAC.
+struct EvMac<'a> {
+    id: &'a str,
+    outcome: &'a str,
+    item: &'a str,
+    attempt: &'a str,
+    trust: &'a str,
+    producer: &'a str,
+    commit: &'a str,
+    check: &'a str,
+    command_hash: &'a str,
+    criteria: &'a str,
+    result: &'a str,
+    exit_code: &'a str,
+    env: &'a str,
+    artifact: &'a str,
+    sha: &'a str,
+    fence: &'a str,
+    captured_at: &'a str,
+    flags: &'a str,
+}
+
+impl EvMac<'_> {
+    fn parts(&self) -> [&str; 18] {
+        [
+            self.id,
+            self.outcome,
+            self.item,
+            self.attempt,
+            self.trust,
+            self.producer,
+            self.commit,
+            self.check,
+            self.command_hash,
+            self.criteria,
+            self.result,
+            self.exit_code,
+            self.env,
+            self.artifact,
+            self.sha,
+            self.fence,
+            self.captured_at,
+            self.flags,
+        ]
+    }
+}
+
+/// An evidence row that counts: with a chained event of the same content AND a MAC (under a
+/// subkey of the chain key) over all of its columns, flags included. A writer who cannot read
+/// `chain.key` cannot produce either, and cannot change a column, add or drop a flag, without the
+/// MAC failing.
+struct AuthRow {
+    item: String,
+    fact: synthesis_core::outcome::EvidenceFact,
+}
+
+fn authentic_evidence(
     conn: &Connection,
+    key: &[u8; 32],
     id: &OutcomeId,
-) -> Result<Vec<synthesis_core::outcome::EvidenceFact>> {
+    contract: &Contract,
+) -> Result<Vec<AuthRow>> {
     let mut st = conn.prepare(&format!(
-        "SELECT e.trust_class,e.result,e.subject_commit,e.check_id,e.criteria_ids, \
-                NOT ({FLAG_FREE}), {FENCE_CURRENT} \
+        "SELECT e.id,e.work_item_id,COALESCE(e.attempt_id,''),e.trust_class,e.producer,e.subject_commit, \
+                e.check_id,COALESCE(e.command_hash,''),e.criteria_ids,e.result,COALESCE(e.exit_code,''), \
+                e.env_fingerprint,COALESCE(e.artifact_session_id,'')||'|'||COALESCE(e.artifact_id,''), \
+                COALESCE(e.sha256,''),e.fence,e.captured_at,e.flags,COALESCE(e.mac,''), \
+                {FENCE_CURRENT} \
          FROM evidence e WHERE e.outcome_id=?1 AND {EVENT_BACKED}"
     ))?;
     let rows = st.query_map([id.as_str()], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, bool>(5)?,
-            r.get::<_, bool>(6)?,
-        ))
+        let mut v: Vec<String> = Vec::with_capacity(18);
+        for i in 0..18 {
+            // numbers (exit code, fence) and text are all compared as text
+            v.push(match r.get_ref(i)? {
+                rusqlite::types::ValueRef::Integer(n) => n.to_string(),
+                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            });
+        }
+        Ok((v, r.get::<_, bool>(18)?))
     })?;
     let mut out = vec![];
     for row in rows {
-        let (trust, result, commit, check_id, criteria, flagged, fence_current) = row?;
-        out.push(synthesis_core::outcome::EvidenceFact {
-            trust: serde_json::from_value(Value::String(trust))?,
-            result,
-            commit,
-            check_id,
-            criteria: serde_json::from_str(&criteria)?,
-            flagged,
-            fence_current,
+        let (v, fence_current) = row?;
+        let m = EvMac {
+            id: &v[0],
+            outcome: id.as_str(),
+            item: &v[1],
+            attempt: &v[2],
+            trust: &v[3],
+            producer: &v[4],
+            commit: &v[5],
+            check: &v[6],
+            command_hash: &v[7],
+            criteria: &v[8],
+            result: &v[9],
+            exit_code: &v[10],
+            env: &v[11],
+            artifact: &v[12],
+            sha: &v[13],
+            fence: &v[14],
+            captured_at: &v[15],
+            flags: &v[16],
+        };
+        if !mac_ok(key, "evidence", &m.parts(), &v[17]) {
+            continue; // forged, altered or from an old build: counts for nothing
+        }
+        // a check the contract froze runs that command and no other
+        if let Some(c) = contract.checks.iter().find(|c| c.id == v[6])
+            && v[7] != sha_hex(c.command.as_bytes())
+        {
+            continue;
+        }
+        let flags: Vec<String> = serde_json::from_str(&v[16])?;
+        out.push(AuthRow {
+            item: v[1].clone(),
+            fact: synthesis_core::outcome::EvidenceFact {
+                trust: serde_json::from_value(Value::String(v[3].clone()))?,
+                result: v[9].clone(),
+                commit: v[5].clone(),
+                check_id: v[6].clone(),
+                criteria: serde_json::from_str(&v[8])?,
+                flagged: !flags.is_empty(),
+                fence_current,
+            },
         });
     }
     Ok(out)
 }
 
 impl OutcomeTx<'_, '_> {
-    /// Marks an evidence row as disqualified (`definitions_changed`, `tests_weakened`,
-    /// `outside_envelope`): the only change evidence allows after it is written. A flag is added,
-    /// never removed.
-    pub fn flag_evidence(&mut self, id: &EvidenceId, flag: &str) -> Result<()> {
-        if !matches!(
-            flag,
-            "definitions_changed" | "tests_weakened" | "outside_envelope"
-        ) {
-            return Err(Error::Invalid(format!("unknown evidence flag {flag:?}")));
-        }
-        let n = self.et.tx.execute(
-            "UPDATE evidence SET flags=json_insert(flags,'$[#]',?3) WHERE id=?1 AND outcome_id=?2 \
-               AND NOT EXISTS (SELECT 1 FROM json_each(flags) f WHERE f.value=?3)",
-            params![id.as_str(), self.id.as_str(), flag],
-        )?;
-        let exists: bool = self.et.tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM evidence WHERE id=?1 AND outcome_id=?2)",
-            params![id.as_str(), self.id.as_str()],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(Error::NotFound(format!("evidence {id}")));
-        }
-        let _ = n;
-        Ok(())
-    }
-
     pub fn emit(&mut self, kind: &str, payload: Value) -> Result<u64> {
         self.et.append(kind, payload)
     }
@@ -2332,29 +2412,27 @@ impl OutcomeTx<'_, '_> {
         let Some(commit) = commit else {
             return Ok(false);
         };
-        Ok(self.et.tx.query_row(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.work_item_id=?1 \
-                   AND e.trust_class='independent_check' AND e.result='passed' \
-                   AND e.subject_commit=?2 AND {FLAG_FREE} AND {FENCE_CURRENT} AND {EVENT_BACKED})"
-            ),
-            params![item.as_str(), commit],
-            |r| r.get(0),
-        )?)
+        let o = self.outcome()?;
+        let contract = self.stored_contract(o.contract_version)?;
+        Ok(
+            authentic_evidence(self.et.tx, self.et.key(), self.id, &contract)?
+                .iter()
+                .any(|r| {
+                    r.item == item.as_str()
+                        && r.fact.trust == TrustClass::IndependentCheck
+                        && r.fact.result == "passed"
+                        && r.fact.commit == commit
+                        && !r.fact.flagged
+                        && r.fact.fence_current
+                }),
+        )
     }
 
-    /// **Do not enable outcomes for real attempts before PR-08 and PR-09.** This MVP verdict reads
-    /// unsigned evidence rows (a writer without the key can INSERT a passing `independent_check`
-    /// row), nothing produces `definitions_changed` yet, the evidence `command_hash` is not bound to
-    /// a frozen command, and "the attempt that ended last" is unsound for parallel branches. PR-09
-    /// replaces it with a verdict over signed `evidence.recorded` events.
-    ///
-    /// The verdict (ADR-020 section 4, MVP rule), computed from the rows (a criterion with
-    /// `check_ids` is only satisfied by evidence of one of those checks): every item of the
-    /// current plan `succeeded`, and every mandatory criterion has evidence of the class it
-    /// requires (`independent_check`, or `human_review` for a manual one), passed, for the
-    /// candidate commit, from the current fence, without `definitions_changed`, and no failed
-    /// evidence of that class for the same commit. The pure verdict function of PR-09 replaces this.
+    /// The verdict for `Verified` and `Completed` (ADR-020 section 4): every item of the current
+    /// plan `succeeded`, and the pure `synthesis_core::outcome::verdict` over the AUTHENTIC evidence
+    /// rows (event-backed, MAC valid, the frozen command's hash) says every mandatory criterion
+    /// `Passed` for the candidate commit. The candidate is still "the newest finished attempt of
+    /// the plan", which is unsound for parallel branches until integration exists.
     fn verdict(&self, o: &OutcomeRecord) -> Result<bool> {
         let Some(pv) = o.plan_version else {
             return Ok(false);
@@ -2372,7 +2450,10 @@ impl OutcomeTx<'_, '_> {
             return Ok(false);
         };
         let contract = self.stored_contract(o.contract_version)?;
-        let facts = evidence_facts(self.et.tx, self.id)?;
+        let facts: Vec<_> = authentic_evidence(self.et.tx, self.et.key(), self.id, &contract)?
+            .into_iter()
+            .map(|r| r.fact)
+            .collect();
         Ok(synthesis_core::outcome::verdict(&contract, &facts, &commit).verified)
     }
 
@@ -3131,6 +3212,13 @@ impl OutcomeTx<'_, '_> {
                 "evidence needs a result, a check and a commit".into(),
             ));
         }
+        let mut flags = e.flags.clone();
+        flags.sort();
+        flags.dedup();
+        if let Some(bad) = flags.iter().find(|f| !EVIDENCE_FLAGS.contains(&f.as_str())) {
+            return Err(Error::Invalid(format!("unknown evidence flag {bad:?}")));
+        }
+        let flags_json = serde_json::to_string(&flags)?;
         self.load_item(&e.work_item_id)?;
         let newest: Option<i64> = self.et.tx.query_row(
             "SELECT MAX(fence) FROM attempts WHERE work_item_id=?1",
@@ -3187,10 +3275,39 @@ impl OutcomeTx<'_, '_> {
         };
         let id = EvidenceId::parse(&new_uuid()).map_err(refuse)?;
         let criteria = serde_json::to_string(&e.criteria_ids)?;
+        let captured = now();
+        let trust = enum_str(&e.trust_class);
+        let mac_text = {
+            let attempt = e.attempt_id.as_ref().map_or("", AttemptId::as_str);
+            let artifact = format!("{}|{}", art_session.unwrap_or(""), art_id.unwrap_or(""));
+            let exit = e.exit_code.map(|c| c.to_string()).unwrap_or_default();
+            let fence = e.fence.to_string();
+            let m = EvMac {
+                id: id.as_str(),
+                outcome: self.id.as_str(),
+                item: e.work_item_id.as_str(),
+                attempt,
+                trust: &trust,
+                producer: &e.producer,
+                commit: &e.subject_commit,
+                check: &e.check_id,
+                command_hash: e.command_hash.as_deref().unwrap_or(""),
+                criteria: &criteria,
+                result: &e.result,
+                exit_code: &exit,
+                env: &e.env_fingerprint,
+                artifact: &artifact,
+                sha: sha.unwrap_or(""),
+                fence: &fence,
+                captured_at: &captured,
+                flags: &flags_json,
+            };
+            mac(self.et.key(), "evidence", &m.parts())
+        };
         let inserted = self.et.tx.execute(
             "INSERT INTO evidence(id,outcome_id,work_item_id,attempt_id,trust_class,producer,subject_commit,check_id,command_hash,\
-               criteria_ids,result,exit_code,env_fingerprint,artifact_session_id,artifact_id,sha256,fence,captured_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) \
+               criteria_ids,result,exit_code,env_fingerprint,artifact_session_id,artifact_id,sha256,fence,captured_at,flags,mac) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) \
              ON CONFLICT DO NOTHING",
             params![
                 id.as_str(),
@@ -3210,14 +3327,16 @@ impl OutcomeTx<'_, '_> {
                 art_id,
                 sha,
                 e.fence,
-                now()
+                captured,
+                flags_json,
+                mac_text
             ],
         )? == 1;
         if !inserted {
             let (existing, same): (String, bool) = self.et.tx.query_row(
                 "SELECT id, trust_class=?5 AND producer=?6 AND command_hash IS ?7 AND criteria_ids=?8 \
                    AND result=?9 AND exit_code IS ?10 AND env_fingerprint=?11 AND sha256 IS ?12 \
-                   AND artifact_id IS ?13 AND fence=?14 \
+                   AND artifact_id IS ?13 AND fence=?14 AND flags=?15 \
                  FROM evidence WHERE COALESCE(attempt_id,'')=?1 AND work_item_id=?2 AND check_id=?3 AND subject_commit=?4",
                 params![
                     e.attempt_id.as_ref().map_or("", AttemptId::as_str),
@@ -3233,7 +3352,8 @@ impl OutcomeTx<'_, '_> {
                     e.env_fingerprint,
                     sha,
                     art_id,
-                    e.fence
+                    e.fence,
+                    flags_json
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
@@ -3249,7 +3369,10 @@ impl OutcomeTx<'_, '_> {
             ev::EVIDENCE_RECORDED,
             json!({"evidence_id": id, "work_item_id": e.work_item_id, "check_id": e.check_id,
                    "trust_class": e.trust_class, "result": e.result, "sha256": sha,
-                   "subject_commit": e.subject_commit, "fence": e.fence}),
+                   "subject_commit": e.subject_commit, "fence": e.fence,
+                   "command_hash": e.command_hash, "exit_code": e.exit_code,
+                   "env_fingerprint": e.env_fingerprint, "criteria_ids": e.criteria_ids,
+                   "flags": flags}),
         )?;
         Ok((id, true))
     }

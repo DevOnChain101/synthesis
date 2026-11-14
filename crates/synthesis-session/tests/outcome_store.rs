@@ -293,6 +293,7 @@ fn evidence(
         env_fingerprint: "fp".into(),
         artifact: None,
         fence: attempt.map_or(0, |a| a.fence),
+        flags: vec![],
     }
 }
 
@@ -340,6 +341,17 @@ fn finish_items(
     w: &mut OutcomeWriter,
     items: &[(String, WorkItemId)],
 ) -> String {
+    finish_items_with(e, store, w, items, &|ev| ev)
+}
+
+/// [`finish_items`] with the verify item's evidence changed by `fin`.
+fn finish_items_with(
+    e: &Env,
+    store: &Store,
+    w: &mut OutcomeWriter,
+    items: &[(String, WorkItemId)],
+    fin: &dyn Fn(NewEvidence) -> NewEvidence,
+) -> String {
     let (inspect, implement, test) = (
         item(items, "inspect"),
         item(items, "implement"),
@@ -363,7 +375,7 @@ fn finish_items(
     ] {
         item_to(w, test, to).unwrap();
     }
-    w.record_evidence(&evidence(test, None, "cafe01", &["c1", "c2"]))
+    w.record_evidence(&fin(evidence(test, None, "cafe01", &["c1", "c2"])))
         .unwrap();
     item_to(w, test, WorkItemState::Succeeded).unwrap();
     "cafe01".into()
@@ -1022,9 +1034,14 @@ fn history_cannot_be_deleted_or_rewritten_with_plain_sql() {
     ] {
         assert!(db.execute(sql, []).is_err(), "{sql}");
     }
-    // evidence flags (stale marking) are the one allowed change
-    db.execute("UPDATE evidence SET flags='[\"stale\"]'", [])
-        .unwrap();
+    // evidence is wholly immutable (flags and mac included)
+    for col in ["flags='[\"stale\"]'", "mac='x'"] {
+        assert!(
+            db.execute(&format!("UPDATE evidence SET {col}"), [])
+                .is_err(),
+            "{col}"
+        );
+    }
     // a decision cannot be resolved by a bare UPDATE: no approval row
     let force = "UPDATE decisions SET state='approved', revision=revision+1 WHERE id=?1";
     let err = db.execute(force, [d.id.as_str()]).unwrap_err();
@@ -1132,7 +1149,14 @@ fn a_failed_stale_or_flagged_check_blocks_verified_even_when_every_item_succeede
         let e = env();
         let store = e.v5();
         let (mut w, items) = ready_outcome(&e, &store);
-        finish_items(&e, &store, &mut w, &items);
+        if case == "flagged" {
+            finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+                criteria_ids: vec![],
+                ..ev
+            });
+        } else {
+            finish_items(&e, &store, &mut w, &items);
+        }
         let test = item(&items, "test").clone();
         match case {
             // a failing check of the required class for the same commit wins over the pass
@@ -1144,7 +1168,11 @@ fn a_failed_stale_or_flagged_check_blocks_verified_even_when_every_item_succeede
             }
             // the runner flagged changed definitions: that evidence does not count
             "flagged" => {
-                e.db().execute("UPDATE evidence SET flags='[\"definitions_changed\"]' WHERE work_item_id=?1", [test.as_str()]).unwrap();
+                // the only evidence that covers the criteria carries a flag from the start
+                let mut f = evidence(&test, None, "cafe01", &["c1", "c2"]);
+                f.check_id = "lint".into();
+                f.flags = vec!["definitions_changed".into()];
+                w.record_evidence(&f).unwrap();
             }
             // the only evidence for c2 names a commit that is not the candidate
             _ => {
@@ -2756,73 +2784,185 @@ fn n4_a_criterion_with_check_ids_needs_evidence_from_one_of_them() {
     }
 }
 
-/// PR-09: a row written by plain SQL has no chained `evidence.recorded` event; it does not count
-/// for the verdict (ADR-020 integrity note), a row written through the store does.
+fn try_verify(w: &mut OutcomeWriter) -> Result<(), String> {
+    go(w, OutcomeState::Verifying);
+    w.transition_outcome(rev_of(w), OutcomeState::Verified, None, NONE)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The events of the control session with a payload of this evidence id, rewritten to match a
+/// forged row (what a writer without the key can do).
+fn forge_event(e: &Env, w: &OutcomeWriter, id: &str, row: &serde_json::Value) {
+    e.db()
+        .execute(
+            "INSERT INTO events(session_id,seq,v,ts,type,payload) VALUES (?1,999999,1,'2026-01-01T00:00:00.000Z','evidence.recorded',?2)",
+            rusqlite::params![w.control_session_id(), serde_json::json!({
+                "evidence_id": id, "work_item_id": row["item"], "check_id": row["check"],
+                "trust_class": "independent_check", "result": "passed", "sha256": null,
+                "subject_commit": "cafe01", "fence": 0, "command_hash": null, "exit_code": 0,
+                "env_fingerprint": "x", "criteria_ids": ["c1","c2"], "flags": []
+            }).to_string()],
+        )
+        .unwrap();
+}
+
+const FORGED_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// PR-09 review (M1): a passing row written by plain SQL, even with a hand-written event of the
+/// same content, has no valid MAC and counts for nothing; the same facts written through the
+/// store do verify.
 #[test]
-fn a_passing_row_without_its_chained_event_does_not_verify() {
+fn a_forged_row_and_event_without_the_mac_do_not_verify() {
     let e = env();
     let store = e.v5();
     let (mut w, items) = ready_outcome(&e, &store);
+    // genuine evidence for the item itself, covering no criterion
+    finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+        criteria_ids: vec![],
+        ..ev
+    });
+    let test = item(&items, "test").clone();
+    e.db()
+        .execute(
+            "INSERT INTO evidence(id,outcome_id,work_item_id,trust_class,producer,subject_commit,check_id,\
+               criteria_ids,result,exit_code,env_fingerprint,fence,captured_at,mac) \
+             VALUES (?1,?2,?3,'independent_check','independent_runner','cafe01','forged',\
+               '[\"c1\",\"c2\"]','passed',0,'x',0,'2026-01-01T00:00:00.000Z',?4)",
+            rusqlite::params![FORGED_ID, w.id().as_str(), test.as_str(), "ab".repeat(32)],
+        )
+        .unwrap();
+    forge_event(
+        &e,
+        &w,
+        FORGED_ID,
+        &serde_json::json!({"item": test.as_str(), "check": "forged"}),
+    );
+    let err = try_verify(&mut w).unwrap_err();
+    assert!(err.contains("verdict"), "{err}");
+    // the same facts through the store verify
+    w.record_evidence(&NewEvidence {
+        check_id: "unit-real".into(),
+        ..evidence(&test, None, "cafe01", &["c1", "c2"])
+    })
+    .unwrap();
+    w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+        .unwrap();
+}
+
+/// A genuine row altered afterwards (the trigger dropped by a writer with file access) fails its
+/// MAC: rewritten `criteria_ids` (the event rewritten too) and a removed flag both count for nothing.
+#[test]
+fn rewritten_criteria_and_removed_flags_break_the_mac() {
+    // criteria_ids rewritten
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+        criteria_ids: vec![],
+        ..ev
+    });
+    let db = e.db();
+    db.execute_batch("DROP TRIGGER evidence_immutable;")
+        .unwrap();
+    db.execute(
+        "UPDATE evidence SET criteria_ids='[\"c1\",\"c2\"]' WHERE work_item_id=?1 AND check_id='unit'",
+        [item(&items, "test").as_str()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE events SET payload=json_set(payload,'$.criteria_ids',json('[\"c1\",\"c2\"]')) \
+         WHERE type='evidence.recorded' AND json_extract(payload,'$.work_item_id')=?1",
+        [item(&items, "test").as_str()],
+    )
+    .unwrap();
+    let err = try_verify(&mut w).unwrap_err();
+    assert!(err.contains("verdict"), "{err}");
+
+    // a flag removed
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    // the flagged row cannot even make its item succeed: flagged evidence is not evidence
+    go(&mut w, OutcomeState::Running);
     let (inspect, implement, test) = (
         item(&items, "inspect"),
         item(&items, "implement"),
         item(&items, "test"),
     );
-    go(&mut w, OutcomeState::Running);
     let a1 = run_agent(&e, &store, &mut w, inspect, "att-inspect", "base0");
     w.record_evidence(&evidence(inspect, Some(&a1), "base0", &[]))
         .unwrap();
     item_to(&mut w, inspect, WorkItemState::Succeeded).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let a2 = run_agent(&e, &store, &mut w, implement, "att-implement", "cafe01");
-    w.record_evidence(&evidence(implement, Some(&a2), "cafe01", &[]))
-        .unwrap();
-    item_to(&mut w, implement, WorkItemState::Succeeded).unwrap();
-    for to in [
-        WorkItemState::Ready,
-        WorkItemState::Leased,
-        WorkItemState::Running,
-        WorkItemState::Verifying,
-    ] {
-        item_to(&mut w, test, to).unwrap();
-    }
-    // genuine evidence for the item, covering no criterion
-    w.record_evidence(&evidence(test, None, "cafe01", &[]))
-        .unwrap();
-    item_to(&mut w, test, WorkItemState::Succeeded).unwrap();
-    // the forged row: plain SQL, a passing independent check for both criteria, no event
-    e.db()
-        .execute(
-            "INSERT INTO evidence(id,outcome_id,work_item_id,trust_class,producer,subject_commit,check_id,\
-               criteria_ids,result,exit_code,env_fingerprint,fence,captured_at) \
-             VALUES ('11111111-1111-4111-8111-111111111111',?1,?2,'independent_check','independent_runner','cafe01','forged',\
-               '[\"c1\",\"c2\"]','passed',0,'x',0,'2026-01-01T00:00:00.000Z')",
-            rusqlite::params![w.id().as_str(), test.as_str()],
-        )
-        .unwrap();
-    go(&mut w, OutcomeState::Verifying);
-    let err = w
-        .transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
-        .unwrap_err();
-    assert!(err.to_string().contains("verdict"), "{err}");
-    // the same facts written through the store do verify
     w.record_evidence(&NewEvidence {
-        check_id: "unit-real".into(),
-        ..evidence(test, None, "cafe01", &["c1", "c2"])
+        flags: vec!["definitions_changed".into()],
+        ..evidence(implement, Some(&a2), "cafe01", &["c1"])
     })
     .unwrap();
-    w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+    assert!(
+        item_to(&mut w, implement, WorkItemState::Succeeded).is_err(),
+        "flagged evidence"
+    );
+    let db = e.db();
+    db.execute_batch("DROP TRIGGER evidence_immutable;")
         .unwrap();
-    // evidence can be flagged afterwards, never unflagged: the verdict then fails
-    let id = w
-        .list_evidence(w.id())
-        .unwrap()
-        .into_iter()
-        .find(|r| r.check_id == "unit-real")
-        .unwrap()
-        .id;
-    w.flag_evidence(&id, "definitions_changed").unwrap();
-    assert!(w.flag_evidence(&id, "no_such_flag").is_err());
+    db.execute(
+        "UPDATE evidence SET flags='[]' WHERE work_item_id=?1",
+        [implement.as_str()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE events SET payload=json_set(payload,'$.flags',json('[]')) WHERE type='evidence.recorded' AND json_extract(payload,'$.work_item_id')=?1",
+        [implement.as_str()],
+    )
+    .unwrap();
+    // un-flagged by SQL: still not authentic, so the item still cannot succeed
+    assert!(
+        item_to(&mut w, implement, WorkItemState::Succeeded).is_err(),
+        "un-flagged by UPDATE"
+    );
+    let _ = test;
+}
+
+/// A check the contract froze is satisfied only by evidence of THAT command (its hash).
+#[test]
+fn evidence_must_carry_the_hash_of_the_frozen_command() {
+    use sha2::{Digest, Sha256};
+    use synthesis_core::outcome::ContractCheck;
+    let hex = |b: &[u8]| -> String {
+        Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    };
+    for (hash, ok) in [
+        (Some(hex(b"cargo test")), true),
+        (Some(hex(b"true")), false),
+        (None, false),
+    ] {
+        let e = env();
+        let store = e.v5();
+        let mut c = contract();
+        c.checks = vec![ContractCheck {
+            id: "frozen".into(),
+            command: "cargo test".into(),
+        }];
+        c.criteria[0].check_ids = vec!["frozen".into()];
+        c.criteria[1].check_ids = vec!["frozen".into()];
+        let (mut w, items) = ready_outcome_with(&e, &store, &c);
+        finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+            criteria_ids: vec![],
+            ..ev
+        });
+        let test = item(&items, "test").clone();
+        let mut f = evidence(&test, None, "cafe01", &["c1", "c2"]);
+        f.check_id = "frozen".into();
+        f.command_hash = hash.clone();
+        w.record_evidence(&f).unwrap();
+        assert_eq!(try_verify(&mut w).is_ok(), ok, "{hash:?}");
+    }
 }
 
 /// N6: the decision expiry is bounded by the settings.

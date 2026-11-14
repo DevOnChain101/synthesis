@@ -11,7 +11,6 @@ use std::path::Path;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::AtomicBool;
-#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -246,6 +245,7 @@ fn without_a_confining_sandbox_the_runner_refuses() {
     let r = SandboxRunner {
         home: std::env::temp_dir(),
         backend: Box::new(NullSandbox),
+        state: child_state,
     };
     let e = r.fingerprint().unwrap_err();
     assert!(e.to_string().contains("enforcing sandbox"), "{e}");
@@ -286,4 +286,382 @@ fn without_a_confining_sandbox_the_runner_refuses() {
         .result(),
         "failed"
     );
+}
+
+// ---- review fixes: the checkout does not trust the repository's config, refs or attributes ----
+
+#[test]
+fn a_filter_in_the_repos_config_does_not_run_at_checkout_and_replace_refs_are_ignored() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::write(repo.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    fs::write(repo.join("a.txt"), "real\n").unwrap();
+    let commit = commit_all(repo, "work");
+    // the filter driver is defined AFTER the commit, in the repository's own config
+    let marker = r.base.join("filter-ran");
+    g(
+        repo,
+        &[
+            "config",
+            "filter.evil.smudge",
+            &format!("touch '{}'; cat", marker.display()),
+        ],
+    );
+    // positive control: plain git in the user's repository DOES run it
+    let ctl = r.base.join("control/");
+    fs::create_dir_all(&ctl).unwrap();
+    g(
+        repo,
+        &[
+            "checkout-index",
+            "-f",
+            "-a",
+            &format!("--prefix={}", ctl.display()),
+        ],
+    );
+    assert!(marker.exists(), "the control shows the filter would run");
+    fs::remove_file(&marker).unwrap();
+    // a replace ref that swaps the blob: plain git shows the replacement
+    let blob = g(repo, &["rev-parse", &format!("{commit}:a.txt")]);
+    fs::write(r.base.join("fake.txt"), "FAKE\n").unwrap();
+    let fake = g(
+        repo,
+        &[
+            "hash-object",
+            "-w",
+            r.base.join("fake.txt").to_str().unwrap(),
+        ],
+    );
+    g(repo, &["replace", &blob, &fake]);
+    let dest = r.base.join("verify-src");
+    fresh_checkout(repo, &commit, &dest).unwrap();
+    assert!(
+        !marker.exists(),
+        "the repository's filter ran at verification checkout"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("a.txt")).unwrap(),
+        "real\n",
+        "a replace ref changed the tree"
+    );
+}
+
+#[test]
+fn an_entry_inside_a_git_directory_is_refused() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::write(repo.join("a.txt"), "x\n").unwrap();
+    let blob = g(repo, &["hash-object", "-w", "a.txt"]);
+    // `.git` as a tree entry cannot be made with `git add`: build it with plumbing
+    let sub = Command::new("git")
+        .current_dir(repo)
+        .args(["mktree"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let mut sub = sub;
+    sub.stdin
+        .take()
+        .unwrap()
+        .write_all(format!("100644 blob {blob}\tconfig\n").as_bytes())
+        .unwrap();
+    let subtree = String::from_utf8(sub.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    if subtree.is_empty() {
+        println!("SKIP: this git cannot build the tree");
+        return;
+    }
+    let root = Command::new("git")
+        .current_dir(repo)
+        .args(["mktree", "--missing"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut root = root;
+    root.stdin
+        .take()
+        .unwrap()
+        .write_all(format!("040000 tree {subtree}\t.git\n").as_bytes())
+        .unwrap();
+    let tree = String::from_utf8(root.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    if tree.is_empty() {
+        println!("SKIP: this git refuses to build a .git entry");
+        return;
+    }
+    let commit = g(
+        repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit-tree",
+            &tree,
+            "-m",
+            "evil",
+        ],
+    );
+    let dest = r.base.join("evil-src");
+    let e = fresh_checkout(repo, &commit, &dest).unwrap_err();
+    assert!(e.to_string().contains(".git"), "{e}");
+    assert!(!dest.join(".git").exists());
+}
+
+// ---- review fixes: the weakening scan reads the diff, not what a file's lines claim ----
+
+#[test]
+fn a_forged_diff_header_line_cannot_hide_a_removed_assertion() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    // the second line, once removed, reads in a patch like the header of another file
+    fs::write(
+        repo.join("tests/calc.test.js"),
+        "-- a/src/x.js\nassert.equal(add(1,2),3);\nassert.equal(add(2,2),4);\n",
+    )
+    .unwrap();
+    let base = commit_all(repo, "base");
+    fs::write(
+        repo.join("tests/calc.test.js"),
+        "assert.equal(add(2,2),4);\n",
+    )
+    .unwrap();
+    let weak = commit_all(repo, "weaken");
+    // the user's own config must not change how the diff is read either
+    g(repo, &["config", "diff.noprefix", "true"]);
+    g(
+        repo,
+        &["config", concat!("diff.mne", "monicPrefix"), "true"],
+    );
+    assert_eq!(
+        change_flags(repo, &base, &weak).unwrap(),
+        ["tests_weakened"]
+    );
+    let edits = file_edits(repo, &base, &weak).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].path, "tests/calc.test.js");
+    assert!(
+        edits[0].removed.iter().any(|l| l.contains("add(1,2)")),
+        "{edits:?}"
+    );
+    // a path with a space is read from the raw listing, not from a header
+    fs::write(
+        repo.join("tests/my test.test.js"),
+        "assert(1);\nassert(2);\n",
+    )
+    .unwrap();
+    let b2 = commit_all(repo, "spaced");
+    fs::write(repo.join("tests/my test.test.js"), "assert(2);\n").unwrap();
+    let w2 = commit_all(repo, "spaced weak");
+    assert_eq!(change_flags(repo, &b2, &w2).unwrap(), ["tests_weakened"]);
+}
+
+#[test]
+fn removed_inline_tests_in_source_files_are_flagged() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn f() -> i32 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    fn one() { assert_eq!(super::f(), 1); }\n}\n",
+    )
+    .unwrap();
+    let base = commit_all(repo, "base");
+    // the test and its assertion are deleted from a non-test path
+    fs::write(repo.join("src/lib.rs"), "pub fn f() -> i32 { 2 }\n").unwrap();
+    let c = commit_all(repo, "gone");
+    assert_eq!(change_flags(repo, &base, &c).unwrap(), ["tests_weakened"]);
+    // an unrelated source edit is not flagged
+    fs::write(repo.join("src/lib.rs"), "pub fn f() -> i32 { 3 }\n").unwrap();
+    let c2 = commit_all(repo, "plain");
+    assert!(change_flags(repo, &c, &c2).unwrap().is_empty());
+}
+
+#[test]
+fn build_scripts_toolchain_pins_and_file_modes_are_flagged() {
+    need_git!();
+    let r = rig();
+    let repo = &r.repo;
+    fs::write(repo.join("run.sh"), "echo\n").unwrap();
+    let base = commit_all(repo, "base");
+    for f in ["build.rs", "conftest.py", "rust-toolchain.toml"] {
+        fs::write(repo.join(f), "x\n").unwrap();
+        let c = commit_all(repo, f);
+        assert!(
+            change_flags(repo, &base, &c)
+                .unwrap()
+                .contains(&"definitions_changed"),
+            "{f}"
+        );
+    }
+    fs::create_dir_all(repo.join(".cargo")).unwrap();
+    fs::write(repo.join(".cargo/config.toml"), "x\n").unwrap();
+    let c = commit_all(repo, "cargo");
+    assert!(
+        change_flags(repo, &base, &c)
+            .unwrap()
+            .contains(&"definitions_changed")
+    );
+    // an exec-bit flip is a mode change
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let before = g(repo, &["rev-parse", "HEAD"]);
+        fs::set_permissions(repo.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        g(repo, &["update-index", "--chmod=+x", "run.sh"]);
+        let m = commit_all(repo, "chmod");
+        assert_eq!(change_flags(repo, &before, &m).unwrap(), ["mode_changed"]);
+    }
+}
+
+// ---- review fixes: process handling ----
+
+#[cfg(unix)]
+fn always_gone(_: u32) -> ChildState {
+    ChildState::Gone
+}
+
+#[cfg(unix)]
+fn pid_from(file: &Path) -> Option<u32> {
+    for _ in 0..200 {
+        if let Some(p) = fs::read_to_string(file)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            return Some(p);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_check_reaped_behind_our_back_is_never_signalled_and_a_normal_exit_kills_its_group() {
+    need_git!();
+    let r = rig();
+    let probe = SandboxRunner::detect(r.home.clone());
+    if probe.fingerprint().is_err() {
+        println!("SKIP: no confining sandbox");
+        return;
+    }
+    fs::write(r.repo.join("a.txt"), "x\n").unwrap();
+    let commit = commit_all(&r.repo, "c");
+    let scratch = r.base.join("proc");
+    let src = scratch.join("src");
+    fresh_checkout(&r.repo, &commit, &src).unwrap();
+    let stop = AtomicBool::new(false);
+
+    // the group of a check that exits is killed while the leader is still ours: a background
+    // child it leaves behind does not survive the check
+    let real = SandboxRunner::detect(r.home.clone());
+    let bg = real.run(
+        &src,
+        &scratch,
+        &check("bg", "sleep 60 & echo $! > \"$TMPDIR/bg.pid\"; exit 0"),
+        Duration::from_secs(20),
+        &stop,
+    );
+    assert_eq!(bg.result(), "passed", "{:?}", bg.problem);
+    let bgpid = pid_from(&scratch.join("tmp-bg/bg.pid")).expect("pid file");
+    let t0 = std::time::Instant::now();
+    while alive(bgpid) && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !alive(bgpid),
+        "the background child of an exited check survived"
+    );
+
+    // injected state: the kernel "reaped" the child, so nothing may be sent to that pid, even on a timeout
+    let gone = SandboxRunner {
+        state: always_gone,
+        ..SandboxRunner::detect(r.home.clone())
+    };
+    let run = gone.run(
+        &src,
+        &scratch,
+        &check("gone", "echo $$ > \"$TMPDIR/gone.pid\"; sleep 60"),
+        Duration::from_millis(100),
+        &stop,
+    );
+    assert_eq!(run.result(), "error");
+    let pid = pid_from(&scratch.join("tmp-gone/gone.pid")).expect("pid file");
+    assert!(alive(pid), "a pid that was reported gone was signalled");
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+}
+
+// ---- review fixes: only an approved contract is verified ----
+
+#[test]
+fn a_verifier_is_only_made_for_the_approved_current_contract() {
+    need_git!();
+    use std::sync::Arc;
+    use synthesis_core::WorkspaceContext;
+    use synthesis_core::outcome::OutcomeState;
+    use synthesis_session::outcome::{Effects, NewOutcome};
+    let r = rig();
+    let runner: Arc<dyn CheckRunner> = Arc::new(SandboxRunner::detect(r.home.clone()));
+    // approved: fine
+    let (w, _) = r.fresh();
+    assert!(
+        IndependentVerifier::for_outcome(
+            &w,
+            r.repo.clone(),
+            r.home.clone(),
+            runner.clone(),
+            Duration::from_secs(5)
+        )
+        .is_ok()
+    );
+    // a new contract version is not approved until a person approves it
+    let ws = WorkspaceContext::open("w", &r.repo, &r.repo, &[], r.base.join("cart"), "pg").unwrap();
+    let mut w = r
+        .store
+        .create_outcome(NewOutcome {
+            workspace: &ws,
+            base_commit: r.head.clone(),
+            contract: &contract(),
+            policy: &policy(),
+        })
+        .unwrap();
+    let rev = w.get_outcome(w.id()).unwrap().revision;
+    w.transition_outcome(
+        rev,
+        OutcomeState::ContractPending,
+        None,
+        &Effects::default(),
+    )
+    .unwrap();
+    let err = IndependentVerifier::for_outcome(
+        &w,
+        r.repo.clone(),
+        r.home.clone(),
+        runner,
+        Duration::from_secs(5),
+    )
+    .err()
+    .expect("unapproved");
+    assert!(err.to_string().contains("not approved"), "{err}");
 }
