@@ -414,9 +414,9 @@ impl WorktreeManager {
     /// branch `synthesis/<session_id>` with its tip at or above `base`, it is adopted (a partial
     /// checkout of an interrupted `worktree add` is reset to `base`); a leftover that is empty is
     /// removed and the allocation redone; anything else (another branch, commits that are not
-    /// ours, unregistered content) is refused, never overwritten. Calling this for a started
-    /// attempt would reset its files: the orchestrator calls it only while the attempt is
-    /// `starting`.
+    /// ours, unregistered content) is refused, never overwritten. A worktree whose worker was
+    /// launched ([`Self::mark_started`]) is refused outright: this resets files, so the guard is
+    /// that marker (and the allocation's outbox row being `done`), not the caller's good manners.
     pub fn allocate_unstarted(
         &self,
         source: &Path,
@@ -442,25 +442,28 @@ impl WorktreeManager {
         let common = self.common_dir(&repo_root)?;
         let g = &self.git;
         let state = with_repo_lock(&common, || -> Result<Option<GitInfo>> {
-            // admin entries whose directory is gone (a crash after `worktree add` began)
-            g.out(&repo_root, &["worktree", "prune"])?;
+            // A branch left by an interrupted `worktree add` is ours only if it has no work on it.
+            // Nothing is pruned repo-wide: other worktrees (the user's, other attempts') keep their
+            // registration even when their directory is missing right now (an unplugged volume).
+            let clear_branch = || -> Result<()> {
+                let r = format!("refs/heads/{branch}");
+                let tip = g.run(&repo_root, &["rev-parse", "--verify", "--quiet", &r], None)?;
+                if tip.status.success() {
+                    let tip = String::from_utf8_lossy(&tip.stdout).trim().to_string();
+                    if tip != base {
+                        return Err(Error::Refused(format!(
+                            "branch {branch} exists with commits of its own; not reusing it"
+                        )));
+                    }
+                    g.out(&repo_root, &["branch", "-D", &branch])?;
+                }
+                Ok(())
+            };
             let entry = fs::symlink_metadata(&wt);
             let registered = self.registered(&repo_root, &wt)?;
             match (entry, registered) {
                 (Err(_), None) => {
-                    // nothing on disk: a branch left by the interrupted add is ours only if it
-                    // has no work on it
-                    let r = format!("refs/heads/{branch}");
-                    let tip = g.run(&repo_root, &["rev-parse", "--verify", "--quiet", &r], None)?;
-                    if tip.status.success() {
-                        let tip = String::from_utf8_lossy(&tip.stdout).trim().to_string();
-                        if tip != base {
-                            return Err(Error::Refused(format!(
-                                "branch {branch} exists with commits of its own; not reusing it"
-                            )));
-                        }
-                        g.out(&repo_root, &["branch", "-D", &branch])?;
-                    }
+                    clear_branch()?;
                     Ok(None)
                 }
                 (Ok(m), None) => {
@@ -478,12 +481,15 @@ impl WorktreeManager {
                         )));
                     }
                     fs::remove_dir_all(&wt)?;
+                    clear_branch()?;
                     Ok(None)
                 }
-                (Err(_), Some(_)) => Err(Error::Refused(format!(
-                    "{} is registered but missing",
-                    wt.display()
-                ))),
+                (Err(_), Some(_)) => {
+                    // registered, directory gone: drop only THIS path's admin entry
+                    self.remove_admin_entry(&common, &wt)?;
+                    clear_branch()?;
+                    Ok(None)
+                }
                 (Ok(m), Some((head, on))) => {
                     if !m.is_dir() || m.is_symlink() {
                         return Err(Error::Refused(format!(
@@ -528,6 +534,12 @@ impl WorktreeManager {
             let a = self.create_at(source, session_id, artifact_root, false, Some(&base))?;
             return Ok((a, Origin::Created));
         };
+        // the guard that matters: once the worker was launched nothing resets this tree
+        if self.is_started(&info) {
+            return Err(Error::Refused(format!(
+                "the worker of {session_id} has started; its worktree is not reset or reused"
+            )));
+        }
         let pinned = self.pinned(&info)?;
         // an interrupted checkout leaves a partial tree at a clean HEAD: bring it to the base
         let tip = pinned.out_str(&info.worktree, &["rev-parse", "HEAD"])?;
@@ -560,6 +572,24 @@ impl WorktreeManager {
         ))
     }
 
+    /// Removes the admin entry `<common>/worktrees/<name>` whose `gitdir` file names exactly
+    /// `<path>/.git`; any other entry is left alone.
+    fn remove_admin_entry(&self, common: &Path, path: &Path) -> Result<()> {
+        let want = path.join(".git");
+        let Ok(dirs) = fs::read_dir(common.join("worktrees")) else {
+            return Ok(());
+        };
+        for d in dirs.filter_map(|d| d.ok()) {
+            let Ok(text) = fs::read_to_string(d.path().join("gitdir")) else {
+                continue;
+            };
+            if Path::new(text.trim()) == want && d.file_type().is_ok_and(|t| t.is_dir()) {
+                fs::remove_dir_all(d.path())?;
+            }
+        }
+        Ok(())
+    }
+
     /// `(HEAD, branch ref)` when `path` is a registered worktree of `repo_root`.
     fn registered(
         &self,
@@ -589,6 +619,30 @@ impl WorktreeManager {
             }
         }
         Ok(None)
+    }
+
+    /// Records that the worker of this attempt has been launched. From then on
+    /// [`Self::allocate_unstarted`] refuses to touch the worktree (it would reset files). The
+    /// marker lives in the worktree's git admin dir, outside the tree the agent writes.
+    pub fn mark_started(&self, info: &GitInfo) -> Result<()> {
+        self.pinned(info)?;
+        fs::write(info.git_dir.join(STARTED_MARKER), b"started\n")?;
+        Ok(())
+    }
+
+    pub fn is_started(&self, info: &GitInfo) -> bool {
+        fs::symlink_metadata(info.git_dir.join(STARTED_MARKER)).is_ok()
+    }
+
+    /// Is `worktree` inside this manager's worktrees directory for `repo_root`?
+    pub fn is_managed(&self, repo_root: &Path, worktree: &Path) -> bool {
+        let Ok(dir) = self.worktree_path(repo_root, "x") else {
+            return false;
+        };
+        let (Some(parent), Ok(wt)) = (dir.parent(), synthesis_core::canonicalize(worktree)) else {
+            return false;
+        };
+        wt.starts_with(parent) && wt != parent
     }
 
     /// The worktree's current commit (pinned to the recorded git dir).
@@ -947,6 +1001,9 @@ fn nul_split_until_blank(b: &[u8]) -> Vec<String> {
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
 }
+
+/// File in a worktree's git admin dir: the worker has been launched.
+const STARTED_MARKER: &str = "synt-started";
 
 /// How long to wait for another process that is adding or removing a worktree of the same
 /// repository.

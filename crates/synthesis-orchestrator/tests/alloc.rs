@@ -157,15 +157,12 @@ impl Rig {
 
     /// A running outcome whose work items `one` and `two` are leased.
     fn outcome(&self) -> (OutcomeWriter, WorkItemId, WorkItemId) {
-        let ws = WorkspaceContext::open(
-            "w",
-            &self.repo,
-            &self.repo,
-            &[],
-            self.base.join("cart"),
-            "pg",
-        )
-        .unwrap();
+        self.outcome_in(&self.repo)
+    }
+
+    fn outcome_in(&self, root: &Path) -> (OutcomeWriter, WorkItemId, WorkItemId) {
+        let ws =
+            WorkspaceContext::open("w", root, root, &[], self.base.join("cart"), "pg").unwrap();
         let mut w = self
             .store
             .create_outcome(NewOutcome {
@@ -487,6 +484,7 @@ fn native_windows_and_a_folder_that_is_not_a_repository_are_refused_clearly() {
 
     let plain = r.base.join("plain");
     fs::create_dir_all(&plain).unwrap();
+    let (mut w, one, _) = r.outcome_in(&plain);
     let spec = AllocSpec {
         source: &plain,
         ..r.spec(&one, 1)
@@ -680,4 +678,107 @@ fn retention_is_seven_days_by_default_and_only_for_parsable_times() {
     assert!(retention_due(ended, at(30, 0), 7));
     assert!(!retention_due("garbage", at(400, 0), 7));
     assert!(!retention_due("", at(400, 0), 7));
+}
+
+/// F1: an allocation does not run, fail or burn tries on rows of other kinds or other keys.
+#[test]
+fn allocate_leaves_other_outbox_rows_alone() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, two) = r.outcome();
+    let other_kind = NewOutbox {
+        idempotency_key: "verify:1".into(),
+        kind: OutboxKind::VerifierRun,
+        payload: serde_json::json!({}),
+    };
+    // another item's pending worktree.create, with a payload that would fail if it ran
+    let other_item = NewOutbox {
+        idempotency_key: format!("worktree.create:{two}:1"),
+        kind: OutboxKind::WorktreeCreate,
+        payload: serde_json::json!({"session_id": "not-a-uuid"}),
+    };
+    w.atomically(|tx| {
+        tx.enqueue(&other_kind)?;
+        tx.enqueue(&other_item)
+    })
+    .unwrap();
+    for _ in 0..3 {
+        r.allocator()
+            .allocate(&mut w, &r.spec(&one, 1), now())
+            .unwrap();
+    }
+    let rows = w.list_outbox(w.id()).unwrap();
+    let by = |k: &str| {
+        rows.iter()
+            .find(|x| x.idempotency_key == k)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (by("verify:1").state, by("verify:1").tries),
+        (OutboxState::Pending, 0)
+    );
+    let k = format!("worktree.create:{two}:1");
+    assert_eq!((by(&k).state, by(&k).tries), (OutboxState::Pending, 0));
+}
+
+#[test]
+fn the_source_must_be_the_outcomes_repository_and_a_removed_worktree_says_so() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, two) = r.outcome();
+    let other = r.base.join("other-repo");
+    fs::create_dir_all(&other).unwrap();
+    g(&other, &["init", "-q"]);
+    fs::write(other.join("x"), "x").unwrap();
+    g(&other, &["add", "."]);
+    g(&other, &["commit", "-qm", "x"]);
+    let spec = AllocSpec {
+        source: &other,
+        ..r.spec(&one, 1)
+    };
+    let err = r.allocator().allocate(&mut w, &spec, now()).unwrap_err();
+    assert!(err.to_string().contains("outcome's repository"), "{err}");
+    assert!(w.list_outbox(w.id()).unwrap().is_empty());
+    assert_eq!(g(&other, &["worktree", "list"]).lines().count(), 1);
+    // a stored row naming another repository is not followed either
+    let mut forged = intent(&r, &two, 1, &uuid_like(9));
+    forged.payload["source"] = serde_json::json!(other.to_str().unwrap());
+    w.atomically(|tx| tx.enqueue(&forged)).unwrap();
+    let err = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&two, 1), now())
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("different effect") || msg.contains("outcome's repository"),
+        "{msg}"
+    );
+    assert_eq!(g(&other, &["worktree", "list"]).lines().count(), 1);
+    // a finished attempt whose worktree was removed: a clear error that names the branch
+    let e = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), now())
+        .unwrap();
+    w.transition_attempt(
+        &e.attempt.id,
+        e.attempt.revision,
+        AttemptState::Lost,
+        &AttemptEnd::default(),
+        &Effects::default(),
+    )
+    .unwrap();
+    let lost = w.list_attempts(&one).unwrap().remove(0);
+    assert_eq!(
+        cleanup_attempt(&r.wm, &mut w, &lost, &e.git).unwrap(),
+        Cleanup::Removed
+    );
+    let err = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), now())
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("was removed") && err.to_string().contains("synthesis/"),
+        "{err}"
+    );
 }

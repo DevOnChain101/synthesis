@@ -2075,6 +2075,7 @@ fn a_crash_between_commit_and_dispatch_replays_the_effect_exactly_once() {
     let run = w
         .run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: true,
@@ -2092,6 +2093,7 @@ fn a_crash_between_commit_and_dispatch_replays_the_effect_exactly_once() {
     let run = w
         .run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: true,
@@ -2118,7 +2120,10 @@ fn a_crash_after_the_effect_but_before_its_receipt_is_reconciled_not_repeated() 
     )
     .unwrap();
     let log = RefCell::new(vec![]);
-    let claimed = w.claim_outbox(OffsetDateTime::now_utc()).unwrap().unwrap();
+    let claimed = w
+        .claim_outbox(OffsetDateTime::now_utc(), &OutboxFilter::all())
+        .unwrap()
+        .unwrap();
     assert_eq!(
         (claimed.state, claimed.tries),
         (OutboxState::Dispatching, 1)
@@ -2129,6 +2134,7 @@ fn a_crash_after_the_effect_but_before_its_receipt_is_reconciled_not_repeated() 
     let run = w
         .run_outbox(
             OffsetDateTime::now_utc(),
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: true,
@@ -2154,7 +2160,9 @@ fn a_dispatching_row_whose_effect_never_happened_backs_off_then_runs_again() {
     let id = w.id().clone();
     w.new_attempt(&it, 1, "att-1", "local-inproc", &with_worktree_effect("k"))
         .unwrap();
-    w.claim_outbox(OffsetDateTime::now_utc()).unwrap().unwrap();
+    w.claim_outbox(OffsetDateTime::now_utc(), &OutboxFilter::all())
+        .unwrap()
+        .unwrap();
     drop(w);
     let log = RefCell::new(vec![]);
     let mut w = store.open_outcome(&id, &policy()).unwrap();
@@ -2162,6 +2170,7 @@ fn a_dispatching_row_whose_effect_never_happened_backs_off_then_runs_again() {
     let run = w
         .run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: true,
@@ -2180,6 +2189,7 @@ fn a_dispatching_row_whose_effect_never_happened_backs_off_then_runs_again() {
     let run = w
         .run_outbox(
             now + time::Duration::minutes(5),
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: true,
@@ -2206,13 +2216,14 @@ fn restart_applies_the_try_cap_to_rows_that_keep_dying() {
     for _ in 0..OUTBOX_MAX_TRIES {
         let mut w = store.open_outcome(&id, &policy()).unwrap();
         now += time::Duration::hours(1);
-        if w.claim_outbox(now).unwrap().is_none() {
+        if w.claim_outbox(now, &OutboxFilter::all()).unwrap().is_none() {
             break;
         }
         drop(w); // dies right after claiming, every time
         let mut w = store.open_outcome(&id, &policy()).unwrap();
         w.run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: false,
@@ -2244,7 +2255,10 @@ fn only_a_dispatching_row_can_be_completed_or_failed() {
     // pending: neither is allowed
     assert!(w.complete_outbox(&rid, "forged receipt").is_err());
     assert!(w.fail_outbox(&rid, OffsetDateTime::now_utc(), "x").is_err());
-    let row = w.claim_outbox(OffsetDateTime::now_utc()).unwrap().unwrap();
+    let row = w
+        .claim_outbox(OffsetDateTime::now_utc(), &OutboxFilter::all())
+        .unwrap()
+        .unwrap();
     w.complete_outbox(&row.id, "ok").unwrap();
     // done: a late completion or failure changes nothing
     assert!(w.complete_outbox(&rid, "again").is_err());
@@ -2350,6 +2364,7 @@ fn a_malformed_outbox_row_is_skipped_with_a_diagnostic_not_fatal() {
     let run = w
         .run_outbox(
             OffsetDateTime::now_utc(),
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: false,
@@ -2397,6 +2412,7 @@ fn failures_back_off_and_stop_after_the_cap() {
     let r = w
         .run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: false,
@@ -2408,11 +2424,15 @@ fn failures_back_off_and_stop_after_the_cap() {
     let row = w.list_outbox(&id).unwrap().remove(0);
     assert_eq!(row.state, OutboxState::Pending);
     assert!(row.next_at.is_some());
-    assert!(w.claim_outbox(now).unwrap().is_none(), "not due yet");
+    assert!(
+        w.claim_outbox(now, &OutboxFilter::all()).unwrap().is_none(),
+        "not due yet"
+    );
     for _ in 0..OUTBOX_MAX_TRIES {
         now += time::Duration::hours(1);
         w.run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: false,
@@ -2430,6 +2450,7 @@ fn failures_back_off_and_stop_after_the_cap() {
     let r = w
         .run_outbox(
             now,
+            &OutboxFilter::all(),
             &mut World {
                 log: &log,
                 probe_sees_it: false,
@@ -2883,5 +2904,71 @@ fn n9_a_v5_database_without_the_ddl_revision_marker_is_refused_loudly() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// A dispatcher handles the kinds (and the one key) it names; other rows are not touched and
+/// no try is consumed on them.
+#[test]
+fn an_outbox_filter_leaves_other_kinds_and_keys_alone() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, _) = ready_outcome(&e, &store);
+    let id = w.id().clone();
+    let mk = |kind, key: &str| NewOutbox {
+        idempotency_key: key.into(),
+        kind,
+        payload: json!({}),
+    };
+    w.atomically(|tx| {
+        tx.enqueue(&mk(OutboxKind::VerifierRun, "v1"))?;
+        tx.enqueue(&mk(OutboxKind::WorktreeCreate, "wt1"))?;
+        tx.enqueue(&mk(OutboxKind::WorktreeCreate, "wt2"))
+    })
+    .unwrap();
+    let log = RefCell::new(vec![]);
+    let now = OffsetDateTime::now_utc();
+    let kinds = [OutboxKind::WorktreeCreate];
+    // only the one key of the one kind runs
+    let run = w
+        .run_outbox(
+            now,
+            &OutboxFilter::one(&kinds, "wt2"),
+            &mut World {
+                log: &log,
+                probe_sees_it: false,
+                fail: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(run.done, 1);
+    assert_eq!(*log.borrow(), ["wt2"]);
+    // a failing effect for the filtered kind does not burn tries on the verifier row
+    let run = w
+        .run_outbox(
+            now,
+            &OutboxFilter::kinds(&kinds),
+            &mut World {
+                log: &log,
+                probe_sees_it: false,
+                fail: true,
+            },
+        )
+        .unwrap();
+    assert_eq!((run.done, run.retry_later), (0, 1));
+    let rows = w.list_outbox(&id).unwrap();
+    let by = |k: &str| {
+        rows.iter()
+            .find(|r| r.idempotency_key == k)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!((by("v1").state, by("v1").tries), (OutboxState::Pending, 0));
+    assert_eq!((by("wt2").state, by("wt2").tries), (OutboxState::Done, 1));
+    assert_eq!(by("wt1").tries, 1);
+    // an empty kind list handles nothing
+    assert_eq!(
+        w.claim_outbox(now, &OutboxFilter::kinds(&[])).unwrap(),
+        None
     );
 }

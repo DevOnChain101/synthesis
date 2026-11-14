@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use synthesis_core::outcome::WorkItemId;
 use synthesis_core::{ParentRef, PermissionMode, WorkspaceContext};
 use synthesis_session::outcome::{
-    AttemptRecord, Effects, NewOutbox, OutboxEffect, OutboxKind, OutboxRecord, OutboxState,
-    OutcomeWriter,
+    AttemptRecord, Effects, NewOutbox, OutboxEffect, OutboxFilter, OutboxKind, OutboxRecord,
+    OutboxState, OutcomeWriter,
 };
 use synthesis_session::{Error as StoreError, NewSession, Store};
 use synthesis_workspace::{Error as WsError, GitInfo, Origin, WorktreeManager};
@@ -123,6 +123,17 @@ impl Allocator<'_> {
         if self.platform.native_windows {
             return Err(AllocError::NativeWindows);
         }
+        // the folder the worktree is made from is the outcome's recorded repository, whatever the
+        // caller or a stored row says
+        let outcome_root = PathBuf::from(w.get_outcome(w.id())?.repo_root);
+        let same = |a: &Path, b: &Path| {
+            synthesis_core::canonicalize(a).ok() == synthesis_core::canonicalize(b).ok()
+        };
+        if !same(spec.source, &outcome_root) {
+            return Err(AllocError::Effect(
+                "the source folder is not the outcome's repository".into(),
+            ));
+        }
         let source = spec
             .source
             .to_str()
@@ -145,7 +156,7 @@ impl Allocator<'_> {
         if let Some(existing) = stored_attempt
             && existing.state != synthesis_core::outcome::AttemptState::Starting
         {
-            return self.env_of(existing, spec.source);
+            return self.env_of(existing, &outcome_root);
         }
         let outbox = NewOutbox {
             idempotency_key: key.clone(),
@@ -163,9 +174,14 @@ impl Allocator<'_> {
             store: self.store,
             worktrees: self.worktrees,
             control_session: w.control_session_id().to_string(),
+            outcome_root: outcome_root.clone(),
             artifact_root: self.artifact_root.clone(),
         };
-        w.run_outbox(now, &mut effect)?;
+        w.run_outbox(
+            now,
+            &OutboxFilter::one(&[OutboxKind::WorktreeCreate], &key),
+            &mut effect,
+        )?;
         let row = w
             .list_outbox(w.id())?
             .into_iter()
@@ -197,11 +213,11 @@ impl Allocator<'_> {
                 })?,
             Err(e) => return Err(e.into()),
         };
-        self.env_of(attempt, spec.source)
+        self.env_of(attempt, &outcome_root)
     }
 
     /// The environment of a stored attempt, rebuilt from its session row without touching files.
-    fn env_of(&self, attempt: AttemptRecord, source: &Path) -> Result<AttemptEnv, AllocError> {
+    fn env_of(&self, attempt: AttemptRecord, repo_root: &Path) -> Result<AttemptEnv, AllocError> {
         let rec = self.store.reader()?.get_session(&attempt.session_id)?;
         let git: GitInfo = rec
             .git_info
@@ -210,6 +226,18 @@ impl Allocator<'_> {
             .ok_or_else(|| {
                 AllocError::Effect("the attempt's session has no worktree recorded".into())
             })?;
+        if !git.worktree.is_dir() {
+            return Err(AllocError::Effect(format!(
+                "the worktree of this attempt was removed ({}); its commits are on branch {}",
+                git.worktree.display(),
+                git.branch
+            )));
+        }
+        if !self.worktrees.is_managed(repo_root, &git.worktree) {
+            return Err(AllocError::Effect(
+                "the recorded worktree is not under the managed worktrees directory".into(),
+            ));
+        }
         let cwd = Path::new(&rec.cwd).to_path_buf();
         let context = WorkspaceContext::open(
             rec.workspace_id.clone(),
@@ -220,7 +248,6 @@ impl Allocator<'_> {
             &attempt.session_id,
         )
         .map_err(|e| AllocError::Workspace(WsError::Invalid(e.to_string())))?;
-        let _ = source;
         let mut context = context;
         context.git_worktree = Some(context.root.clone());
         Ok(AttemptEnv {
@@ -256,6 +283,7 @@ struct WorktreeEffect<'a> {
     store: &'a Store,
     worktrees: &'a WorktreeManager,
     control_session: String,
+    outcome_root: PathBuf,
     artifact_root: PathBuf,
 }
 
@@ -292,6 +320,12 @@ impl OutboxEffect for WorktreeEffect<'_> {
             text("source").ok_or("malformed payload: source")?,
             text("base_commit").ok_or("malformed payload: base_commit")?,
         );
+        // the stored row is data: it must still name the outcome's own repository
+        if synthesis_core::canonicalize(Path::new(&source)).ok()
+            != synthesis_core::canonicalize(&self.outcome_root).ok()
+        {
+            return Err("the recorded source is not the outcome's repository".into());
+        }
         let (alloc, origin) = self
             .worktrees
             .allocate_unstarted(
@@ -304,6 +338,9 @@ impl OutboxEffect for WorktreeEffect<'_> {
         let Some(git) = alloc.git.clone() else {
             return Err(AllocError::NotGit(PathBuf::from(&source)).to_string());
         };
+        if !self.worktrees.is_managed(&git.repo_root, &git.worktree) {
+            return Err("the worktree is not under the managed worktrees directory".into());
+        }
         let new = NewSession {
             id: Some(sid.clone()),
             workspace: &alloc.context,

@@ -1283,3 +1283,144 @@ fn a_directory_that_is_not_a_repository_is_reported_not_given_a_worktree() {
     assert!(a.not_a_git_repo && a.git.is_none());
     assert_eq!(o, Origin::Created);
 }
+
+#[test]
+fn reconcile_never_drops_the_registration_of_other_worktrees() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    // another linked worktree whose directory is missing right now (an unplugged volume)
+    let (other, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "other-wt", art(&f, "o"), &base)
+        .unwrap();
+    let other_dir = other.git.unwrap().worktree;
+    fs::rename(&other_dir, f.base.join("moved-away")).unwrap();
+    // and the user's own linked worktree, same state
+    let user_wt = f.base.join("user-wt");
+    g(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "user-branch",
+            user_wt.to_str().unwrap(),
+        ],
+    );
+    fs::rename(&user_wt, f.base.join("user-away")).unwrap();
+    let (_, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-new", art(&f, "n"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
+    assert!(list.contains(other_dir.to_str().unwrap()), "{list}");
+    assert!(list.contains("user-wt"), "{list}");
+    // this attempt's own stale entry (its directory deleted by hand) is cleared and redone
+    let own = f.base.join("never");
+    let _ = own;
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-stale", art(&f, "s"), &base)
+        .unwrap();
+    let dir = a.git.unwrap().worktree;
+    fs::remove_dir_all(&dir).unwrap();
+    let (b, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-stale", art(&f, "s"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    assert!(b.git.unwrap().worktree.is_dir());
+    let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
+    assert_eq!(list.matches("att-stale").count(), 1, "{list}");
+    assert!(
+        list.contains(other_dir.to_str().unwrap()),
+        "other registrations still there"
+    );
+}
+
+#[test]
+fn a_started_worktree_is_never_reset_or_reused() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-m", art(&f, "m"), &base)
+        .unwrap();
+    let info = a.git.unwrap();
+    assert!(!f.mgr.is_started(&info));
+    f.mgr.mark_started(&info).unwrap();
+    f.mgr.mark_started(&info).unwrap(); // idempotent
+    assert!(f.mgr.is_started(&info));
+    fs::write(info.worktree.join("a.txt"), "agent work\n").unwrap();
+    fs::write(info.worktree.join("new.txt"), "more\n").unwrap();
+    let r = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-m", art(&f, "m"), &base);
+    assert!(
+        matches!(&r, Err(Error::Refused(m)) if m.contains("has started")),
+        "{r:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(info.worktree.join("a.txt")).unwrap(),
+        "agent work\n"
+    );
+    assert!(info.worktree.join("new.txt").exists());
+    // the marker is not in the tree the agent writes
+    assert!(!info.worktree.join("synt-started").exists());
+    assert!(info.git_dir.join("synt-started").exists());
+    // a stranger's GitInfo does not mark anything
+    let mut forged = info.clone();
+    forged.git_dir = f.base.join("elsewhere");
+    assert!(f.mgr.mark_started(&forged).is_err());
+}
+
+#[test]
+fn a_leftover_directory_and_its_empty_branch_do_not_wedge_the_allocation() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-l", art(&f, "l"), &base)
+        .unwrap();
+    let wt = a.git.unwrap().worktree;
+    g(
+        &f.repo,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
+    );
+    // an interrupted add: the branch exists at the base and a `.git`-only directory is left
+    g(&f.repo, &["branch", "-f", "synthesis/att-l", &base]);
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    let (b, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-l", art(&f, "l"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    assert!(b.git.unwrap().worktree.join("a.txt").exists());
+    assert_eq!(
+        g(&f.repo, &["branch", "--list", "synthesis/att-l"])
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn is_managed_means_inside_the_worktrees_directory() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-g", art(&f, "g"), &base)
+        .unwrap();
+    assert!(f.mgr.is_managed(&f.repo, &a.git.unwrap().worktree));
+    assert!(!f.mgr.is_managed(&f.repo, &f.repo));
+    assert!(!f.mgr.is_managed(&f.repo, &f.base));
+    assert!(!f.mgr.is_managed(&f.repo, Path::new("/")));
+}

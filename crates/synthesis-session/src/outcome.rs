@@ -1420,10 +1420,14 @@ impl OutcomeWriter {
     /// Moves the next due `pending` row to `dispatching` (one more try) and returns it. A row
     /// that cannot be read (malformed, written by something else) is marked `failed` with the
     /// reason and skipped, so it cannot block the rest.
-    pub fn claim_outbox(&mut self, now: OffsetDateTime) -> Result<Option<OutboxRecord>> {
+    pub fn claim_outbox(
+        &mut self,
+        now: OffsetDateTime,
+        only: &OutboxFilter<'_>,
+    ) -> Result<Option<OutboxRecord>> {
         let at = ts(now);
         self.atomically(|tx| {
-            for (id, row) in due_pending(tx.et.tx, tx.id, &at)? {
+            for (id, row) in due_pending(tx.et.tx, tx.id, &at, only)? {
                 match row {
                     Ok(mut row) => {
                         tx.et.tx.execute(
@@ -1506,11 +1510,12 @@ impl OutcomeWriter {
     pub fn run_outbox(
         &mut self,
         now: OffsetDateTime,
+        only: &OutboxFilter<'_>,
         effect: &mut dyn OutboxEffect,
     ) -> Result<OutboxRun> {
         let mut run = OutboxRun::default();
         let outcome = self.id.clone();
-        let (stuck, skipped) = dispatching_rows(&self.w.conn, &outcome)?;
+        let (stuck, skipped) = dispatching_rows(&self.w.conn, &outcome, only)?;
         run.skipped = skipped;
         for row in stuck {
             match effect.probe(&row)? {
@@ -1527,7 +1532,7 @@ impl OutcomeWriter {
                 }
             }
         }
-        while let Some(row) = self.claim_outbox(now)? {
+        while let Some(row) = self.claim_outbox(now, only)? {
             match effect.run(&row) {
                 Ok(receipt) => {
                     self.complete_outbox(&row.id, &receipt)?;
@@ -1554,33 +1559,124 @@ fn lenient(r: &Row<'_>) -> rusqlite::Result<LenientRow> {
 }
 
 /// Due `pending` rows, oldest first; a row that does not parse comes back as `Err`.
-fn due_pending(conn: &Connection, outcome: &OutcomeId, at: &str) -> Result<Vec<LenientRow>> {
+fn due_pending(
+    conn: &Connection,
+    outcome: &OutcomeId,
+    at: &str,
+    only: &OutboxFilter<'_>,
+) -> Result<Vec<LenientRow>> {
     let mut st = conn.prepare(&format!(
         "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='pending' \
-         AND (next_at IS NULL OR next_at<=?2) ORDER BY rowid LIMIT 50"
+         AND (next_at IS NULL OR next_at<=?2){} ORDER BY rowid LIMIT 50",
+        only.sql()
     ))?;
-    Ok(st
-        .query_map(params![outcome.as_str(), at], lenient)?
-        .collect::<rusqlite::Result<_>>()?)
+    let rows = match only.key {
+        Some(k) => st.query_map(params![outcome.as_str(), at, k], lenient)?,
+        None => st.query_map(params![outcome.as_str(), at], lenient)?,
+    };
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Rows left `dispatching`, and a diagnostic for each one that could not be read.
 fn dispatching_rows(
     conn: &Connection,
     outcome: &OutcomeId,
+    only: &OutboxFilter<'_>,
 ) -> Result<(Vec<OutboxRecord>, Vec<String>)> {
     let mut st = conn.prepare(&format!(
-        "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='dispatching' \
-         ORDER BY rowid LIMIT {LIST_LIMIT}"
+        "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='dispatching'{} \
+         ORDER BY rowid LIMIT {LIST_LIMIT}",
+        only.sql_key(2)
     ))?;
     let (mut rows, mut skipped) = (vec![], vec![]);
-    for r in st.query_map([outcome.as_str()], lenient)? {
+    let key = only.key.unwrap_or("");
+    let rows_iter = if only.key.is_some() {
+        st.query_map(params![outcome.as_str(), key], lenient)?
+    } else {
+        st.query_map(params![outcome.as_str()], lenient)?
+    };
+    for r in rows_iter {
         match r?.1 {
             Ok(row) => rows.push(row),
             Err(why) => skipped.push(format!("outbox row skipped: {why}")),
         }
     }
     Ok((rows, skipped))
+}
+
+/// Which outbox rows a dispatcher handles. A caller names the kinds (and optionally the one key) it
+/// has an effect for: rows of other kinds are left untouched, no try is consumed on them.
+#[derive(Debug, Clone, Copy)]
+pub struct OutboxFilter<'a> {
+    /// `None`: every kind (including rows of a kind this build does not know, which are parked).
+    pub kinds: Option<&'a [OutboxKind]>,
+    /// `Some`: only the row with this idempotency key.
+    pub key: Option<&'a str>,
+}
+
+impl<'a> OutboxFilter<'a> {
+    pub fn all() -> Self {
+        Self {
+            kinds: None,
+            key: None,
+        }
+    }
+
+    pub fn kinds(kinds: &'a [OutboxKind]) -> Self {
+        Self {
+            kinds: Some(kinds),
+            key: None,
+        }
+    }
+
+    /// Only the row `key` of `kind`.
+    pub fn one(kind: &'a [OutboxKind], key: &'a str) -> Self {
+        Self {
+            kinds: Some(kind),
+            key: Some(key),
+        }
+    }
+
+    fn kind_clause(&self) -> String {
+        match self.kinds {
+            None => String::new(),
+            Some([]) => " AND 0".into(),
+            // the strings are the enum's own constants, never caller text
+            Some(ks) => format!(
+                " AND kind IN ({})",
+                ks.iter()
+                    .map(|k| format!("'{}'", enum_str(k)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+
+    /// Clause for `due_pending` (the key is parameter ?3).
+    fn sql(&self) -> String {
+        format!(
+            "{}{}",
+            self.kind_clause(),
+            if self.key.is_some() {
+                " AND idempotency_key=?3"
+            } else {
+                ""
+            }
+        )
+    }
+
+    /// Clause with the key as parameter `?n`.
+    fn sql_key(&self, n: u8) -> String {
+        format!(
+            "{}{}",
+            self.kind_clause(),
+            if self.key.is_some() {
+                format!(" AND idempotency_key=?{n}")
+            } else {
+                String::new()
+            }
+        )
+    }
 }
 
 /// The side of an outbox effect that knows whether it already happened.
