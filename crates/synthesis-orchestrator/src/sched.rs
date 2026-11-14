@@ -137,7 +137,13 @@ pub struct SchedConfig {
     pub backoff_cap: Duration,
     /// The outcome's cost cap: no worker is started once the attempts' recorded spend reached it.
     pub max_cost_usd: Option<f64>,
+    /// [`Scheduler::run_until`] gives up after this many ticks in a row that reported errors and
+    /// made no progress (nothing leased, nothing settled).
+    pub max_stalled_ticks: u32,
 }
+
+/// Reports kept by [`Scheduler::run_until`]: the last ones (a long walk must not grow without bound).
+pub const MAX_REPORTS: usize = 256;
 
 impl SchedConfig {
     pub fn new(max_parallel: u32, max_attempts: u32) -> Self {
@@ -147,6 +153,7 @@ impl SchedConfig {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(300),
             max_cost_usd: None,
+            max_stalled_ticks: 50,
         }
     }
 
@@ -691,7 +698,8 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         pause_between: Duration,
         deadline: Option<Instant>,
     ) -> Result<(Stop, Vec<TickReport>), SchedError> {
-        let mut reports = vec![];
+        let mut reports: Vec<TickReport> = vec![];
+        let mut stalled = 0u32;
         loop {
             let rep = match self.tick(w, clock()) {
                 Ok(r) => r,
@@ -701,7 +709,22 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
                 }
             };
             let stop = rep.stop.clone();
+            stalled = if !rep.errors.is_empty() && rep.leased.is_empty() && rep.settled.is_empty() {
+                stalled + 1
+            } else {
+                0
+            };
             reports.push(rep);
+            if reports.len() > MAX_REPORTS {
+                reports.remove(0);
+            }
+            if stalled >= self.cfg.max_stalled_ticks
+                && stop.as_ref().is_none_or(|s| *s == Stop::Backoff)
+            {
+                let why = format!("{stalled} ticks in a row with errors and no progress");
+                self.shutdown(w, &why);
+                return Err(SchedError::State(why));
+            }
             match stop {
                 Some(Stop::Backoff) | None => {
                     if deadline.is_some_and(|d| Instant::now() >= d) {

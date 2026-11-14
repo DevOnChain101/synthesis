@@ -2586,10 +2586,16 @@ impl OutcomeTx<'_, '_> {
     /// nothing was spent. Same fence rules; a reservation can be lowered, never raised.
     pub fn release_budget(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
         self.live_attempt(id, fence)?;
-        self.et.tx.execute(
-            "UPDATE attempts SET reserved_usd=0 WHERE id=?1",
+        // a recorded worker pid means a process existed: its reservation stays
+        let n = self.et.tx.execute(
+            "UPDATE attempts SET reserved_usd=0 WHERE id=?1 AND worker_pid IS NULL",
             params![id.as_str()],
         )?;
+        if n == 0 {
+            return Err(Error::Invalid(
+                "a reservation of a worker that was started cannot be released".into(),
+            ));
+        }
         Ok(())
     }
 

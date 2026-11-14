@@ -1166,3 +1166,33 @@ fn an_item_left_in_recovering_by_a_crash_is_freed() {
         .unwrap();
     assert_eq!(stop, Stop::Succeeded, "{:?}", states(&w));
 }
+
+#[test]
+fn a_walk_that_only_reports_errors_gives_up_and_stops_its_workers() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    struct Broken;
+    impl Verifier for Broken {
+        fn verify(
+            &mut self,
+            _: &mut OutcomeWriter,
+            _: &WorkItemRecord,
+        ) -> Result<Verdict, SchedError> {
+            Err(SchedError::State("verifier crashed".into()))
+        }
+    }
+    let s = ByItem {
+        slow: "two",
+        fail: None,
+    };
+    let mut c = cfg();
+    c.max_stalled_ticks = 4;
+    let mut sched = Scheduler::new(host(&r, &s), Broken, c);
+    let err = sched
+        .run(&mut w, &clock, Duration::from_millis(10))
+        .unwrap_err();
+    assert!(err.to_string().contains("no progress"), "{err}");
+    assert_eq!(sched.running_count(), 0);
+    assert!(pids(&w).iter().all(|p| !alive(*p)));
+}

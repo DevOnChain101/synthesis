@@ -102,29 +102,55 @@ pub fn kill_verified(
     Ok(())
 }
 
-/// Has the child exited, without reaping it? While it is not reaped its pid stays ours, so the
-/// final sweep of its tree can run before `wait` (no window for pid reuse). Where SIGCHLD is
-/// ignored the kernel reaps at once and `waitid` answers ECHILD for ever: the child is then
-/// reported as exited once its pid is gone (the exit code is lost, which counts as a failure).
+/// Where a child this process spawned stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildState {
+    Running,
+    /// Exited, not reaped: its pid is still ours, so its tree can be swept before `wait`.
+    ExitedUnreaped,
+    /// Already reaped by the kernel (SIGCHLD is ignored: `waitid` answers ECHILD). The pid may
+    /// belong to someone else by now, so it is never signalled again.
+    Gone,
+}
+
 #[cfg(unix)]
-pub fn exited_unreaped(pid: u32) -> bool {
-    use rustix::io::Errno;
-    use rustix::process::{WaitId, WaitIdOptions, test_kill_process, waitid};
-    let Some(p) = rustix::process::Pid::from_raw(pid as i32) else {
-        return false;
-    };
-    match waitid(
-        WaitId::Pid(p),
-        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-    ) {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(Errno::CHILD) => test_kill_process(p) == Err(Errno::SRCH),
-        Err(_) => false,
+fn state_of(r: Result<Option<()>, rustix::io::Errno>) -> ChildState {
+    match r {
+        Ok(Some(())) => ChildState::ExitedUnreaped,
+        Err(rustix::io::Errno::CHILD) => ChildState::Gone,
+        _ => ChildState::Running,
     }
 }
 
+#[cfg(unix)]
+pub fn child_state(pid: u32) -> ChildState {
+    use rustix::process::{WaitId, WaitIdOptions, waitid};
+    let Some(p) = rustix::process::Pid::from_raw(pid as i32) else {
+        return ChildState::Running;
+    };
+    state_of(
+        waitid(
+            WaitId::Pid(p),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )
+        .map(|o| o.map(|_| ())),
+    )
+}
+
 #[cfg(not(unix))]
-pub fn exited_unreaped(_pid: u32) -> bool {
-    false
+pub fn child_state(_pid: u32) -> ChildState {
+    ChildState::Running
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_the_kernel_already_reaped_is_gone_and_never_signalled() {
+        assert_eq!(state_of(Err(rustix::io::Errno::CHILD)), ChildState::Gone);
+        assert_eq!(state_of(Ok(Some(()))), ChildState::ExitedUnreaped);
+        assert_eq!(state_of(Ok(None)), ChildState::Running);
+        assert_eq!(state_of(Err(rustix::io::Errno::INTR)), ChildState::Running);
+    }
 }

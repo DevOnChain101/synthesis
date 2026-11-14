@@ -484,11 +484,19 @@ impl Runner<'_> {
         cancel: &CancelFlag,
     ) -> Result<Option<WorkerEnd>, RunError> {
         // The tree is swept BEFORE the child is reaped: an unreaped pid cannot be reused.
-        if crate::proc::exited_unreaped(r.pid) {
-            crate::proc::kill_child_tree(self.probe, r.pid);
-            let code = r.child.wait().ok().and_then(|s| s.code());
-            r.reaped = true;
-            return Ok(Some(map_exit(code, r.cancelled, r.wall_hit)));
+        match crate::proc::child_state(r.pid) {
+            crate::proc::ChildState::ExitedUnreaped => {
+                crate::proc::kill_child_tree(self.probe, r.pid);
+                let code = r.child.wait().ok().and_then(|s| s.code());
+                r.reaped = true;
+                return Ok(Some(map_exit(code, r.cancelled, r.wall_hit)));
+            }
+            // reaped behind our back: the exit code is lost (a failure), the pid is not ours
+            crate::proc::ChildState::Gone => {
+                r.reaped = true;
+                return Ok(Some(map_exit(None, r.cancelled, r.wall_hit)));
+            }
+            crate::proc::ChildState::Running => {}
         }
         #[cfg(not(unix))]
         if let Ok(Some(s)) = r.child.try_wait() {

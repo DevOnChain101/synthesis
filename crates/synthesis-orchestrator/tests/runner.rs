@@ -1271,6 +1271,8 @@ fn a_killed_attempt_keeps_its_reservation_and_a_final_usage_lowers_it_but_never_
         )
         .is_err()
     );
+    // a reservation of a worker that was started (its pid is recorded) is not given back
+    assert!(w.release_budget(&env.attempt.id, 1).is_err());
     assert!(w.reserve_budget(&env.attempt.id, 99, 1.0).is_err());
     assert!(w.reserve_budget(&env.attempt.id, 1, f64::NAN).is_err());
     assert!(w.reserve_budget(&env.attempt.id, 1, -1.0).is_err());
