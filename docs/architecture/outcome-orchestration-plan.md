@@ -146,6 +146,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: Low-Medium. Size: M.
 
 ### PR-08 Envelope compiler, gateway, non-interactive attempts
+- **Status (implemented):** `compile_envelope`, `Profile` adds the compiled rules and mode `default`, `record_blocked_decision` (blocked attempts become Decisions), bypass-path tests and the `orch-attempt-*` red-team cases. Not done: the orchestrator-side `OrchGateway`, answering decisions and the one-shot grant (PR-10), checking the commit's files against the envelope (PR-09). See ADR-019 implementation notes.
 - Scope: envelope -> rules/mode/sandbox/budget compile; `OrchGateway`; attempt launch profile (no bypass, no auto judge, no Always, no project trust, no MCP unless listed); `AskUserQuestion` and denials recorded as `needs_decision` (ADR-019 section 2).
 - Crates: `synthesis-orchestrator`, `synthesis-permissions` (only if a hook is missing; prefer none), `synthesis-app`.
 - Tests: golden compile tests; fuzz: no generated allow for any `irreversible.rs` action; red-team cases (threat model) in all four modes; AC-05, AC-06.

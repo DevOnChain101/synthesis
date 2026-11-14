@@ -9,6 +9,8 @@
 //! crate holds no switch of its own, the store's `OutcomePolicy` gate does.
 
 mod alloc;
+mod decision;
+mod envelope;
 mod host;
 mod planner;
 mod proc;
@@ -19,6 +21,8 @@ mod runner;
 mod sched;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
+pub use decision::record_blocked_decision;
+pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
 pub use proc::{ChildState, StateFn, kill_verified};

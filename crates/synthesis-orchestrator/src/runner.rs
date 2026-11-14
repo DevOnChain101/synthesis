@@ -590,6 +590,18 @@ impl Runner<'_> {
                 end.task_status(),
             )?)
         };
+        if end == WorkerEnd::Blocked {
+            // nobody can be asked inside an attempt: what it needed becomes a durable decision
+            let it = w.get_work_item(&attempt.work_item_id)?;
+            crate::record_blocked_decision(
+                self.store,
+                w,
+                &it,
+                attempt,
+                subject.as_deref(),
+                time::OffsetDateTime::now_utc(),
+            )?;
+        }
         let item = settle_item(w, attempt, end)?;
         Ok(Settled {
             end,

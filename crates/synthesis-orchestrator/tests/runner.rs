@@ -659,7 +659,8 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     let prof = Profile::build(PathBuf::from("synt"), &env, &c, &p, 0.0, "goal".into()).unwrap();
     // the smallest of contract and settings; the outcome cap bounds it too
     assert_eq!((prof.max_cost_usd(), prof.max_wall_secs()), (1.5, 600));
-    assert_eq!(prof.permission_mode(), "acceptEdits");
+    // never acceptEdits: that would allow edits outside allowed_paths; writes come from rules
+    assert_eq!(prof.permission_mode(), "default");
     let argv: Vec<String> = prof
         .argv()
         .iter()
@@ -683,7 +684,6 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     // nothing that would loosen the unattended defaults, and the permission mode is a safe one
     for never in [
         "--sandbox",
-        "--network",
         "--allow-host",
         "--trust-project",
         "--approve-mcp",
@@ -693,7 +693,6 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
         "--no-session-store",
         "--no-cost-cap",
         "--peers",
-        "--allow",
         "--allowedTools",
         "bypassPermissions",
         "auto",
@@ -701,6 +700,16 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     ] {
         assert!(!argv.iter().any(|a| a == never), "{never} in {argv:?}");
     }
+    // the only flags the envelope adds: edit rules for the allowed paths, deny rules, network deny
+    let after = |flag: &str| -> Vec<&String> {
+        argv.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| &w[1])
+            .collect()
+    };
+    assert_eq!(after("--allow"), ["Edit(/src/**)"]);
+    assert!(after("--deny").iter().any(|r| *r == "Bash(git push:*)"));
+    assert_eq!(after("--network"), ["deny"]);
     // with no per-attempt caps the outcome cap is the cap: a worker always has one
     let plain = Profile::build(
         PathBuf::from("synt"),
@@ -713,15 +722,12 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     .unwrap();
     assert_eq!(plain.max_cost_usd(), 5.0);
     assert_eq!(plain.max_wall_secs(), DEFAULT_WALL_SECS);
-    // a contract that does not allow writing gets the default mode, never more
+    // a contract that does not allow writing gets no edit rule and an edit deny
     let mut ro = r.contract_for_profile();
     ro.envelope.capabilities.remove(&Capability::RepoWrite);
-    assert_eq!(
-        Profile::build(PathBuf::from("synt"), &env, &ro, &policy(), 0.0, "g".into())
-            .unwrap()
-            .permission_mode(),
-        "default"
-    );
+    let ro = Profile::build(PathBuf::from("synt"), &env, &ro, &policy(), 0.0, "g".into()).unwrap();
+    assert_eq!(ro.permission_mode(), "default");
+    assert!(ro.compiled().allow.is_empty() && ro.compiled().deny.contains(&"Edit".to_string()));
 }
 
 #[test]
@@ -753,6 +759,8 @@ fn only_the_model_and_turn_bounds_can_be_added_to_the_profile() {
         vec!["--sandbox", "off"],
         vec!["--sandbox"],
         vec!["--network", "allow"],
+        vec!["--allow", "Bash"],
+        vec!["--deny", "Edit"],
         vec!["--trust-project", "x"],
         vec!["--approve-mcp", "x"],
         vec!["--allow-host", "x"],

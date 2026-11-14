@@ -174,6 +174,10 @@ fn plan() -> Plan {
 }
 
 fn leased_item(r: &Rig) -> (OutcomeWriter, WorkItemId) {
+    leased_item_with(r, &contract())
+}
+
+fn leased_item_with(r: &Rig, contract: &Contract) -> (OutcomeWriter, WorkItemId) {
     let ws = WorkspaceContext::open("w", &r.repo, &r.repo, &[], r.dir.path().join("cart"), "pg")
         .unwrap();
     let mut policy = OutcomePolicy::new(true, 16, 10, 24);
@@ -183,7 +187,7 @@ fn leased_item(r: &Rig) -> (OutcomeWriter, WorkItemId) {
         .create_outcome(NewOutcome {
             workspace: &ws,
             base_commit: r.head.clone(),
-            contract: &contract(),
+            contract,
             policy: &policy,
         })
         .unwrap();
@@ -220,16 +224,19 @@ fn worker_env(r: &Rig) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     ]
 }
 
-fn run(
-    r: &Rig,
-    script: serde_json::Value,
-) -> (
+type Ran = (
     OutcomeWriter,
     WorkItemId,
     AttemptEnv,
     Result<Settled, RunError>,
-) {
-    let (mut w, it) = leased_item(r);
+);
+
+fn run(r: &Rig, script: serde_json::Value) -> Ran {
+    run_with(r, &contract(), "write hello.txt", script)
+}
+
+fn run_with(r: &Rig, contract: &Contract, prompt: &str, script: serde_json::Value) -> Ran {
+    let (mut w, it) = leased_item_with(r, contract);
     let alloc = Allocator {
         store: &r.store,
         worktrees: &r.wm,
@@ -257,10 +264,10 @@ fn run(
     let profile = Profile::build(
         PathBuf::from(env!("CARGO_BIN_EXE_synt")),
         &env,
-        &contract(),
+        contract,
         &policy,
         0.0,
-        "write hello.txt".into(),
+        prompt.into(),
     )
     .unwrap()
     .with_extra(&["--provider", &format!("fake:{}", script_path.display())])
@@ -525,4 +532,236 @@ fn the_worker_cannot_be_given_a_weaker_profile() {
         "the control session is not an attempt's: {}",
         String::from_utf8_lossy(&o.stderr)
     );
+}
+
+// ---- the gateway: the envelope's rules, non-interactive attempts, the closed bypass paths ----
+
+/// Contract that allows writing only under `src/`.
+fn src_only() -> Contract {
+    let mut c = contract();
+    c.envelope.allowed_paths = vec!["src/**".into()];
+    c
+}
+
+fn write_call(id: &str, path: &str) -> serde_json::Value {
+    json!({"text": "writing", "tools": [{"id": id, "name": "Write", "input": {"file_path": path, "content": "x\n"}}]})
+}
+
+fn done() -> [serde_json::Value; 3] {
+    [
+        json!({"text": "done"}),
+        json!({"text": "done"}),
+        json!({"text": "done"}),
+    ]
+}
+
+fn script(calls: Vec<serde_json::Value>) -> serde_json::Value {
+    calls.into_iter().chain(done()).collect()
+}
+
+fn decisions(w: &OutcomeWriter) -> Vec<DecisionRecord> {
+    w.list_decisions(w.id()).unwrap()
+}
+
+#[test]
+fn a_write_outside_allowed_paths_blocks_the_attempt_and_becomes_a_decision() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    // positive control first: src/ok.txt is inside the envelope and is written
+    let calls = vec![
+        write_call("w1", "src/ok.txt"),
+        write_call("w2", "outside.txt"),
+    ];
+    let (w, it, env, settled) = run_with(&r, &src_only(), "write files", script(calls));
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
+    assert_eq!(s.item, WorkItemState::WaitingDecision, "{log}");
+    assert!(
+        env.git.worktree.join("src/ok.txt").exists(),
+        "control: {log}"
+    );
+    assert!(!env.git.worktree.join("outside.txt").exists());
+    // not in the user's tree either
+    assert!(!r.repo.join("outside.txt").exists());
+    // a durable, pending decision names what was needed; no live prompt was involved
+    let ds = decisions(&w);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    let d = &ds[0];
+    assert_eq!(d.kind, "approval_needed");
+    assert_eq!(d.row_state, DecisionState::Pending);
+    let brief = d.brief.to_string();
+    assert!(
+        brief.contains("outside.txt") && brief.contains("HOLD"),
+        "{brief}"
+    );
+    assert!(d.brief.get("selected").is_none() && d.brief.get("default").is_none());
+    for k in [
+        "contract_version",
+        "plan_version",
+        "policy_hash",
+        "action_hash",
+        "attempt_ordinal",
+    ] {
+        assert!(d.binding.get(k).is_some(), "{k} in {}", d.binding);
+    }
+    assert_eq!(d.binding["attempt_ordinal"], 1);
+    let _ = it;
+}
+
+#[test]
+fn ask_user_question_becomes_a_decision_not_a_prompt() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let ask = json!({"text": "asking", "tools": [{"id": "q1", "name": "AskUserQuestion", "input": {"questions": [
+        {"question": "Which API shape?", "options": [{"label": "REST"}, {"label": "gRPC"}]}]}}]});
+    let (w, _, _, settled) = run_with(&r, &contract(), "decide", script(vec![ask]));
+    let s = settled.unwrap();
+    assert_eq!(
+        (s.end, s.item),
+        (WorkerEnd::Blocked, WorkItemState::WaitingDecision)
+    );
+    let ds = decisions(&w);
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].kind, "ambiguity");
+    let brief = ds[0].brief.to_string();
+    assert!(brief.contains("Which API shape?") && brief.contains("REST") && brief.contains("gRPC"));
+}
+
+#[test]
+fn the_bypass_paths_are_closed_for_an_attempt() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let marker = |n: &str| r.dir.path().join(n);
+    // git alias in the repo's config (shared by its worktrees): `git st` would run a shell
+    g(
+        &r.repo,
+        &[
+            "config",
+            "alias.st",
+            &format!("!touch {}", marker("alias-ran").display()),
+        ],
+    );
+    let bash = |id: &str, cmd: String| json!({"text": "run", "tools": [{"id": id, "name": "Bash", "input": {"command": cmd}}]});
+    let calls = vec![
+        // 1. `!cmd` is a chat-UI feature: as a task text it is just text (the model is scripted)
+        // 2. a repo script / git alias needs approval nobody can give: not run
+        bash("b1", "git st".into()),
+        // 3. ExitPlanMode is not a way out: it asks, which nobody can answer
+        json!({"text": "plan", "tools": [{"id": "p1", "name": "ExitPlanMode", "input": {"plan": "x"}}]}),
+        // 4. no browser tools exist in an attempt
+        json!({"text": "browse", "tools": [{"id": "n1", "name": "browser_navigate", "input": {"url": "http://127.0.0.1:9"}}]}),
+        // 5. ToolSearch is read-only and has nothing to load (no MCP tools): it makes no decision
+        json!({"text": "search", "tools": [{"id": "s1", "name": "ToolSearch", "input": {"query": "select:nothing"}}]}),
+    ];
+    let settings_before = std::fs::read_to_string(r.home.join("settings.json")).unwrap();
+    let bang = format!("!touch {}", marker("bang-ran").display());
+    let (w, _, env, settled) = run_with(&r, &contract(), &bang, script(calls));
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
+    assert!(!marker("bang-ran").exists(), "`!cmd` ran");
+    assert!(!marker("alias-ran").exists(), "a git alias ran");
+    let evs = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&env.session_id, 0, 5000)
+        .unwrap();
+    let text = format!("{evs:?}");
+    assert!(
+        text.contains("requires approval"),
+        "the alias call was refused for approval"
+    );
+    // the browser tool does not exist in an attempt: the call failed, nothing was started
+    let nav = evs.iter().find_map(|rec| match rec {
+        synthesis_events::Record::Known(e) => match &e.event {
+            synthesis_events::Event::ToolCompleted { name, is_error, .. }
+                if name == "browser_navigate" =>
+            {
+                Some(*is_error)
+            }
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(nav, Some(true), "no browser tool: {text}");
+    // one decision (the alias), none from ExitPlanMode or ToolSearch; nothing widened the settings
+    assert_eq!(decisions(&w).len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(r.home.join("settings.json")).unwrap(),
+        settings_before
+    );
+    assert!(!r.repo.join(".synt/settings.local.json").exists());
+    assert!(!env.git.worktree.join(".synt/settings.local.json").exists());
+}
+
+#[test]
+fn an_attempt_refuses_auto_and_bypass_modes_whatever_the_caller_says() {
+    let r = rig();
+    let (mut w, it) = leased_item(&r);
+    let alloc = Allocator {
+        store: &r.store,
+        worktrees: &r.wm,
+        platform: Platform::current(),
+        artifact_root: r.dir.path().join("art"),
+    };
+    let source = r.repo.clone();
+    let env = alloc
+        .allocate(
+            &mut w,
+            &AllocSpec {
+                item: &it,
+                ordinal: 1,
+                source: &source,
+                base_commit: &r.head,
+                worker_kind: "local-engine",
+            },
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let p = Profile::build(
+        PathBuf::from(env!("CARGO_BIN_EXE_synt")),
+        &env,
+        &contract(),
+        &OutcomePolicy::new(true, 16, 10, 24),
+        0.0,
+        "x".into(),
+    )
+    .unwrap();
+    let empty = r.dir.path().join("empty.json");
+    std::fs::write(&empty, "[]").unwrap();
+    let p = p
+        .with_extra(&["--provider", &format!("fake:{}", empty.display())])
+        .unwrap();
+    for mode in ["bypassPermissions", "auto"] {
+        // the mode value of the real argv is replaced (not appended: clap would refuse a repeat)
+        let mut args = p.argv();
+        let i = args.iter().position(|a| a == "--permission-mode").unwrap();
+        args[i + 1] = mode.into();
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(&args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", r.dir.path())
+            .env("SYNT_HOME", &r.home)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{mode}: {err}");
+        assert!(
+            err.contains("never auto") || err.contains("refuses"),
+            "{mode}: {err}"
+        );
+    }
 }

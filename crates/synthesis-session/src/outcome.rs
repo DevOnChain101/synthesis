@@ -1314,6 +1314,11 @@ impl OutcomeWriter {
         &self.id
     }
 
+    /// The settings' limit on how long a decision may stay open.
+    pub fn decision_expiry_hours(&self) -> u32 {
+        self.policy.decision_expiry_hours
+    }
+
     /// Is `session_id` the session of one of this outcome's attempts?
     pub(crate) fn owns_attempt_session(&self, session_id: &str) -> Result<bool> {
         Ok(self.w.conn.query_row(

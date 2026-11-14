@@ -10,10 +10,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use synthesis_core::outcome::{Capability, CapabilityMode, Contract};
+use synthesis_core::outcome::{Contract, Envelope};
 use synthesis_session::outcome::OutcomePolicy;
 
-use crate::AttemptEnv;
+use crate::{AttemptEnv, CompileError, CompiledEnvelope, compile_envelope};
 
 /// Default wall cap of an attempt when neither the contract nor the settings name one.
 pub const DEFAULT_WALL_SECS: u64 = 1800;
@@ -26,6 +26,8 @@ pub enum ProfileError {
     BudgetExhausted { spent: f64, cap: f64 },
     /// A flag outside the allow-list was offered for the worker.
     Forbidden(String),
+    /// The envelope cannot be compiled into rules.
+    Envelope(CompileError),
 }
 
 impl std::fmt::Display for ProfileError {
@@ -36,6 +38,7 @@ impl std::fmt::Display for ProfileError {
                 f,
                 "the outcome's cost cap is used up: {spent:.4} of {cap:.4} USD spent by earlier attempts"
             ),
+            Self::Envelope(e) => write!(f, "the envelope cannot be compiled: {e}"),
             Self::Forbidden(a) => write!(
                 f,
                 "{a:?} is not allowed for an outcome attempt: sandbox, network, trust, MCP, hooks and permission mode come from the profile, never from the caller"
@@ -57,7 +60,8 @@ pub struct Profile {
     prompt: String,
     max_cost_usd: f64,
     max_wall_secs: u64,
-    permission_mode: &'static str,
+    envelope: Envelope,
+    compiled: CompiledEnvelope,
     extra: Vec<String>,
 }
 
@@ -119,7 +123,7 @@ impl Profile {
             .flatten()
             .min()
             .unwrap_or(DEFAULT_WALL_SECS);
-        let writes = contract.envelope.mode(Capability::RepoWrite) == CapabilityMode::Allow;
+        let compiled = compile_envelope(&contract.envelope, &[]).map_err(ProfileError::Envelope)?;
         Ok(Self {
             program,
             cwd: env.context.cwd.clone(),
@@ -127,9 +131,22 @@ impl Profile {
             prompt,
             max_cost_usd: cap,
             max_wall_secs: wall,
-            permission_mode: if writes { "acceptEdits" } else { "default" },
+            envelope: contract.envelope.clone(),
+            compiled,
             extra: vec![],
         })
+    }
+
+    /// The commands that count as "the tests" when the envelope allows `tests.run` (from the
+    /// user's settings; only known runners, see [`compile_envelope`]).
+    pub fn with_test_commands(mut self, cmds: &[String]) -> Result<Self, ProfileError> {
+        self.compiled = compile_envelope(&self.envelope, cmds).map_err(ProfileError::Envelope)?;
+        Ok(self)
+    }
+
+    /// What the envelope compiled to.
+    pub fn compiled(&self) -> &CompiledEnvelope {
+        &self.compiled
     }
 
     /// Adds allow-listed options (`--provider X`, `--model X`, `--max-turns N`,
@@ -170,7 +187,7 @@ impl Profile {
     }
 
     pub fn permission_mode(&self) -> &'static str {
-        self.permission_mode
+        CompiledEnvelope::MODE
     }
 
     /// The arguments after the program name. No `--sandbox`, `--network`, `--trust-project`,
@@ -192,7 +209,8 @@ impl Profile {
             "--max-wall-secs".into(),
             self.max_wall_secs.to_string().into(),
         ]);
-        v.extend(["--permission-mode".into(), self.permission_mode.into()]);
+        v.extend(["--permission-mode".into(), CompiledEnvelope::MODE.into()]);
+        v.extend(self.compiled.args());
         v.extend(["--output-format".into(), "json".into()]);
         v.extend(self.extra.iter().map(OsString::from));
         // `--prompt=<text>`: a prompt that starts with `-` is a value, not a flag
