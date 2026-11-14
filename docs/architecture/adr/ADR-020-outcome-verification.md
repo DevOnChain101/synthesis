@@ -76,3 +76,7 @@ Any change to the candidate commit (new attempt, integration, conflict resolutio
 - The runner needs a stronger boundary than the host sandbox (container or remote).
 - Evidence volume makes per-commit re-runs too slow: incremental/affected-test selection.
 - A second independent signer is required (signed evidence attestation).
+
+## Integrity of evidence (PR-02 review)
+
+Evidence rows carry no MAC today. Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. A writer without the key can INSERT a passing `independent_check` row with plain SQL, so the MVP verdict in the store is **not** to be trusted before PR-09: it must compute the verdict only from signed `evidence.recorded` events and verify that each row matches its event. Open points recorded for PR-09: nothing produces `definitions_changed` yet; evidence `command_hash` is not bound to a frozen command (criterion `check_ids` are); "the attempt that ended last" as candidate commit is unsound for parallel branches.

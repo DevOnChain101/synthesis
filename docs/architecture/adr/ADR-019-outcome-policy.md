@@ -90,3 +90,7 @@ The gateway, the launch profile and the closed bypass paths above apply identica
 - A second approver role (RBAC, separation of duties) is required.
 - Evidence from nightly evals shows the auto judge is reliable enough to use in attempts.
 - A formal policy language is requested (re-open Cedar).
+
+## Integrity of approvals (PR-02 review)
+
+A decision approval is a row with an HMAC over the decision, outcome, kind, revision, binding hash, expiry, brief hash, approver, choice and time; the resolved state is derived from the MAC'd choice, and a mismatch is `Tampered`. Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. PR-10 must re-check the binding against the current state and tie every approval to its chained `decision.resolved` event (which carries `outcome_id` and `binding_hash`) before it grants anything. `from_surface` and the approver are self-asserted until the orchestrator endpoint authenticates its clients (PR-12) and, for irreversible decisions, a person-present signature exists (post-MVP).

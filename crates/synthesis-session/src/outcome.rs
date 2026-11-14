@@ -643,8 +643,9 @@ pub struct Resolved {
 
 /// A MAC over length-prefixed parts (domain included), so no two different tuples share an input.
 /// The key is a subkey of the per-user chain key (`HMAC(chain key, "synt outcome mac v1")`), so a
-/// MAC never doubles as a chain link. The chain key lives in the home the sandbox must not read
-/// (that deny is plan PR-S1 / PR #117), so an attempt cannot forge a MAC.
+/// MAC never doubles as a chain link. The key is stored next to the data: the MAC detects
+/// corruption, old binaries and writers that cannot read the key (the sandbox denies the key file
+/// to attempts, PR #117); it does not stop a program running as the same user outside the sandbox.
 fn mac_state(key: &[u8; 32], domain: &str, parts: &[&str]) -> Hmac<Sha256> {
     let mut sub = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
     sub.update(b"synt outcome mac v1");
@@ -668,7 +669,7 @@ fn mac(key: &[u8; 32], domain: &str, parts: &[&str]) -> String {
 
 /// Constant-time check of a stored hex MAC.
 fn mac_ok(key: &[u8; 32], domain: &str, parts: &[&str], stored_hex: &str) -> bool {
-    let bytes: Option<Vec<u8>> = (stored_hex.len() % 2 == 0 && stored_hex.is_ascii())
+    let bytes: Option<Vec<u8>> = (stored_hex.len().is_multiple_of(2) && stored_hex.is_ascii())
         .then(|| {
             (0..stored_hex.len())
                 .step_by(2)

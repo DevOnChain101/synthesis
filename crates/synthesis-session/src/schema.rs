@@ -173,10 +173,14 @@ CREATE TABLE outbox(
   UNIQUE(outcome_id, idempotency_key));
 CREATE INDEX outbox_pending ON outbox(state, next_at);
 CREATE INDEX work_items_state ON work_items(outcome_id, state);
--- What a person approved or was shown never changes afterwards. Triggers stop accidents and a
--- careless same-user writer; `INSERT OR REPLACE` skips delete triggers (recursive_triggers is off)
--- and a writer that opens the file itself can drop a trigger, so authenticity rests on the MACs
--- (contracts.approved_mac, decision_approvals.mac) and the hash-chained events, checked on use.
+-- What a person approved or was shown never changes afterwards. Triggers stop accidents and old
+-- or careless writers. They are NOT a security boundary against a program running as the same user
+-- outside the sandbox: `INSERT OR REPLACE` skips delete triggers (recursive_triggers is off) and a
+-- writer that opens the file can drop a trigger. The MACs (contracts.approved_mac,
+-- decision_approvals.mac, keyed under the per-user chain key stored next to the data) detect
+-- corruption and writers that cannot read that key; they do not stop one that can. Evidence rows,
+-- attempts and work-item columns carry no MAC. Outcome state is protected from agent attempts by
+-- the OS sandbox (platform dependent), not by this file.
 CREATE TRIGGER contracts_immutable BEFORE UPDATE OF outcome_id, version, hash, body ON contracts
   BEGIN SELECT RAISE(ABORT, 'contracts are immutable'); END;
 CREATE TRIGGER contracts_approval_once BEFORE UPDATE OF approved_by, approved_at, approved_mac ON contracts

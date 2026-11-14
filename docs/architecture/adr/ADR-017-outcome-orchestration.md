@@ -86,6 +86,10 @@ Options for lifetime:
 
 Relation to the engine protocol: the stdio engine remains one-session-per-engine for chat. Outcome methods (ADR-021) are served by the orchestrator process and, for WSL, forwarded by the engine; in-process hosting of the same server is allowed **only** for tests and headless CI (transport `InProc`), never as a per-surface production path.
 
+### Security boundary of the orchestrator process (added after the PR-02 review)
+
+The standalone process (L2) gives lifetime independence and a single owner per outcome (the control-session lock). It is an **ownership and correctness boundary, not a security boundary**: it runs as the same OS user as every surface, so any program of that user outside the sandbox can read the key and the database. Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. Real boundaries (a daemon under a separate OS user; a person-present signature through FIDO2, Touch ID or Windows Hello for irreversible decisions) are post-MVP owner decisions.
+
 ## Consequences
 
 - Positive: reuses the governed run path, caps and sandbox; crash model is the existing one; no new IPC.

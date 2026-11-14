@@ -1421,7 +1421,7 @@ impl Reader {
         if last != head {
             rep.broken = Some(ChainBreak {
                 seq: rec.event_cursor as i64,
-                why: "the last event does not match the head kept in the session row (events were changed or cut off at the end, or the key changed)".into(),
+                why: "the last event does not match the head kept in the session row (an event was changed or removed, or the key changed; a cut-off tail together with a rewritten head is NOT detected: the head is a plain column in the same database)".into(),
             });
         }
         Ok(rep)

@@ -97,6 +97,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: Low (pure). Rollback: revert. Size: M.
 
 ### PR-02 Migration v5, outcome store, outbox
+- **Prerequisite for merging:** PR-S1 / PR #117 (chain key and `backups/` read deny, red-team cases `evid-chain-key-read`, `evid-backups-read`) is merged into main; this branch contains it. The store's MACs are only as good as the key's confinement.
 - Scope: `schema.rs` v5 (DDL in the [MVP slice](./outcome-orchestration-mvp-slice.md) section 3), `sessions.kind`, `synthesis-session::outcome` (CAS transitions, **`outcome_commands` with idempotency keys and result write-back, optimistic revisions: Phase 1**, outbox, evidence insert API without runner), kind filters in listers and cleaners, `StoreOptions` migration target so a default open stays at v4 (`store.rs:585`) and v5 is applied only by the explicit `enable` step with the automatic pre-migration backup (`clean.rs:431` pattern).
 - Crates: `synthesis-session`, `synthesis-events` (additive event types and payload structs).
 - Tests: v4 -> v5 migration fixture; CAS conflict; outbox replay after a killed writer (reuse `synthesis-session/tests/crash.rs` helpers); chain verification over outcome events (`tests/governance.rs` style); control session hidden from `list_used_sessions` and `clean`; `SchemaTooNew` for a v4-target open on a v5 DB (assert error text); a default open leaves v4 at v4; command idempotency and stale-revision results.
@@ -194,6 +195,19 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 
 ### PR-H1, H2, H3 Known hardening (already listed by the owner, `docs/specs/sandbox-hardening.md` sections 2-4)
 - H1 Linux read allow-list; H2 MCP stdio and browser worker under the sandbox; H3 rlimits and disk quota. They are not prerequisites of the MVP but each one upgrades what the UI may claim (ADR-018 item 9) and closes risks R-8. H4 (Windows AppContainer) needs an ADR-010 exception (decision D3).
+
+## 3b. Enable gate (before PR-13 turns the feature on for real attempts)
+
+`synt outcome enable` must refuse, and no surface may offer the toggle, until every item holds:
+
+1. **PR-S1 merged** and the red-team cases `evid-chain-key-read`, `evid-backups-read` and `orch-db-write-from-attempt` are enforced (green) on Linux and macOS CI.
+2. **PR-08 bypass gate** passed (ADR-019 section 6).
+3. **Native Windows refuses writable attempts** (D3); the refusal text is shown by every surface.
+4. **Authority is consumed only from verified data.** PR-10 re-checks a decision's binding against the current state and ties each approval to its signed `decision.resolved` event; PR-09 computes the verdict only from signed `evidence.recorded` events (today a writer without the key can INSERT a passing `independent_check` row with plain SQL, and the MVP verdict in the store must not be relied on).
+5. **Attempts run with no MCP servers and no project hooks by default** (T-23 `pol-mcp-not-in-attempt-by-default`). Highest priority.
+6. **The integrity claim and the per-attempt sandbox guarantee are shown to the user at enable time.** The claim: "Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events."
+
+Acceptance criteria for PR-09 and PR-10: **every read that grants authority verifies the control-session chain and that the row matches its signed event.** PR-12's standalone process is an ownership boundary, not a security boundary; separate-OS-user daemons and person-present signatures for irreversible decisions are post-MVP owner decisions.
 
 ## 4. Cross-platform requirements
 
