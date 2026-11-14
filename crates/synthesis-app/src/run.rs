@@ -287,6 +287,11 @@ pub struct Common {
     /// Set by `synt run` and `synt engine`: the unattended defaults apply (not a flag).
     #[arg(skip)]
     pub governed: bool,
+    /// Internal (the outcome orchestrator launches `synt run` with it): `--resume` names the
+    /// session of a live outcome attempt, which a plain resume refuses. The attempt runs with no MCP
+    /// servers and no browser tools, never in auto or bypass mode, and only unattended.
+    #[arg(long, hide = true, requires = "resume", requires = "unattended")]
+    pub attempt_session: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -1256,9 +1261,20 @@ pub fn prepare(
         .as_deref()
         .and_then(Mode::parse)
     {
+        // an attempt takes a managed mode only if it is stricter than `default`: acceptEdits would
+        // allow edits outside the contract's allowed paths
+        Some(Mode::AcceptEdits) if c.attempt_session => mode,
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
+    if c.attempt_session
+        && matches!(
+            mode,
+            Mode::Auto | Mode::BypassPermissions | Mode::AcceptEdits
+        )
+    {
+        return Err("an outcome attempt runs in default, plan or dontAsk mode: never auto (no model is the authority), never bypassPermissions and never acceptEdits (it would allow edits outside the contract's allowed paths)".into());
+    }
     let mut budget = budget_from_settings(&settings);
     if let Some(v) = limits.max_turns {
         budget.max_turns = v;
@@ -1278,10 +1294,12 @@ pub fn prepare(
         .or(governed.then_some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
+    // an attempt works in its worktree only: settings cannot add writable or readable directories
     let mut extra_dirs: Vec<PathBuf> = settings
         .permissions
         .additional_directories
         .iter()
+        .filter(|_| !c.attempt_session)
         .filter_map(|d| match std::fs::canonicalize(d) {
             Ok(p) if Path::new(d).is_absolute() && p.is_dir() => Some(p),
             _ => {
@@ -1291,6 +1309,9 @@ pub fn prepare(
         })
         .collect();
 
+    if c.attempt_session && !c.add_dir.is_empty() {
+        return Err("an outcome attempt works in its worktree only: --add-dir is refused".into());
+    }
     for d in &c.add_dir {
         match std::fs::canonicalize(d) {
             Ok(p) if p.is_dir() => extra_dirs.push(p),
@@ -1525,6 +1546,9 @@ pub fn prepare(
         let w = SessionStore::open(&h.synthesis, opts)
             .and_then(|s| {
                 if in_place {
+                    if c.attempt_session {
+                        return s.resume_attempt_session(&sid);
+                    }
                     return s.resume_session(&sid, true);
                 }
                 s.create_session(NewSession {
@@ -1723,11 +1747,16 @@ pub fn prepare(
         None
     };
 
+    // The envelope can only restrict (ADR-019 section 3): in an attempt the allow rules are the
+    // compiled ones (the flags) and nothing from user or managed settings, which could otherwise
+    // allow edits outside the contract or lift the irreversible table. Deny and ask rules still
+    // come from every layer (a managed deny wins).
     let rules = PermissionRules {
         allow: settings
             .permissions
             .allow
             .iter()
+            .filter(|_| !c.attempt_session)
             .chain(&cli_allow)
             .cloned()
             .collect(),
@@ -1760,6 +1789,7 @@ pub fn prepare(
         .permissions
         .allow
         .iter()
+        .filter(|_| !c.attempt_session)
         .chain(&cli_allow)
         .cloned()
         .collect();
@@ -1776,7 +1806,8 @@ pub fn prepare(
             .use_auto_mode_during_plan
             .unwrap_or(true),
     };
-    perms.block_outside_reads = settings.permissions.block_reads_outside_working_directories;
+    perms.block_outside_reads =
+        c.attempt_session || settings.permissions.block_reads_outside_working_directories;
 
     let mut hcfg = HarnessConfig::new(res.model.clone());
     hcfg.max_output_tokens = cfg.max_tokens as u32;
@@ -2098,6 +2129,16 @@ pub fn prepare(
         eprintln!("synt: warning: {w}");
         notices.push(w);
     }
+    if c.attempt_session && !mplan.servers.is_empty() {
+        // D12: an attempt starts no MCP server (stdio servers run outside the sandbox)
+        let n = format!(
+            "outcome attempt: {} MCP server(s) not started",
+            mplan.servers.len()
+        );
+        eprintln!("synt: {n}");
+        notices.push(n);
+        mplan.servers.clear();
+    }
     mplan.env_passthrough = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
@@ -2192,19 +2233,21 @@ pub fn prepare(
             eprintln!("synt: {note}");
         }
     }
-    let mut toolbox = ToolBox::new(
-        Registry::with_terminal_policy(rt.clone(), make_policy)
-            .with_new_tools()
-            .with_browser(browser.config(
-                synthesis_tools::BrowserConfig::default(),
-                &h.synthesis,
-                env,
-                browser_host,
-                sandbox_mode == SandboxMode::Enforce,
-                stdio,
-            ))
-            .with_background_on_timeout(is_cli),
-    );
+    let registry = Registry::with_terminal_policy(rt.clone(), make_policy).with_new_tools();
+    // an outcome attempt has no browser tools (the browser worker is outside the OS sandbox)
+    let registry = if c.attempt_session {
+        registry
+    } else {
+        registry.with_browser(browser.config(
+            synthesis_tools::BrowserConfig::default(),
+            &h.synthesis,
+            env,
+            browser_host,
+            sandbox_mode == SandboxMode::Enforce,
+            stdio,
+        ))
+    };
+    let mut toolbox = ToolBox::new(registry.with_background_on_timeout(is_cli));
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
     }

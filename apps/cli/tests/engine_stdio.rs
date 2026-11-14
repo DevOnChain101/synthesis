@@ -551,6 +551,38 @@ fn bypass_and_plan_cannot_be_lifted_through_the_new_methods() {
     assert_eq!(v["trusted"], false);
 }
 
+/// AC-03: `start` takes the folder the client named, and only an existing absolute one; a restart in
+/// place (`session.new`, `session.resume`) keeps that folder, never another.
+#[test]
+fn start_refuses_a_relative_or_missing_cwd_and_a_new_session_keeps_the_folder() {
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
+    e.hello();
+    for cwd in ["relative/dir", "", "/definitely/not/here/at/all"] {
+        let id = e.call("start", json!({ "cwd": cwd }));
+        let err = e.result(id).1["error"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(err.contains("cwd must be"), "{cwd:?}: {err}");
+    }
+    // a file is not a folder either
+    let file = e.ws.join("a-file");
+    std::fs::write(&file, "x").unwrap();
+    let id = e.call("start", json!({ "cwd": file.to_str().unwrap() }));
+    assert!(
+        e.result(id).1["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cwd must be")
+    );
+    let ws = e.ws.to_str().unwrap().to_string();
+    let id = e.call("start", json!({ "cwd": ws }));
+    let started = e.result(id).1["ok"].clone();
+    assert_eq!(started["cwd"], ws.as_str(), "{started}");
+    let v = e.ok("session.new", Value::Null);
+    assert_eq!(v["cwd"], ws.as_str(), "{v}");
+}
+
 #[test]
 fn session_new_and_resume_restart_in_place_in_the_same_folder() {
     let (mut e, info) = used_engine();

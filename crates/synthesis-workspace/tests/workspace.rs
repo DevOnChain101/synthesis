@@ -946,3 +946,486 @@ fn tampered_admin_files_and_pointer_forms_are_refused_without_running_git() {
     }
     assert!(f.mgr.changes(&info).is_ok(), "restored state works again");
 }
+
+// ------------------------------------------------------------ attempt allocation (PR-04)
+
+fn art(f: &Fx, id: &str) -> PathBuf {
+    f.base.join("art").join(id)
+}
+
+fn head(f: &Fx) -> String {
+    g(&f.repo, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn create_at_starts_at_the_given_commit_and_measures_edits_against_it() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    fs::write(f.repo.join("a.txt"), "two\n").unwrap();
+    g(&f.repo, &["commit", "-qam", "second"]);
+    let a = f
+        .mgr
+        .create_at(&f.repo, "s-base", art(&f, "s-base"), false, Some(&base))
+        .unwrap();
+    let info = a.git.unwrap();
+    assert_eq!(info.baseline, base);
+    assert_eq!(
+        fs::read_to_string(info.worktree.join("a.txt")).unwrap(),
+        "one\n",
+        "starts at the base, not HEAD"
+    );
+    assert_eq!(f.mgr.head(&info).unwrap(), base);
+    assert!(f.mgr.changes(&info).unwrap().agent.is_empty());
+}
+
+#[test]
+fn a_base_is_a_full_commit_id_of_the_repository_and_nothing_else() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let short = &base[..12];
+    for bad in [
+        short,
+        "HEAD",
+        "main",
+        "--help",
+        "-x",
+        &base.to_uppercase(),
+        &"0".repeat(40),
+        "",
+    ] {
+        let r = f
+            .mgr
+            .create_at(&f.repo, "s-bad", art(&f, "s-bad"), false, Some(bad));
+        assert!(r.is_err(), "{bad:?}");
+    }
+    // a tree id is not a commit
+    let tree = g(&f.repo, &["rev-parse", "HEAD^{tree}"]);
+    assert!(
+        f.mgr
+            .create_at(&f.repo, "s-bad", art(&f, "s-bad"), false, Some(&tree))
+            .is_err()
+    );
+    // base and include_uncommitted do not combine
+    assert!(
+        f.mgr
+            .create_at(&f.repo, "s-bad", art(&f, "s-bad"), true, Some(&base))
+            .is_err()
+    );
+    // nothing was created by any of the refusals
+    assert!(g(&f.repo, &["worktree", "list"]).lines().count() == 1);
+    assert!(g(&f.repo, &["branch", "--list", "synthesis/*"]).is_empty());
+}
+
+#[test]
+fn names_that_escape_or_collide_are_refused_before_any_git_call() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    for bad in [
+        "../x", "a/b", "a\\b", ".hidden", "-x", "x.lock", "a..b", "", "sp ace", "tab\t",
+    ] {
+        let r = f.mgr.allocate_unstarted(&f.repo, bad, art(&f, "x"), &base);
+        assert!(matches!(r, Err(Error::Invalid(_))), "{bad:?}: {r:?}");
+    }
+    assert!(g(&f.repo, &["worktree", "list"]).lines().count() == 1);
+}
+
+// symlinks need privilege on Windows: the planted-link cases are unix-only
+#[cfg(unix)]
+#[test]
+fn a_planted_symlink_at_the_worktree_path_is_never_written_through() {
+    need_git!();
+    let tmp = tempfile::tempdir().unwrap();
+    let wdir = synthesis_core::canonicalize(tmp.path())
+        .unwrap()
+        .join("worktrees");
+    let f = {
+        let mut f = fx();
+        f.mgr = WorktreeManager::new(&env(), {
+            let mut o = WorktreeOptions::new(f.base.join("state"));
+            o.worktrees_dir = Some(wdir.clone());
+            o
+        })
+        .unwrap();
+        f
+    };
+    let base = head(&f);
+    fs::create_dir_all(&wdir).unwrap();
+    let outside = f.base.join("outside-target");
+    {
+        // dangling link: `exists()` is false for it, git would create the target
+        std::os::unix::fs::symlink(&outside, wdir.join("s-link")).unwrap();
+        let r = f
+            .mgr
+            .allocate_unstarted(&f.repo, "s-link", art(&f, "s-link"), &base);
+        assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+        assert!(!outside.exists(), "nothing was created through the link");
+        let r = f
+            .mgr
+            .create_at(&f.repo, "s-link", art(&f, "s-link"), false, Some(&base));
+        assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+        assert!(!outside.exists());
+        // a link to a real directory is refused as well
+        let real = f.base.join("real-dir");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, wdir.join("s-link2")).unwrap();
+        assert!(
+            f.mgr
+                .allocate_unstarted(&f.repo, "s-link2", art(&f, "s-link2"), &base)
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn allocation_is_idempotent_and_distinct_per_session() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, o1) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-1", art(&f, "att-1"), &base)
+        .unwrap();
+    assert_eq!(o1, Origin::Created);
+    let (b, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-2", art(&f, "att-2"), &base)
+        .unwrap();
+    let (ia, ib) = (a.git.clone().unwrap(), b.git.unwrap());
+    // distinct directories, branches and git dirs
+    assert_ne!(ia.worktree, ib.worktree);
+    assert_ne!(ia.branch, ib.branch);
+    assert_ne!(ia.git_dir, ib.git_dir);
+    assert_eq!(
+        (ia.branch.as_str(), ib.branch.as_str()),
+        ("synthesis/att-1", "synthesis/att-2")
+    );
+    assert_eq!(a.context.cwd, ia.worktree);
+    // the same call again adopts: no second worktree, same paths
+    let (again, o2) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-1", art(&f, "att-1"), &base)
+        .unwrap();
+    assert_eq!(o2, Origin::Adopted);
+    assert_eq!(again.git.unwrap(), ia);
+    assert_eq!(g(&f.repo, &["worktree", "list"]).lines().count(), 3);
+    assert_eq!(
+        g(&f.repo, &["branch", "--list", "synthesis/*"])
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_crash_inside_worktree_add_is_reconciled_without_duplicates() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-c", art(&f, "att-c"), &base)
+        .unwrap();
+    let info = a.git.unwrap();
+    // (1) crash after `worktree add` began, before the directory existed: branch left behind
+    f.mgr.cleanup(&info, false).unwrap();
+    g(&f.repo, &["branch", "synthesis/att-c", &base]);
+    let (b, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-c", art(&f, "att-c"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created, "an empty leftover branch is reused");
+    assert_eq!(
+        g(&f.repo, &["branch", "--list", "synthesis/att-c"])
+            .lines()
+            .count(),
+        1
+    );
+    // (2) crash mid-checkout: registered worktree, files missing at a clean HEAD
+    let info = b.git.unwrap();
+    fs::remove_file(info.worktree.join("b.txt")).unwrap();
+    fs::write(info.worktree.join("stray.txt"), "partial").unwrap();
+    let (c, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-c", art(&f, "att-c"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Adopted);
+    let w = c.git.unwrap().worktree;
+    assert_eq!(
+        fs::read_to_string(w.join("b.txt")).unwrap(),
+        "bee\n",
+        "restored to the base"
+    );
+    assert!(!w.join("stray.txt").exists());
+    // (3) registered nowhere, directory empty: removed and redone
+    let wt = w.clone();
+    g(
+        &f.repo,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
+    );
+    g(&f.repo, &["branch", "-D", "synthesis/att-c"]);
+    fs::create_dir_all(&wt).unwrap();
+    let (_, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-c", art(&f, "att-c"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    assert_eq!(g(&f.repo, &["worktree", "list"]).lines().count(), 2);
+}
+
+#[test]
+fn work_of_its_own_or_foreign_content_is_never_overwritten_by_reconcile() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    // a branch with a commit of its own and no directory
+    g(&f.repo, &["branch", "synthesis/att-w", &base]);
+    g(&f.repo, &["checkout", "-q", "synthesis/att-w"]);
+    fs::write(f.repo.join("work.txt"), "w").unwrap();
+    g(&f.repo, &["add", "."]);
+    g(&f.repo, &["commit", "-qm", "work"]);
+    g(&f.repo, &["checkout", "-q", "main"]);
+    let r = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-w", art(&f, "att-w"), &base);
+    assert!(matches!(r, Err(Error::Refused(m)) if m.contains("commits of its own")));
+    assert!(
+        !g(&f.repo, &["branch", "--list", "synthesis/att-w"]).is_empty(),
+        "the branch is kept"
+    );
+    // a directory with foreign content that is not a registered worktree
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-f", art(&f, "att-f"), &base)
+        .unwrap();
+    let w = a.git.unwrap().worktree;
+    g(
+        &f.repo,
+        &["worktree", "remove", "--force", w.to_str().unwrap()],
+    );
+    g(&f.repo, &["branch", "-D", "synthesis/att-f"]);
+    fs::create_dir_all(&w).unwrap();
+    fs::write(w.join("precious.txt"), "mine").unwrap();
+    let r = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-f", art(&f, "att-f"), &base);
+    assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+    assert_eq!(fs::read_to_string(w.join("precious.txt")).unwrap(), "mine");
+    // a worktree on a different base is not adopted
+    let (b, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-b", art(&f, "att-b"), &base)
+        .unwrap();
+    fs::write(f.repo.join("a.txt"), "moved\n").unwrap();
+    g(&f.repo, &["commit", "-qam", "next"]);
+    let newer = head(&f);
+    let r = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-b", art(&f, "att-b"), &newer);
+    assert!(
+        matches!(r, Err(Error::Refused(m)) if m.contains("not based on")),
+        "{b:?}"
+    );
+}
+
+#[test]
+fn a_dirty_attempt_tree_is_retained_and_a_clean_one_is_removed() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-d", art(&f, "att-d"), &base)
+        .unwrap();
+    let info = a.git.unwrap();
+    fs::write(info.worktree.join("a.txt"), "edited\n").unwrap();
+    let r = f.mgr.cleanup(&info, false);
+    assert!(matches!(r, Err(Error::Refused(m)) if m.contains("uncommitted")));
+    assert!(info.worktree.join("a.txt").exists(), "dirty work is kept");
+    let commit = f.mgr.commit_all(&info, "attempt").unwrap().unwrap();
+    assert_eq!(f.mgr.head(&info).unwrap(), commit);
+    // committed but unmerged: still kept
+    assert!(
+        matches!(f.mgr.cleanup(&info, false), Err(Error::Refused(m)) if m.contains("unmerged"))
+    );
+    // gitignored files would be deleted: refused too
+    let (b, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-i", art(&f, "att-i"), &base)
+        .unwrap();
+    let ib = b.git.unwrap();
+    fs::write(ib.worktree.join(".gitignore"), "*.log\n").unwrap();
+    f.mgr.commit_all(&ib, "ignore").unwrap();
+    fs::write(ib.worktree.join("x.log"), "keep me").unwrap();
+    assert!(
+        matches!(f.mgr.cleanup(&ib, false), Err(Error::Refused(m)) if m.contains("gitignored"))
+    );
+    // an untouched worktree goes
+    let (c, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-e", art(&f, "att-e"), &base)
+        .unwrap();
+    f.mgr.cleanup(&c.git.unwrap(), false).unwrap();
+}
+
+#[test]
+fn a_directory_that_is_not_a_repository_is_reported_not_given_a_worktree() {
+    need_git!();
+    let f = fx();
+    let plain = f.base.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let (a, o) = f
+        .mgr
+        .allocate_unstarted(&plain, "att-p", art(&f, "att-p"), &"a".repeat(40))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(a.not_a_git_repo && a.git.is_none());
+    assert_eq!(o, Origin::Created);
+}
+
+#[test]
+fn reconcile_never_drops_the_registration_of_other_worktrees() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    // another linked worktree whose directory is missing right now (an unplugged volume)
+    let (other, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "other-wt", art(&f, "o"), &base)
+        .unwrap();
+    let other_dir = other.git.unwrap().worktree;
+    fs::rename(&other_dir, f.base.join("moved-away")).unwrap();
+    // and the user's own linked worktree, same state
+    let user_wt = f.base.join("user-wt");
+    g(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "user-branch",
+            user_wt.to_str().unwrap(),
+        ],
+    );
+    fs::rename(&user_wt, f.base.join("user-away")).unwrap();
+    let (_, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-new", art(&f, "n"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
+    assert!(list.contains(other_dir.to_str().unwrap()), "{list}");
+    assert!(list.contains("user-wt"), "{list}");
+    // this attempt's own stale entry (its directory deleted by hand) is cleared and redone
+    let own = f.base.join("never");
+    let _ = own;
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-stale", art(&f, "s"), &base)
+        .unwrap();
+    let dir = a.git.unwrap().worktree;
+    fs::remove_dir_all(&dir).unwrap();
+    let (b, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-stale", art(&f, "s"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    assert!(b.git.unwrap().worktree.is_dir());
+    let list = g(&f.repo, &["worktree", "list", "--porcelain"]);
+    let entries = list
+        .lines()
+        .filter(|l| l.starts_with("worktree ") && l.contains("att-stale"))
+        .count();
+    assert_eq!(entries, 1, "{list}");
+    assert!(
+        list.contains(other_dir.to_str().unwrap()),
+        "other registrations still there"
+    );
+}
+
+#[test]
+fn a_started_worktree_is_never_reset_or_reused() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-m", art(&f, "m"), &base)
+        .unwrap();
+    let info = a.git.unwrap();
+    assert!(!f.mgr.is_started(&info));
+    f.mgr.mark_started(&info).unwrap();
+    f.mgr.mark_started(&info).unwrap(); // idempotent
+    assert!(f.mgr.is_started(&info));
+    fs::write(info.worktree.join("a.txt"), "agent work\n").unwrap();
+    fs::write(info.worktree.join("new.txt"), "more\n").unwrap();
+    let r = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-m", art(&f, "m"), &base);
+    assert!(
+        matches!(&r, Err(Error::Refused(m)) if m.contains("has started")),
+        "{r:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(info.worktree.join("a.txt")).unwrap(),
+        "agent work\n"
+    );
+    assert!(info.worktree.join("new.txt").exists());
+    // the marker is not in the tree the agent writes
+    assert!(!info.worktree.join("synt-started").exists());
+    assert!(info.git_dir.join("synt-started").exists());
+    // a stranger's GitInfo does not mark anything
+    let mut forged = info.clone();
+    forged.git_dir = f.base.join("elsewhere");
+    assert!(f.mgr.mark_started(&forged).is_err());
+}
+
+#[test]
+fn a_leftover_directory_and_its_empty_branch_do_not_wedge_the_allocation() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-l", art(&f, "l"), &base)
+        .unwrap();
+    let wt = a.git.unwrap().worktree;
+    g(
+        &f.repo,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
+    );
+    // an interrupted add: the branch exists at the base and a `.git`-only directory is left
+    g(&f.repo, &["branch", "-f", "synthesis/att-l", &base]);
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), "gitdir: /nonexistent\n").unwrap();
+    let (b, o) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-l", art(&f, "l"), &base)
+        .unwrap();
+    assert_eq!(o, Origin::Created);
+    assert!(b.git.unwrap().worktree.join("a.txt").exists());
+    assert_eq!(
+        g(&f.repo, &["branch", "--list", "synthesis/att-l"])
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn is_managed_means_inside_the_worktrees_directory() {
+    need_git!();
+    let f = fx();
+    let base = head(&f);
+    let (a, _) = f
+        .mgr
+        .allocate_unstarted(&f.repo, "att-g", art(&f, "g"), &base)
+        .unwrap();
+    assert!(f.mgr.is_managed(&f.repo, &a.git.unwrap().worktree));
+    assert!(!f.mgr.is_managed(&f.repo, &f.repo));
+    assert!(!f.mgr.is_managed(&f.repo, &f.base));
+    assert!(!f.mgr.is_managed(&f.repo, Path::new("/")));
+}

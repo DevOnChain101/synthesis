@@ -3,6 +3,7 @@
 
 pub mod definitions;
 mod key;
+pub mod outcome;
 pub mod secrets;
 mod session;
 mod workspace;

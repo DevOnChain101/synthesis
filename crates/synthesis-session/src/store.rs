@@ -32,7 +32,7 @@ use synthesis_events::{
 use time::OffsetDateTime;
 
 use crate::error::{Error, Result};
-use crate::{node, schema};
+use crate::{clean, node, schema};
 
 /// Redacted event payloads above this go to an artifact (events.md §5, session-store B.2).
 pub const MAX_INLINE_PAYLOAD: usize = 8 * 1024;
@@ -49,6 +49,51 @@ const RUNNING_STATES: [SessionStatus; 3] = [
     SessionStatus::Verifying,
 ];
 
+/// SQL conjunct that keeps the hidden outcome control sessions (`kind = 'outcome'`, schema v5)
+/// out of a lister or a cleaner. Empty below v5, where the column does not exist, so the
+/// statements of a v4 database are exactly the old ones.
+pub(crate) fn chat_only(conn: &Connection, alias: &str) -> Result<String> {
+    Ok(if schema::user_version(conn)? >= schema::OUTCOMES {
+        format!(" AND {alias}.kind = 'chat'")
+    } else {
+        String::new()
+    })
+}
+
+/// [`chat_only`] for the cleaners: also keeps the session of an attempt, which `attempts` and the
+/// evidence artifacts point at (deleting it would orphan them). Empty below v5.
+pub(crate) fn cleanable_only(conn: &Connection, alias: &str) -> Result<String> {
+    let chat = chat_only(conn, alias)?;
+    Ok(if chat.is_empty() {
+        chat
+    } else {
+        format!("{chat} AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.session_id = {alias}.id)")
+    })
+}
+
+/// A user path (`/resume`, `/close`) must not reach an outcome's control session or an attempt's
+/// session: those belong to the orchestrator (ADR-016 item 2). No-op below v5.
+fn refuse_hidden(conn: &Connection, id: &str) -> Result<()> {
+    if schema::user_version(conn)? < schema::OUTCOMES {
+        return Ok(());
+    }
+    let hidden: bool = conn
+        .query_row(
+            "SELECT kind <> 'chat' OR EXISTS (SELECT 1 FROM attempts a WHERE a.session_id = ?1) \
+             FROM sessions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if hidden {
+        return Err(Error::Invalid(format!(
+            "session {id} belongs to an outcome and cannot be resumed or closed directly"
+        )));
+    }
+    Ok(())
+}
+
 /// The store's timestamp format (UTC, milliseconds), comparable as text.
 pub fn timestamp() -> String {
     now()
@@ -63,13 +108,13 @@ pub(crate) fn now() -> String {
         .expect("format utc timestamp")
 }
 
-fn enum_str<T: Serialize>(v: &T) -> String {
+pub(crate) fn enum_str<T: Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
         Ok(Value::String(s)) => s,
         _ => unreachable!("unit-variant enum serialises to a string"),
     }
 }
-fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T> {
+pub(crate) fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T> {
     Ok(serde_json::from_value(Value::String(s.to_string()))?)
 }
 
@@ -268,6 +313,10 @@ pub struct StoreOptions {
     pub keep_recent_deltas: u64,
     /// Total artifact bytes per session (disk quota).
     pub max_artifact_bytes_per_session: Option<u64>,
+    /// Schema version to migrate an older database to. The default stays at the version every
+    /// released binary reads, so a plain open never upgrades the store (outcomes are opt-in,
+    /// ADR-016 item 9); the explicit enable step passes [`schema::OUTCOMES`].
+    pub schema_target: i64,
 }
 
 /// Event byte accounting is a scan, so it runs once per this many appended events.
@@ -285,8 +334,18 @@ impl Default for StoreOptions {
             max_event_bytes_per_session: Some(512 * 1024 * 1024),
             keep_recent_deltas: 1000,
             max_artifact_bytes_per_session: Some(4 * 1024 * 1024 * 1024),
+            schema_target: schema::DEFAULT_TARGET,
         }
     }
+}
+
+/// A schema upgrade this open performed on an existing database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub from: i64,
+    pub to: i64,
+    /// The consistent copy taken before the first change (`backups/pre-v<to>-<time>/synt.db`).
+    pub backup: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +363,7 @@ pub struct Store {
     mirror: bool,
     redactor: Arc<Redactor>,
     limits: Limits,
+    migration: Option<MigrationReport>,
 }
 
 /// One local calendar day of [`Reader::usage_by_day`]; `day` counts days since 1970-01-01.
@@ -580,9 +640,49 @@ impl Store {
         ensure_db_file(&synthesis_home.join("synt.db"))?;
         // Two processes opening a fresh home at once: `connect` retries its setup; the migration
         // is retried here too.
+        let target = opts.schema_target;
+        let mut migration = None;
+        let mut pending: Option<MigrationReport> = None;
         retry_busy(Duration::from_secs(15), || {
             let mut conn = connect(synthesis_home, false)?;
-            schema::migrate(&mut conn, &now())
+            let from = schema::user_version(&conn)?;
+            let to = target.min(schema::LATEST);
+            // An existing database is copied before any upgrade (a fresh one holds nothing). A
+            // failed backup stops the migration: no backup, no change.
+            if pending.is_none() && from > 0 && from < to {
+                let backup = clean::backup_to(
+                    synthesis_home,
+                    &format!("pre-v{to}"),
+                    OffsetDateTime::now_utc(),
+                )?;
+                // Another process may have migrated between our read and the copy: a copy that is
+                // not at `from` would be labelled with the wrong version. Drop it and look again.
+                let copy: i64 =
+                    Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .map_err(Error::from)
+                        .and_then(|c| schema::user_version(&c))?;
+                if copy != from {
+                    let _ = fs::remove_file(&backup);
+                    if let Some(d) = backup.parent() {
+                        let _ = fs::remove_dir(d);
+                    }
+                    return Err(Error::Sqlite(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        None,
+                    )));
+                }
+                pending = Some(MigrationReport { from, to, backup });
+            }
+            if schema::migrate(&mut conn, &now(), target)? {
+                migration = pending.take();
+            } else if let Some(p) = pending.take() {
+                // someone else migrated first: our copy is surplus
+                let _ = fs::remove_file(&p.backup);
+                if let Some(d) = p.backup.parent() {
+                    let _ = fs::remove_dir(d);
+                }
+            }
+            Ok(())
         })?;
         Ok(Store {
             home: synthesis_home.to_path_buf(),
@@ -595,11 +695,22 @@ impl Store {
                 max_artifact_bytes: opts.max_artifact_bytes_per_session,
                 redact_snapshots: opts.redact_snapshots,
             },
+            migration,
         })
+    }
+
+    /// The upgrade this open performed, if any (with its backup path).
+    pub fn migration(&self) -> Option<&MigrationReport> {
+        self.migration.as_ref()
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Masks the configured secrets in `v` (everything persisted goes through this).
+    pub(crate) fn redact_value(&self, v: &mut Value) {
+        self.redactor.redact_value(v);
     }
 
     /// Retention of attached images: in every session not touched for `days` days (`updated_at`
@@ -715,13 +826,14 @@ impl Store {
         let cutoff = (now - min_age).format(&fmt).expect("format utc timestamp");
         let mut conn = connect(&self.home, false)?;
         conn.busy_timeout(Duration::from_millis(200))?;
+        let chat = cleanable_only(&conn, "s")?;
         let ids: Vec<String> = {
-            let mut st = conn.prepare(
+            let mut st = conn.prepare(&format!(
                 "SELECT id FROM sessions s WHERE id != ?1 AND updated_at < ?2 \
                  AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=s.id) \
                  AND NOT EXISTS (SELECT 1 FROM tasks WHERE session_id=s.id) \
-                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id)",
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id){chat}"
+            ))?;
             st.query_map([keep, &cutoff], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?
         };
@@ -765,6 +877,7 @@ impl Store {
     pub fn close_session(&self, id: &str) -> Result<bool> {
         check_id(id)?;
         let conn = connect(&self.home, false)?;
+        refuse_hidden(&conn, id)?;
         let n = conn.execute(
             "UPDATE sessions SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
             (id, now()),
@@ -777,6 +890,8 @@ impl Store {
     pub fn request_stop(&self, id: &str) -> Result<bool> {
         check_id(id)?;
         let conn = connect(&self.home, false)?;
+        // an outcome's sessions are stopped by their owner ([`Self::stop_attempt`]), not by id
+        refuse_hidden(&conn, id)?;
         let n = conn.execute(
             "UPDATE sessions SET stop_requested_at=?2 WHERE id=?1",
             (id, now()),
@@ -852,12 +967,31 @@ impl Store {
         new: NewSession<'_>,
         mirror: impl FnOnce(&str, &str) -> Option<PathBuf>,
     ) -> Result<SessionWriter> {
+        self.create_kind(new, mirror, None)
+    }
+
+    /// `kind`: `Some("outcome")` creates a hidden control session; the row is written with its
+    /// kind in one transaction, so it is never visible as a chat.
+    pub(crate) fn create_kind(
+        &self,
+        new: NewSession<'_>,
+        mirror: impl FnOnce(&str, &str) -> Option<PathBuf>,
+        kind: Option<&str>,
+    ) -> Result<SessionWriter> {
         let id = new
             .id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         check_id(&id)?;
         let ws = new.workspace;
+        // AC-03: a session's folder lies inside its workspace (the root or an added folder). A
+        // context assembled by hand with another cwd is refused here, whatever the caller meant.
+        if !std::iter::once(&ws.root)
+            .chain(&ws.additional_dirs)
+            .any(|r| contains(r, &ws.cwd, ws.path_policy))
+        {
+            return Err(Error::OutsideWorkspace(ws.cwd.clone()));
+        }
         let (root, cwd) = (utf8(&ws.root)?, utf8(&ws.cwd)?);
         let dirs = ws
             .additional_dirs
@@ -869,6 +1003,9 @@ impl Store {
         let lock = lock_session(&self.home, &id)?;
         let conn = connect(&self.home, false)?;
         let ts = now();
+        if kind.is_some() {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
         let r = conn.execute(
             "INSERT INTO sessions(id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,
                model_config,permission_mode,permission_policy_id,budget,usage,title,parent_session_id,
@@ -905,6 +1042,11 @@ impl Store {
             }
             r => r?,
         };
+        if let Some(k) = kind {
+            // an error above drops the connection, which rolls the transaction back
+            conn.execute("UPDATE sessions SET kind=?2 WHERE id=?1", (&id, k))?;
+            conn.execute_batch("COMMIT")?;
+        }
         self.writer(conn, id, lock, mirror_path, cwd, root, dirs)
     }
 
@@ -950,6 +1092,34 @@ impl Store {
     /// process is first moved to `interrupted`. Fails with [`Error::TranscriptChanged`] when
     /// the Node JSONL it mirrors was modified by someone else, unless `accept_external_changes`.
     pub fn resume_session(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
+        check_id(id)?;
+        refuse_hidden(&connect(&self.home, true)?, id)?;
+        self.resume_inner(id, accept_external_changes)
+    }
+
+    /// `synt run --attempt-session`: the worker of an attempt continues the session the
+    /// orchestrator allocated. Only a session of a live (`starting` or `running`) attempt is
+    /// accepted, so this is not a way into a control session or a finished attempt's.
+    pub fn resume_attempt_session(&self, id: &str) -> Result<SessionWriter> {
+        check_id(id)?;
+        let conn = connect(&self.home, true)?;
+        if schema::user_version(&conn)? < schema::OUTCOMES {
+            return Err(Error::OutcomesNotEnabled);
+        }
+        let live: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attempts WHERE session_id=?1 AND state IN ('starting','running'))",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !live {
+            return Err(Error::Invalid(format!(
+                "session {id} is not the session of a live outcome attempt"
+            )));
+        }
+        self.resume_inner(id, true)
+    }
+
+    fn resume_inner(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
         let mut w = self.open_locked(id)?;
         let rec = w.get_session(id)?;
         if let (Some(p), false) = (&rec.legacy_transcript_path, accept_external_changes)
@@ -966,6 +1136,54 @@ impl Store {
             w.repair_cancelling("writer process exited; found cancelling on resume")?;
         }
         Ok(w)
+    }
+
+    /// Records where a session's worktree is pinned, only if nothing was recorded yet (`false`:
+    /// already set). It lets an interrupted allocation finish the session row it left behind
+    /// without opening the session; the value is never replaced.
+    pub fn set_git_info_if_unset(&self, id: &str, json: &str) -> Result<bool> {
+        check_id(id)?;
+        let n = connect(&self.home, false)?.execute(
+            "UPDATE sessions SET git_info=?2 WHERE id=?1 AND git_info IS NULL",
+            (id, json),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The orchestrator's way into an attempt's session (to read or finish it): the lock and
+    /// connection without the user-path refusal of [`Self::resume_session`]. It needs the outcome's
+    /// writer as proof of ownership and only opens a session that is an attempt of that outcome.
+    pub fn open_attempt_session(
+        &self,
+        outcome: &crate::outcome::OutcomeWriter,
+        session_id: &str,
+    ) -> Result<SessionWriter> {
+        check_id(session_id)?;
+        if !outcome.owns_attempt_session(session_id)? {
+            return Err(Error::Invalid(format!(
+                "session {session_id} is not an attempt of this outcome"
+            )));
+        }
+        self.open_locked(session_id)
+    }
+
+    /// `synt stop` for an attempt's session, on behalf of its outcome's owner (cancel path).
+    pub fn stop_attempt(
+        &self,
+        outcome: &crate::outcome::OutcomeWriter,
+        session_id: &str,
+    ) -> Result<bool> {
+        check_id(session_id)?;
+        if !outcome.owns_attempt_session(session_id)? {
+            return Err(Error::Invalid(format!(
+                "session {session_id} is not an attempt of this outcome"
+            )));
+        }
+        let n = connect(&self.home, false)?.execute(
+            "UPDATE sessions SET stop_requested_at=?2 WHERE id=?1",
+            (session_id, now()),
+        )?;
+        Ok(n > 0)
     }
 
     /// Lock + connection for an existing session without any state checks (recovery).
@@ -1108,14 +1326,14 @@ impl Store {
 /// Read side. `SessionWriter` derefs to it, so a writer can also read.
 pub struct Reader {
     pub(crate) conn: Connection,
-    home: PathBuf,
+    pub(crate) home: PathBuf,
 }
 
 const SESSION_COLS: &str = "id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,model_config,
   permission_mode,permission_policy_id,budget,usage,event_cursor,checkpoint_id,title,parent_session_id,
   parent_tool_call_id,legacy_transcript_path,created_at,updated_at,git_info";
 
-fn bad(e: impl std::fmt::Display) -> rusqlite::Error {
+pub(crate) fn bad(e: impl std::fmt::Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.to_string().into())
 }
 
@@ -1249,7 +1467,7 @@ impl Reader {
         if last != head {
             rep.broken = Some(ChainBreak {
                 seq: rec.event_cursor as i64,
-                why: "the last event does not match the head kept in the session row (events were changed or cut off at the end, or the key changed)".into(),
+                why: "the last event does not match the head kept in the session row (an event was changed or removed, or the key changed; a cut-off tail together with a rewritten head is NOT detected: the head is a plain column in the same database)".into(),
             });
         }
         Ok(rep)
@@ -1286,8 +1504,9 @@ impl Reader {
 
     /// Newest first; `cwd` filters by the persisted working directory.
     pub fn list_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let chat = chat_only(&self.conn, "sessions")?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC, id"
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} ORDER BY updated_at DESC, id"
         ))?;
         let rows = st.query_map([cwd], session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1296,8 +1515,9 @@ impl Reader {
     /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
     /// every launch leaves behind when nothing was typed) and the closed ones.
     pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let chat = chat_only(&self.conn, "sessions")?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) \
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} \
              AND closed_at IS NULL \
              AND (EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) \
                OR EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)) \
@@ -1688,7 +1908,7 @@ pub fn file_state_hash(p: &Path) -> String {
     }
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1895,6 +2115,35 @@ impl SessionWriter {
             agent_id: agent,
             kind: kind.to_string(),
             payload,
+        })
+    }
+
+    /// Runs `f` in one IMMEDIATE transaction on this session's connection; events appended
+    /// through the [`EventTx`] commit or roll back together with whatever `f` writes (the outbox
+    /// rule of ADR-016 item 3). A busy database re-runs `f` from scratch, so `f` must not have
+    /// effects outside the transaction.
+    pub(crate) fn event_tx<T>(
+        &mut self,
+        mut f: impl FnMut(&mut EventTx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        retry_busy(Duration::from_secs(15), || {
+            let tx = self
+                .reader
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let out = {
+                let mut et = EventTx {
+                    tx: &tx,
+                    key: &self.chain_key,
+                    home: &self.reader.home,
+                    limits: &self.limits,
+                    sid: &self.id,
+                    redactor: &self.redactor,
+                };
+                f(&mut et)?
+            };
+            tx.commit()?;
+            Ok(out)
         })
     }
 
@@ -2449,6 +2698,47 @@ impl SessionWriter {
             files,
             created_at: ts,
         })
+    }
+}
+
+/// A session's transaction with event append (see [`SessionWriter::event_tx`]).
+pub(crate) struct EventTx<'a> {
+    pub(crate) tx: &'a Transaction<'a>,
+    key: &'a [u8; 32],
+    home: &'a Path,
+    limits: &'a Limits,
+    sid: &'a str,
+    redactor: &'a Redactor,
+}
+
+impl EventTx<'_> {
+    /// Redacts and appends an untyped event of this session; returns its `seq`.
+    pub(crate) fn append(&mut self, kind: &str, mut payload: Value) -> Result<u64> {
+        self.redactor.redact_value(&mut payload);
+        append_tx(
+            self.tx,
+            self.key,
+            self.home,
+            self.limits,
+            self.sid,
+            &now(),
+            (&None, &None, &None),
+            kind,
+            &payload,
+        )
+    }
+
+    pub(crate) fn redact_str(&self, s: &str) -> String {
+        self.redactor.redact_str(s)
+    }
+
+    /// The per-user chain key (MACs of approvals are keyed with it).
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        self.key
+    }
+
+    pub(crate) fn redact_value(&self, v: &mut Value) {
+        self.redactor.redact_value(v);
     }
 }
 

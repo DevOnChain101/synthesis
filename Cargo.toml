@@ -15,6 +15,7 @@ default-members = [
     "crates/synthesis-harness",
     "crates/synthesis-hooks",
     "crates/synthesis-mcp",
+    "crates/synthesis-orchestrator",
     "crates/synthesis-memory",
     "crates/synthesis-peers",
     "crates/synthesis-permissions",
