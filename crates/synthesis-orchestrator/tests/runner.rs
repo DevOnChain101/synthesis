@@ -34,15 +34,14 @@ impl Spawn for Script {
 }
 
 fn runner<'a>(r: &'a Rig, s: &'a Script) -> Runner<'a> {
-    Runner {
-        store: &r.store,
-        worktrees: &r.wm,
-        spawn: s,
-        probe: &OsProbe,
-        poll: Duration::from_millis(40),
-        grace: Duration::from_millis(400),
-        beat: None,
-    }
+    Runner::new(
+        &r.store,
+        &r.wm,
+        s,
+        &OsProbe,
+        Duration::from_millis(40),
+        Duration::from_millis(400),
+    )
 }
 
 fn profile(r: &Rig, env: &AttemptEnv, p: &OutcomePolicy) -> Profile {
@@ -836,8 +835,7 @@ fn a_busy_database_never_kills_a_healthy_worker() {
             w.heartbeat(id, fence)
         }
     };
-    let mut rn = runner(&r, &s);
-    rn.beat = Some(&hook);
+    let rn = runner(&r, &s).with_beat(&hook);
     let settled = rn
         .run_attempt(
             &mut w,
@@ -867,8 +865,7 @@ fn a_busy_database_never_kills_a_healthy_worker() {
             _ => w.heartbeat(id, fence),
         }
     };
-    let mut rn = runner(&r, &s);
-    rn.beat = Some(&hook2);
+    let rn = runner(&r, &s).with_beat(&hook2);
     let settled = rn
         .run_attempt(
             &mut w2,
@@ -894,8 +891,7 @@ fn only_a_stale_heartbeat_kills_the_worker_and_a_dead_database_gives_the_attempt
     let hook = |_: &mut OutcomeWriter, _: &AttemptId, _: i64| {
         Err(synthesis_session::Error::Stale("superseded".into()))
     };
-    let mut rn = runner(&r, &s);
-    rn.beat = Some(&hook);
+    let rn = runner(&r, &s).with_beat(&hook);
     let began = Instant::now();
     let err = rn
         .run_attempt(
@@ -921,8 +917,7 @@ fn only_a_stale_heartbeat_kills_the_worker_and_a_dead_database_gives_the_attempt
         .allocate(&mut w, &r.spec(&two, 1), OffsetDateTime::now_utc())
         .unwrap();
     let hook = |_: &mut OutcomeWriter, _: &AttemptId, _: i64| Err(busy());
-    let mut rn = runner(&r, &s);
-    rn.beat = Some(&hook);
+    let rn = runner(&r, &s).with_beat(&hook);
     let err = rn
         .run_attempt(
             &mut w,
@@ -957,15 +952,14 @@ fn a_worker_that_cannot_start_fails_the_attempt_instead_of_leaving_it_running() 
         .allocator()
         .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
         .unwrap();
-    let rn = Runner {
-        store: &r.store,
-        worktrees: &r.wm,
-        spawn: &Broken,
-        probe: &OsProbe,
-        poll: Duration::from_millis(40),
-        grace: Duration::from_millis(100),
-        beat: None,
-    };
+    let rn = Runner::new(
+        &r.store,
+        &r.wm,
+        &Broken,
+        &OsProbe,
+        Duration::from_millis(40),
+        Duration::from_millis(100),
+    );
     let err = rn
         .run_attempt(
             &mut w,
@@ -1124,8 +1118,15 @@ fn later_attempts_get_what_is_left_of_the_outcome_cap() {
         build(7.0),
         Err(ProfileError::BudgetExhausted { .. })
     ));
-    // a hostile value cannot raise the cap
-    assert_eq!(build(f64::NAN).unwrap().max_cost_usd(), 5.0);
+    // a hostile value cannot raise the cap: a spend that is not a number is a used-up budget
+    assert!(matches!(
+        build(f64::NAN),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
+    assert!(matches!(
+        build(f64::INFINITY),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
     assert_eq!(build(-100.0).unwrap().max_cost_usd(), 5.0);
     // the settings' ceiling bounds it as well
     let mut p = policy();
@@ -1187,4 +1188,180 @@ fn a_prompt_that_starts_with_a_dash_is_a_value() {
         "{argv:?}"
     );
     assert!(!argv.iter().any(|a| a == "--sandbox"));
+}
+
+fn usage_of(r: &Rig, env: &AttemptEnv, status: &str, usage: &str) {
+    rusqlite::Connection::open(r.home.join("synt.db"))
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET status=?2, usage=?3 WHERE id=?1",
+            [&env.session_id, status, usage],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_killed_attempt_keeps_its_reservation_and_a_final_usage_lowers_it_but_never_below_what_is_recorded()
+ {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let id = w.id().clone();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 0.0, "nothing started yet");
+    let s = Script("sleep 30".into());
+    let rn = runner(&r, &s);
+    let mut run = rn
+        .start(&mut w, &env, &profile(&r, &env, &policy()))
+        .unwrap();
+    assert_eq!(attempt(&w, &one, 1).reserved_usd, Some(5.0));
+    assert_eq!(
+        w.outcome_spend(&id).unwrap(),
+        5.0,
+        "a running worker counts its cap"
+    );
+    // killed: no usage was ever recorded, the reservation stays
+    rn.abort(&mut w, &mut run, "test");
+    assert_eq!(attempt(&w, &one, 1).state, AttemptState::Lost);
+    assert_eq!(
+        w.outcome_spend(&id).unwrap(),
+        5.0,
+        "a killed attempt is not free"
+    );
+    // the default (all zero) usage of a session that did not run is not a final usage
+    usage_of(
+        &r,
+        &env,
+        "failed",
+        r#"{"turns":0,"tool_calls":0,"cost_usd":0.0,"wall_ms":0,"verify_attempts":0}"#,
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    // a final usage replaces the reservation
+    usage_of(
+        &r,
+        &env,
+        "failed",
+        r#"{"turns":3,"tool_calls":2,"cost_usd":0.4,"wall_ms":900,"verify_attempts":0}"#,
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 0.4);
+    // usage written while the session is not over never lowers it, and never goes below itself
+    usage_of(
+        &r,
+        &env,
+        "running",
+        r#"{"turns":3,"tool_calls":2,"cost_usd":0.4,"wall_ms":900,"verify_attempts":0}"#,
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    usage_of(
+        &r,
+        &env,
+        "running",
+        r#"{"turns":9,"tool_calls":2,"cost_usd":7.5,"wall_ms":900,"verify_attempts":0}"#,
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 7.5);
+    // the reservation is set once, can only be lowered, and only by the attempt's own fence
+    let db = rusqlite::Connection::open(r.home.join("synt.db")).unwrap();
+    assert!(
+        db.execute(
+            "UPDATE attempts SET reserved_usd=99 WHERE id=?1",
+            [env.attempt.id.as_str()]
+        )
+        .is_err()
+    );
+    assert!(w.reserve_budget(&env.attempt.id, 99, 1.0).is_err());
+    assert!(w.reserve_budget(&env.attempt.id, 1, f64::NAN).is_err());
+    assert!(w.reserve_budget(&env.attempt.id, 1, -1.0).is_err());
+}
+
+#[test]
+fn a_worker_that_could_not_be_spawned_gives_its_reservation_back() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let rn = Runner::new(
+        &r.store,
+        &r.wm,
+        &Broken,
+        &OsProbe,
+        Duration::from_millis(40),
+        Duration::from_millis(100),
+    );
+    assert!(
+        rn.start(&mut w, &env, &profile(&r, &env, &policy()))
+            .is_err()
+    );
+    let id = w.id().clone();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 0.0, "nothing ever ran");
+}
+
+#[test]
+fn a_dropped_handle_kills_and_reaps_its_whole_tree() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let pidfile = r.base.join("child.pid");
+    let s = Script(format!("sleep 60 & echo $! > {}; wait", pidfile.display()));
+    let rn = runner(&r, &s);
+    let run = rn
+        .start(&mut w, &env, &profile(&r, &env, &policy()))
+        .unwrap();
+    let pid = run.pid();
+    let until = Instant::now() + Duration::from_secs(5);
+    while !pidfile.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let child: u32 = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(pid) && alive(child));
+    drop(run);
+    assert!(gone(pid), "the worker is reaped");
+    assert!(gone(child), "and so is what it started");
+}
+
+#[test]
+fn a_settle_error_marks_the_attempt_lost_instead_of_leaving_the_slot_stuck() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let s = Script("sleep 1".into());
+    let rn = runner(&r, &s);
+    let mut run = rn
+        .start(&mut w, &env, &profile(&r, &env, &policy()))
+        .unwrap();
+    // the worktree is damaged: committing the attempt's tree fails
+    let _ = fs::remove_file(env.context.cwd.join(".git"));
+    let cancel = CancelFlag::default();
+    let err = loop {
+        match rn.poll(&mut w, &mut run, &cancel) {
+            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
+            Ok(Some(s)) => panic!("settled: {s:?}"),
+            Err(e) => break e,
+        }
+    };
+    assert!(!err.to_string().is_empty());
+    let a = attempt(&w, &one, 1);
+    assert_eq!(
+        a.state,
+        AttemptState::Lost,
+        "no live attempt holds the slot"
+    );
+    assert!(a.retained_reason.unwrap_or_default().contains("lost"));
 }

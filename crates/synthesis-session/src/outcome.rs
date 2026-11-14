@@ -127,6 +127,9 @@ pub struct AttemptRecord {
     pub worker_start: Option<String>,
     /// Last sign of life of the worker; a lease that is older than the owner's limit is expired.
     pub heartbeat_at: Option<String>,
+    /// The cost cap allocated to this attempt when its worker started. It counts as spent until
+    /// the session records a final usage (then the recorded cost counts, never less).
+    pub reserved_usd: Option<f64>,
     pub started_at: String,
     pub ended_at: Option<String>,
 }
@@ -278,7 +281,7 @@ fn item_row(r: &Row<'_>) -> rusqlite::Result<WorkItemRecord> {
     })
 }
 
-const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.started_at,a.ended_at";
+const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.reserved_usd,a.started_at,a.ended_at";
 fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
     Ok(AttemptRecord {
         id: id_col(r, 0)?,
@@ -295,8 +298,9 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         worker_pid: r.get(11)?,
         worker_start: r.get(12)?,
         heartbeat_at: r.get(13)?,
-        started_at: r.get(14)?,
-        ended_at: r.get(15)?,
+        reserved_usd: r.get(14)?,
+        started_at: r.get(15)?,
+        ended_at: r.get(16)?,
     })
 }
 
@@ -462,13 +466,24 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// What the outcome's attempts have cost so far, from the usage their sessions recorded
-    /// (`sessions.usage.cost_usd`). Used to lower the cap of the next attempt: N attempts must not
-    /// spend N times the outcome cap.
+    /// What the outcome's attempts have cost, as an UPPER BOUND: for every attempt whose session
+    /// ended with a final usage recorded (the session's usage is not the all-zero default), that
+    /// cost; for every other attempt (running, killed,
+    /// crashed, abandoned, wall-killed) the larger of its reservation (the cap allocated when its
+    /// worker started) and whatever usage was written. A cancelled or lost attempt with a
+    /// final usage counts only that usage. Used to lower the cap of the next attempt: N attempts
+    /// must not spend N times the outcome cap, and parallel starts must not over-commit it.
     pub fn outcome_spend(&self, id: &OutcomeId) -> Result<f64> {
         need_v5(&self.conn)?;
         Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0) \
+            "SELECT COALESCE(SUM(CASE \
+               WHEN s.status IN ('completed','unverified','blocked','failed','cancelled') \
+                AND (COALESCE(json_extract(s.usage,'$.turns'),0) > 0 \
+                  OR COALESCE(json_extract(s.usage,'$.wall_ms'),0) > 0 \
+                  OR COALESCE(json_extract(s.usage,'$.cost_usd'),0) > 0) \
+                 THEN COALESCE(json_extract(s.usage,'$.cost_usd'),0) \
+               ELSE MAX(COALESCE(a.reserved_usd,0), COALESCE(json_extract(s.usage,'$.cost_usd'),0)) \
+             END),0.0) \
              FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
              JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
             [id.as_str()],
@@ -1396,6 +1411,14 @@ impl OutcomeWriter {
 
     pub fn heartbeat(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
         self.atomically(|tx| tx.heartbeat(id, fence))
+    }
+
+    pub fn reserve_budget(&mut self, id: &AttemptId, fence: i64, usd: f64) -> Result<()> {
+        self.atomically(|tx| tx.reserve_budget(id, fence, usd))
+    }
+
+    pub fn release_budget(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
+        self.atomically(|tx| tx.release_budget(id, fence))
     }
 
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
@@ -2538,6 +2561,34 @@ impl OutcomeTx<'_, '_> {
         self.et.tx.execute(
             "UPDATE attempts SET worker_pid=?2, worker_start=?3, heartbeat_at=?4 WHERE id=?1",
             params![id.as_str(), pid, start, at],
+        )?;
+        Ok(())
+    }
+
+    /// Reserves `usd` for the attempt, once, before its worker is spawned: from then on the
+    /// outcome counts it as spent until a final usage is recorded. Same fence rules as the
+    /// worker's writes; the amount must be positive and finite.
+    pub fn reserve_budget(&mut self, id: &AttemptId, fence: i64, usd: f64) -> Result<()> {
+        if !usd.is_finite() || usd <= 0.0 {
+            return Err(Error::Invalid(
+                "a reservation must be a positive number".into(),
+            ));
+        }
+        self.live_attempt(id, fence)?;
+        self.et.tx.execute(
+            "UPDATE attempts SET reserved_usd=?2 WHERE id=?1",
+            params![id.as_str(), usd],
+        )?;
+        Ok(())
+    }
+
+    /// Gives a reservation back: only for a worker that never started (its spawn failed), so
+    /// nothing was spent. Same fence rules; a reservation can be lowered, never raised.
+    pub fn release_budget(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
+        self.live_attempt(id, fence)?;
+        self.et.tx.execute(
+            "UPDATE attempts SET reserved_usd=0 WHERE id=?1",
+            params![id.as_str()],
         )?;
         Ok(())
     }

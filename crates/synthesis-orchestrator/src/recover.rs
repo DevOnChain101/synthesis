@@ -168,15 +168,14 @@ fn never_spawns<'a>(
     probe: &'a dyn ProcessProbe,
 ) -> Runner<'a> {
     static NO: NoSpawn = NoSpawn;
-    Runner {
+    Runner::new(
         store,
         worktrees,
-        spawn: &NO,
+        &NO,
         probe,
-        poll: Duration::from_secs(1),
-        grace: Duration::from_secs(1),
-        beat: None,
-    }
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
 }
 
 /// Marks the attempt `lost` and frees its work item: `ready` while the attempt budget allows

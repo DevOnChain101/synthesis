@@ -5,7 +5,7 @@
 mod common;
 use common::*;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -34,19 +34,25 @@ impl Spawn for Script {
     }
 }
 
-fn host<'a>(r: &'a Rig, s: &'a Script) -> ProcessHost<'a> {
+/// The scripted workers record no usage, so each attempt keeps its whole reservation: keep it small.
+fn small_attempts(r: &Rig) -> Contract {
+    let mut c = r.contract_for_profile();
+    c.envelope.budgets.attempt_max_cost_usd = Some(0.01);
+    c
+}
+
+fn host<'a>(r: &'a Rig, s: &'a dyn Spawn) -> ProcessHost<'a> {
     ProcessHost {
         allocator: r.allocator(),
-        runner: Runner {
-            store: &r.store,
-            worktrees: &r.wm,
-            spawn: s,
-            probe: &OsProbe,
-            poll: Duration::from_millis(30),
-            grace: Duration::from_millis(300),
-            beat: None,
-        },
-        contract: r.contract_for_profile(),
+        runner: Runner::new(
+            &r.store,
+            &r.wm,
+            s,
+            &OsProbe,
+            Duration::from_millis(30),
+            Duration::from_millis(300),
+        ),
+        contract: small_attempts(r),
         policy: policy(),
         program: PathBuf::from("sh"),
         extra: vec![],
@@ -573,6 +579,7 @@ impl WorkerHost for Counting {
         item: &WorkItemRecord,
         _: u32,
         _: f64,
+        _: u32,
     ) -> Result<u32, SchedError> {
         self.live.set(self.live.get() + 1);
         self.max.set(self.max.get().max(self.live.get()));
@@ -731,4 +738,431 @@ fn two_hundred_and_fifty_ready_items_never_run_more_than_the_cap_at_once() {
             250
         );
     }
+}
+
+/// Picks the command by work item (the prompt names it): `slow` sleeps, `fail` cannot be spawned,
+/// every other item finishes at once.
+struct ByItem {
+    slow: &'static str,
+    fail: Option<&'static str>,
+}
+
+impl Spawn for ByItem {
+    fn spawn(&self, p: &Profile) -> io::Result<Child> {
+        let named = |k: &str| {
+            p.argv()
+                .iter()
+                .any(|a| a.to_string_lossy().ends_with(&format!("Work item: {k}")))
+        };
+        if self.fail.is_some_and(named) {
+            return Err(io::Error::other("no such program"));
+        }
+        let script = if named(self.slow) {
+            "sleep 30"
+        } else {
+            "echo made > out.txt"
+        };
+        Script(script.into()).spawn(p)
+    }
+}
+
+fn ready(w: &mut OutcomeWriter, it: &WorkItemId) {
+    let rev = w.get_work_item(it).unwrap().revision;
+    w.transition_work_item(it, rev, WorkItemState::Ready, &Effects::default())
+        .unwrap();
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn pids(w: &OutcomeWriter) -> Vec<u32> {
+    let mut v = vec![];
+    for i in w.list_work_items(w.id()).unwrap() {
+        v.extend(
+            w.list_attempts(&i.id)
+                .unwrap()
+                .iter()
+                .filter_map(|a| a.worker_pid),
+        );
+    }
+    v
+}
+
+fn lost_attempts(w: &OutcomeWriter) -> usize {
+    let mut n = 0;
+    for i in w.list_work_items(w.id()).unwrap() {
+        n += w
+            .list_attempts(&i.id)
+            .unwrap()
+            .iter()
+            .filter(|a| a.state == AttemptState::Lost)
+            .count();
+    }
+    n
+}
+
+#[test]
+fn parallel_starts_split_what_is_left_and_cannot_over_commit_the_outcome_cap() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    let s = Script("sleep 30".into());
+    let mut c = cfg();
+    c.max_cost_usd = Some(5.0);
+    let mut h = host(&r, &s);
+    h.contract = r.contract_for_profile(); // outcome cap 5.0, no per-attempt cap
+    let mut sched = Scheduler::new(h, EvidenceVerifier::new(&[]), c);
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert_eq!(rep.leased, ["one", "two"], "{rep:?}");
+    let id = w.id().clone();
+    let mut reserved = vec![];
+    for i in w.list_work_items(&id).unwrap() {
+        reserved.extend(
+            w.list_attempts(&i.id)
+                .unwrap()
+                .iter()
+                .map(|a| a.reserved_usd),
+        );
+    }
+    assert_eq!(
+        reserved,
+        [Some(2.5), Some(2.5)],
+        "each gets its share, not the whole cap"
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    // the cap is reserved: nothing more starts, and that is no failure while workers run
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(rep.leased.is_empty() && rep.stop.is_none(), "{rep:?}");
+    // killed workers keep their reservations
+    let pids = pids(&w);
+    sched.shutdown(&mut w, "test");
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    assert_eq!(lost_attempts(&w), 2);
+    assert!(pids.iter().all(|p| !alive(*p)), "no worker is left");
+    // a lone ready item gets the whole remainder
+    let (mut w, _) = r.fresh();
+    let mut h = host(&r, &s);
+    h.contract = r.contract_for_profile();
+    let mut c = cfg();
+    c.max_parallel = 1;
+    c.max_cost_usd = Some(5.0);
+    let mut sched = Scheduler::new(h, EvidenceVerifier::new(&[]), c);
+    sched.tick(&mut w, clock()).unwrap();
+    let it = w.list_work_items(w.id()).unwrap();
+    let leased = it
+        .iter()
+        .find(|i| i.state == WorkItemState::Running)
+        .unwrap();
+    assert_eq!(
+        w.list_attempts(&leased.id).unwrap()[0].reserved_usd,
+        Some(5.0)
+    );
+}
+
+#[test]
+fn a_crash_keeps_the_reservations_of_attempts_that_never_recorded_a_usage() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let id = w.id().clone();
+    let one = items.iter().find(|(n, _)| n == "one").unwrap().1.clone();
+    ready(&mut w, &one);
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    r.wm.mark_started(&env.git).unwrap();
+    let rev = w.list_attempts(&one).unwrap()[0].revision;
+    w.transition_attempt(
+        &env.attempt.id,
+        rev,
+        AttemptState::Running,
+        &AttemptEnd::default(),
+        &Effects::default(),
+    )
+    .unwrap();
+    w.reserve_budget(&env.attempt.id, 1, 3.0).unwrap();
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    w.record_worker(&env.attempt.id, 1, pid, Some("tok"))
+        .unwrap();
+    drop(w);
+    let mut w = r.store.open_outcome(&id, &policy()).unwrap();
+    let rep = recover_attempts(
+        &r.store,
+        &r.wm,
+        &OsProbe,
+        &mut w,
+        clock(),
+        Duration::from_secs(120),
+        3,
+        Platform {
+            native_windows: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(rep.lost.len(), 1);
+    assert_eq!(w.list_attempts(&one).unwrap()[0].state, AttemptState::Lost);
+    assert_eq!(
+        w.outcome_spend(&id).unwrap(),
+        3.0,
+        "the crashed attempt still counts"
+    );
+}
+
+#[test]
+fn a_spend_that_is_not_a_number_is_a_used_up_budget_even_without_a_cap() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let one = items.iter().find(|(n, _)| n == "one").unwrap().1.clone();
+    ready(&mut w, &one);
+    r.allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    r.raw("UPDATE attempts SET reserved_usd=9e999");
+    let s = Script("exit 0".into());
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg()); // no cap
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(rep.leased.is_empty(), "{rep:?}");
+    assert!(
+        matches!(&rep.stop, Some(Stop::Blocked(m)) if m.contains("cost cap")),
+        "{rep:?}"
+    );
+}
+
+#[test]
+fn a_worker_that_cannot_start_does_not_abort_the_tick_or_stop_its_sibling() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    let s = ByItem {
+        slow: "one",
+        fail: Some("two"),
+    };
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg());
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.starts_with("two:") && e.contains("cannot start")),
+        "{rep:?}"
+    );
+    assert_eq!(
+        sched.running_count(),
+        1,
+        "the sibling was started and is still held"
+    );
+    let st = states(&w);
+    assert!(
+        st.contains(&("one".into(), WorkItemState::Running)),
+        "{st:?}"
+    );
+    assert!(
+        st.contains(&("two".into(), WorkItemState::RetryableFailure)),
+        "the failed start retries within its budget: {st:?}"
+    );
+    let sibling = pids(&w);
+    // the walk goes on: `two` is retried until its attempts are used up, then the outcome is
+    // blocked (the sibling is still sleeping: a deadline ends this test)
+    let mut n = 0;
+    while sched.running_count() > 0 && n < 40 {
+        let rep = sched.tick(&mut w, clock()).unwrap();
+        if matches!(rep.stop, Some(Stop::Blocked(_))) {
+            break;
+        }
+        n += 1;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let st = states(&w);
+    assert!(
+        st.contains(&("two".into(), WorkItemState::TerminalFailure)),
+        "{st:?}"
+    );
+    assert!(
+        sibling.iter().all(|p| alive(*p)),
+        "the sibling was never touched"
+    );
+    sched.shutdown(&mut w, "test");
+    assert!(sibling.iter().all(|p| !alive(*p)));
+}
+
+#[test]
+fn a_hard_error_or_the_deadline_stops_every_worker_and_marks_their_attempts_lost() {
+    need_git!();
+    // the outcome is cancelled behind the walk's back while a worker sleeps: the tick fails
+    struct Pull;
+    impl Verifier for Pull {
+        fn verify(
+            &mut self,
+            w: &mut OutcomeWriter,
+            _: &WorkItemRecord,
+        ) -> Result<Verdict, SchedError> {
+            let rev = w.get_outcome(w.id())?.revision;
+            w.transition_outcome(
+                rev,
+                OutcomeState::Cancelled,
+                Some("pulled"),
+                &Effects::default(),
+            )?;
+            Ok(Verdict::Pending)
+        }
+    }
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    let s = ByItem {
+        slow: "two",
+        fail: None,
+    };
+    let mut sched = Scheduler::new(host(&r, &s), Pull, cfg());
+    let err = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap_err();
+    assert!(err.to_string().contains("not running"), "{err}");
+    assert_eq!(sched.running_count(), 0);
+    let p = pids(&w);
+    assert_eq!(p.len(), 2);
+    assert!(
+        p.iter().all(|p| !alive(*p)),
+        "the sleeping worker was killed and reaped"
+    );
+    assert!(lost_attempts(&w) >= 1);
+    // the deadline
+    let (mut w, _) = r.fresh();
+    let s = Script("sleep 30".into());
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg());
+    let t = std::time::Instant::now();
+    let err = sched
+        .run_until(
+            &mut w,
+            &clock,
+            Duration::from_millis(20),
+            Some(t + Duration::from_millis(300)),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("deadline"), "{err}");
+    assert!(t.elapsed() < Duration::from_secs(10));
+    let p = pids(&w);
+    assert_eq!(p.len(), 2);
+    assert!(p.iter().all(|p| !alive(*p)));
+    assert_eq!(lost_attempts(&w), 2);
+}
+
+#[test]
+fn a_dropped_scheduler_leaves_no_worker_behind() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    let s = Script("sleep 30".into());
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg());
+    sched.tick(&mut w, clock()).unwrap();
+    let p = pids(&w);
+    assert_eq!(p.len(), 2);
+    assert!(p.iter().all(|p| alive(*p)));
+    drop(sched);
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while p.iter().any(|p| alive(*p)) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(p.iter().all(|p| !alive(*p)));
+}
+
+#[test]
+fn a_verifier_that_fails_is_asked_again_and_does_not_end_the_walk() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    struct Flaky(EvidenceVerifier, Cell<u32>);
+    impl Verifier for Flaky {
+        fn verify(
+            &mut self,
+            w: &mut OutcomeWriter,
+            it: &WorkItemRecord,
+        ) -> Result<Verdict, SchedError> {
+            if self.1.get() < 2 {
+                self.1.set(self.1.get() + 1);
+                return Err(SchedError::State("verifier crashed".into()));
+            }
+            self.0.verify(w, it)
+        }
+    }
+    let s = ByItem {
+        slow: "none",
+        fail: None,
+    };
+    let mut sched = Scheduler::new(
+        host(&r, &s),
+        Flaky(EvidenceVerifier::new(&[]), Cell::new(0)),
+        cfg(),
+    );
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded, "{reports:?}");
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("the verifier failed")),
+        "{reports:?}"
+    );
+}
+
+#[test]
+fn a_missing_synt_binary_ends_blocked_with_the_reason_and_no_worker() {
+    need_git!();
+    let r = rig();
+    let (mut w, _) = r.fresh();
+    let spawn = SyntSpawn {
+        log: r.base.join("worker.log"),
+        env: Some(vec![]),
+    };
+    let mut h = host(&r, &spawn);
+    h.program = PathBuf::from("/no/such/dir/synt");
+    let mut sched = Scheduler::new(h, EvidenceVerifier::new(&[]), cfg());
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(10))
+        .unwrap();
+    assert!(
+        matches!(&stop, Stop::Blocked(m) if m.contains("cannot start the worker")),
+        "{stop:?}"
+    );
+    assert_eq!(sched.running_count(), 0);
+    assert!(
+        reports
+            .iter()
+            .flat_map(|r| &r.errors)
+            .any(|e| e.contains("cannot start"))
+    );
+    // nothing was spent: the reservations went back
+    assert_eq!(w.outcome_spend(&w.id().clone()).unwrap(), 0.0);
+}
+
+#[test]
+fn an_item_left_in_recovering_by_a_crash_is_freed() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let one = items.iter().find(|(n, _)| n == "one").unwrap().1.clone();
+    for to in [
+        WorkItemState::Ready,
+        WorkItemState::Leased,
+        WorkItemState::Recovering,
+    ] {
+        let rev = w.get_work_item(&one).unwrap().revision;
+        w.transition_work_item(&one, rev, to, &Effects::default())
+            .unwrap();
+    }
+    let s = Script("exit 0".into());
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg());
+    let (stop, _) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded, "{:?}", states(&w));
 }

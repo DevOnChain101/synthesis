@@ -269,15 +269,14 @@ fn run(
         log: r.dir.path().join("worker.log"),
         env: Some(worker_env(r)),
     };
-    let runner = Runner {
-        store: &r.store,
-        worktrees: &r.wm,
-        spawn: &spawn,
-        probe: &OsProbe,
-        poll: Duration::from_millis(100),
-        grace: Duration::from_secs(5),
-        beat: None,
-    };
+    let runner = Runner::new(
+        &r.store,
+        &r.wm,
+        &spawn,
+        &OsProbe,
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+    );
     let settled = runner.run_attempt(&mut w, &env, &profile, &CancelFlag::default());
     (w, it, env, settled)
 }

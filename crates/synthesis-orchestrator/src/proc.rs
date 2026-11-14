@@ -64,6 +64,31 @@ pub fn kill_child_tree(probe: &dyn ProcessProbe, pid: u32) {
     }
 }
 
+/// Kills the process group and the descendants of a child this process spawned (in its own
+/// group) and has not reaped yet; the part of [`kill_child_tree`] that needs no probe (a handle
+/// that is dropped has none).
+pub fn kill_unreaped_tree(pid: u32) {
+    #[cfg(unix)]
+    if pid > 1
+        && pid != std::process::id()
+        && let Some(p) = rustix::process::Pid::from_raw(pid as i32)
+    {
+        let below = descendants(pid);
+        let _ = rustix::process::kill_process_group(p, rustix::process::Signal::KILL);
+        let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
+        for d in below.into_iter().rev() {
+            if d > 1
+                && d != std::process::id()
+                && let Some(q) = rustix::process::Pid::from_raw(d as i32)
+            {
+                let _ = rustix::process::kill_process(q, rustix::process::Signal::KILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
 /// Kills a process we did not spawn (recovery): `kill_guard` re-checks, right before the kill,
 /// that it is not pid 0/1, not ourselves or our process group, and still has the start token that
 /// was recorded; anything else is refused.
@@ -78,20 +103,25 @@ pub fn kill_verified(
 }
 
 /// Has the child exited, without reaping it? While it is not reaped its pid stays ours, so the
-/// final sweep of its tree can run before `wait` (no window for pid reuse).
+/// final sweep of its tree can run before `wait` (no window for pid reuse). Where SIGCHLD is
+/// ignored the kernel reaps at once and `waitid` answers ECHILD for ever: the child is then
+/// reported as exited once its pid is gone (the exit code is lost, which counts as a failure).
 #[cfg(unix)]
 pub fn exited_unreaped(pid: u32) -> bool {
-    use rustix::process::{WaitId, WaitIdOptions, waitid};
+    use rustix::io::Errno;
+    use rustix::process::{WaitId, WaitIdOptions, test_kill_process, waitid};
     let Some(p) = rustix::process::Pid::from_raw(pid as i32) else {
         return false;
     };
-    matches!(
-        waitid(
-            WaitId::Pid(p),
-            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT
-        ),
-        Ok(Some(_))
-    )
+    match waitid(
+        WaitId::Pid(p),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    ) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(Errno::CHILD) => test_kill_process(p) == Err(Errno::SRCH),
+        Err(_) => false,
+    }
 }
 
 #[cfg(not(unix))]

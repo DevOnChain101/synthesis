@@ -19,11 +19,16 @@ serde_json = "1.0.154"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# `Runner::with_beat`: tests inject heartbeat errors
+test-seam = []
+
 [target.'cfg(unix)'.dependencies]
 # kill(2) of the worker's descendants (no unsafe)
 rustix = { version = "1", default-features = false, features = ["process"] }
 
 [dev-dependencies]
+synthesis-orchestrator = { path = ".", features = ["test-seam"] }
 synthesis-config = { path = "../synthesis-config" }
 synthesis-events = { path = "../synthesis-events" }
 tempfile = "3"

@@ -167,8 +167,36 @@ pub struct Runner<'a> {
     pub poll: Duration,
     /// After a stop request the worker gets this long before the tree is killed.
     pub grace: Duration,
-    /// Replaces the store call of the heartbeat (tests inject transient errors). `None` in use.
-    pub beat: Option<&'a BeatFn<'a>>,
+    /// Replaces the store call of the heartbeat (tests inject transient errors, feature
+    /// `test-seam`). Always `None` in use.
+    beat: Option<&'a BeatFn<'a>>,
+}
+
+impl<'a> Runner<'a> {
+    pub fn new(
+        store: &'a Store,
+        worktrees: &'a WorktreeManager,
+        spawn: &'a dyn Spawn,
+        probe: &'a dyn ProcessProbe,
+        poll: Duration,
+        grace: Duration,
+    ) -> Self {
+        Self {
+            store,
+            worktrees,
+            spawn,
+            probe,
+            poll,
+            grace,
+            beat: None,
+        }
+    }
+
+    #[cfg(feature = "test-seam")]
+    pub fn with_beat(mut self, f: &'a BeatFn<'a>) -> Self {
+        self.beat = Some(f);
+        self
+    }
 }
 
 /// See [`Runner::beat`].
@@ -251,6 +279,33 @@ pub struct Running {
     wall_hit: bool,
     last_beat: Instant,
     missed: u32,
+    /// The child was waited for: its pid is no longer ours.
+    reaped: bool,
+}
+
+/// No worker outlives its handle: a handle dropped while the worker is still ours (a failed
+/// runner, a panic, a scheduler that was dropped) kills its tree and reaps it.
+impl Drop for Running {
+    fn drop(&mut self) {
+        if !self.reaped {
+            crate::proc::kill_unreaped_tree(self.pid);
+            reap_bounded(&mut self.child);
+        }
+    }
+}
+
+/// Kills the child and waits for it, for at most a couple of seconds (a process in an
+/// uninterruptible state must not hang the owner). True when it was reaped.
+fn reap_bounded(child: &mut Child) -> bool {
+    let _ = child.kill();
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if Instant::now() >= until => return false,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 impl Running {
@@ -305,22 +360,26 @@ impl Runner<'_> {
         if item_row(w, &env.attempt)?.0 == WorkItemState::Leased {
             item_to(w, &env.attempt, WorkItemState::Running)?;
         }
-        let mut child = match self.spawn.spawn(profile) {
+        // the cost cap this attempt may spend counts against the outcome from now on, whatever
+        // happens to the worker (a killed or crashed one never records a usage)
+        if let Err(e) = w.reserve_budget(&env.attempt.id, env.attempt.fence, profile.max_cost_usd())
+        {
+            if !matches!(e, StoreError::Stale(_)) {
+                let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
+            }
+            return Err(RunError::Store(e));
+        }
+        let child = match self.spawn.spawn(profile) {
             Ok(c) => c,
             Err(e) => {
+                // no process ever existed: nothing was spent, the reservation goes back
+                let _ = w.release_budget(&env.attempt.id, env.attempt.fence);
                 let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
                 return Err(RunError::Io(e));
             }
         };
         let pid = child.id();
-        let start = self.probe.start_time(pid);
-        if let Err(e) = w.record_worker(&env.attempt.id, env.attempt.fence, pid, start.as_deref()) {
-            self.abandon(w, env, &mut child, pid, &RunError::Store(e));
-            return Err(RunError::Store(StoreError::Invalid(
-                "the worker could not be recorded and was stopped".into(),
-            )));
-        }
-        Ok(Running {
+        let mut run = Running {
             env: env.clone(),
             child,
             pid,
@@ -331,29 +390,47 @@ impl Runner<'_> {
             wall_hit: false,
             last_beat: Instant::now(),
             missed: 0,
-        })
+            reaped: false,
+        };
+        let start = self.probe.start_time(pid);
+        if let Err(e) = w.record_worker(&env.attempt.id, env.attempt.fence, pid, start.as_deref()) {
+            self.abandon(w, &mut run, &RunError::Store(e));
+            return Err(RunError::Store(StoreError::Invalid(
+                "the worker could not be recorded and was stopped".into(),
+            )));
+        }
+        Ok(run)
+    }
+
+    /// Stops a worker the owner gives up on (the scheduler shutting down) and marks its attempt
+    /// lost; the work item is freed by the next walk.
+    pub fn abort(&self, w: &mut OutcomeWriter, run: &mut Running, why: &str) {
+        self.abandon(w, run, &RunError::Store(StoreError::Invalid(why.into())));
     }
 
     /// Kills and reaps a worker after an error of ours, and (unless the worker is stale) marks its
     /// attempt lost with the reason. No worker outlives a failed runner.
-    fn abandon(
-        &self,
-        w: &mut OutcomeWriter,
-        env: &AttemptEnv,
-        child: &mut std::process::Child,
-        pid: u32,
-        e: &RunError,
-    ) {
-        crate::proc::kill_child_tree(self.probe, pid);
-        let _ = child.wait();
-        let stale = matches!(e, RunError::Store(StoreError::Stale(_)));
-        if !stale && let Ok(a) = attempt_row(w, &env.attempt) {
+    fn abandon(&self, w: &mut OutcomeWriter, run: &mut Running, e: &RunError) {
+        if !run.reaped {
+            crate::proc::kill_child_tree(self.probe, run.pid);
+            run.reaped = reap_bounded(&mut run.child);
+        }
+        if !matches!(e, RunError::Store(StoreError::Stale(_))) {
+            self.mark_lost(w, &run.env.attempt, &e.to_string());
+        }
+    }
+
+    /// `lost` for an attempt that is still `starting` or `running` (best effort).
+    fn mark_lost(&self, w: &mut OutcomeWriter, attempt: &AttemptRecord, why: &str) {
+        if let Ok(a) = attempt_row(w, attempt)
+            && matches!(a.state, AttemptState::Starting | AttemptState::Running)
+        {
             let _ = w.transition_attempt(
                 &a.id,
                 a.revision,
                 AttemptState::Lost,
                 &AttemptEnd {
-                    retained_reason: Some(format!("lost: {e}")),
+                    retained_reason: Some(format!("lost: {why}")),
                     ..AttemptEnd::default()
                 },
                 &Effects::default(),
@@ -380,12 +457,21 @@ impl Runner<'_> {
     ) -> Result<Option<Settled>, RunError> {
         match self.look(w, run, cancel) {
             Ok(None) => Ok(None),
-            Ok(Some(end)) => self
-                .settle(w, &run.env.attempt, &run.env.git, end)
-                .map(Some),
+            Ok(Some(end)) => {
+                run.reaped = true;
+                self.settle(w, &run.env.attempt, &run.env.git, end)
+                    .map(Some)
+                    .inspect_err(|e| {
+                        // the worker is gone; an attempt left `running` would hold its slot forever
+                        self.mark_lost(
+                            w,
+                            &run.env.attempt,
+                            &format!("it could not be settled: {e}"),
+                        )
+                    })
+            }
             Err(e) => {
-                let env = run.env.clone();
-                self.abandon(w, &env, &mut run.child, run.pid, &e);
+                self.abandon(w, run, &e);
                 Err(e)
             }
         }
@@ -401,10 +487,12 @@ impl Runner<'_> {
         if crate::proc::exited_unreaped(r.pid) {
             crate::proc::kill_child_tree(self.probe, r.pid);
             let code = r.child.wait().ok().and_then(|s| s.code());
+            r.reaped = true;
             return Ok(Some(map_exit(code, r.cancelled, r.wall_hit)));
         }
         #[cfg(not(unix))]
         if let Ok(Some(s)) = r.child.try_wait() {
+            r.reaped = true;
             crate::proc::kill_child_tree(self.probe, r.pid);
             return Ok(Some(map_exit(s.code(), r.cancelled, r.wall_hit)));
         }

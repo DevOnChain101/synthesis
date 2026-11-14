@@ -74,26 +74,37 @@ impl Profile {
         spent_usd: f64,
         prompt: String,
     ) -> Result<Self, ProfileError> {
+        Self::build_shared(program, env, contract, policy, spent_usd, 1, prompt)
+    }
+
+    /// Like [`Profile::build`] for one of `share` workers that start together: each gets an equal
+    /// part of what is left, so together they cannot spend more than the outcome's cap.
+    pub fn build_shared(
+        program: PathBuf,
+        env: &AttemptEnv,
+        contract: &Contract,
+        policy: &OutcomePolicy,
+        spent_usd: f64,
+        share: u32,
+        prompt: String,
+    ) -> Result<Self, ProfileError> {
         let b = &contract.envelope.budgets;
         // earlier attempts already spent part of the outcome's cap; this one gets what is left
         let outcome_cap = [Some(b.max_cost_usd), policy.max_cost_usd]
             .into_iter()
             .flatten()
             .fold(f64::INFINITY, f64::min);
-        let spent = if spent_usd.is_finite() && spent_usd > 0.0 {
-            spent_usd
-        } else {
-            0.0
-        };
+        // a spend that is not a number is not "nothing spent": the budget is treated as used up
+        let spent = if spent_usd < 0.0 { 0.0 } else { spent_usd };
         let left = outcome_cap - spent;
-        if left <= 0.0 {
+        if !spent.is_finite() || left <= 0.0 {
             return Err(ProfileError::BudgetExhausted {
                 spent,
                 cap: outcome_cap,
             });
         }
         let cap = [
-            Some(left),
+            Some(left / f64::from(share.max(1))),
             b.attempt_max_cost_usd,
             policy.attempt_max_cost_usd,
         ]

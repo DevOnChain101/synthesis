@@ -34,6 +34,7 @@ impl WorkerHost for ProcessHost<'_> {
         item: &WorkItemRecord,
         ordinal: u32,
         spent_usd: f64,
+        share: u32,
     ) -> Result<Running, SchedError> {
         let env = self.allocator.allocate(
             w,
@@ -48,12 +49,13 @@ impl WorkerHost for ProcessHost<'_> {
         )?;
         let prompt = format!("{}\n\nWork item: {}", self.contract.goal, item.key);
         let extra: Vec<&str> = self.extra.iter().map(String::as_str).collect();
-        let profile = Profile::build(
+        let profile = Profile::build_shared(
             self.program.clone(),
             &env,
             &self.contract,
             &self.policy,
             spent_usd,
+            share,
             prompt,
         )?
         .with_extra(&extra)?;
@@ -67,5 +69,9 @@ impl WorkerHost for ProcessHost<'_> {
         cancel: &CancelFlag,
     ) -> Result<Option<Settled>, SchedError> {
         Ok(self.runner.poll(w, handle, cancel)?)
+    }
+
+    fn abort(&mut self, w: &mut OutcomeWriter, handle: &mut Running, why: &str) {
+        self.runner.abort(w, handle, why);
     }
 }
