@@ -231,6 +231,7 @@ fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u
     } else {
         dir.join("run")
     };
+    let made_dir = !tmp_dir.exists();
     fs::create_dir_all(&tmp_dir).map_err(io)?;
     let tmp = tmp_dir.join(format!(".trust.key.{}", uuid::Uuid::new_v4().simple()));
     let mut o = fs::OpenOptions::new();
@@ -246,6 +247,9 @@ fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u
         .and_then(|mut f| f.write_all(&key).and_then(|()| f.sync_all()));
     let linked = written.and_then(|()| fs::hard_link(&tmp, dir.join(name)));
     let _ = fs::remove_file(&tmp);
+    if made_dir && !make_private {
+        let _ = fs::remove_dir(&tmp_dir); // run/ exists only when peers or the trust key need it; fails if not empty
+    }
     match linked {
         Ok(()) => Ok(Some(key)),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
