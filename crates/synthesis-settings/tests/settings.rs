@@ -1171,3 +1171,56 @@ fn orchestrator_keys_under_a_surface_section_are_not_read() {
         "{d:?}"
     );
 }
+
+/// F11: a value the managed file states wrongly must not leave the user's looser one in force.
+#[test]
+fn an_unusable_managed_orchestrator_value_fails_closed() {
+    for bad in [
+        json!({"enabled": "yes"}),
+        json!({"enabled": true, "max_cost_usd": "ten"}),
+        json!({"max_parallel_workers": 0}),
+        json!({"attempt": {"max_wall_secs": -1}}),
+    ] {
+        let f = fx();
+        f.user(json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 1000, "max_parallel_workers": 8}}}));
+        write(
+            f.home.path(),
+            "managed.json",
+            json!({"synt":{"orchestrator": bad}}),
+        );
+        let s = f.load(ProjectTrust::Trusted);
+        let o = &s.synthesis.orchestrator;
+        assert!(
+            !o.enabled && o.fail_closed,
+            "{bad}: the user's `enabled` must not survive"
+        );
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("switched off")),
+            "{:?}",
+            s.diagnostics
+        );
+    }
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator": [1]}}),
+    );
+    assert!(!f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
+    // a bad user value only keeps the previous value (no lockout from the user's own typo)
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": "yes"}}}));
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(!o.enabled && !o.fail_closed);
+    // a good managed object does not lock anything
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator":{"max_cost_usd": 10}}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(o.enabled && !o.fail_closed && o.max_cost_usd == Some(10.0));
+}

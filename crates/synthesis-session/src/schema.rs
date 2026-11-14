@@ -95,6 +95,7 @@ CREATE TABLE contracts(
   outcome_id TEXT NOT NULL REFERENCES outcomes(id), version INTEGER NOT NULL,
   hash TEXT NOT NULL, body TEXT NOT NULL CHECK(json_valid(body)),
   approved_by TEXT, approved_at TEXT,
+  approved_mac TEXT,   -- HMAC(chain key) over the approval; a bare UPDATE cannot forge it
   PRIMARY KEY(outcome_id, version));
 CREATE TABLE plans(
   outcome_id TEXT NOT NULL REFERENCES outcomes(id), version INTEGER NOT NULL,
@@ -128,53 +129,102 @@ CREATE TABLE evidence(
   criteria_ids TEXT NOT NULL CHECK(json_valid(criteria_ids)),
   result TEXT NOT NULL, exit_code INTEGER, env_fingerprint TEXT NOT NULL,
   artifact_session_id TEXT, artifact_id TEXT, sha256 TEXT, flags TEXT NOT NULL DEFAULT '[]',
-  fence INTEGER NOT NULL, captured_at TEXT NOT NULL,
-  UNIQUE(attempt_id, check_id, subject_commit));
+  fence INTEGER NOT NULL, captured_at TEXT NOT NULL);
+-- NULL attempt ids (human reviews) dedupe too
+CREATE UNIQUE INDEX evidence_dedupe ON evidence(COALESCE(attempt_id, ''), work_item_id, check_id, subject_commit);
 CREATE TABLE decisions(
   id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
   kind TEXT NOT NULL, dedupe_key TEXT NOT NULL,
   state TEXT NOT NULL, revision INTEGER NOT NULL,
   brief TEXT NOT NULL CHECK(json_valid(brief)),
   binding TEXT NOT NULL CHECK(json_valid(binding)),
-  expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
-  UNIQUE(outcome_id, dedupe_key));
+  binding_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+-- one open decision per (key, binding); a finished one does not block a new binding
+CREATE UNIQUE INDEX decisions_open ON decisions(outcome_id, dedupe_key, binding_hash)
+  WHERE state IN ('preparing','pending','needs_more_info');
 CREATE TABLE decision_approvals(
   id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES decisions(id),
   decision_revision INTEGER NOT NULL, approver TEXT NOT NULL,
   choice TEXT NOT NULL, brief_sha256 TEXT NOT NULL,
-  decided_at TEXT NOT NULL);
+  decided_at TEXT NOT NULL,
+  mac TEXT NOT NULL);   -- HMAC(chain key) over the row, checked before an approval is used
 CREATE TABLE grants(
   id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES decisions(id),
   action_hash TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT);
 CREATE TABLE outcome_commands(
   id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
-  idempotency_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL, kind TEXT NOT NULL,
   params TEXT NOT NULL CHECK(json_valid(params)),
   expected_revision INTEGER,
   from_surface TEXT NOT NULL CHECK(from_surface IN ('cli','tui','superagent')),
   state TEXT NOT NULL CHECK(state IN ('queued','applied','stale','already_resolved','denied')),
   result TEXT CHECK(result IS NULL OR json_valid(result)),
-  created_at TEXT NOT NULL, applied_at TEXT);
+  created_at TEXT NOT NULL, applied_at TEXT,
+  UNIQUE(outcome_id, idempotency_key));
 CREATE INDEX outcome_commands_queue ON outcome_commands(state, created_at);
 CREATE TABLE outbox(
   id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
-  idempotency_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL, kind TEXT NOT NULL,
   payload TEXT NOT NULL CHECK(json_valid(payload)),
   state TEXT NOT NULL CHECK(state IN ('pending','dispatching','done','failed')),
-  tries INTEGER NOT NULL DEFAULT 0, next_at TEXT, receipt TEXT);
+  tries INTEGER NOT NULL DEFAULT 0, next_at TEXT, receipt TEXT,
+  UNIQUE(outcome_id, idempotency_key));
 CREATE INDEX outbox_pending ON outbox(state, next_at);
 CREATE INDEX work_items_state ON work_items(outcome_id, state);
--- what a person approved or was shown never changes afterwards
+-- What a person approved or was shown never changes afterwards. Triggers stop accidents and a
+-- careless same-user writer; `INSERT OR REPLACE` skips delete triggers (recursive_triggers is off)
+-- and a writer that opens the file itself can drop a trigger, so authenticity rests on the MACs
+-- (contracts.approved_mac, decision_approvals.mac) and the hash-chained events, checked on use.
 CREATE TRIGGER contracts_immutable BEFORE UPDATE OF outcome_id, version, hash, body ON contracts
   BEGIN SELECT RAISE(ABORT, 'contracts are immutable'); END;
-CREATE TRIGGER contracts_approval_once BEFORE UPDATE OF approved_by, approved_at ON contracts
-  WHEN OLD.approved_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a contract is approved once'); END;
+CREATE TRIGGER contracts_approval_once BEFORE UPDATE OF approved_by, approved_at, approved_mac ON contracts
+  WHEN OLD.approved_at IS NOT NULL OR NEW.approved_at IS NULL OR NEW.approved_by IS NULL OR NEW.approved_mac IS NULL
+  BEGIN SELECT RAISE(ABORT, 'a contract is approved once, with its mac'); END;
+CREATE TRIGGER contracts_no_delete BEFORE DELETE ON contracts
+  BEGIN SELECT RAISE(ABORT, 'contracts are never deleted'); END;
 CREATE TRIGGER plans_immutable BEFORE UPDATE OF outcome_id, version, contract_version, hash, dag ON plans
   BEGIN SELECT RAISE(ABORT, 'plans are immutable'); END;
+CREATE TRIGGER plans_no_delete BEFORE DELETE ON plans
+  BEGIN SELECT RAISE(ABORT, 'plans are never deleted'); END;
+CREATE TRIGGER evidence_immutable BEFORE UPDATE OF id, outcome_id, work_item_id, attempt_id, kind,
+    trust_class, producer, subject_commit, subject_tree, check_id, command_hash, criteria_ids, result,
+    exit_code, env_fingerprint, artifact_session_id, artifact_id, sha256, fence, captured_at ON evidence
+  BEGIN SELECT RAISE(ABORT, 'evidence is immutable (only flags change)'); END;
+CREATE TRIGGER evidence_no_delete BEFORE DELETE ON evidence
+  BEGIN SELECT RAISE(ABORT, 'evidence is never deleted'); END;
+CREATE TRIGGER decisions_immutable BEFORE UPDATE OF id, outcome_id, kind, dedupe_key, brief, binding,
+    binding_hash, expires_at, created_at ON decisions
+  BEGIN SELECT RAISE(ABORT, 'a decision brief and binding are immutable'); END;
+CREATE TRIGGER decisions_resolution_needs_approval BEFORE UPDATE OF state ON decisions
+  WHEN NEW.state IN ('approved','rejected','needs_more_info')
+   AND NOT EXISTS (SELECT 1 FROM decision_approvals a WHERE a.decision_id = OLD.id AND a.decision_revision = OLD.revision)
+  BEGIN SELECT RAISE(ABORT, 'a resolution needs its approval row first'); END;
+CREATE TRIGGER decisions_no_delete BEFORE DELETE ON decisions
+  BEGIN SELECT RAISE(ABORT, 'decisions are never deleted'); END;
 CREATE TRIGGER decision_approvals_no_update BEFORE UPDATE ON decision_approvals
   BEGIN SELECT RAISE(ABORT, 'approvals are append-only'); END;
 CREATE TRIGGER decision_approvals_no_delete BEFORE DELETE ON decision_approvals
   BEGIN SELECT RAISE(ABORT, 'approvals are append-only'); END;
+CREATE TRIGGER outcomes_immutable BEFORE UPDATE OF id, control_session_id, workspace_id, repo_root, base_commit, created_at ON outcomes
+  BEGIN SELECT RAISE(ABORT, 'an outcome keeps its identity, workspace and base commit'); END;
+CREATE TRIGGER outcomes_no_delete BEFORE DELETE ON outcomes
+  BEGIN SELECT RAISE(ABORT, 'outcomes are never deleted'); END;
+-- a state change is a compare-and-swap: it must bump the revision by one
+CREATE TRIGGER outcomes_revision BEFORE UPDATE OF state ON outcomes
+  WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
+CREATE TRIGGER work_items_revision BEFORE UPDATE OF state ON work_items
+  WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
+CREATE TRIGGER attempts_revision BEFORE UPDATE OF state ON attempts
+  WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
+CREATE TRIGGER decisions_revision BEFORE UPDATE OF state ON decisions
+  WHEN NEW.revision <> OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'state change without a revision bump'); END;
+-- a finished command keeps its request and result
+CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempotency_key, kind, params,
+    expected_revision, from_surface, created_at ON outcome_commands
+  BEGIN SELECT RAISE(ABORT, 'a command request is immutable'); END;
+CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
+  BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
 "#,
 ];
 
@@ -186,9 +236,9 @@ pub const OUTCOMES: i64 = 5;
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 
 /// Brings the database up to `target` (never past what this build supports). A database that is
-/// already at or above `target` is left alone, so a binary with the feature off keeps working on
+/// already at or above `target` is left alone (`Ok(false)`; `Ok(true)` = this call changed it), so a binary with the feature off keeps working on
 /// a database another binary enabled.
-pub fn migrate(conn: &mut Connection, now: &str, target: i64) -> Result<()> {
+pub fn migrate(conn: &mut Connection, now: &str, target: i64) -> Result<bool> {
     migrate_with(conn, now, LATEST, target)
 }
 
@@ -198,7 +248,7 @@ pub(crate) fn migrate_with(
     now: &str,
     supported: i64,
     target: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let target = target.min(supported);
     let version = user_version(conn)?;
     if version > supported {
@@ -208,7 +258,7 @@ pub(crate) fn migrate_with(
         });
     }
     if version >= target {
-        return Ok(());
+        return Ok(false);
     }
     // IMMEDIATE: two processes opening a fresh DB serialise here; the loser re-reads the version.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -227,7 +277,7 @@ pub(crate) fn migrate_with(
         tx.pragma_update(None, "user_version", i as i64 + 1)?;
     }
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn user_version(conn: &Connection) -> Result<i64> {

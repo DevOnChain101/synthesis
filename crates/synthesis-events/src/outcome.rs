@@ -11,6 +11,7 @@ pub const OUTCOME_CREATED: &str = "outcome.created";
 pub const PLAN_CREATED: &str = "plan.created";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";
+pub const DECISION_RESOLVED: &str = "decision.resolved";
 pub const EVIDENCE_RECORDED: &str = "evidence.recorded";
 pub const COMMAND_FINISHED: &str = "outcome.command_finished";
 

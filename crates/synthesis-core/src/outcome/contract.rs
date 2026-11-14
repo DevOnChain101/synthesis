@@ -18,13 +18,28 @@ pub const MAX_ATTEMPTS_PER_WORK_ITEM: u32 = 10;
 pub const DEFAULT_MAX_PARALLEL_WORKERS: u32 = 2;
 pub const DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM: u32 = 3;
 
-/// Ids of criteria, work items and checks: short, no path or shell significance.
+/// Ids of criteria, work items and checks: short, no path or shell significance, and safe as a
+/// file name on Windows too (no trailing `.`, no reserved device name such as `NUL` or `COM1.txt`).
 pub(crate) fn valid_key(s: &str) -> bool {
     let mut b = s.bytes();
     s.len() <= 64
         && b.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && b.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+        && !s.ends_with('.')
+        && !reserved_device_name(s)
 }
+
+fn reserved_device_name(s: &str) -> bool {
+    let stem = s.split('.').next().unwrap_or(s).to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            stem.strip_prefix(p)
+                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+        })
+}
+
+/// Longest list a contract or plan item may carry (untrusted input is bounded).
+pub const MAX_LIST_ENTRIES: usize = 64;
 
 // -------------------------------------------------------------- capabilities
 
@@ -358,10 +373,14 @@ pub fn validate_contract(c: &Contract) -> Result<(), ContractError> {
     }
     let mut seen = BTreeSet::new();
     for k in &c.criteria {
-        if !valid_key(&k.id) || !k.check_ids.iter().all(|i| valid_key(i)) {
+        if !valid_key(&k.id)
+            || k.check_ids.len() > MAX_LIST_ENTRIES
+            || !k.check_ids.iter().all(|i| valid_key(i))
+        {
             return Err(ContractError::BadId(k.id.clone()));
         }
-        if !seen.insert(k.id.as_str()) {
+        // `C1` and `c1` would be one file on a case-folding volume
+        if !seen.insert(k.id.to_ascii_lowercase()) {
             return Err(ContractError::DuplicateCriterion(k.id.clone()));
         }
         if k.text.trim().is_empty() || k.text.chars().count() > MAX_CRITERION_CHARS {

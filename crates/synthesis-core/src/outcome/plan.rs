@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::outcome::contract::{
-    Capability, CapabilityMode, Contract, ContractError, valid_key, validate_contract,
+    Capability, CapabilityMode, Contract, ContractError, MAX_LIST_ENTRIES, valid_key,
+    validate_contract,
 };
 
 /// A planner is untrusted input (a model, later): bound what it can make us allocate.
@@ -68,6 +69,13 @@ pub enum PlanError {
     TooManyItems,
     BadKey(String),
     DuplicateKey(String),
+    /// The same dependency listed twice (the `work_item_deps` key would refuse it).
+    DuplicateDependency {
+        item: String,
+        dependency: String,
+    },
+    /// A `requires`, `capabilities` or `covers` list over the cap.
+    TooManyEntries(String),
     UnknownDependency {
         item: String,
         dependency: String,
@@ -88,6 +96,9 @@ pub enum PlanError {
         criterion: String,
     },
     UncoveredCriterion(String),
+    /// A mandatory, non-manual criterion covered only by `agent` items: only a `verify` item
+    /// yields independent evidence, so it could never be verified.
+    NotIndependentlyVerifiable(String),
 }
 
 impl std::fmt::Display for PlanError {
@@ -105,6 +116,22 @@ impl std::fmt::Display for PlanError {
             Self::TooManyItems => write!(f, "plan has more than {MAX_PLAN_ITEMS} work items"),
             Self::BadKey(k) => write!(f, "invalid work item key {k:?}"),
             Self::DuplicateKey(k) => write!(f, "duplicate work item key {k:?}"),
+            Self::DuplicateDependency { item, dependency } => {
+                write!(
+                    f,
+                    "work item {item:?} lists dependency {dependency:?} twice"
+                )
+            }
+            Self::TooManyEntries(i) => {
+                write!(
+                    f,
+                    "work item {i:?} has a list over {MAX_LIST_ENTRIES} entries"
+                )
+            }
+            Self::NotIndependentlyVerifiable(c) => write!(
+                f,
+                "mandatory criterion {c:?} is covered by agent items only; a verify item must cover it"
+            ),
             Self::UnknownDependency { item, dependency } => {
                 write!(f, "work item {item:?} requires unknown item {dependency:?}")
             }
@@ -160,18 +187,33 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
         return Err(PlanError::TooManyItems);
     }
     let mut keys = BTreeSet::new();
+    let mut folded = BTreeSet::new();
     for it in &plan.items {
         if !valid_key(&it.key) {
             return Err(PlanError::BadKey(it.key.clone()));
         }
-        if !keys.insert(it.key.as_str()) {
+        if !keys.insert(it.key.as_str()) || !folded.insert(it.key.to_ascii_lowercase()) {
             return Err(PlanError::DuplicateKey(it.key.clone()));
+        }
+        if [it.requires.len(), it.capabilities.len(), it.covers.len()]
+            .iter()
+            .any(|n| *n > MAX_LIST_ENTRIES)
+        {
+            return Err(PlanError::TooManyEntries(it.key.clone()));
         }
     }
     let criteria: BTreeSet<&str> = contract.criteria.iter().map(|c| c.id.as_str()).collect();
     let mut coverage: BTreeMap<String, Vec<String>> =
         criteria.iter().map(|c| ((*c).to_owned(), vec![])).collect();
+    let mut verified_by: BTreeSet<&str> = BTreeSet::new();
     for it in &plan.items {
+        let mut deps = BTreeSet::new();
+        if let Some(d) = it.requires.iter().find(|d| !deps.insert(d.as_str())) {
+            return Err(PlanError::DuplicateDependency {
+                item: it.key.clone(),
+                dependency: d.clone(),
+            });
+        }
         if let Some(d) = it.requires.iter().find(|d| !keys.contains(d.as_str())) {
             return Err(PlanError::UnknownDependency {
                 item: it.key.clone(),
@@ -199,6 +241,9 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
             };
             if !v.contains(&it.key) {
                 v.push(it.key.clone());
+            }
+            if it.kind == WorkItemKind::Verify {
+                verified_by.insert(c.as_str());
             }
         }
     }
@@ -234,6 +279,13 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
     {
         return Err(PlanError::UncoveredCriterion(c.id.clone()));
     }
+    if let Some(c) = contract
+        .criteria
+        .iter()
+        .find(|c| c.mandatory && !c.manual && !verified_by.contains(c.id.as_str()))
+    {
+        return Err(PlanError::NotIndependentlyVerifiable(c.id.clone()));
+    }
     Ok(ValidPlan { order, coverage })
 }
 
@@ -263,7 +315,12 @@ mod tests {
             &["c1", "c2"],
         );
         implement.capabilities = vec!["repo.write".into(), "tests.run".into()];
-        let test = item("test", WorkItemKind::Verify, &["implement"], &["c3"]);
+        let test = item(
+            "test",
+            WorkItemKind::Verify,
+            &["implement"],
+            &["c1", "c2", "c3"],
+        );
         (
             Plan {
                 version: 1,
@@ -283,7 +340,7 @@ mod tests {
             ["inspect", "implement", "test"],
             "input order is irrelevant"
         );
-        assert_eq!(v.coverage["c1"], ["implement"]);
+        assert_eq!(v.coverage["c1"], ["test", "implement"]);
         assert_eq!(v.coverage["c3"], ["test"]);
         assert_eq!(v.coverage.len(), 3);
         let j = serde_json::to_string(&p).unwrap();
@@ -393,7 +450,7 @@ mod tests {
             .map(|i| {
                 item(
                     &format!("i{i}"),
-                    WorkItemKind::Agent,
+                    WorkItemKind::Verify,
                     &[],
                     &["c1", "c2", "c3"],
                 )
@@ -401,7 +458,7 @@ mod tests {
             .collect();
         assert_eq!(validate_plan(&p, &c).unwrap_err(), PlanError::TooManyItems);
         p.items.pop();
-        assert!(validate_plan(&p, &c).is_ok());
+        assert_eq!(validate_plan(&p, &c).map(|_| ()), Ok(()));
     }
 
     #[test]
@@ -457,11 +514,17 @@ mod tests {
             let items: Vec<PlanItem> = (0..n)
                 .map(|i| PlanItem {
                     key: key(i),
-                    kind: WorkItemKind::Agent,
+                    kind: if i == 0 {
+                        WorkItemKind::Verify
+                    } else {
+                        WorkItemKind::Agent
+                    },
                     requires: edges
                         .iter()
                         .filter(|e| e.0 == i)
                         .map(|e| key(e.1))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
                         .collect(),
                     capabilities: vec![],
                     covers: if i == 0 { vec!["c1".into()] } else { vec![] },
@@ -505,7 +568,11 @@ mod tests {
             let mut items: Vec<PlanItem> = (0..n)
                 .map(|i| PlanItem {
                     key: key(i),
-                    kind: WorkItemKind::Agent,
+                    kind: if i == 0 {
+                        WorkItemKind::Verify
+                    } else {
+                        WorkItemKind::Agent
+                    },
                     requires: (0..i)
                         .filter(|_| rng.next().is_multiple_of(3))
                         .map(key)
@@ -541,5 +608,70 @@ mod tests {
             validate_plan(&p, &c).unwrap_err(),
             PlanError::Cycle(vec!["test".into()])
         );
+    }
+
+    #[test]
+    fn duplicate_dependencies_long_lists_and_agent_only_coverage_are_refused() {
+        let (base, c) = good();
+        let mut p = base.clone();
+        p.items[1].requires.push("inspect".into());
+        assert!(matches!(
+            validate_plan(&p, &c),
+            Err(PlanError::DuplicateDependency { .. })
+        ));
+        let mut p = base.clone();
+        p.items[1].capabilities = vec!["repo.read".into(); MAX_LIST_ENTRIES + 1];
+        assert_eq!(
+            validate_plan(&p, &c).unwrap_err(),
+            PlanError::TooManyEntries("implement".into())
+        );
+        // c3 is covered by the agent item only: it can never get independent evidence
+        let mut p = base.clone();
+        p.items[0].covers = vec!["c1".into(), "c2".into()];
+        p.items[1].covers.push("c3".into());
+        assert_eq!(
+            validate_plan(&p, &c).unwrap_err(),
+            PlanError::NotIndependentlyVerifiable("c3".into())
+        );
+        // a manual criterion is a person's review, not a verify item's
+        let mut c2 = c.clone();
+        c2.criteria[2].manual = true;
+        c2.criteria[2].required_trust = crate::outcome::TrustClass::HumanReview;
+        assert!(validate_plan(&p, &c2).is_ok());
+    }
+
+    #[test]
+    fn keys_that_collide_or_are_unsafe_on_windows_are_refused() {
+        let (base, c) = good();
+        for bad in ["NUL", "con", "Com1", "lpt9.txt", "aux.log", "ends.", "x/y"] {
+            let mut p = base.clone();
+            p.items[0].key = bad.into();
+            assert!(
+                matches!(validate_plan(&p, &c), Err(PlanError::BadKey(_))),
+                "{bad}"
+            );
+        }
+        for ok in ["com0", "console", "nulx", "a.b", "COM10"] {
+            let mut p = base.clone();
+            p.items[0].key = ok.into();
+            assert!(validate_plan(&p, &c).is_ok(), "{ok}");
+        }
+        // case-insensitive duplicates
+        let mut p = base.clone();
+        p.items[0].key = "INSPECT".into();
+        p.items[2].requires.clear();
+        let mut q = p.clone();
+        q.items[0].key = "Implement".into();
+        assert!(matches!(
+            validate_plan(&q, &c),
+            Err(PlanError::DuplicateKey(_))
+        ));
+        // criteria ids collide the same way
+        let mut c3 = c.clone();
+        c3.criteria[1].id = "C1".into();
+        assert!(matches!(
+            validate_plan(&base, &c3),
+            Err(PlanError::Contract(ContractError::DuplicateCriterion(_)))
+        ));
     }
 }

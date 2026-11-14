@@ -156,6 +156,9 @@ pub struct OrchestratorSettings {
     pub worktree_retention_days: u32,
     pub decision_expiry_hours: u32,
     pub idle_exit_minutes: u32,
+    /// The managed file had a value this build could not use: the feature is locked off (the
+    /// organisation's intent is unknown, so the safe reading wins, never the user's value).
+    pub fail_closed: bool,
 }
 
 impl Default for OrchestratorSettings {
@@ -170,6 +173,7 @@ impl Default for OrchestratorSettings {
             worktree_retention_days: 7,
             decision_expiry_hours: 24,
             idle_exit_minutes: 10,
+            fail_closed: false,
         }
     }
 }
@@ -185,6 +189,24 @@ impl OrchestratorSettings {
     /// never the value) and the previous value stays, so a layer can only change what it states
     /// correctly.
     fn apply(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) {
+        let before = diags.len();
+        self.apply_keys(o, what, diags);
+        // The managed layer cannot be skipped over: a value it states wrongly must not leave the
+        // user's looser one in force, so the feature is switched off and stays off.
+        if what == "managed settings"
+            && diags[before..]
+                .iter()
+                .any(|d| d.contains(" must be ") || d.contains("is not an object"))
+        {
+            self.enabled = false;
+            self.fail_closed = true;
+            diags.push(format!(
+                "{what}: synt.orchestrator has an unusable value: outcome orchestration is switched off"
+            ));
+        }
+    }
+
+    fn apply_keys(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) {
         let Some(o) = o.as_object() else {
             diags.push(format!(
                 "{what}: synt.orchestrator is not an object, ignored"
@@ -196,7 +218,7 @@ impl OrchestratorSettings {
         for (k, v) in o {
             match k.as_str() {
                 "enabled" => match v.as_bool() {
-                    Some(b) => self.enabled = b,
+                    Some(b) => self.enabled = b && !self.fail_closed,
                     None => bad(diags, what, k, "true or false"),
                 },
                 "max_parallel_workers" => match int(v, 1, ORCH_MAX_PARALLEL) {

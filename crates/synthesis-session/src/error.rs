@@ -31,6 +31,11 @@ pub enum Error {
     TranscriptChanged(PathBuf),
     OutsideWorkspace(PathBuf),
     Invalid(String),
+    /// A request that was right when it was made but no longer matches the stored state: the
+    /// brief changed, the binding moved. The caller reloads (command result `stale`).
+    Stale(String),
+    /// `synt.orchestrator.enabled` is off (or locked off by the managed settings).
+    OutcomesDisabled,
     /// The database is below schema v5: outcomes were never enabled here.
     OutcomesNotEnabled,
     /// A compare-and-swap on an aggregate's `revision` lost: reload and decide again.
@@ -72,6 +77,11 @@ impl std::fmt::Display for Error {
             ),
             Self::OutsideWorkspace(p) => write!(f, "{} is outside the workspace", p.display()),
             Self::Invalid(s) => write!(f, "{s}"),
+            Self::Stale(why) => write!(f, "stale: {why}"),
+            Self::OutcomesDisabled => write!(
+                f,
+                "outcome orchestration is disabled by the settings (synt.orchestrator.enabled)"
+            ),
             Self::OutcomesNotEnabled => write!(
                 f,
                 "outcome orchestration is not enabled for this store (run `synt outcome enable`)"

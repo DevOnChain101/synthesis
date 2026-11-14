@@ -42,7 +42,7 @@ Option A.
 
 | Binary | DB v4 (not enabled) | DB v5 (enabled) |
 |---|---|---|
-| Released CLI or desktop before outcomes | works | refuses: `SchemaTooNew` (message names the supported version); restore `backups/pre-v5-*` or upgrade |
+| Released CLI or desktop before outcomes | works | refuses to open for writing: `SchemaTooNew` (message names the supported version); its read-only `Reader::open` still opens it (listings work, `list_sessions` also shows the hidden control sessions); restore `backups/pre-v5-*` or upgrade |
 | New CLI, flag off | works, stays v4, outcome commands say "run `synt outcome enable`" | works, outcome features off, sessions unaffected |
 | New CLI, flag on | offers the explicit upgrade | works |
 | New TUI or Super Agent (desktop), flag off | works, stays v4 | works, Outcomes hidden |
@@ -57,3 +57,7 @@ Option A.
 - Remote workers: artifact transfer needs a content-addressed store.
 - The v5 table count or row volume makes `synt.db` backups slow (> a few seconds on a developer machine).
 - An external consumer needs a stable cross-session event order.
+
+## Implementation notes (PR-02, security review fixes)
+
+Changes made after the security review of PR-01/02, so the v5 DDL could freeze: approval MACs (`contracts.approved_mac`, `decision_approvals.mac`, keyed with the chain key) instead of bare timestamps; one `resolve_decision` entry point (brief hash, binding, clock, approval row and chained event in one transaction); guard inputs derived inside the transaction (retry budget from the stored contract, independent evidence and the verdict from rows); idempotency keys unique per `(outcome_id, key)`; outbox unique per `(outcome_id, key)` with a same-effect check; decision uniqueness by `(key, binding_hash)` among open decisions. See `docs/specs/session-store.md` C.6 for the integrity model and the rollback steps. Requirements carried to later PRs: PR-05/PR-07 must build `OutcomePolicy` from the merged settings for every `create_outcome`/`open_outcome` (the app helper `synthesis_app::outcome_policy` does it); PR-09's pure verdict function replaces the MVP verdict in the store; PR-12 authenticates `from_surface`.

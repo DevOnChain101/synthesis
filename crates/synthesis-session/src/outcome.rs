@@ -12,11 +12,13 @@
 
 use std::ops::Deref;
 
+use hmac::{Hmac, Mac as _};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use synthesis_core::outcome::{
-    AttemptId, AttemptState, CommandId, Contract, DecisionGuards, DecisionId, DecisionState,
+    Actor, AttemptId, AttemptState, CommandId, Contract, DecisionGuards, DecisionId, DecisionState,
     EvidenceId, OutcomeGuards, OutcomeId, OutcomeState, Plan, TrustClass, WorkItemGuards,
     WorkItemId, WorkItemKind, WorkItemState, validate_contract, validate_plan,
 };
@@ -29,8 +31,16 @@ use crate::error::{Error, Result};
 use crate::schema;
 use crate::store::{
     EventTx, NewSession, Reader, SessionWriter, Store, bad, connect, enum_from, enum_str, now,
-    sha_hex, utf8,
+    sha_hex, utf8, valid_id,
 };
+
+/// Every list is bounded: a hostile or runaway writer cannot make a reader allocate without limit.
+pub const LIST_LIMIT: usize = 1000;
+/// A command's params, and how many commands may wait for an owner per outcome.
+pub const MAX_COMMAND_PARAMS_BYTES: usize = 64 * 1024;
+pub const MAX_QUEUED_COMMANDS: i64 = 1000;
+/// A decision may not stay open longer than this (settings allow at most 30 days).
+const MAX_DECISION_DAYS: i64 = 31;
 
 /// Backoff cap of the outbox: after this many tries a row stays `failed` for a person to look at.
 pub const OUTBOX_MAX_TRIES: u32 = 5;
@@ -115,7 +125,10 @@ pub struct DecisionRecord {
     pub state: DecisionState,
     pub revision: i64,
     pub brief: Value,
+    /// Hash of the stored brief as shown: the resolve command must echo it back.
+    pub brief_sha256: String,
     pub binding: Value,
+    pub binding_hash: String,
     pub expires_at: String,
     pub created_at: String,
 }
@@ -268,7 +281,8 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
     })
 }
 
-const DECISION_COLS: &str = "id,kind,dedupe_key,state,revision,brief,binding,expires_at,created_at";
+const DECISION_COLS: &str =
+    "id,kind,dedupe_key,state,revision,brief,binding,expires_at,created_at,binding_hash";
 fn decision_row(r: &Row<'_>) -> rusqlite::Result<DecisionRecord> {
     Ok(DecisionRecord {
         id: id_col(r, 0)?,
@@ -276,8 +290,10 @@ fn decision_row(r: &Row<'_>) -> rusqlite::Result<DecisionRecord> {
         dedupe_key: r.get(2)?,
         state: col(r, 3)?,
         revision: r.get(4)?,
+        brief_sha256: sha_hex(r.get::<_, String>(5)?.as_bytes()),
         brief: json_col(r, 5)?,
         binding: json_col(r, 6)?,
+        binding_hash: r.get(9)?,
         expires_at: r.get(7)?,
         created_at: r.get(8)?,
     })
@@ -357,7 +373,7 @@ impl Reader {
     pub fn list_outcomes(&self) -> Result<Vec<OutcomeRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {OUTCOME_COLS} FROM outcomes ORDER BY created_at DESC, id"
+            "SELECT {OUTCOME_COLS} FROM outcomes ORDER BY created_at DESC, id LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([], outcome_row)?
@@ -382,7 +398,7 @@ impl Reader {
     pub fn list_work_items(&self, id: &OutcomeId) -> Result<Vec<WorkItemRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {ITEM_COLS} FROM work_items WHERE outcome_id=?1 ORDER BY plan_version, key"
+            "SELECT {ITEM_COLS} FROM work_items WHERE outcome_id=?1 ORDER BY plan_version, key LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], item_row)?
@@ -394,7 +410,7 @@ impl Reader {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(
             "SELECT r.key FROM work_item_deps d JOIN work_items r ON r.id=d.requires_id \
-             WHERE d.work_item_id=?1 ORDER BY r.key",
+             WHERE d.work_item_id=?1 ORDER BY r.key LIMIT 1000",
         )?;
         Ok(st
             .query_map([id.as_str()], |r| r.get(0))?
@@ -404,7 +420,7 @@ impl Reader {
     pub fn list_attempts(&self, item: &WorkItemId) -> Result<Vec<AttemptRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {ATTEMPT_COLS} FROM attempts a WHERE a.work_item_id=?1 ORDER BY a.ordinal"
+            "SELECT {ATTEMPT_COLS} FROM attempts a WHERE a.work_item_id=?1 ORDER BY a.ordinal LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([item.as_str()], attempt_row)?
@@ -414,7 +430,7 @@ impl Reader {
     pub fn list_decisions(&self, id: &OutcomeId) -> Result<Vec<DecisionRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {DECISION_COLS} FROM decisions WHERE outcome_id=?1 ORDER BY created_at, id"
+            "SELECT {DECISION_COLS} FROM decisions WHERE outcome_id=?1 ORDER BY created_at, id LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], decision_row)?
@@ -426,7 +442,7 @@ impl Reader {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(
             "SELECT decision_revision,approver,choice FROM decision_approvals \
-             WHERE decision_id=?1 ORDER BY rowid",
+             WHERE decision_id=?1 ORDER BY rowid LIMIT 1000",
         )?;
         Ok(st
             .query_map([id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -436,7 +452,7 @@ impl Reader {
     pub fn list_evidence(&self, id: &OutcomeId) -> Result<Vec<EvidenceRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {EVIDENCE_COLS} FROM evidence WHERE outcome_id=?1 ORDER BY captured_at, id"
+            "SELECT {EVIDENCE_COLS} FROM evidence WHERE outcome_id=?1 ORDER BY captured_at, id LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], evidence_row)?
@@ -446,23 +462,84 @@ impl Reader {
     pub fn list_outbox(&self, id: &OutcomeId) -> Result<Vec<OutboxRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 ORDER BY rowid"
+            "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 ORDER BY rowid LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], outbox_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn get_command(&self, idempotency_key: &str) -> Result<Option<CommandRecord>> {
+    /// Keys are scoped to the outcome: another outcome's command of the same key is unrelated.
+    pub fn get_command(
+        &self,
+        outcome: &OutcomeId,
+        idempotency_key: &str,
+    ) -> Result<Option<CommandRecord>> {
         need_v5(&self.conn)?;
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {COMMAND_COLS} FROM outcome_commands WHERE idempotency_key=?1"),
-                [idempotency_key],
+                &format!(
+                    "SELECT {COMMAND_COLS} FROM outcome_commands WHERE outcome_id=?1 AND idempotency_key=?2"
+                ),
+                params![outcome.as_str(), idempotency_key],
                 command_row,
             )
             .optional()?)
+    }
+
+    /// The contract of `version` with its approval checked: the stored hash is the hash of the
+    /// stored body and the approval MAC (keyed with the per-user chain key) matches. A row whose
+    /// `approved_at` was written by a bare `UPDATE` is not approved.
+    pub fn contract_is_approved(&self, id: &OutcomeId, version: u32) -> Result<bool> {
+        need_v5(&self.conn)?;
+        let key = crate::trust::existing_chain_key(&self.home);
+        contract_authentic(&self.conn, key.as_ref(), id, version)
+    }
+
+    /// The resolution of a decision, only if its approval row is authentic: the MAC matches, it
+    /// belongs to the revision the decision resolved at, and it names the brief that is stored.
+    /// `None` for an open decision or for a state reached without a valid approval.
+    pub fn verified_resolution(&self, id: &DecisionId) -> Result<Option<Resolved>> {
+        need_v5(&self.conn)?;
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            return Ok(None);
+        };
+        let d = self
+            .conn
+            .query_row(
+                &format!("SELECT {DECISION_COLS} FROM decisions WHERE id=?1"),
+                [id.as_str()],
+                decision_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
+        if !matches!(
+            d.state,
+            DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo
+        ) {
+            return Ok(None);
+        }
+        let row: Option<(String, String, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT approver,choice,brief_sha256,decided_at,mac FROM decision_approvals \
+                 WHERE decision_id=?1 AND decision_revision=?2",
+                params![id.as_str(), d.revision - 1],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((approver, choice, brief, at, mac)) = row else {
+            return Ok(None);
+        };
+        let want = approval_mac(&key, id, d.revision - 1, &approver, &choice, &brief, &at);
+        Ok(
+            (want == mac && brief == d.brief_sha256).then_some(Resolved {
+                state: d.state,
+                approver,
+                choice,
+            }),
+        )
     }
 
     /// Commands waiting for an owner, oldest first.
@@ -470,11 +547,169 @@ impl Reader {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
             "SELECT {COMMAND_COLS} FROM outcome_commands WHERE outcome_id=?1 AND state='queued' \
-             ORDER BY created_at, rowid"
+             ORDER BY created_at, rowid LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], command_row)?
             .collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+/// A decision resolution whose approval row was verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub state: DecisionState,
+    pub approver: String,
+    pub choice: String,
+}
+
+/// HMAC-SHA256 under the chain key over length-prefixed parts, so no two different tuples share
+/// an input. The key lives in the home that the sandbox must not read (the `chain.key` read deny
+/// is plan PR-S1, a separate branch), so an attempt cannot forge a MAC.
+fn mac(key: &[u8; 32], domain: &str, parts: &[&str]) -> String {
+    let mut m = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+    m.update(b"synt-outcome-v1\0");
+    m.update(domain.as_bytes());
+    for p in parts {
+        m.update(&(p.len() as u64).to_le_bytes());
+        m.update(p.as_bytes());
+    }
+    m.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn contract_mac(
+    key: &[u8; 32],
+    outcome: &str,
+    version: u32,
+    hash: &str,
+    approver: &str,
+    at: &str,
+) -> String {
+    mac(
+        key,
+        "contract",
+        &[outcome, &version.to_string(), hash, approver, at],
+    )
+}
+
+fn approval_mac(
+    key: &[u8; 32],
+    id: &DecisionId,
+    revision: i64,
+    approver: &str,
+    choice: &str,
+    brief_sha256: &str,
+    at: &str,
+) -> String {
+    mac(
+        key,
+        "approval",
+        &[
+            id.as_str(),
+            &revision.to_string(),
+            approver,
+            choice,
+            brief_sha256,
+            at,
+        ],
+    )
+}
+
+type ContractApprovalRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Shared by [`Reader::contract_is_approved`] and the check before `Ready`.
+fn contract_authentic(
+    conn: &Connection,
+    key: Option<&[u8; 32]>,
+    id: &OutcomeId,
+    version: u32,
+) -> Result<bool> {
+    let row: Option<ContractApprovalRow> = conn
+        .query_row(
+            "SELECT body,hash,approved_by,approved_at,approved_mac FROM contracts \
+             WHERE outcome_id=?1 AND version=?2",
+            params![id.as_str(), version],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let (Some((body, hash, Some(by), Some(at), Some(m))), Some(key)) = (row, key) else {
+        return Ok(false);
+    };
+    let body_ok = serde_json::from_str::<Value>(&body)
+        .map(|v| body_hash(&v) == hash)
+        .unwrap_or(false);
+    Ok(body_ok && contract_mac(key, id.as_str(), version, &hash, &by, &at) == m)
+}
+
+fn parse_ts(s: &str) -> Option<OffsetDateTime> {
+    let fmt = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    time::PrimitiveDateTime::parse(s, &fmt)
+        .ok()
+        .map(time::PrimitiveDateTime::assume_utc)
+}
+
+fn is_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// ------------------------------------------------------------------- policy
+
+/// What the settings allow (`synt.orchestrator.*`, user and managed layers already merged, managed
+/// winning). Required to create or open an outcome, so the store itself refuses when the
+/// feature is off and never accepts a contract above the ceilings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutcomePolicy {
+    pub enabled: bool,
+    pub max_parallel_workers: u32,
+    pub max_attempts_per_work_item: u32,
+    /// `None`: no ceiling on the outcome cap (the contract still has to name one).
+    pub max_cost_usd: Option<f64>,
+    /// A ceiling makes a per-attempt cap mandatory in the contract.
+    pub attempt_max_cost_usd: Option<f64>,
+    pub attempt_max_wall_secs: Option<u64>,
+}
+
+impl OutcomePolicy {
+    /// Refuses a contract whose budgets exceed the ceilings (never silently clamps: what the
+    /// person approves is what runs).
+    pub fn check(&self, c: &Contract) -> Result<()> {
+        let b = &c.envelope.budgets;
+        let over =
+            |what: &str| Error::Invalid(format!("contract {what} exceeds the settings ceiling"));
+        if b.max_parallel_workers > self.max_parallel_workers {
+            return Err(over("max_parallel_workers"));
+        }
+        if b.max_attempts_per_work_item > self.max_attempts_per_work_item {
+            return Err(over("max_attempts_per_work_item"));
+        }
+        if self.max_cost_usd.is_some_and(|m| b.max_cost_usd > m) {
+            return Err(over("max_cost_usd"));
+        }
+        if let Some(m) = self.attempt_max_cost_usd
+            && !b.attempt_max_cost_usd.is_some_and(|c| c <= m)
+        {
+            return Err(over("attempt_max_cost_usd"));
+        }
+        if let Some(m) = self.attempt_max_wall_secs
+            && !b.attempt_max_wall_secs.is_some_and(|w| w <= m)
+        {
+            return Err(over("attempt_max_wall_secs"));
+        }
+        Ok(())
     }
 }
 
@@ -483,12 +718,15 @@ impl Reader {
 #[derive(Debug, Clone)]
 pub struct NewCommand {
     pub outcome_id: OutcomeId,
-    /// The caller's retry key: the same key returns the stored result and has no second effect.
+    /// The caller's retry key, scoped to the outcome: the same key returns the stored result
+    /// and has no second effect.
     pub idempotency_key: String,
     /// `decision.resolve`, `outcome.start`, ...
     pub kind: String,
     pub params: Value,
     pub expected_revision: Option<i64>,
+    /// Self-asserted until the orchestrator endpoint authenticates its clients (plan PR-12):
+    /// the store records it, it is not proof of who sent the command.
     pub from_surface: Surface,
 }
 
@@ -496,41 +734,119 @@ fn valid_command_text(s: &str, max: usize) -> bool {
     !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// What a person's answer to a decision carries (ADR-019 section 4): every field is required, so
+/// a surface cannot resolve something it did not show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub decision_id: DecisionId,
+    /// The decision revision the person saw.
+    pub decision_revision: i64,
+    pub approver: String,
+    pub choice: String,
+    /// Hash of the brief as shown ([`DecisionRecord::brief_sha256`]).
+    pub brief_sha256: String,
+}
+
+impl Resolution {
+    fn from_parts(
+        params: &Value,
+        expected_revision: Option<i64>,
+        approver: String,
+    ) -> Result<Self> {
+        let text = |k: &str| params.get(k).and_then(Value::as_str);
+        let bad = |what: &str| Error::Invalid(format!("decision.resolve needs {what}"));
+        let decision_id = text("decision_id")
+            .and_then(|s| DecisionId::parse(s).ok())
+            .ok_or_else(|| bad("a decision_id"))?;
+        let choice = text("choice")
+            .filter(|c| valid_command_text(c, 128))
+            .ok_or_else(|| bad("a choice (there is no default)"))?;
+        let brief_sha256 = text("brief_sha256")
+            .filter(|h| is_sha256(h))
+            .ok_or_else(|| bad("the brief_sha256 of the brief that was shown"))?;
+        let decision_revision = expected_revision
+            .filter(|r| *r >= 1)
+            .ok_or_else(|| bad("an expected_revision"))?;
+        Ok(Self {
+            decision_id,
+            decision_revision,
+            approver,
+            choice: choice.to_string(),
+            brief_sha256: brief_sha256.to_string(),
+        })
+    }
+
+    /// The approver is derived from the command's surface, not taken from its params.
+    pub fn from_command(c: &CommandRecord) -> Result<Self> {
+        Self::from_parts(
+            &c.params,
+            c.expected_revision,
+            format!("user:{}", enum_str(&c.from_surface)),
+        )
+    }
+}
+
 impl Store {
     /// The only write a surface makes (ADR-016 item 11): a plain insert, safe under WAL while an
     /// owner runs or while none does. Retrying with the same key returns the stored row; reusing a
-    /// key for a different request is refused.
+    /// key for a different request is refused. Bounded: params at most 64 KiB, at most 1000
+    /// commands waiting per outcome, and a `decision.resolve` must carry everything the resolution
+    /// needs.
     pub fn enqueue_command(&self, c: NewCommand) -> Result<CommandRecord> {
         if !valid_command_text(&c.idempotency_key, 128) || !valid_command_text(&c.kind, 64) {
             return Err(Error::Invalid(
                 "command key and kind must be 1 to 128 and 1 to 64 printable characters".into(),
             ));
         }
-        let conn = connect(self.home(), false)?;
-        need_v5(&conn)?;
         let mut params_json = c.params.clone();
         // the store never keeps a secret a surface pasted into a command
         self.redact_value(&mut params_json);
-        conn.execute(
-            "INSERT INTO outcome_commands(id,outcome_id,idempotency_key,kind,params,expected_revision,from_surface,state,created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8) ON CONFLICT(idempotency_key) DO NOTHING",
-            params![
-                new_uuid(),
-                c.outcome_id.as_str(),
-                c.idempotency_key,
-                c.kind,
-                params_json.to_string(),
-                c.expected_revision,
-                enum_str(&c.from_surface),
-                now(),
-            ],
-        )?;
-        let rec = self
-            .reader()?
-            .get_command(&c.idempotency_key)?
+        let text = params_json.to_string();
+        if text.len() > MAX_COMMAND_PARAMS_BYTES {
+            return Err(Error::TooLarge {
+                what: "command params",
+                size: text.len(),
+                max: MAX_COMMAND_PARAMS_BYTES,
+            });
+        }
+        if c.kind == "decision.resolve" {
+            Resolution::from_parts(&params_json, c.expected_revision, String::new())?;
+        }
+        let conn = connect(self.home(), false)?;
+        need_v5(&conn)?;
+        let reader = self.reader()?;
+        let existing = reader.get_command(&c.outcome_id, &c.idempotency_key)?;
+        if existing.is_none() {
+            let queued: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM outcome_commands WHERE outcome_id=?1 AND state='queued'",
+                [c.outcome_id.as_str()],
+                |r| r.get(0),
+            )?;
+            if queued >= MAX_QUEUED_COMMANDS {
+                return Err(Error::QuotaExceeded {
+                    what: "queued commands",
+                    limit: MAX_QUEUED_COMMANDS as u64,
+                });
+            }
+            conn.execute(
+                "INSERT INTO outcome_commands(id,outcome_id,idempotency_key,kind,params,expected_revision,from_surface,state,created_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8) ON CONFLICT(outcome_id,idempotency_key) DO NOTHING",
+                params![
+                    new_uuid(),
+                    c.outcome_id.as_str(),
+                    c.idempotency_key,
+                    c.kind,
+                    text,
+                    c.expected_revision,
+                    enum_str(&c.from_surface),
+                    now(),
+                ],
+            )?;
+        }
+        let rec = reader
+            .get_command(&c.outcome_id, &c.idempotency_key)?
             .ok_or_else(|| Error::NotFound("command".into()))?;
-        if rec.outcome_id != c.outcome_id
-            || rec.kind != c.kind
+        if rec.kind != c.kind
             || rec.params != params_json
             || rec.expected_revision != c.expected_revision
             || rec.from_surface != c.from_surface
@@ -549,8 +865,10 @@ pub struct NewOutcome<'a> {
     /// The workspace the control session is bound to (the repository's root).
     pub workspace: &'a WorkspaceContext,
     pub base_commit: String,
-    /// Validated here; the stored body is what a person approves.
+    /// Validated here against the contract rules and the policy ceilings; the stored body is
+    /// what a person approves.
     pub contract: &'a Contract,
+    pub policy: &'a OutcomePolicy,
 }
 
 /// `sha256` of the stored contract body (redacted JSON, fields in declaration order). Approval
@@ -560,15 +878,19 @@ fn body_hash(body: &Value) -> String {
 }
 
 impl Store {
-    /// Creates the outcome, its hidden control session (`kind = 'outcome'`) and contract v1 in one
-    /// transaction with the `outcome.created` event, and returns the writer that owns the
-    /// control-session lock.
+    /// Creates the outcome, its hidden control session (`kind = 'outcome'`, written with its kind
+    /// in one transaction) and contract v1 with the `outcome.created` event, and returns the
+    /// writer that owns the control-session lock. Refused when the settings turn outcomes off.
     pub fn create_outcome(&self, new: NewOutcome<'_>) -> Result<OutcomeWriter> {
+        if !new.policy.enabled {
+            return Err(Error::OutcomesDisabled);
+        }
         need_v5(&connect(self.home(), true)?)?;
         validate_contract(new.contract).map_err(refuse)?;
+        new.policy.check(new.contract)?;
         let id = OutcomeId::parse(&new_uuid()).map_err(refuse)?;
         // no Node transcript mirror: a control session holds events only
-        let mut w = self.create_inner(
+        let mut w = self.create_kind(
             NewSession {
                 id: None,
                 workspace: new.workspace,
@@ -580,6 +902,7 @@ impl Store {
                 title: Some("outcome".into()),
             },
             |_, _| None,
+            Some("outcome"),
         )?;
         let control = w.id().to_string();
         let (root, ws_id) = (
@@ -592,8 +915,6 @@ impl Store {
             et.redact_value(&mut body);
             let goal = et.redact_str(&new.contract.goal);
             let ts = now();
-            et.tx
-                .execute("UPDATE sessions SET kind='outcome' WHERE id=?1", [&control])?;
             et.tx.execute(
                 "INSERT INTO outcomes(id,workspace_id,repo_root,base_commit,control_session_id,goal,state,revision,contract_version,created_at,updated_at) \
                  VALUES (?1,?2,?3,?4,?5,?6,'draft',1,?7,?8,?8)",
@@ -610,7 +931,12 @@ impl Store {
             )?;
             et.tx.execute(
                 "INSERT INTO contracts(outcome_id,version,hash,body) VALUES (?1,?2,?3,?4)",
-                params![id.as_str(), new.contract.version, body_hash(&body), body.to_string()],
+                params![
+                    id.as_str(),
+                    new.contract.version,
+                    body_hash(&body),
+                    body.to_string()
+                ],
             )?;
             et.append(
                 ev::OUTCOME_CREATED,
@@ -619,15 +945,19 @@ impl Store {
             )?;
             Ok(())
         })?;
-        Ok(OutcomeWriter { w, id })
+        Ok(OutcomeWriter::new(w, id, new.policy.clone()))
     }
 
     /// Takes the control-session lock of an existing outcome. [`Error::Locked`] means another
-    /// process owns it: talk to that owner (or queue a command) instead.
-    pub fn open_outcome(&self, id: &OutcomeId) -> Result<OutcomeWriter> {
+    /// process owns it: talk to that owner (or queue a command) instead. Refused when the
+    /// settings turn outcomes off (a managed `enabled = false` stops a running install too).
+    pub fn open_outcome(&self, id: &OutcomeId, policy: &OutcomePolicy) -> Result<OutcomeWriter> {
+        if !policy.enabled {
+            return Err(Error::OutcomesDisabled);
+        }
         let rec = self.reader()?.get_outcome(id)?;
         let w = self.open_locked(&rec.control_session_id)?;
-        Ok(OutcomeWriter { w, id: id.clone() })
+        Ok(OutcomeWriter::new(w, id.clone(), policy.clone()))
     }
 }
 
@@ -637,6 +967,8 @@ impl Store {
 pub struct OutcomeWriter {
     w: SessionWriter,
     id: OutcomeId,
+    policy: OutcomePolicy,
+    clock: fn() -> OffsetDateTime,
 }
 
 impl Deref for OutcomeWriter {
@@ -661,11 +993,12 @@ pub struct NewOutbox {
     pub payload: Value,
 }
 
-/// Facts about an outcome the rows cannot show (the guards read the rest from the rows).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OutcomeFacts {
-    pub verdict_verified: bool,
-    pub delivery_ready: bool,
+/// The result of a transition: the new revision, and per outbox row of the effects whether it
+/// was newly inserted (`false`: the same effect was already queued under that key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    pub revision: i64,
+    pub outbox_new: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -678,11 +1011,14 @@ pub struct AttemptEnd {
 #[derive(Debug, Clone)]
 pub struct NewDecision {
     pub kind: String,
-    /// One open decision per key (ADR-016 item 4): a second insert returns the first.
+    /// One open decision per `(key, binding)` (ADR-016 item 4): a second insert returns the first.
     pub dedupe_key: String,
+    /// Alternatives are `alternatives`: strings or objects with an `id`. No `selected`,
+    /// `recommended` or default field is accepted.
     pub brief: Value,
     /// Contract and plan versions, subject commit, policy hash, action hash, attempt ordinal.
     pub binding: Value,
+    /// A store-format timestamp in the future, at most 31 days away.
     pub expires_at: String,
 }
 
@@ -701,12 +1037,30 @@ pub struct NewEvidence {
     pub result: String,
     pub exit_code: Option<i64>,
     pub env_fingerprint: String,
+    /// `(session_id, artifact_id, sha256)` of a stored artifact of this outcome; checked
+    /// against the `artifacts` table.
     pub artifact: Option<(String, String, String)>,
     /// The fence of the attempt that produced it; an older one is rejected (ADR-017).
     pub fence: i64,
 }
 
 impl OutcomeWriter {
+    fn new(w: SessionWriter, id: OutcomeId, policy: OutcomePolicy) -> Self {
+        Self {
+            w,
+            id,
+            policy,
+            clock: OffsetDateTime::now_utc,
+        }
+    }
+
+    /// Replaces the clock (expiry and binding checks); for tests.
+    #[must_use]
+    pub fn with_clock(mut self, clock: fn() -> OffsetDateTime) -> Self {
+        self.clock = clock;
+        self
+    }
+
     pub fn id(&self) -> &OutcomeId {
         &self.id
     }
@@ -721,8 +1075,15 @@ impl OutcomeWriter {
         &mut self,
         mut f: impl FnMut(&mut OutcomeTx<'_, '_>) -> Result<T>,
     ) -> Result<T> {
-        let id = &self.id;
-        self.w.event_tx(|et| f(&mut OutcomeTx { et, id }))
+        let (id, policy, now) = (&self.id, &self.policy, (self.clock)());
+        self.w.event_tx(|et| {
+            f(&mut OutcomeTx {
+                et,
+                id,
+                policy,
+                now,
+            })
+        })
     }
 
     pub fn approve_contract(&mut self, version: u32, hash: &str, approver: &str) -> Result<()> {
@@ -737,11 +1098,10 @@ impl OutcomeWriter {
         &mut self,
         expected_revision: i64,
         to: OutcomeState,
-        facts: OutcomeFacts,
         reason: Option<&str>,
         fx: &Effects,
-    ) -> Result<i64> {
-        self.atomically(|tx| tx.transition_outcome(expected_revision, to, facts, reason, fx))
+    ) -> Result<Applied> {
+        self.atomically(|tx| tx.transition_outcome(expected_revision, to, reason, fx))
     }
 
     pub fn transition_work_item(
@@ -749,20 +1109,9 @@ impl OutcomeWriter {
         id: &WorkItemId,
         expected_revision: i64,
         to: WorkItemState,
-        max_retries: u32,
-        independent_evidence: bool,
         fx: &Effects,
-    ) -> Result<i64> {
-        self.atomically(|tx| {
-            tx.transition_work_item(
-                id,
-                expected_revision,
-                to,
-                max_retries,
-                independent_evidence,
-                fx,
-            )
-        })
+    ) -> Result<Applied> {
+        self.atomically(|tx| tx.transition_work_item(id, expected_revision, to, fx))
     }
 
     pub fn new_attempt(
@@ -772,7 +1121,7 @@ impl OutcomeWriter {
         session_id: &str,
         worker_kind: &str,
         fx: &Effects,
-    ) -> Result<AttemptRecord> {
+    ) -> Result<(AttemptRecord, Vec<bool>)> {
         self.atomically(|tx| tx.new_attempt(item, ordinal, session_id, worker_kind, fx))
     }
 
@@ -783,7 +1132,7 @@ impl OutcomeWriter {
         to: AttemptState,
         end: &AttemptEnd,
         fx: &Effects,
-    ) -> Result<i64> {
+    ) -> Result<Applied> {
         self.atomically(|tx| tx.transition_attempt(id, expected_revision, to, end, fx))
     }
 
@@ -791,28 +1140,25 @@ impl OutcomeWriter {
         self.atomically(|tx| tx.new_decision(d))
     }
 
+    /// The orchestrator's own decision transitions (prepare, expire, invalidate). A person's
+    /// answer is [`Self::resolve_decision`].
     pub fn transition_decision(
         &mut self,
         id: &DecisionId,
         expected_revision: i64,
         to: DecisionState,
-        guards: &DecisionGuards,
+        current_binding: &Value,
         fx: &Effects,
-    ) -> Result<i64> {
-        self.atomically(|tx| tx.transition_decision(id, expected_revision, to, guards, fx))
+    ) -> Result<Applied> {
+        self.atomically(|tx| tx.transition_decision(id, expected_revision, to, current_binding, fx))
     }
 
-    pub fn record_decision_approval(
+    pub fn resolve_decision(
         &mut self,
-        id: &DecisionId,
-        decision_revision: i64,
-        approver: &str,
-        choice: &str,
-        brief_sha256: &str,
-    ) -> Result<()> {
-        self.atomically(|tx| {
-            tx.record_decision_approval(id, decision_revision, approver, choice, brief_sha256)
-        })
+        r: &Resolution,
+        current_binding: &Value,
+    ) -> Result<DecisionState> {
+        self.atomically(|tx| tx.resolve_decision(r, current_binding))
     }
 
     pub fn record_evidence(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
@@ -820,8 +1166,9 @@ impl OutcomeWriter {
     }
 
     /// Applies one queued command exactly once. `f` does the work through the transaction and
-    /// returns the result state and body; a lost revision race inside `f` becomes `stale`. A
-    /// command that is no longer queued is returned as stored, with no second effect.
+    /// returns the result state and body; a lost revision race, a stale brief or a moved
+    /// binding inside `f` becomes `stale`. A command that is no longer queued is returned as
+    /// stored, with no second effect.
     pub fn apply_command(
         &mut self,
         idempotency_key: &str,
@@ -835,74 +1182,90 @@ impl OutcomeWriter {
             let (state, result) = f(tx, &cmd)?;
             tx.finish_command(&cmd, state, result)
         });
-        match run {
+        let stale = match run {
             Err(Error::RevisionConflict {
                 aggregate,
                 id,
                 expected,
                 actual,
-            }) => self.atomically(|tx| {
-                let cmd = tx.command(idempotency_key)?;
-                if cmd.state != CommandState::Queued {
-                    return Ok(cmd);
-                }
-                let result = json!({"aggregate": aggregate, "id": id, "expected": expected, "actual": actual});
-                tx.finish_command(&cmd, CommandState::Stale, result)
-            }),
-            other => other,
-        }
+            }) => json!({"aggregate": aggregate, "id": id, "expected": expected, "actual": actual}),
+            Err(Error::Stale(why)) => json!({ "reason": why }),
+            other => return other,
+        };
+        self.atomically(|tx| {
+            let cmd = tx.command(idempotency_key)?;
+            if cmd.state != CommandState::Queued {
+                return Ok(cmd);
+            }
+            tx.finish_command(&cmd, CommandState::Stale, stale.clone())
+        })
     }
 
     // ---- outbox
 
-    /// Moves the next due `pending` row to `dispatching` (one more try) and returns it.
+    /// Moves the next due `pending` row to `dispatching` (one more try) and returns it. A row
+    /// that cannot be read (malformed, written by something else) is marked `failed` with the
+    /// reason and skipped, so it cannot block the rest.
     pub fn claim_outbox(&mut self, now: OffsetDateTime) -> Result<Option<OutboxRecord>> {
         let at = ts(now);
         self.atomically(|tx| {
-            let row = tx
-                .et
-                .tx
-                .query_row(
-                    &format!(
-                        "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='pending' \
-                         AND (next_at IS NULL OR next_at<=?2) ORDER BY rowid LIMIT 1"
-                    ),
-                    params![tx.id.as_str(), at],
-                    outbox_row,
-                )
-                .optional()?;
-            let Some(mut row) = row else { return Ok(None) };
-            tx.et.tx.execute(
-                "UPDATE outbox SET state='dispatching', tries=tries+1 WHERE id=?1 AND state='pending'",
-                [&row.id],
-            )?;
-            row.state = OutboxState::Dispatching;
-            row.tries += 1;
-            Ok(Some(row))
+            for (id, row) in due_pending(tx.et.tx, tx.id, &at)? {
+                match row {
+                    Ok(mut row) => {
+                        tx.et.tx.execute(
+                            "UPDATE outbox SET state='dispatching', tries=tries+1 WHERE id=?1 AND state='pending'",
+                            [&id],
+                        )?;
+                        row.state = OutboxState::Dispatching;
+                        row.tries += 1;
+                        return Ok(Some(row));
+                    }
+                    Err(why) => {
+                        tx.et.tx.execute(
+                            "UPDATE outbox SET state='failed', receipt=?2 WHERE id=?1 AND state='pending'",
+                            params![id, format!("malformed row: {why}")],
+                        )?;
+                    }
+                }
+            }
+            Ok(None)
         })
     }
 
+    /// Only a row this writer is dispatching can be completed.
     pub fn complete_outbox(&mut self, id: &str, receipt: &str) -> Result<()> {
         self.atomically(|tx| {
             let mut receipt = Value::String(receipt.to_string());
             tx.et.redact_value(&mut receipt);
-            tx.et.tx.execute(
-                "UPDATE outbox SET state='done', receipt=?2, next_at=NULL WHERE id=?1 AND outcome_id=?3",
+            let n = tx.et.tx.execute(
+                "UPDATE outbox SET state='done', receipt=?2, next_at=NULL \
+                 WHERE id=?1 AND outcome_id=?3 AND state='dispatching'",
                 params![id, receipt.as_str().unwrap_or_default(), tx.id.as_str()],
             )?;
-            Ok(())
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(Error::Invalid(format!(
+                    "outbox row {id} is not being dispatched"
+                )))
+            }
         })
     }
 
     /// Back to `pending` after a growing delay, or `failed` once [`OUTBOX_MAX_TRIES`] tries are
-    /// used; the reason is kept in `receipt` (redacted).
+    /// used; the reason is kept in `receipt` (redacted). Only a `dispatching` row changes.
     pub fn fail_outbox(&mut self, id: &str, now: OffsetDateTime, why: &str) -> Result<OutboxState> {
         self.atomically(|tx| {
-            let tries: u32 = tx.et.tx.query_row(
-                "SELECT tries FROM outbox WHERE id=?1 AND outcome_id=?2",
-                params![id, tx.id.as_str()],
-                |r| r.get(0),
-            )?;
+            let tries: u32 = tx
+                .et
+                .tx
+                .query_row(
+                    "SELECT tries FROM outbox WHERE id=?1 AND outcome_id=?2 AND state='dispatching'",
+                    params![id, tx.id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| Error::Invalid(format!("outbox row {id} is not being dispatched")))?;
             let mut why = Value::String(why.to_string());
             tx.et.redact_value(&mut why);
             let (state, next) = if tries >= OUTBOX_MAX_TRIES {
@@ -913,7 +1276,7 @@ impl OutcomeWriter {
                 (OutboxState::Pending, Some(ts(now + delay)))
             };
             tx.et.tx.execute(
-                "UPDATE outbox SET state=?2, next_at=?3, receipt=?4 WHERE id=?1",
+                "UPDATE outbox SET state=?2, next_at=?3, receipt=?4 WHERE id=?1 AND state='dispatching'",
                 params![id, enum_str(&state), next, why.as_str().unwrap_or_default()],
             )?;
             Ok(state)
@@ -921,20 +1284,20 @@ impl OutcomeWriter {
     }
 
     /// Restart path (ADR-016 item 5): rows left `dispatching` by a dead writer are asked
-    /// [`OutboxEffect::probe`]; an effect that already happened is completed with its receipt,
-    /// anything else goes back to `pending`. Then every due `pending` row runs once. At-least-once,
-    /// so receivers must be idempotent on the row's key; this never runs a probed-done effect twice.
+    /// [`OutboxEffect::probe`]; an effect that already happened is completed with its receipt.
+    /// Anything else counts as a failed try (the one it was claimed for), so the cap and the
+    /// backoff apply: it goes back to `pending` with a `next_at`, or to `failed`. Then every due
+    /// `pending` row runs once. At-least-once, so receivers must be idempotent on the row's key;
+    /// a probed-done effect never runs twice.
     pub fn run_outbox(
         &mut self,
         now: OffsetDateTime,
         effect: &mut dyn OutboxEffect,
     ) -> Result<OutboxRun> {
         let mut run = OutboxRun::default();
-        let stuck: Vec<OutboxRecord> = self
-            .list_outbox(&self.id.clone())?
-            .into_iter()
-            .filter(|r| r.state == OutboxState::Dispatching)
-            .collect();
+        let outcome = self.id.clone();
+        let (stuck, skipped) = dispatching_rows(&self.w.conn, &outcome)?;
+        run.skipped = skipped;
         for row in stuck {
             match effect.probe(&row)? {
                 Some(receipt) => {
@@ -942,13 +1305,11 @@ impl OutcomeWriter {
                     run.reconciled += 1;
                 }
                 None => {
-                    self.atomically(|tx| {
-                        tx.et.tx.execute(
-                            "UPDATE outbox SET state='pending' WHERE id=?1 AND state='dispatching'",
-                            [&row.id],
-                        )?;
-                        Ok(())
-                    })?;
+                    if self.fail_outbox(&row.id, now, "interrupted before its receipt")?
+                        == OutboxState::Failed
+                    {
+                        run.failed += 1;
+                    }
                 }
             }
         }
@@ -971,6 +1332,43 @@ impl OutcomeWriter {
     }
 }
 
+type LenientRow = (String, std::result::Result<OutboxRecord, String>);
+
+fn lenient(r: &Row<'_>) -> rusqlite::Result<LenientRow> {
+    let id: String = r.get(0)?;
+    Ok((id.clone(), outbox_row(r).map_err(|e| format!("{id}: {e}"))))
+}
+
+/// Due `pending` rows, oldest first; a row that does not parse comes back as `Err`.
+fn due_pending(conn: &Connection, outcome: &OutcomeId, at: &str) -> Result<Vec<LenientRow>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='pending' \
+         AND (next_at IS NULL OR next_at<=?2) ORDER BY rowid LIMIT 50"
+    ))?;
+    Ok(st
+        .query_map(params![outcome.as_str(), at], lenient)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Rows left `dispatching`, and a diagnostic for each one that could not be read.
+fn dispatching_rows(
+    conn: &Connection,
+    outcome: &OutcomeId,
+) -> Result<(Vec<OutboxRecord>, Vec<String>)> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {OUTBOX_COLS} FROM outbox WHERE outcome_id=?1 AND state='dispatching' \
+         ORDER BY rowid LIMIT {LIST_LIMIT}"
+    ))?;
+    let (mut rows, mut skipped) = (vec![], vec![]);
+    for r in st.query_map([outcome.as_str()], lenient)? {
+        match r?.1 {
+            Ok(row) => rows.push(row),
+            Err(why) => skipped.push(format!("outbox row skipped: {why}")),
+        }
+    }
+    Ok((rows, skipped))
+}
+
 /// The side of an outbox effect that knows whether it already happened.
 pub trait OutboxEffect {
     /// `Some(receipt)` when the effect of `row` is already in place (worktree exists, verifier
@@ -987,16 +1385,27 @@ pub struct OutboxRun {
     /// Rows that failed and were put back (or failed for good).
     pub retry_later: u32,
     pub failed: u32,
+    /// Rows that could not be read, one diagnostic each (the run went on without them).
+    pub skipped: Vec<String>,
 }
 
 // ---------------------------------------------------------------- transaction
 
 /// The primitives of one outcome transaction. Every method that changes a row appends its event
-/// in the same transaction.
+/// in the same transaction. Guard inputs (approval, plan, verdict, retry budget, independent
+/// evidence, binding, expiry) are derived here from the rows and the clock, never passed in.
 pub struct OutcomeTx<'a, 'e> {
     et: &'a mut EventTx<'e>,
     id: &'a OutcomeId,
+    policy: &'a OutcomePolicy,
+    now: OffsetDateTime,
 }
+
+const FLAG_FREE: &str =
+    "NOT EXISTS (SELECT 1 FROM json_each(e.flags) f WHERE f.value='definitions_changed')";
+/// The evidence is for the newest attempt of its item (a late one from a superseded attempt
+/// does not count).
+const FENCE_CURRENT: &str = "e.fence >= COALESCE((SELECT MAX(a.fence) FROM attempts a WHERE a.work_item_id=e.work_item_id),0)";
 
 impl OutcomeTx<'_, '_> {
     pub fn emit(&mut self, kind: &str, payload: Value) -> Result<u64> {
@@ -1012,23 +1421,41 @@ impl OutcomeTx<'_, '_> {
         )?)
     }
 
-    fn effects(&mut self, fx: &Effects) -> Result<()> {
+    fn outcome(&self) -> Result<OutcomeRecord> {
+        self.et
+            .tx
+            .query_row(
+                &format!("SELECT {OUTCOME_COLS} FROM outcomes WHERE id=?1"),
+                [self.id.as_str()],
+                outcome_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("outcome {}", self.id)))
+    }
+
+    /// Writes the effects; returns, per outbox row, whether it was newly inserted.
+    fn effects(&mut self, fx: &Effects) -> Result<Vec<bool>> {
         for (kind, payload) in &fx.events {
             self.et.append(kind, payload.clone())?;
         }
-        for o in &fx.outbox {
-            self.enqueue(o)?;
-        }
-        Ok(())
+        fx.outbox.iter().map(|o| self.enqueue(o)).collect()
     }
 
-    /// Inserts an outbox row; `false` when the key already exists (nothing changes).
+    fn applied(&mut self, revision: i64, fx: &Effects) -> Result<Applied> {
+        Ok(Applied {
+            revision,
+            outbox_new: self.effects(fx)?,
+        })
+    }
+
+    /// Inserts an outbox row. `false`: the key exists with the same effect (nothing changes). The
+    /// same key with a different kind or payload is an error: one key, one effect.
     pub fn enqueue(&mut self, o: &NewOutbox) -> Result<bool> {
         let mut payload = o.payload.clone();
         self.et.redact_value(&mut payload);
-        Ok(self.et.tx.execute(
+        let inserted = self.et.tx.execute(
             "INSERT INTO outbox(id,outcome_id,idempotency_key,kind,payload,state) \
-             VALUES (?1,?2,?3,?4,?5,'pending') ON CONFLICT(idempotency_key) DO NOTHING",
+             VALUES (?1,?2,?3,?4,?5,'pending') ON CONFLICT(outcome_id,idempotency_key) DO NOTHING",
             params![
                 new_uuid(),
                 self.id.as_str(),
@@ -1036,7 +1463,23 @@ impl OutcomeTx<'_, '_> {
                 enum_str(&o.kind),
                 payload.to_string()
             ],
-        )? == 1)
+        )? == 1;
+        if !inserted {
+            let (kind, stored): (String, String) = self.et.tx.query_row(
+                "SELECT kind,payload FROM outbox WHERE outcome_id=?1 AND idempotency_key=?2",
+                params![self.id.as_str(), o.idempotency_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let same = kind == enum_str(&o.kind)
+                && serde_json::from_str::<Value>(&stored).is_ok_and(|v| v == payload);
+            if !same {
+                return Err(Error::Invalid(format!(
+                    "outbox key {:?} is already queued for a different effect",
+                    o.idempotency_key
+                )));
+            }
+        }
+        Ok(inserted)
     }
 
     fn changed(
@@ -1060,23 +1503,39 @@ impl OutcomeTx<'_, '_> {
         Ok(())
     }
 
+    fn conflict_or(&self, agg: ev::Aggregate, id: &str, expected: i64, actual: i64) -> Result<()> {
+        if expected == actual {
+            Ok(())
+        } else {
+            Err(conflict(agg.as_str(), id, expected, actual))
+        }
+    }
+
     // ---- contract and plan
 
     pub fn approve_contract(&mut self, version: u32, hash: &str, approver: &str) -> Result<()> {
-        let stored: Option<(String, Option<String>)> = self
+        if !valid_command_text(approver, 128) {
+            return Err(Error::Invalid(
+                "approver must be 1 to 128 printable characters".into(),
+            ));
+        }
+        let stored: Option<(String, String, Option<String>)> = self
             .et
             .tx
             .query_row(
-                "SELECT hash,approved_at FROM contracts WHERE outcome_id=?1 AND version=?2",
+                "SELECT body,hash,approved_at FROM contracts WHERE outcome_id=?1 AND version=?2",
                 params![self.id.as_str(), version],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((stored, approved)) = stored else {
+        let Some((body, stored, approved)) = stored else {
             return Err(Error::NotFound(format!("contract v{version}")));
         };
-        if stored != hash {
-            // the person approved something other than what is stored
+        // the person approved exactly the stored body, and the stored hash is that body's hash
+        let body_ok = serde_json::from_str::<Value>(&body)
+            .map(|v| body_hash(&v) == stored)
+            .unwrap_or(false);
+        if stored != hash || !body_ok {
             return Err(Error::Invalid(
                 "contract hash does not match the stored contract".into(),
             ));
@@ -1084,10 +1543,18 @@ impl OutcomeTx<'_, '_> {
         if approved.is_some() {
             return Ok(());
         }
-        let at = now();
+        let at = ts(self.now);
+        let m = contract_mac(
+            self.et.key(),
+            self.id.as_str(),
+            version,
+            hash,
+            approver,
+            &at,
+        );
         self.et.tx.execute(
-            "UPDATE contracts SET approved_by=?3, approved_at=?4 WHERE outcome_id=?1 AND version=?2",
-            params![self.id.as_str(), version, approver, at],
+            "UPDATE contracts SET approved_by=?3, approved_at=?4, approved_mac=?5 WHERE outcome_id=?1 AND version=?2",
+            params![self.id.as_str(), version, approver, at, m],
         )?;
         self.et.append(
             "outcome.contract_approved",
@@ -1096,16 +1563,58 @@ impl OutcomeTx<'_, '_> {
         Ok(())
     }
 
-    /// Validates `plan` against the stored contract of its version, stores it with its work
-    /// items (state `created`) and dependencies, and makes it the outcome's current plan.
-    /// Returns `(key, id)` of every work item.
+    fn stored_contract(&self, version: u32) -> Result<Contract> {
+        let body: String = self
+            .et
+            .tx
+            .query_row(
+                "SELECT body FROM contracts WHERE outcome_id=?1 AND version=?2",
+                params![self.id.as_str(), version],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("contract v{version}")))?;
+        Ok(serde_json::from_str(&body)?)
+    }
+
+    /// Validates `plan` against the stored, approved contract it names, and stores it with its
+    /// work items (state `created`) and dependencies as the outcome's current plan. Allowed only
+    /// while the outcome is `contract_pending`, `blocked` or `rework_required`, and only as the
+    /// next version. Returns `(key, id)` of every work item.
     pub fn insert_plan(&mut self, plan: &Plan) -> Result<Vec<(String, WorkItemId)>> {
-        let (body, chash): (String, String) = self.et.tx.query_row(
-            "SELECT body,hash FROM contracts WHERE outcome_id=?1 AND version=?2",
+        let o = self.outcome()?;
+        if !matches!(
+            o.state,
+            OutcomeState::ContractPending | OutcomeState::Blocked | OutcomeState::ReworkRequired
+        ) {
+            return Err(Error::Invalid(format!(
+                "a plan cannot be stored while the outcome is {}",
+                enum_str(&o.state)
+            )));
+        }
+        if plan.version != o.plan_version.unwrap_or(0) + 1 {
+            return Err(Error::Invalid(
+                "a plan version must follow the current one".into(),
+            ));
+        }
+        if plan.contract_version != o.contract_version
+            || !contract_authentic(
+                self.et.tx,
+                Some(self.et.key()),
+                self.id,
+                plan.contract_version,
+            )?
+        {
+            return Err(Error::Invalid(
+                "a plan needs the approved current contract".into(),
+            ));
+        }
+        let contract = self.stored_contract(plan.contract_version)?;
+        let chash: String = self.et.tx.query_row(
+            "SELECT hash FROM contracts WHERE outcome_id=?1 AND version=?2",
             params![self.id.as_str(), plan.contract_version],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )?;
-        let contract: Contract = serde_json::from_str(&body)?;
         validate_plan(plan, &contract).map_err(refuse)?;
         let dag = serde_json::to_value(plan)?;
         let hash = body_hash(&dag);
@@ -1153,51 +1662,166 @@ impl OutcomeTx<'_, '_> {
         Ok(ids)
     }
 
-    // ---- transitions
+    // ---- derived facts
 
-    fn conflict_or(&self, agg: ev::Aggregate, id: &str, expected: i64, actual: i64) -> Result<()> {
-        if expected == actual {
-            Ok(())
-        } else {
-            Err(conflict(agg.as_str(), id, expected, actual))
-        }
+    /// Attempts per work item the plan's contract allows, under the settings ceiling.
+    fn max_attempts(&self, plan_version: u32) -> Result<u32> {
+        let body: String = self.et.tx.query_row(
+            "SELECT c.body FROM plans p JOIN contracts c \
+               ON c.outcome_id=p.outcome_id AND c.version=p.contract_version \
+             WHERE p.outcome_id=?1 AND p.version=?2",
+            params![self.id.as_str(), plan_version],
+            |r| r.get(0),
+        )?;
+        let c: Contract = serde_json::from_str(&body)?;
+        Ok(c.envelope
+            .budgets
+            .max_attempts_per_work_item
+            .min(self.policy.max_attempts_per_work_item))
     }
 
+    /// The commit of the attempt that ended last among the current plan's items: the candidate
+    /// the evidence must name.
+    fn candidate_commit(&self, plan_version: u32) -> Result<Option<String>> {
+        Ok(self
+            .et
+            .tx
+            .query_row(
+                "SELECT a.subject_commit FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+                 WHERE w.outcome_id=?1 AND w.plan_version=?2 AND a.state='finished' \
+                   AND a.subject_commit IS NOT NULL \
+                 ORDER BY a.ended_at DESC, a.ordinal DESC LIMIT 1",
+                params![self.id.as_str(), plan_version],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// `independent_check` evidence, passed, for the commit of this item's last finished attempt
+    /// (a `verify` item has no attempt: the last finished attempt it requires), from the newest
+    /// attempt, without `definitions_changed`.
+    fn item_has_independent_evidence(&self, item: &WorkItemId) -> Result<bool> {
+        let own = self
+            .et
+            .tx
+            .query_row(
+                "SELECT subject_commit FROM attempts WHERE work_item_id=?1 AND state='finished' \
+                 AND subject_commit IS NOT NULL ORDER BY ordinal DESC LIMIT 1",
+                [item.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        let commit = match own {
+            Some(c) => Some(c),
+            None => self
+                .et
+                .tx
+                .query_row(
+                    "SELECT a.subject_commit FROM attempts a \
+                     JOIN work_item_deps d ON d.requires_id=a.work_item_id \
+                     WHERE d.work_item_id=?1 AND a.state='finished' AND a.subject_commit IS NOT NULL \
+                     ORDER BY a.ended_at DESC, a.ordinal DESC LIMIT 1",
+                    [item.as_str()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+        };
+        let Some(commit) = commit else {
+            return Ok(false);
+        };
+        Ok(self.et.tx.query_row(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.work_item_id=?1 \
+                   AND e.trust_class='independent_check' AND e.result='passed' \
+                   AND e.subject_commit=?2 AND {FLAG_FREE} AND {FENCE_CURRENT})"
+            ),
+            params![item.as_str(), commit],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The verdict (ADR-020 section 4, MVP rule), computed from the rows: every item of the
+    /// current plan `succeeded`, and every mandatory criterion has evidence of the class it
+    /// requires (`independent_check`, or `human_review` for a manual one), passed, for the
+    /// candidate commit, from the current fence, without `definitions_changed`, and no failed
+    /// evidence of that class for the same commit. The pure verdict function of PR-09 replaces this.
+    fn verdict(&self, o: &OutcomeRecord) -> Result<bool> {
+        let Some(pv) = o.plan_version else {
+            return Ok(false);
+        };
+        let (total, open): (i64, i64) = self.et.tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(state <> 'succeeded'),0) FROM work_items \
+             WHERE outcome_id=?1 AND plan_version=?2",
+            params![self.id.as_str(), pv],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if total == 0 || open > 0 {
+            return Ok(false);
+        }
+        let Some(commit) = self.candidate_commit(pv)? else {
+            return Ok(false);
+        };
+        let contract = self.stored_contract(o.contract_version)?;
+        for c in contract.criteria.iter().filter(|c| c.mandatory) {
+            let class = if c.manual {
+                "human_review"
+            } else {
+                "independent_check"
+            };
+            let any = |result: &str| -> Result<bool> {
+                Ok(self.et.tx.query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM evidence e WHERE e.outcome_id=?1 \
+                           AND e.subject_commit=?2 AND e.trust_class=?3 AND e.result IN ({result}) \
+                           AND EXISTS (SELECT 1 FROM json_each(e.criteria_ids) j WHERE j.value=?4) \
+                           AND {FLAG_FREE} AND {FENCE_CURRENT})"
+                    ),
+                    params![self.id.as_str(), commit, class, c.id],
+                    |r| r.get(0),
+                )?)
+            };
+            if any("'failed','error'")? || !any("'passed'")? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    // ---- transitions
+
+    /// Guards are derived: the contract approval is checked against its MAC, the plan must
+    /// exist for the current contract, and `Verified`/`Completed` need the store's own verdict.
     pub fn transition_outcome(
         &mut self,
         expected_revision: i64,
         to: OutcomeState,
-        facts: OutcomeFacts,
         reason: Option<&str>,
         fx: &Effects,
-    ) -> Result<i64> {
-        let (state, rev, approved, plan_ok): (String, i64, bool, bool) = self
-            .et
-            .tx
-            .query_row(
-                "SELECT o.state,o.revision, \
-                   EXISTS(SELECT 1 FROM contracts c WHERE c.outcome_id=o.id AND c.version=o.contract_version AND c.approved_at IS NOT NULL), \
-                   EXISTS(SELECT 1 FROM plans p WHERE p.outcome_id=o.id AND p.version=o.plan_version AND p.contract_version=o.contract_version) \
-                 FROM outcomes o WHERE o.id=?1",
-                [self.id.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("outcome {}", self.id)))?;
+    ) -> Result<Applied> {
+        let o = self.outcome()?;
         self.conflict_or(
             ev::Aggregate::Outcome,
             self.id.as_str(),
             expected_revision,
-            rev,
+            o.revision,
         )?;
-        let from: OutcomeState = enum_from(&state)?;
+        let approved =
+            contract_authentic(self.et.tx, Some(self.et.key()), self.id, o.contract_version)?;
+        let plan_valid: bool = self.et.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plans p WHERE p.outcome_id=?1 AND p.version=?2 AND p.contract_version=?3)",
+            params![self.id.as_str(), o.plan_version, o.contract_version],
+            |r| r.get(0),
+        )?;
+        let needs_verdict = matches!(to, OutcomeState::Verified | OutcomeState::Completed);
+        let verdict = needs_verdict && self.verdict(&o)?;
         let guards = OutcomeGuards {
             contract_approved: approved,
-            plan_valid: plan_ok,
-            verdict_verified: facts.verdict_verified,
-            delivery_ready: facts.delivery_ready,
+            plan_valid,
+            verdict_verified: verdict && to == OutcomeState::Verified,
+            delivery_ready: verdict && to == OutcomeState::Completed,
         };
-        from.transition(to, &guards).map_err(refuse)?;
+        o.state.transition(to, &guards).map_err(refuse)?;
+        let rev = o.revision;
         let changed = self.et.tx.execute(
             "UPDATE outcomes SET state=?2, revision=revision+1, updated_at=?4 WHERE id=?1 AND revision=?3",
             params![self.id.as_str(), enum_str(&to), rev, now()],
@@ -1207,46 +1831,45 @@ impl OutcomeTx<'_, '_> {
         }
         self.changed(
             ev::Aggregate::Outcome,
-            &self.id.to_string(),
+            self.id.as_str(),
             rev + 1,
-            &state,
+            &enum_str(&o.state),
             &enum_str(&to),
             reason,
         )?;
-        self.effects(fx)?;
-        Ok(rev + 1)
+        self.applied(rev + 1, fx)
     }
 
-    fn load_item(&self, id: &WorkItemId) -> Result<(String, i64, u32)> {
+    fn load_item(&self, id: &WorkItemId) -> Result<(String, i64, u32, u32, WorkItemKind)> {
         self.et
             .tx
             .query_row(
-                "SELECT state,revision,retries_used FROM work_items WHERE id=?1 AND outcome_id=?2",
+                "SELECT state,revision,retries_used,plan_version,kind FROM work_items WHERE id=?1 AND outcome_id=?2",
                 params![id.as_str(), self.id.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, col(r, 4)?)),
             )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("work item {id}")))
     }
 
-    /// `max_retries` comes from the contract's budgets; `retries_used` is read from the row.
+    /// The retry budget comes from the stored contract (under the settings ceiling) and
+    /// `retries_used` from the row; `Succeeded` needs independent evidence found in the rows.
     /// Leaving `retryable_failure` for `ready` starts a retry and counts it.
     pub fn transition_work_item(
         &mut self,
         id: &WorkItemId,
         expected_revision: i64,
         to: WorkItemState,
-        max_retries: u32,
-        independent_evidence: bool,
         fx: &Effects,
-    ) -> Result<i64> {
-        let (state, rev, used) = self.load_item(id)?;
+    ) -> Result<Applied> {
+        let (state, rev, used, plan_version, _) = self.load_item(id)?;
         self.conflict_or(ev::Aggregate::WorkItem, id.as_str(), expected_revision, rev)?;
         let from: WorkItemState = enum_from(&state)?;
         let guards = WorkItemGuards {
             retries_used: used,
-            max_retries,
-            independent_evidence,
+            max_retries: self.max_attempts(plan_version)?.saturating_sub(1),
+            independent_evidence: to == WorkItemState::Succeeded
+                && self.item_has_independent_evidence(id)?,
         };
         from.transition(to, &guards).map_err(refuse)?;
         let retry =
@@ -1266,15 +1889,16 @@ impl OutcomeTx<'_, '_> {
             &enum_str(&to),
             None,
         )?;
-        self.effects(fx)?;
-        Ok(rev + 1)
+        self.applied(rev + 1, fx)
     }
 
     // ---- attempts
 
-    /// Inserts attempt `ordinal` of a work item in state `starting`. The pair
-    /// `(work_item, ordinal)` is unique, so a replayed allocation is refused instead of doubled
-    /// ([`Error::AlreadyExists`]); the caller adopts the existing row. The fence equals the ordinal.
+    /// Inserts attempt `ordinal` of an `agent` work item in state `starting`. Refused unless
+    /// `ordinal` is the next one (a replayed allocation is [`Error::AlreadyExists`]: adopt the
+    /// existing row), within the attempt budget, with no live attempt before it, and with a
+    /// session that is an ordinary (non-control) child of this outcome's control session. The
+    /// fence equals the ordinal. Returns the row and, per outbox row, whether it was new.
     pub fn new_attempt(
         &mut self,
         item: &WorkItemId,
@@ -1282,13 +1906,61 @@ impl OutcomeTx<'_, '_> {
         session_id: &str,
         worker_kind: &str,
         fx: &Effects,
-    ) -> Result<AttemptRecord> {
-        if ordinal == 0 || !matches!(worker_kind, "local-inproc" | "local-engine") {
+    ) -> Result<(AttemptRecord, Vec<bool>)> {
+        if !matches!(worker_kind, "local-inproc" | "local-engine") {
+            return Err(Error::Invalid("worker kind is invalid".into()));
+        }
+        let (_, _, _, plan_version, kind) = self.load_item(item)?;
+        if kind != WorkItemKind::Agent {
             return Err(Error::Invalid(
-                "attempt ordinal or worker kind is invalid".into(),
+                "only an agent work item runs attempts".into(),
             ));
         }
-        self.load_item(item)?;
+        let (max_ord, live): (u32, bool) = self.et.tx.query_row(
+            "SELECT COALESCE(MAX(ordinal),0), COALESCE(MAX(state IN ('starting','running')),0) \
+             FROM attempts WHERE work_item_id=?1",
+            [item.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if ordinal != 0 && ordinal <= max_ord {
+            return Err(Error::AlreadyExists(format!("attempt {ordinal} of {item}")));
+        }
+        if ordinal != max_ord + 1 {
+            return Err(Error::Invalid(format!(
+                "the next attempt of this item is {}",
+                max_ord + 1
+            )));
+        }
+        if ordinal > self.max_attempts(plan_version)? {
+            return Err(Error::Invalid(
+                "the attempt budget of this item is used".into(),
+            ));
+        }
+        if live {
+            return Err(Error::Invalid("the previous attempt is still live".into()));
+        }
+        let control: String = self.et.tx.query_row(
+            "SELECT control_session_id FROM outcomes WHERE id=?1",
+            [self.id.as_str()],
+            |r| r.get(0),
+        )?;
+        let sess: Option<(String, Option<String>)> = self
+            .et
+            .tx
+            .query_row(
+                "SELECT kind,parent_session_id FROM sessions WHERE id=?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match sess {
+            Some((k, Some(parent))) if k == "chat" && parent == control => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "an attempt's session must be an ordinary child of the control session".into(),
+                ));
+            }
+        }
         let id = AttemptId::parse(&new_uuid()).map_err(refuse)?;
         let r = self.et.tx.execute(
             "INSERT INTO attempts(id,work_item_id,ordinal,session_id,worker_kind,state,revision,fence,started_at) \
@@ -1308,12 +1980,13 @@ impl OutcomeTx<'_, '_> {
             json!({"attempt_id": id, "work_item_id": item, "ordinal": ordinal,
                    "session_id": session_id, "worker_kind": worker_kind, "fence": ordinal}),
         )?;
-        self.effects(fx)?;
-        Ok(self.et.tx.query_row(
+        let outbox_new = self.effects(fx)?;
+        let rec = self.et.tx.query_row(
             &format!("SELECT {ATTEMPT_COLS} FROM attempts a WHERE a.id=?1"),
             [id.as_str()],
             attempt_row,
-        )?)
+        )?;
+        Ok((rec, outbox_new))
     }
 
     pub fn transition_attempt(
@@ -1323,7 +1996,7 @@ impl OutcomeTx<'_, '_> {
         to: AttemptState,
         end: &AttemptEnd,
         fx: &Effects,
-    ) -> Result<i64> {
+    ) -> Result<Applied> {
         let (state, rev): (String, i64) = self
             .et
             .tx
@@ -1364,31 +2037,84 @@ impl OutcomeTx<'_, '_> {
             &enum_str(&to),
             None,
         )?;
-        self.effects(fx)?;
-        Ok(rev + 1)
+        self.applied(rev + 1, fx)
     }
 
     // ---- decisions
 
-    /// Creates a decision in `preparing`, or returns the existing one of the same dedupe key
-    /// (`false`: nothing was created).
+    /// Creates a decision in `preparing`. The same `(key, binding)` returns the existing decision
+    /// (`false`) while it is open or was answered; one that expired or was invalidated does not
+    /// block a new one, and neither does a different binding. A stored decision of that key and
+    /// binding with a different brief is an error, not a silent reuse.
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
-        if !d.brief.is_object()
-            || !d.binding.is_object()
-            || d.kind.is_empty()
+        if d.kind.is_empty()
+            || d.kind.len() > 64
             || d.dedupe_key.is_empty()
+            || d.dedupe_key.len() > 128
+            || !d.brief.is_object()
+            || !d.binding.is_object()
         {
             return Err(Error::Invalid(
                 "a decision needs a kind, a key, a brief and a binding".into(),
             ));
         }
+        // the brief offers choices; it never pre-selects one (AC-10)
+        if let Some(k) = [
+            "selected",
+            "recommended",
+            "default",
+            "default_choice",
+            "preselected",
+        ]
+        .iter()
+        .find(|k| d.brief.get(**k).is_some())
+        {
+            return Err(Error::Invalid(format!(
+                "a decision brief has no {k:?} field: there is no default choice"
+            )));
+        }
+        let expires = parse_ts(&d.expires_at)
+            .filter(|t| *t > self.now && *t <= self.now + time::Duration::days(MAX_DECISION_DAYS))
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "expires_at must be a store timestamp in the future, within 31 days".into(),
+                )
+            })?;
+        let _ = expires;
         let (mut brief, mut binding) = (d.brief.clone(), d.binding.clone());
         self.et.redact_value(&mut brief);
         self.et.redact_value(&mut binding);
+        let binding_hash = sha_hex(binding.to_string().as_bytes());
+        let latest: Option<DecisionRecord> = self
+            .et
+            .tx
+            .query_row(
+                &format!(
+                    "SELECT {DECISION_COLS} FROM decisions WHERE outcome_id=?1 AND dedupe_key=?2 \
+                     AND binding_hash=?3 ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ),
+                params![self.id.as_str(), d.dedupe_key, binding_hash],
+                decision_row,
+            )
+            .optional()?;
+        if let Some(rec) = latest
+            && !matches!(
+                rec.state,
+                DecisionState::Expired | DecisionState::Invalidated
+            )
+        {
+            if rec.brief != brief || rec.kind != d.kind {
+                return Err(Error::Invalid(format!(
+                    "decision key {:?} already holds a different brief for this binding",
+                    d.dedupe_key
+                )));
+            }
+            return Ok((rec, false));
+        }
         let id = DecisionId::parse(&new_uuid()).map_err(refuse)?;
-        let inserted = self.et.tx.execute(
-            "INSERT INTO decisions(id,outcome_id,kind,dedupe_key,state,revision,brief,binding,expires_at,created_at) \
-             VALUES (?1,?2,?3,?4,'preparing',1,?5,?6,?7,?8) ON CONFLICT(outcome_id,dedupe_key) DO NOTHING",
+        self.et.tx.execute(
+            "INSERT INTO decisions(id,outcome_id,kind,dedupe_key,state,revision,brief,binding,binding_hash,expires_at,created_at) \
+             VALUES (?1,?2,?3,?4,'preparing',1,?5,?6,?7,?8,?9)",
             params![
                 id.as_str(),
                 self.id.as_str(),
@@ -1396,99 +2122,223 @@ impl OutcomeTx<'_, '_> {
                 d.dedupe_key,
                 brief.to_string(),
                 binding.to_string(),
+                binding_hash,
                 d.expires_at,
                 now()
             ],
-        )? == 1;
+        )?;
         let rec = self.et.tx.query_row(
-            &format!("SELECT {DECISION_COLS} FROM decisions WHERE outcome_id=?1 AND dedupe_key=?2"),
-            params![self.id.as_str(), d.dedupe_key],
+            &format!("SELECT {DECISION_COLS} FROM decisions WHERE id=?1"),
+            [id.as_str()],
             decision_row,
         )?;
-        if inserted {
-            self.et.append(
-                ev::DECISION_CREATED,
-                json!({"decision_id": rec.id, "kind": rec.kind, "binding_hash": body_hash(&rec.binding),
-                       "revision": 1}),
-            )?;
-        }
-        Ok((rec, inserted))
+        self.et.append(
+            ev::DECISION_CREATED,
+            json!({"decision_id": rec.id, "kind": rec.kind, "binding_hash": rec.binding_hash,
+                   "brief_sha256": rec.brief_sha256, "revision": 1}),
+        )?;
+        Ok((rec, true))
     }
 
-    /// Transition with the ADR-019 guards. An approval or rejection by a person also needs its
-    /// audit row: [`Self::record_decision_approval`] in the same transaction.
+    fn load_decision(&self, id: &DecisionId) -> Result<DecisionRecord> {
+        self.et
+            .tx
+            .query_row(
+                &format!("SELECT {DECISION_COLS} FROM decisions WHERE id=?1 AND outcome_id=?2"),
+                params![id.as_str(), self.id.as_str()],
+                decision_row,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("decision {id}")))
+    }
+
+    fn binding_current(&self, d: &DecisionRecord, current: &Value) -> bool {
+        let mut c = current.clone();
+        self.et.redact_value(&mut c);
+        sha_hex(c.to_string().as_bytes()) == d.binding_hash
+    }
+
+    fn expired(&self, d: &DecisionRecord) -> bool {
+        parse_ts(&d.expires_at).is_none_or(|t| t <= self.now)
+    }
+
+    /// The orchestrator's own transitions: prepare (`pending`), `expired` once the stored expiry
+    /// has passed, `invalidated` once `current_binding` differs from the stored one. A person's
+    /// answer (`approved`, `rejected`, `needs_more_info`) is refused here: it goes through
+    /// [`Self::resolve_decision`], the one entry point that checks the brief, the binding and
+    /// the clock and records the approval.
     pub fn transition_decision(
         &mut self,
         id: &DecisionId,
         expected_revision: i64,
         to: DecisionState,
-        guards: &DecisionGuards,
+        current_binding: &Value,
         fx: &Effects,
-    ) -> Result<i64> {
-        let (state, rev): (String, i64) = self
-            .et
-            .tx
-            .query_row(
-                "SELECT state,revision FROM decisions WHERE id=?1 AND outcome_id=?2",
-                params![id.as_str(), self.id.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
-        self.conflict_or(ev::Aggregate::Decision, id.as_str(), expected_revision, rev)?;
-        let from: DecisionState = enum_from(&state)?;
-        from.transition(to, guards).map_err(refuse)?;
+    ) -> Result<Applied> {
+        if matches!(
+            to,
+            DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo
+        ) {
+            return Err(Error::Invalid(
+                "a decision is resolved by a person through resolve_decision".into(),
+            ));
+        }
+        let d = self.load_decision(id)?;
+        self.conflict_or(
+            ev::Aggregate::Decision,
+            id.as_str(),
+            expected_revision,
+            d.revision,
+        )?;
+        let guards = DecisionGuards {
+            actor: Actor::Orchestrator,
+            binding_current: self.binding_current(&d, current_binding),
+            expiry_reached: self.expired(&d),
+        };
+        d.state.transition(to, &guards).map_err(refuse)?;
         let changed = self.et.tx.execute(
             "UPDATE decisions SET state=?2, revision=revision+1 WHERE id=?1 AND revision=?3",
-            params![id.as_str(), enum_str(&to), rev],
+            params![id.as_str(), enum_str(&to), d.revision],
         )?;
         if changed != 1 {
-            return Err(conflict("decision", id.as_str(), rev, rev + 1));
+            return Err(conflict(
+                "decision",
+                id.as_str(),
+                d.revision,
+                d.revision + 1,
+            ));
         }
         self.changed(
             ev::Aggregate::Decision,
             id.as_str(),
-            rev + 1,
-            &state,
+            d.revision + 1,
+            &enum_str(&d.state),
             &enum_str(&to),
             None,
         )?;
-        self.effects(fx)?;
-        Ok(rev + 1)
+        self.applied(d.revision + 1, fx)
     }
 
-    /// What the person was shown and chose. `brief_sha256` is the hash of the brief as displayed.
-    pub fn record_decision_approval(
+    /// The one way a decision is resolved (ADR-019 section 4). One transaction: the decision is
+    /// at the revision the person saw; the brief hash they echo is the hash of the stored brief;
+    /// the stored binding equals `current_binding`; the decision has not expired; the choice is
+    /// offered by the brief (an alternative, `reject`, `request_evidence` or `edit_scope`; there
+    /// is no default). Then the approval row (with its MAC), the state change and the chained
+    /// `decision.resolved` event are written together. A mismatch of brief or binding is
+    /// [`Error::Stale`], a lost revision race [`Error::RevisionConflict`].
+    pub fn resolve_decision(
         &mut self,
-        id: &DecisionId,
-        decision_revision: i64,
-        approver: &str,
-        choice: &str,
-        brief_sha256: &str,
-    ) -> Result<()> {
-        self.et
-            .tx
-            .query_row(
-                "SELECT 1 FROM decisions WHERE id=?1 AND outcome_id=?2",
-                params![id.as_str(), self.id.as_str()],
-                |_| Ok(()),
-            )
-            .optional()?
-            .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
-        self.et.tx.execute(
-            "INSERT INTO decision_approvals(id,decision_id,decision_revision,approver,choice,brief_sha256,decided_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![new_uuid(), id.as_str(), decision_revision, approver, choice, brief_sha256, now()],
+        r: &Resolution,
+        current_binding: &Value,
+    ) -> Result<DecisionState> {
+        let d = self.load_decision(&r.decision_id)?;
+        self.conflict_or(
+            ev::Aggregate::Decision,
+            r.decision_id.as_str(),
+            r.decision_revision,
+            d.revision,
         )?;
-        Ok(())
+        if r.brief_sha256 != d.brief_sha256 {
+            return Err(Error::Stale("the brief changed since it was shown".into()));
+        }
+        if !self.binding_current(&d, current_binding) {
+            return Err(Error::Stale(
+                "the contract, plan, commit or policy changed since it was shown".into(),
+            ));
+        }
+        if !valid_command_text(&r.approver, 128) {
+            return Err(Error::Invalid(
+                "approver must be 1 to 128 printable characters".into(),
+            ));
+        }
+        let to = match r.choice.as_str() {
+            "reject" => DecisionState::Rejected,
+            "request_evidence" | "edit_scope" => DecisionState::NeedsMoreInfo,
+            c => {
+                let offered = d
+                    .brief
+                    .get("alternatives")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| {
+                        a.iter().any(|x| {
+                            x.as_str() == Some(c) || x.get("id").and_then(Value::as_str) == Some(c)
+                        })
+                    });
+                if !offered {
+                    return Err(Error::Invalid(
+                        "the choice is not offered by the brief".into(),
+                    ));
+                }
+                DecisionState::Approved
+            }
+        };
+        let guards = DecisionGuards {
+            actor: Actor::User,
+            binding_current: true,
+            expiry_reached: self.expired(&d),
+        };
+        d.state.transition(to, &guards).map_err(refuse)?;
+        let at = ts(self.now);
+        let m = approval_mac(
+            self.et.key(),
+            &r.decision_id,
+            d.revision,
+            &r.approver,
+            &r.choice,
+            &r.brief_sha256,
+            &at,
+        );
+        // the approval row first: the v5 trigger refuses a resolution without it
+        self.et.tx.execute(
+            "INSERT INTO decision_approvals(id,decision_id,decision_revision,approver,choice,brief_sha256,decided_at,mac) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                new_uuid(),
+                r.decision_id.as_str(),
+                d.revision,
+                r.approver,
+                r.choice,
+                r.brief_sha256,
+                at,
+                m
+            ],
+        )?;
+        let changed = self.et.tx.execute(
+            "UPDATE decisions SET state=?2, revision=revision+1 WHERE id=?1 AND revision=?3",
+            params![r.decision_id.as_str(), enum_str(&to), d.revision],
+        )?;
+        if changed != 1 {
+            return Err(conflict(
+                "decision",
+                r.decision_id.as_str(),
+                d.revision,
+                d.revision + 1,
+            ));
+        }
+        self.changed(
+            ev::Aggregate::Decision,
+            r.decision_id.as_str(),
+            d.revision + 1,
+            &enum_str(&d.state),
+            &enum_str(&to),
+            None,
+        )?;
+        self.et.append(
+            ev::DECISION_RESOLVED,
+            json!({"decision_id": r.decision_id, "revision": d.revision + 1,
+                   "approver": r.approver, "choice": r.choice,
+                   "brief_sha256": r.brief_sha256, "state": to}),
+        )?;
+        Ok(to)
     }
 
     // ---- evidence
 
     /// Inserts evidence. Refused: a trust class its producer cannot honestly hold (only the
     /// independent runner writes `independent_check`, only a person `human_review`), an attempt
-    /// that is not this outcome's, and a stale fence (a newer attempt of the item exists).
-    /// Idempotent on `(attempt, check, commit)`: returns the stored id and `false`.
+    /// that is not this outcome's, a stale fence, and an artifact that is not stored with that
+    /// hash. Idempotent on `(attempt, work item, check, commit)`: the same row again returns the
+    /// stored id and `false`; the same key with different content is an error.
     pub fn record_evidence(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
         let producer_ok = match e.trust_class {
             TrustClass::IndependentCheck => e.producer == "independent_runner",
@@ -1505,8 +2355,10 @@ impl OutcomeTx<'_, '_> {
             )));
         }
         if !matches!(e.result.as_str(), "passed" | "failed" | "error" | "skipped")
-            || e.check_id.is_empty()
+            || !valid_command_text(&e.check_id, 128)
             || e.subject_commit.is_empty()
+            || e.subject_commit.len() > 128
+            || e.criteria_ids.len() > 64
         {
             return Err(Error::Invalid(
                 "evidence needs a result, a check and a commit".into(),
@@ -1541,16 +2393,38 @@ impl OutcomeTx<'_, '_> {
                 ));
             }
         }
-        let id = EvidenceId::parse(&new_uuid()).map_err(refuse)?;
         let (art_session, art_id, sha) = match &e.artifact {
-            Some((s, a, h)) => (Some(s.as_str()), Some(a.as_str()), Some(h.as_str())),
+            Some((s, a, h)) => {
+                if !valid_id(s) || !valid_id(a) || !is_sha256(h) {
+                    return Err(Error::Invalid(
+                        "evidence artifact reference is malformed".into(),
+                    ));
+                }
+                // stored with that hash, in this outcome's control session or one of its attempts
+                let ok: bool = self.et.tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM artifacts x WHERE x.id=?2 AND x.session_id=?1 AND x.sha256=?3 \
+                       AND (x.session_id = (SELECT control_session_id FROM outcomes WHERE id=?4) \
+                         OR EXISTS (SELECT 1 FROM attempts at JOIN work_items w ON w.id=at.work_item_id \
+                                    WHERE at.session_id=x.session_id AND w.outcome_id=?4)))",
+                    params![s, a, h, self.id.as_str()],
+                    |r| r.get(0),
+                )?;
+                if !ok {
+                    return Err(Error::Invalid(
+                        "evidence artifact is not stored in this outcome with that hash".into(),
+                    ));
+                }
+                (Some(s.as_str()), Some(a.as_str()), Some(h.as_str()))
+            }
             None => (None, None, None),
         };
+        let id = EvidenceId::parse(&new_uuid()).map_err(refuse)?;
+        let criteria = serde_json::to_string(&e.criteria_ids)?;
         let inserted = self.et.tx.execute(
             "INSERT INTO evidence(id,outcome_id,work_item_id,attempt_id,trust_class,producer,subject_commit,check_id,command_hash,\
                criteria_ids,result,exit_code,env_fingerprint,artifact_session_id,artifact_id,sha256,fence,captured_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) \
-             ON CONFLICT(attempt_id,check_id,subject_commit) DO NOTHING",
+             ON CONFLICT DO NOTHING",
             params![
                 id.as_str(),
                 self.id.as_str(),
@@ -1561,7 +2435,7 @@ impl OutcomeTx<'_, '_> {
                 e.subject_commit,
                 e.check_id,
                 e.command_hash,
-                serde_json::to_string(&e.criteria_ids)?,
+                criteria,
                 e.result,
                 e.exit_code,
                 e.env_fingerprint,
@@ -1573,11 +2447,35 @@ impl OutcomeTx<'_, '_> {
             ],
         )? == 1;
         if !inserted {
-            let existing: String = self.et.tx.query_row(
-                "SELECT id FROM evidence WHERE attempt_id IS ?1 AND check_id=?2 AND subject_commit=?3",
-                params![e.attempt_id.as_ref().map(AttemptId::as_str), e.check_id, e.subject_commit],
-                |r| r.get(0),
+            let (existing, same): (String, bool) = self.et.tx.query_row(
+                "SELECT id, trust_class=?5 AND producer=?6 AND command_hash IS ?7 AND criteria_ids=?8 \
+                   AND result=?9 AND exit_code IS ?10 AND env_fingerprint=?11 AND sha256 IS ?12 \
+                   AND artifact_id IS ?13 AND fence=?14 \
+                 FROM evidence WHERE COALESCE(attempt_id,'')=?1 AND work_item_id=?2 AND check_id=?3 AND subject_commit=?4",
+                params![
+                    e.attempt_id.as_ref().map_or("", AttemptId::as_str),
+                    e.work_item_id.as_str(),
+                    e.check_id,
+                    e.subject_commit,
+                    enum_str(&e.trust_class),
+                    e.producer,
+                    e.command_hash,
+                    criteria,
+                    e.result,
+                    e.exit_code,
+                    e.env_fingerprint,
+                    sha,
+                    art_id,
+                    e.fence
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            if !same {
+                return Err(Error::Invalid(
+                    "evidence for this check and commit is already recorded with different content"
+                        .into(),
+                ));
+            }
             return Ok((EvidenceId::parse(&existing).map_err(refuse)?, false));
         }
         self.et.append(

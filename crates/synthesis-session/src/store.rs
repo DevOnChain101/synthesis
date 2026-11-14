@@ -71,6 +71,29 @@ pub(crate) fn cleanable_only(conn: &Connection, alias: &str) -> Result<String> {
     })
 }
 
+/// A user path (`/resume`, `/close`) must not reach an outcome's control session or an attempt's
+/// session: those belong to the orchestrator (ADR-016 item 2). No-op below v5.
+fn refuse_hidden(conn: &Connection, id: &str) -> Result<()> {
+    if schema::user_version(conn)? < schema::OUTCOMES {
+        return Ok(());
+    }
+    let hidden: bool = conn
+        .query_row(
+            "SELECT kind <> 'chat' OR EXISTS (SELECT 1 FROM attempts a WHERE a.session_id = ?1) \
+             FROM sessions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if hidden {
+        return Err(Error::Invalid(format!(
+            "session {id} belongs to an outcome and cannot be resumed or closed directly"
+        )));
+    }
+    Ok(())
+}
+
 /// The store's timestamp format (UTC, milliseconds), comparable as text.
 pub fn timestamp() -> String {
     now()
@@ -619,21 +642,47 @@ impl Store {
         // is retried here too.
         let target = opts.schema_target;
         let mut migration = None;
+        let mut pending: Option<MigrationReport> = None;
         retry_busy(Duration::from_secs(15), || {
             let mut conn = connect(synthesis_home, false)?;
             let from = schema::user_version(&conn)?;
+            let to = target.min(schema::LATEST);
             // An existing database is copied before any upgrade (a fresh one holds nothing). A
             // failed backup stops the migration: no backup, no change.
-            if migration.is_none() && from > 0 && from < target.min(schema::LATEST) {
-                let to = target.min(schema::LATEST);
+            if pending.is_none() && from > 0 && from < to {
                 let backup = clean::backup_to(
                     synthesis_home,
                     &format!("pre-v{to}"),
                     OffsetDateTime::now_utc(),
                 )?;
-                migration = Some(MigrationReport { from, to, backup });
+                // Another process may have migrated between our read and the copy: a copy that is
+                // not at `from` would be labelled with the wrong version. Drop it and look again.
+                let copy: i64 =
+                    Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .map_err(Error::from)
+                        .and_then(|c| schema::user_version(&c))?;
+                if copy != from {
+                    let _ = fs::remove_file(&backup);
+                    if let Some(d) = backup.parent() {
+                        let _ = fs::remove_dir(d);
+                    }
+                    return Err(Error::Sqlite(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        None,
+                    )));
+                }
+                pending = Some(MigrationReport { from, to, backup });
             }
-            schema::migrate(&mut conn, &now(), target)
+            if schema::migrate(&mut conn, &now(), target)? {
+                migration = pending.take();
+            } else if let Some(p) = pending.take() {
+                // someone else migrated first: our copy is surplus
+                let _ = fs::remove_file(&p.backup);
+                if let Some(d) = p.backup.parent() {
+                    let _ = fs::remove_dir(d);
+                }
+            }
+            Ok(())
         })?;
         Ok(Store {
             home: synthesis_home.to_path_buf(),
@@ -828,6 +877,7 @@ impl Store {
     pub fn close_session(&self, id: &str) -> Result<bool> {
         check_id(id)?;
         let conn = connect(&self.home, false)?;
+        refuse_hidden(&conn, id)?;
         let n = conn.execute(
             "UPDATE sessions SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
             (id, now()),
@@ -910,10 +960,21 @@ impl Store {
         self.create_inner(new, mirror)
     }
 
-    pub(crate) fn create_inner(
+    fn create_inner(
         &self,
         new: NewSession<'_>,
         mirror: impl FnOnce(&str, &str) -> Option<PathBuf>,
+    ) -> Result<SessionWriter> {
+        self.create_kind(new, mirror, None)
+    }
+
+    /// `kind`: `Some("outcome")` creates a hidden control session; the row is written with its
+    /// kind in one transaction, so it is never visible as a chat.
+    pub(crate) fn create_kind(
+        &self,
+        new: NewSession<'_>,
+        mirror: impl FnOnce(&str, &str) -> Option<PathBuf>,
+        kind: Option<&str>,
     ) -> Result<SessionWriter> {
         let id = new
             .id
@@ -932,6 +993,9 @@ impl Store {
         let lock = lock_session(&self.home, &id)?;
         let conn = connect(&self.home, false)?;
         let ts = now();
+        if kind.is_some() {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
         let r = conn.execute(
             "INSERT INTO sessions(id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,
                model_config,permission_mode,permission_policy_id,budget,usage,title,parent_session_id,
@@ -968,6 +1032,11 @@ impl Store {
             }
             r => r?,
         };
+        if let Some(k) = kind {
+            // an error above drops the connection, which rolls the transaction back
+            conn.execute("UPDATE sessions SET kind=?2 WHERE id=?1", (&id, k))?;
+            conn.execute_batch("COMMIT")?;
+        }
         self.writer(conn, id, lock, mirror_path, cwd, root, dirs)
     }
 
@@ -1013,6 +1082,8 @@ impl Store {
     /// process is first moved to `interrupted`. Fails with [`Error::TranscriptChanged`] when
     /// the Node JSONL it mirrors was modified by someone else, unless `accept_external_changes`.
     pub fn resume_session(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
+        check_id(id)?;
+        refuse_hidden(&connect(&self.home, true)?, id)?;
         let mut w = self.open_locked(id)?;
         let rec = w.get_session(id)?;
         if let (Some(p), false) = (&rec.legacy_transcript_path, accept_external_changes)
@@ -1029,6 +1100,13 @@ impl Store {
             w.repair_cancelling("writer process exited; found cancelling on resume")?;
         }
         Ok(w)
+    }
+
+    /// The orchestrator's way into a session it owns (an attempt's, to read or finish it): the
+    /// lock and connection without the user-path refusal of [`Self::resume_session`]. Only the
+    /// orchestrator should call it; `/resume` and `/close` never do.
+    pub fn open_session_for_orchestrator(&self, id: &str) -> Result<SessionWriter> {
+        self.open_locked(id)
     }
 
     /// Lock + connection for an existing session without any state checks (recovery).
@@ -1171,7 +1249,7 @@ impl Store {
 /// Read side. `SessionWriter` derefs to it, so a writer can also read.
 pub struct Reader {
     pub(crate) conn: Connection,
-    home: PathBuf,
+    pub(crate) home: PathBuf,
 }
 
 const SESSION_COLS: &str = "id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,model_config,
@@ -2575,6 +2653,11 @@ impl EventTx<'_> {
 
     pub(crate) fn redact_str(&self, s: &str) -> String {
         self.redactor.redact_str(s)
+    }
+
+    /// The per-user chain key (MACs of approvals are keyed with it).
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        self.key
     }
 
     pub(crate) fn redact_value(&self, v: &mut Value) {
