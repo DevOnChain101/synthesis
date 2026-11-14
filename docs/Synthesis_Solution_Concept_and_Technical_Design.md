@@ -15,6 +15,7 @@
 | 1.4 | 2026-10-29 | ADR-012 and ADR-013 accepted with all recommendations of the owner (messaging D9–D16, memory D1–D8); memory phase M0 (audit findings F1–F7) implemented |
 | 1.5 | 2026-10-30 | TUI redesign: FR-16, ADR-014 accepted with all recommendations of the owner (D1–D11); spec `docs/specs/tui-design.md`; phase P1 (theme tokens, header, logo) implemented |
 | 1.6 | 2026-10-31 | UI removed 2026-10-31; TUI/desktop archived at tag archive/ui-before-removal; to be rebuilt later from the HTML design. Everything below that describes the TUI, the GPUI desktop (FR-01 interactive part, FR-12, FR-16, ADR-008, ADR-014, Phase 4, `docs/specs/tui-design.md`, `docs/specs/desktop.md`) describes the archived or planned state, not the shipped one. |
+| 1.7 | 2026-11-14 | Outcome orchestration, opt-in (plan decision D1 applied with the recommended default): ADR-009 amended again (orchestrator allowed, scoped to outcome mode, `synt.orchestrator.enabled`, off by default, no behaviour or schema change while off); ADR-016..021 are drafts in `docs/architecture/adr/` and get registry rows on acceptance; domain types in `synthesis-core::outcome` |
 
 ---
 
@@ -41,7 +42,7 @@ The proposed strategy is **CLI-first, headless-capable, runtime-centered**, with
 - Reimplementing Claude Code or Codex provider harnesses as external dependencies.
 - Full autonomous access to the host machine, arbitrary secrets or production systems.
 - A mandatory GPUI interface or embedded browser engine.
-- Complex multi-agent collaboration before single-agent reliability is established (agent messaging is allowed in the narrow scope of ADR-012).
+- Complex multi-agent collaboration before single-agent reliability is established (agent messaging is allowed in the narrow scope of ADR-012; an outcome orchestrator is allowed only as the opt-in feature of ADR-017, off by default).
 - Perfect formal proof of software correctness; Synthesis reports what was actually checked.
 
 ---
@@ -624,7 +625,7 @@ The Session Manager can route a session to a remote worker running the same tool
 | ADR-006 | Verification evidence is a first-class object | Reduces unsupported success claims |
 | ADR-007 | Policy gate sits before tool execution | Model proposals do not grant privileges |
 | ADR-008 | Defer GPUI to thin client phase | UI should not block autonomous runtime development; GPUI is Rust and may share crates with the core |
-| ADR-009 | Defer complex multi-agent orchestration (amended by ADR-012) | Single-agent success and safety are foundational |
+| ADR-009 | Defer complex multi-agent orchestration (amended by ADR-012 for messaging, and by ADR-017 draft, plan D1, for an opt-in outcome orchestrator: only behind `synt.orchestrator.enabled`, default off; with it off there is no schema change, no command in `--help`, no UI row) | Single-agent success and safety are foundational |
 | ADR-010 | Core engine is implemented in Rust; Node CLI is a frozen reference until cutover | Native cross-OS binary without Node runtime, access to OS sandbox primitives, crates shareable with GPUI. Cost: rewrite effort, unverified crate maturity, a dual-maintenance window while both implementations exist |
 | ADR-011 | Model access uses API keys only; no subscription/OAuth login flows | Anthropic and OpenAI do not permit third-party coding agents to authenticate through consumer subscriptions; API keys are the supported path (the Node CLI already works this way). Users manage their own keys through `SYNT_*` environment variables (no other env prefix is ever read) or provider config substitution; Synthesis does not store credentials in a keychain and does not write them to disk. Bearer-style keys for Anthropic-compatible gateways remain API keys. Cost: users need billed API access and handle key hygiene themselves; no subscription-priced usage |
 | ADR-012 | **Status: Accepted (2026-10-29).** Inter-agent messaging without an orchestrator: in-session via an in-process per-session hub (named/background/resumable sub-agents, `SendMessage`, `@agent`); cross-session via a per-session local endpoint (Unix socket / Windows named pipe, NDJSON, mutual HMAC, same OS user only) answered by a read-only responder forked from the addressed agent's context; fully qualified `ws/sess/agent` addresses that never resolve by guessing. Amends ADR-009: messaging is allowed; planners and orchestrators stay deferred | Reuses tokio `net` and the session lock, with no TCP/HTTP server and no polling; the receiver's own policy decides what leaves it. Cost: per-OS endpoint code and a Windows ACL assumption to verify; same-user processes can impersonate a peer (sandbox R7 mitigates); queued in-session messages are lost on a crash; responder runs cost the receiver's tokens. Peers are off by default |
