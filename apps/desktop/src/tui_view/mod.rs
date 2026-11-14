@@ -1744,6 +1744,25 @@ mod tests {
         }
     }
 
+    /// A folder chosen from the Workspace panel of the slide-over column closes the column (it used to stay
+    /// open, as if the picker had never been answered).
+    #[gpui::test]
+    fn choosing_a_folder_closes_the_drawer_it_was_picked_from(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        view.update(vcx, |t, _| t.set_live(l));
+        view.update(vcx, |t, cx| {
+            t.drawer = Some(Side::Left);
+            t.open_folder(std::path::Path::new("/no/such/folder/for/the/test"), cx);
+            assert!(t.drawer.is_none());
+        });
+    }
+
     /// The send picker is a dialog like the others: under Settings no key reaches it (no typing into its
     /// filter, no Enter), on screen Enter picks at once (the person opened it), and Esc sends nothing.
     #[gpui::test]

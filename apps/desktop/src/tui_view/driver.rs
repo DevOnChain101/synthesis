@@ -2233,6 +2233,8 @@ impl TuiView {
 
     /// A folder chosen as a new workspace: it must be a readable directory.
     pub fn open_folder(&mut self, p: &Path, cx: &mut Context<Self>) {
+        // the slide-over column the picker was opened from closes: the new session (or the note) shows
+        self.drawer = None;
         let Some(lu) = &mut self.live else { return };
         // the system picker can return a network path too: not probed here either
         if crate::folder::is_unc(&p.to_string_lossy()) {
