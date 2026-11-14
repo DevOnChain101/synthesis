@@ -4,6 +4,7 @@
 //! fields and types. Removing/renaming/retyping a field bumps it.
 
 mod io;
+pub mod outcome;
 mod types;
 
 pub use io::{EventReader, EventWriter, Record, Redactor};

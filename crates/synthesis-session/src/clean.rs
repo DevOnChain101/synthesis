@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 
 use crate::error::{Error, Result};
 use crate::store::{
-    Store, connect, delete_session_rows, private_dir, private_file, utf8, valid_id,
+    Store, cleanable_only, connect, delete_session_rows, private_dir, private_file, utf8, valid_id,
 };
 
 /// "Sessions inactive for more than N days".
@@ -58,7 +58,7 @@ impl CleanScope {
 /// `updated_at` is always written by the store's own `now()` (fixed-width RFC 3339 UTC, millis, `Z`;
 /// a Node import goes through `create_session` too), so the text comparison in the scope predicates is
 /// chronological. A NULL or foreign-format value does not match (`NULL < x` is NULL), so it is kept.
-fn ts(t: OffsetDateTime) -> String {
+pub(crate) fn ts(t: OffsetDateTime) -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );
@@ -180,9 +180,10 @@ impl Store {
             .prepare("SELECT id, workspace_root, parent_session_id FROM sessions")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
+        let chat = cleanable_only(&conn, "s")?;
         let cand: HashSet<String> = conn
             .prepare(&format!(
-                "SELECT s.id FROM sessions s WHERE {}",
+                "SELECT s.id FROM sessions s WHERE {}{chat}",
                 scope.pred()
             ))?
             .query_map([scope.cutoff(now)], |r| r.get(0))?
@@ -382,9 +383,10 @@ impl Store {
                 continue;
             }
             // re-checked inside the write transaction
+            let chat = cleanable_only(&tx, "s")?;
             let still: bool = tx.query_row(
                 &format!(
-                    "SELECT EXISTS (SELECT 1 FROM sessions s WHERE s.id=?2 AND {}) \
+                    "SELECT EXISTS (SELECT 1 FROM sessions s WHERE s.id=?2 AND {}{chat}) \
                      AND NOT EXISTS (SELECT 1 FROM sessions WHERE parent_session_id=?2)",
                     scope.pred()
                 ),
@@ -429,50 +431,55 @@ impl Store {
     /// `$SYNT_HOME/backups/clean-<time>/synt.db`, mode 0600 in a 0700 directory. The copy is
     /// checked with `quick_check` before the path is returned.
     pub fn backup_db(&self, now: OffsetDateTime) -> Result<PathBuf> {
-        let fmt = time::macros::format_description!(
-            "[year][month][day]T[hour][minute][second][subsecond digits:3]Z"
-        );
-        let base = self.home().join("backups");
-        let dir = base.join(format!(
-            "clean-{}",
-            now.format(&fmt).expect("format utc timestamp")
-        ));
-        private_dir(&base)?;
-        #[cfg(unix)]
-        {
-            // an existing `backups/` must be owned by the effective user and private
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            if fs::metadata(&base)?.uid() != rustix::process::geteuid().as_raw() {
-                return Err(Error::Invalid(format!(
-                    "{} is not owned by you",
-                    base.display()
-                )));
-            }
-            fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
-        }
-        private_dir(&dir)?;
-        let dest = dir.join("synt.db");
-        // create_new: an existing file (or link) is an error, never written through
-        private_file(OpenOptions::new().write(true).create_new(true)).open(&dest)?;
-        let copy = (|| -> Result<()> {
-            connect(self.home(), true)?.execute("VACUUM INTO ?1", [utf8(&dest)?])?;
-            let c = rusqlite::Connection::open_with_flags(
-                &dest,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let ok: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-            if ok == "ok" {
-                Ok(())
-            } else {
-                Err(Error::Invalid(format!(
-                    "backup failed its integrity check: {ok}"
-                )))
-            }
-        })();
-        if let Err(e) = copy {
-            let _ = fs::remove_file(&dest);
-            return Err(e);
-        }
-        Ok(dest)
+        backup_to(self.home(), "clean", now)
     }
+}
+
+/// [`Store::backup_db`] into `backups/<label>-<time>/`; the schema upgrade uses `pre-v<N>`.
+pub(crate) fn backup_to(home: &Path, label: &str, now: OffsetDateTime) -> Result<PathBuf> {
+    let fmt = time::macros::format_description!(
+        "[year][month][day]T[hour][minute][second][subsecond digits:3]Z"
+    );
+    let base = home.join("backups");
+    let dir = base.join(format!(
+        "{label}-{}",
+        now.format(&fmt).expect("format utc timestamp")
+    ));
+    private_dir(&base)?;
+    #[cfg(unix)]
+    {
+        // an existing `backups/` must be owned by the effective user and private
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if fs::metadata(&base)?.uid() != rustix::process::geteuid().as_raw() {
+            return Err(Error::Invalid(format!(
+                "{} is not owned by you",
+                base.display()
+            )));
+        }
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
+    }
+    private_dir(&dir)?;
+    let dest = dir.join("synt.db");
+    // create_new: an existing file (or link) is an error, never written through
+    private_file(OpenOptions::new().write(true).create_new(true)).open(&dest)?;
+    let copy = (|| -> Result<()> {
+        connect(home, true)?.execute("VACUUM INTO ?1", [utf8(&dest)?])?;
+        let c = rusqlite::Connection::open_with_flags(
+            &dest,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let ok: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if ok == "ok" {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!(
+                "backup failed its integrity check: {ok}"
+            )))
+        }
+    })();
+    if let Err(e) = copy {
+        let _ = fs::remove_file(&dest);
+        return Err(e);
+    }
+    Ok(dest)
 }

@@ -521,7 +521,78 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
             "session store: none yet (the first session creates synt.db)".into(),
         );
     }
+    // outcome orchestration: opt-in, so doctor only reports; it never migrates or creates anything
+    let schema = db
+        .is_file()
+        .then(|| {
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|c| {
+                    c.busy_timeout(std::time::Duration::from_millis(1000))?;
+                    c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                })
+                .ok()
+        })
+        .flatten();
+    let marker_ok = schema.is_none_or(|v| v < synthesis_session::SCHEMA_VERSION_OUTCOMES)
+        || rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|c| {
+                c.busy_timeout(std::time::Duration::from_millis(1000))?;
+                c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = ?1)",
+                    [synthesis_session::OUTCOME_DDL_MARKER],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false);
+    let (level, text) = orchestrator_row(st.synthesis.orchestrator.enabled, schema, marker_ok);
+    add(level, text);
+    if st.synthesis.orchestrator.fail_closed {
+        add(
+            Level::Warn,
+            "orchestrator: the managed settings are unusable, so outcome orchestration is switched off".into(),
+        );
+    }
     v
+}
+
+/// The `orchestrator:` line: the setting, the store's schema version, what each means together.
+fn orchestrator_row(flag: bool, schema: Option<i64>, marker_ok: bool) -> (Level, String) {
+    use synthesis_session::{SCHEMA_VERSION_OUTCOMES, SCHEMA_VERSION_SUPPORTED};
+    let on = if flag { "on" } else { "off (default)" };
+    match schema {
+        // a developer database that enabled an earlier draft of v5 (no DDL revision marker)
+        Some(n) if n >= SCHEMA_VERSION_OUTCOMES && n <= SCHEMA_VERSION_SUPPORTED && !marker_ok => (
+            Level::Fail,
+            "orchestrator: the outcome tables come from an earlier draft of the v5 schema and are refused; stop every surface, delete synt.db-wal and synt.db-shm, restore backups/pre-v5-*/synt.db, and enable again".into(),
+        ),
+        Some(n) if n > SCHEMA_VERSION_SUPPORTED => (
+            Level::Fail,
+            format!(
+                "orchestrator: store schema v{n} is newer than this build supports (v{SCHEMA_VERSION_SUPPORTED}); update this binary, or restore backups/pre-v5-*/synt.db with the older one"
+            ),
+        ),
+        Some(n) if n >= SCHEMA_VERSION_OUTCOMES && flag => (
+            Level::Ok,
+            format!("orchestrator: on, store schema v{n} (outcomes enabled; releases without outcomes refuse this store)"),
+        ),
+        Some(n) if n >= SCHEMA_VERSION_OUTCOMES => (
+            Level::Ok,
+            format!("orchestrator: {on}, store schema v{n} (outcomes were enabled earlier; releases without outcomes refuse this store)"),
+        ),
+        Some(n) if flag => (
+            Level::Warn,
+            format!("orchestrator: setting is on but the store is schema v{n}: the explicit enable step (backup, then migrate to v{SCHEMA_VERSION_OUTCOMES}) has not run, so outcome features stay off"),
+        ),
+        Some(n) => (
+            Level::Ok,
+            format!("orchestrator: {on}, store schema v{n} (a plain open never migrates; enabling is an explicit step with a backup)"),
+        ),
+        None if flag => (
+            Level::Warn,
+            "orchestrator: setting is on but there is no readable session store yet; outcome features stay off until the explicit enable step runs".into(),
+        ),
+        None => (Level::Ok, format!("orchestrator: {on}, no session store yet")),
+    }
 }
 
 /// Hints for people coming from the earlier "Nemo" builds, and a PATH shadowing warning. Nothing
@@ -594,6 +665,32 @@ pub fn legacy_notes(
                 keys.join(", synt.tui."),
                 h.synthesis.join("settings.json").display()
             ));
+        }
+    }
+    // Behaviour and budgets are shared by every surface under `synt.orchestrator`; a copy under a
+    // surface's rendering section is never read.
+    for section in ["cli", "tui"] {
+        if let Some(o) = user_settings
+            .as_ref()
+            .and_then(|j| j.get("synt"))
+            .and_then(|s| s.get(section))
+            .and_then(|t| t.as_object())
+        {
+            let keys: Vec<&str> = std::iter::once("orchestrator")
+                .chain(
+                    synthesis_settings::ORCHESTRATOR_KEYS
+                        .into_iter()
+                        .filter(|k| !matches!(*k, "enabled" | "attempt" | "version")),
+                )
+                .filter(|k| o.contains_key(*k))
+                .collect();
+            if !keys.is_empty() {
+                v.push(format!(
+                    "note: synt.{section}.{} in {} is ignored (orchestrator settings are shared by every surface and live under synt.orchestrator, in the user or managed settings file)",
+                    keys.join(&format!(", synt.{section}.")),
+                    h.synthesis.join("settings.json").display()
+                ));
+            }
         }
     }
     let old_home = h.user.join(".nemo");
@@ -919,5 +1016,81 @@ mod tests {
         );
         assert!(all.contains("cp -R"), "{all}");
         assert!(summary(&r).contains("warn"));
+    }
+
+    #[test]
+    fn orchestrator_row_says_what_flag_and_schema_mean_together() {
+        let r = |flag, v| orchestrator_row(flag, v, true);
+        let (l, t) = r(false, Some(4));
+        assert!(
+            matches!(l, Level::Ok) && t.contains("off (default)") && t.contains("v4"),
+            "{t}"
+        );
+        assert!(t.contains("never migrates"), "{t}");
+        let (l, t) = r(true, Some(4));
+        assert!(
+            matches!(l, Level::Warn) && t.contains("outcome features stay off"),
+            "{t}"
+        );
+        let (l, t) = r(true, Some(5));
+        assert!(
+            matches!(l, Level::Ok) && t.starts_with("orchestrator: on"),
+            "{t}"
+        );
+        let (l, t) = r(false, Some(5));
+        assert!(
+            matches!(l, Level::Ok) && t.contains("enabled earlier"),
+            "{t}"
+        );
+        let (l, t) = r(false, Some(99));
+        assert!(
+            matches!(l, Level::Fail) && t.contains("newer than this build"),
+            "{t}"
+        );
+        let (l, _) = r(true, None);
+        assert!(matches!(l, Level::Warn));
+        let (l, t) = orchestrator_row(true, Some(5), false);
+        assert!(
+            matches!(l, Level::Fail) && t.contains("earlier draft") && t.contains("pre-v5"),
+            "{t}"
+        );
+        let (l, _) = orchestrator_row(false, Some(4), false);
+        assert!(
+            matches!(l, Level::Ok),
+            "v4 has no outcome tables to be outdated"
+        );
+        let (l, t) = r(false, None);
+        assert!(
+            matches!(l, Level::Ok) && t.contains("no session store"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_orchestrator_keys_left_under_a_surface_section_names_only() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"synt":{"cli":{"orchestrator":{"enabled":true},"max_cost_usd":9999},"tui":{"verbose":true}}}"#,
+        )
+        .unwrap();
+        let h = crate::Homes {
+            user: d.path().to_path_buf(),
+            synthesis: home,
+        };
+        let notes = legacy_notes(&Env::default(), &h, d.path(), None);
+        let n = notes
+            .iter()
+            .find(|n| n.contains("synt.cli."))
+            .expect("a note");
+        assert!(
+            n.contains("synt.cli.orchestrator, synt.cli.max_cost_usd"),
+            "{n}"
+        );
+        assert!(n.contains("synt.orchestrator"), "{n}");
+        assert!(!n.contains("9999"), "values never shown: {n}");
+        assert!(!notes.iter().any(|n| n.contains("synt.tui.")), "{notes:?}");
     }
 }

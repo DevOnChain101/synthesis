@@ -561,6 +561,8 @@ fn ctrl_click_opens_a_link_and_a_failing_opener_is_reported() {
         r.tty.send("q");
         r.tty.send("\r");
         r.wait_for("https://example.com/guide");
+        // the turn is over before the click: the link table is rebuilt while a frame streams
+        r.wait_for("Done");
         let (x, y) = cell_of(&r, "https://example.com/guide");
         r.tty.send(&format!("\x1b[<16;{};{y}M", x + 3)); // ctrl + left button
         if fail {

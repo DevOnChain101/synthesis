@@ -988,3 +988,285 @@ fn network_allowed_hosts_is_user_or_managed_only_and_managed_wins() {
     assert_eq!(s.synthesis.network_allowed_hosts, None);
     assert!(s.diagnostics.iter().any(|d| d.contains("list of strings")));
 }
+
+#[test]
+fn orchestrator_is_off_by_default_with_the_plan_defaults() {
+    let f = fx();
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert_eq!(o, OrchestratorSettings::default());
+    assert!(!o.enabled);
+    assert_eq!(
+        (o.max_parallel_workers, o.max_attempts_per_work_item),
+        (2, 3)
+    );
+    assert_eq!(o.max_cost_usd, None, "the cost cap has no default");
+    assert_eq!(
+        (
+            o.worktree_retention_days,
+            o.decision_expiry_hours,
+            o.idle_exit_minutes
+        ),
+        (7, 24, 10)
+    );
+}
+
+#[test]
+fn orchestrator_reads_the_user_file_and_validates_every_key() {
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{
+        "enabled": true, "max_parallel_workers": 4, "max_attempts_per_work_item": 2,
+        "max_cost_usd": 12.5, "attempt": {"max_cost_usd": 1.5, "max_wall_secs": 600},
+        "worktree_retention_days": 3, "decision_expiry_hours": 48, "idle_exit_minutes": 5
+    }}}));
+    let s = f.load(ProjectTrust::Trusted);
+    let o = &s.synthesis.orchestrator;
+    assert!(o.enabled);
+    assert_eq!(
+        (o.max_parallel_workers, o.max_attempts_per_work_item),
+        (4, 2)
+    );
+    assert_eq!(
+        (
+            o.max_cost_usd,
+            o.attempt_max_cost_usd,
+            o.attempt_max_wall_secs
+        ),
+        (Some(12.5), Some(1.5), Some(600))
+    );
+    assert_eq!(
+        (
+            o.worktree_retention_days,
+            o.decision_expiry_hours,
+            o.idle_exit_minutes
+        ),
+        (3, 48, 5)
+    );
+    assert!(s.diagnostics.is_empty(), "{:?}", s.diagnostics);
+
+    // wrong values keep the previous value and are named without their value
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{
+        "enabled": "yes", "max_parallel_workers": 0, "max_attempts_per_work_item": 11,
+        "max_cost_usd": -1, "attempt": {"max_cost_usd": "x", "max_wall_secs": 0, "nope": 1},
+        "worktree_retention_days": 0, "decision_expiry_hours": 721, "idle_exit_minutes": 1.5,
+        "bogus": 1, "network": {"allowed_hosts": ["x.test"]}
+    }}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.orchestrator, OrchestratorSettings::default());
+    let d = s.diagnostics.join("\n");
+    for k in [
+        "enabled",
+        "max_parallel_workers",
+        "max_attempts_per_work_item",
+        "max_cost_usd",
+        "attempt.max_cost_usd",
+        "attempt.max_wall_secs",
+        "attempt.nope",
+        "worktree_retention_days",
+        "decision_expiry_hours",
+        "idle_exit_minutes",
+        "bogus",
+        "network",
+    ] {
+        assert!(d.contains(&format!("synt.orchestrator.{k}")), "{k}: {d}");
+    }
+    assert!(
+        !d.contains("x.test") && !d.contains("721"),
+        "values stay out of diagnostics"
+    );
+
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":[true]}}));
+    assert!(
+        f.load(ProjectTrust::Trusted)
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("not an object"))
+    );
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"max_cost_usd": f64::MAX}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted)
+            .synthesis
+            .orchestrator
+            .max_cost_usd,
+        Some(f64::MAX)
+    );
+}
+
+#[test]
+fn a_project_or_local_file_can_never_enable_or_budget_the_orchestrator() {
+    for trust in [ProjectTrust::Trusted, ProjectTrust::Untrusted] {
+        let f = fx();
+        f.project(json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 1000}}}));
+        write(
+            f.proj.path(),
+            ".synt/settings.local.json",
+            json!({"synt":{"orchestrator":{"enabled": true}}}),
+        );
+        let s = f.load(trust);
+        assert_eq!(
+            s.synthesis.orchestrator,
+            OrchestratorSettings::default(),
+            "{trust:?}"
+        );
+        assert!(!s.synthesis.orchestrator.enabled);
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("ignored")),
+            "{trust:?}: {:?}",
+            s.diagnostics
+        );
+    }
+    let f = fx();
+    f.project(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.diagnostics.iter().any(|d| {
+        d.contains("project settings: synt.orchestrator is read from user or managed settings only")
+    }));
+}
+
+#[test]
+fn managed_orchestrator_settings_win_over_the_user_in_both_directions() {
+    // the organisation forbids it
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 100, "max_parallel_workers": 8}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator":{"enabled": false, "max_cost_usd": 10}}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(!o.enabled, "managed off beats user on");
+    assert_eq!(o.max_cost_usd, Some(10.0));
+    assert_eq!(
+        o.max_parallel_workers, 8,
+        "a key managed does not state stays the user's"
+    );
+    // the organisation requires it
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": false}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator":{"enabled": true}}}),
+    );
+    assert!(f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
+}
+
+#[test]
+fn orchestrator_keys_under_a_surface_section_are_not_read() {
+    let f = fx();
+    f.user(
+        json!({"synt":{"cli":{"orchestrator":{"enabled": true}, "max_cost_usd": 5},
+                          "tui":{"enabled": true}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(!s.synthesis.orchestrator.enabled);
+    let (_, d) = UiSettings::from_section(
+        &json!({"synt":{"cli":{"orchestrator":{"enabled":true}}}}),
+        CLI_SECTION,
+    );
+    assert!(
+        d.iter().any(|d| d.contains("synt.cli.orchestrator")),
+        "{d:?}"
+    );
+}
+
+/// F11: a value the managed file states wrongly must not leave the user's looser one in force.
+#[test]
+fn an_unusable_managed_orchestrator_value_fails_closed() {
+    for bad in [
+        json!({"enabled": "yes"}),
+        json!({"enabled": true, "max_cost_usd": "ten"}),
+        json!({"max_parallel_workers": 0}),
+        json!({"attempt": {"max_wall_secs": -1}}),
+    ] {
+        let f = fx();
+        f.user(json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 1000, "max_parallel_workers": 8}}}));
+        write(
+            f.home.path(),
+            "managed.json",
+            json!({"synt":{"orchestrator": bad}}),
+        );
+        let s = f.load(ProjectTrust::Trusted);
+        let o = &s.synthesis.orchestrator;
+        assert!(
+            !o.enabled && o.fail_closed,
+            "{bad}: the user's `enabled` must not survive"
+        );
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("switched off")),
+            "{:?}",
+            s.diagnostics
+        );
+    }
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator": [1]}}),
+    );
+    assert!(!f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
+    // a bad user value only keeps the previous value (no lockout from the user's own typo)
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": "yes"}}}));
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(!o.enabled && !o.fail_closed);
+    // a good managed object does not lock anything
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator":{"max_cost_usd": 10}}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(o.enabled && !o.fail_closed && o.max_cost_usd == Some(10.0));
+}
+
+/// N5: whatever makes the managed file unusable switches the feature off.
+#[test]
+fn a_managed_file_that_cannot_be_used_fails_closed() {
+    let user = json!({"synt":{"orchestrator":{"enabled": true, "max_cost_usd": 1000}}});
+    let managed_raw: [(&str, String); 5] = [
+        ("malformed json", "{not json".into()),
+        ("not an object", "[1,2]".into()),
+        (
+            "unknown key in the block",
+            json!({"synt":{"orchestrator":{"max_cost_usd": 5, "max_cost": 1}}}).to_string(),
+        ),
+        ("synt is not an object", json!({"synt": "x"}).to_string()),
+        (
+            "synt from a newer build",
+            json!({"synt":{"version": 99}}).to_string(),
+        ),
+    ];
+    for (what, raw) in managed_raw {
+        let f = fx();
+        f.user(user.clone());
+        fs::write(f.home.path().join("managed.json"), raw).unwrap();
+        let s = f.load(ProjectTrust::Trusted);
+        let o = &s.synthesis.orchestrator;
+        assert!(!o.enabled && o.fail_closed, "{what}: {:?}", s.diagnostics);
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("switched off")),
+            "{what}: {:?}",
+            s.diagnostics
+        );
+    }
+    // a managed file that simply does not mention the feature locks nothing
+    let f = fx();
+    f.user(user);
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"permissions": {"deny": ["Bash(rm:*)"]}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(o.enabled && !o.fail_closed);
+    // and no managed file at all is the user's call
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
+    assert!(f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
+}

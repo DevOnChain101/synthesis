@@ -1484,3 +1484,48 @@ fn set_title_replaces_the_title_and_the_list_shows_it() {
     let listed = w.list_sessions(None).unwrap();
     assert_eq!(listed[0].title.as_deref(), Some("Renamed"));
 }
+
+/// AC-03 at the store: a session keeps the folder it was created with (a second session created
+/// while the first is open does not inherit it), and a context whose cwd is outside its workspace
+/// is refused.
+#[test]
+fn a_session_keeps_its_own_cwd_and_a_cwd_outside_the_workspace_is_refused() {
+    let e = env();
+    let (a, b) = (e.dir("a"), e.dir("b"));
+    let store = e.store();
+    let w1 = store
+        .create_session(new_session(Some("s-a"), &ws(&a)))
+        .unwrap();
+    // created while s-a is still open
+    let w2 = store
+        .create_session(new_session(Some("s-b"), &ws(&b)))
+        .unwrap();
+    let r = store.reader().unwrap();
+    assert_eq!(Path::new(&r.get_session("s-a").unwrap().cwd), a.as_path());
+    assert_eq!(Path::new(&r.get_session("s-b").unwrap().cwd), b.as_path());
+    drop((w1, w2));
+    // a subfolder of the root is a fine cwd; a sibling folder or a parent is not
+    let sub = e.dir("a/sub");
+    let mut inside = ws(&a);
+    inside.cwd = sub.clone();
+    store
+        .create_session(new_session(Some("s-sub"), &inside))
+        .unwrap();
+    for (id, bad) in [("s-sib", b.clone()), ("s-par", e.base.clone())] {
+        let mut w = ws(&a);
+        w.cwd = bad;
+        let r = store.create_session(new_session(Some(id), &w));
+        assert!(matches!(r, Err(Error::OutsideWorkspace(_))), "{id}");
+        assert!(
+            store.reader().unwrap().get_session(id).is_err(),
+            "no row for {id}"
+        );
+    }
+    // an added folder makes its subtree a valid cwd
+    let mut extra = ws(&a);
+    extra.additional_dirs = vec![b.clone()];
+    extra.cwd = b.clone();
+    store
+        .create_session(new_session(Some("s-extra"), &extra))
+        .unwrap();
+}

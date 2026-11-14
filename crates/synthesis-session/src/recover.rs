@@ -102,7 +102,7 @@ impl ProcessProbe for OsProbe {
 /// Last checks before `kill_tree`: never pid 0/1, never ourselves or our own process group, and
 /// the start-time token must still equal the recorded one (the pid may have been reused since
 /// the first probe).
-fn kill_guard(pid: u32, recorded: Option<&str>, probe: &dyn ProcessProbe) -> io::Result<()> {
+pub fn kill_guard(pid: u32, recorded: Option<&str>, probe: &dyn ProcessProbe) -> io::Result<()> {
     let refuse = |why: &str| {
         Err(io::Error::other(format!(
             "refusing to kill pid {pid}: {why}"
