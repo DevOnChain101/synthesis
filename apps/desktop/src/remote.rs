@@ -887,8 +887,8 @@ fn clean(s: &str) -> String {
 const SLOW_TIMEOUT: Duration = Duration::from_secs(30);
 /// A rewind or a deletion is not cut short: the engine finishes it (and says so).
 const APPLY_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_TREE_ROWS: usize = 1000;
-const MAX_TREE_PAGES: usize = 10;
+const MAX_TREE_ROWS: usize = 5000;
+const MAX_TREE_PAGES: usize = 30;
 const MAX_LINES: usize = 2000;
 const MAX_RECORDS: usize = 100;
 const MAX_ENTRIES: usize = 2000;

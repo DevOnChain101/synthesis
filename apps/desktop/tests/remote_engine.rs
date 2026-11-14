@@ -365,7 +365,7 @@ fn files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable(
     // the tree: bounded, printable, no row that could corrupt a path, depth and status clamped
     let t = r.fs_list().unwrap();
     assert!(
-        t.rows.len() <= 1000 && t.truncated || t.rows.len() == 1000,
+        t.rows.len() <= 5000 && t.truncated || t.rows.len() == 5000,
         "{}",
         t.rows.len()
     );
