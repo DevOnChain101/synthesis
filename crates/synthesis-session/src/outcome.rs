@@ -614,9 +614,7 @@ impl Reader {
         ) {
             // a concurrent move out of the resolved state between the two reads is not tampering: report what
             // the row says now
-            return Ok(self
-                .verified_resolution(id)?
-                .map_or(row_state, |r| r.state));
+            return Ok(self.verified_resolution(id)?.map_or(row_state, |r| r.state));
         }
         Ok(row_state)
     }
