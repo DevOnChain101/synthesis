@@ -266,6 +266,8 @@ impl SettingsSchema {
                 .scope(Scope::Layered).help("Also write transcripts the old Node CLI can read."),
             Field::new("synt.browser.login_timeout_sec", Execution, "Browser login timeout (s)", Int { min: 10, max: 3600 })
                 .def(json!(600)).help("How long a browser login waits for the person."),
+            Field::new("synt.browser.headed", Execution, "Show the agent's browser", Bool).def(json!(true))
+                .help("The agent's browser opens a visible window with a cursor and field highlight so you can watch it (needs a display; otherwise it runs headless with a note). Same profile isolation, URL policy and download rules as headless. `synt run` keeps headless unless this is true."),
             Field::new("synt.browser.allow_unsandboxed", Execution, "Browser without sandbox", Bool).def(json!(false))
                 .shown("turns the browser sandbox off; edit settings.json by hand"),
             Field::new("synt.browser.secrets", Execution, "Browser login secrets", ReadOnly)

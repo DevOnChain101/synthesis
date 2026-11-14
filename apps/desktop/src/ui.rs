@@ -378,7 +378,7 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::fill(t::BG))
+            .bg(theme::ground())
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {

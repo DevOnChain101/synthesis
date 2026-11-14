@@ -10,9 +10,38 @@ use synthesis_desktop::live::local_offset_min;
 use synthesis_desktop::tui_view::driver::LiveCfg;
 
 /// The flags and the process environment, read once here (the engine only sees this snapshot).
-fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
+fn live_cfg(mut args: Args, env: Env) -> Result<LiveCfg, String> {
+    // no flags: start where the app was closed (session and workspace), not in the launch folder
+    let mut restored = None;
+    let flags = args.cwd.is_some()
+        || args.common.resume.is_some()
+        || args.common.continue_session
+        || args.common.fork_session;
+    if !flags
+        && let Ok(h) = homes(&env)
+        && !synthesis_desktop::wsl::enabled(&h.synthesis).unwrap_or(true)
+    {
+        match synthesis_desktop::last_session::from_store(&h.synthesis) {
+            Some((dir, resume)) => {
+                args.common.resume = resume;
+                restored = Some(dir);
+            }
+            None if synthesis_desktop::last_session::load(
+                &h.synthesis,
+                synthesis_desktop::last_session::LOCAL,
+            )
+            .is_some() =>
+            {
+                eprintln!(
+                    "synthesis-desktop: the session and folder of the last run are gone; starting in the launch folder"
+                );
+            }
+            None => {}
+        }
+    }
     let dir = match &args.cwd {
         Some(d) => d.clone(),
+        None if restored.is_some() => restored.take().unwrap_or_default(),
         // A Finder launch starts in `/`; never make the filesystem root the workspace.
         None => match launch_dir()? {
             d if d.parent().is_none() => homes(&env)?.user,

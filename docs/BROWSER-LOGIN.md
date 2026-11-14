@@ -163,3 +163,11 @@ The `synt.browser` block is read from the user's own settings file only. In proj
 ## Dependencies added for this feature
 - `psl` 2.1.246 (public-suffix list for the registrable domain). Verified on crates.io and in the vendored source: licence MIT/Apache-2.0 (both on `deny.toml`'s allow list); latest release 2026-11-02 (371 releases, the list is refreshed by new releases), created 2017, about 38 million downloads (8.5 million recent); `#![forbid(unsafe_code)]`, `#![no_std]`, only dependency `psl-types`; no platform limits (pure data tables). Note the list is compiled in: a stale build misses new suffixes until `psl` is updated.
 - `rustix` (feature `termios`, already in the lockfile through other crates) for `tcflush`, and `libc` (constants only; already used elsewhere): both safe APIs, unix only.
+
+## Headed agent browser (`synt.browser.headed`)
+
+The interactive app (CLI and desktop) opens the agent's own browser as a VISIBLE window by default, with an agent cursor (moves and a ring on a click) and a highlight around the field being typed into, so a person can watch. `synt.browser.headed: false` turns it off; `synt run` stays headless unless it is `true`. No display (`DISPLAY`/`WAYLAND_DISPLAY` on Linux) or Windows (TCP DevTools transport has no window support yet): headless, with a startup note.
+
+Differences for a reviewer (everything else is the headless code path): the process gets `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY` (as the login window already does); the device-metrics emulation is skipped; the page can use a real window (focus, the person's own clicks reach it); an overlay script is injected in the top frame of every document (`OVERLAY_JS`, `crates/synthesis-browser/src/lib.rs`): it receives only numbers (click point) or an element the agent just acted on, never text, URLs or page strings, and lives in a closed shadow root with `pointer-events:none`. The profile (temp, isolated), the URL policy, downloads, `file://` and credential rules are unchanged. Not verified on a real desktop.
+
+Accepted for headed mode: the `XAUTHORITY` path is passed to the browser process, so it can read the X cookie file (the login window already did).

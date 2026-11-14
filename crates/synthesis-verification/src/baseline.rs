@@ -330,6 +330,51 @@ fn entry(path: &Path, rel: &str, extra: &HashSet<String>, is_link: bool) -> Opti
     })
 }
 
+/// A directory that is genuine, untracked build output (cargo's `target`, wherever it is): it carries cargo's own
+/// `CACHEDIR.TAG` (a regular file, never a link, with the signature line), no file of it is tracked by git, and its
+/// top level holds nothing a check or a reviewer cares about (only directories and dotfiles besides the tag, no test
+/// or definition path). A committed or planted tag in `tests/` or `src/` therefore hides nothing.
+fn is_build_output_tree(root: &Path, dir: &Path, rel: &str) -> bool {
+    use std::io::Read;
+    const SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+    let tag = dir.join("CACHEDIR.TAG");
+    if !fs::symlink_metadata(&tag).is_ok_and(|m| m.file_type().is_file()) {
+        return false;
+    }
+    let mut head = [0u8; SIGNATURE.len()];
+    if !fs::File::open(&tag).is_ok_and(|mut f| f.read_exact(&mut head).is_ok())
+        || head != *SIGNATURE
+    {
+        return false;
+    }
+    if is_test_path(&format!("{rel}/x")) {
+        return false;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ft) = e.file_type() else { return false };
+        let child = format!("{rel}/{name}");
+        if is_test_path(&child) || is_definition_file(&child) {
+            return false;
+        }
+        if !ft.is_dir() && name != "CACHEDIR.TAG" && !name.starts_with('.') {
+            return false;
+        }
+    }
+    // tracked files under it: a committed directory is source, whatever it is named (no git: nothing is tracked)
+    let tracked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--cached", "--"])
+        .arg(rel)
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty());
+    !tracked
+}
+
 fn scan(root: &Path, extra: &HashSet<String>) -> (HashMap<String, Entry>, bool) {
     let mut out = HashMap::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -346,7 +391,8 @@ fn scan(root: &Path, extra: &HashSet<String>) -> (HashMap<String, Entry>, bool) 
             if ft.is_dir() {
                 let skip = SKIP_DIRS.contains(&name.as_str())
                     || (rel.is_empty() && ROOT_SKIP_DIRS.contains(&name.as_str()))
-                    || (name == "target" && dir.join("Cargo.toml").exists());
+                    || (name == "target" && dir.join("Cargo.toml").exists())
+                    || is_build_output_tree(root, &e.path(), &child);
                 if !skip {
                     stack.push((e.path(), child));
                 }
@@ -383,6 +429,94 @@ mod tests {
         let f = p.join(rel);
         fs::create_dir_all(f.parent().unwrap()).unwrap();
         fs::write(f, c).unwrap();
+    }
+
+    const SIG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# cargo";
+
+    #[test]
+    fn untracked_build_output_trees_are_not_changes_or_weakened_tests() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        // a cargo target dir that is not beside a Cargo.toml
+        w(p, "out/target/CACHEDIR.TAG", SIG);
+        w(
+            p,
+            "out/target/debug/build/x/depfile_tests.rs",
+            "#[test]\nfn a() {}\n",
+        );
+        w(p, "src.js", "1");
+        let b = Baseline::take(p, vec![]);
+        fs::remove_file(p.join("out/target/debug/build/x/depfile_tests.rs")).unwrap();
+        let d = b.drift();
+        assert!(
+            d.changed.is_empty() && d.weakened.is_empty(),
+            "{:?} {:?}",
+            d.changed,
+            d.weakened
+        );
+    }
+
+    fn weakened_after_deleting(p: &Path, rel: &str) -> Vec<String> {
+        let b = Baseline::take(p, vec![]);
+        fs::remove_file(p.join(rel)).unwrap();
+        b.drift().weakened
+    }
+
+    #[test]
+    fn a_tag_does_not_hide_tests_when_it_is_planted_unsigned_linked_or_in_a_tracked_dir() {
+        let git = |p: &Path, a: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(p)
+                    .args(a)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        // valid signature, but the directory is committed (tracked): still watched
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        w(p, "gen/CACHEDIR.TAG", SIG);
+        w(p, "gen/sub/a.test.js", "test('a',()=>{assert(1)})\n");
+        git(p, &["init", "-q"]);
+        git(p, &["add", "-A"]);
+        let wk = weakened_after_deleting(p, "gen/sub/a.test.js");
+        assert!(
+            wk.iter().any(|x| x.contains("a.test.js (deleted")),
+            "tracked: {wk:?}"
+        );
+        // untracked dir with a test file at its top level (a task made it): watched
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "tests/CACHEDIR.TAG", SIG);
+        w(d.path(), "tests/a.test.js", "x\n");
+        assert!(!weakened_after_deleting(d.path(), "tests/a.test.js").is_empty());
+        // a source file at the top level of the tagged dir: watched
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "src/CACHEDIR.TAG", SIG);
+        w(
+            d.path(),
+            "src/lib.rs",
+            "#[cfg(test)]\nmod t { #[test] fn a(){} }\n",
+        );
+        assert!(!weakened_after_deleting(d.path(), "src/lib.rs").is_empty());
+        // no signature
+        let d = tempfile::tempdir().unwrap();
+        w(d.path(), "tests/CACHEDIR.TAG", "hello");
+        w(d.path(), "tests/sub/a.test.js", "x\n");
+        assert!(!weakened_after_deleting(d.path(), "tests/sub/a.test.js").is_empty());
+        // a symlinked tag
+        #[cfg(unix)]
+        {
+            let d = tempfile::tempdir().unwrap();
+            let real = d.path().join("real-tag");
+            fs::write(&real, SIG).unwrap();
+            fs::create_dir_all(d.path().join("tests/sub")).unwrap();
+            std::os::unix::fs::symlink(&real, d.path().join("tests/CACHEDIR.TAG")).unwrap();
+            w(d.path(), "tests/sub/a.test.js", "x\n");
+            assert!(!weakened_after_deleting(d.path(), "tests/sub/a.test.js").is_empty());
+        }
     }
 
     #[test]

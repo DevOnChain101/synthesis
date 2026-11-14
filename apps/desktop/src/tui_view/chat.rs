@@ -635,7 +635,7 @@ impl TuiView {
                 .into_any_element()
             }
             Item::Assistant { text: s, .. } => msg(
-                div().size_full().bg(gpui::black()).child(
+                div().size_full().bg(crate::theme::ground()).child(
                     gpui::img(crate::brand::mark())
                         .size_full()
                         .rounded(px(6.))
@@ -1167,6 +1167,27 @@ impl TuiView {
     }
 
     pub(super) fn welcome(&self) -> Div {
+        // a vertical glow: clear at both ends, `colour` at `alpha` in the middle, in two halves
+        fn glow(left: f32, top: f32, colour: t::Rgb, alpha: f32) -> Div {
+            let (clear, lit) = (
+                with_alpha(hsla(colour), 0.),
+                with_alpha(hsla(colour), alpha),
+            );
+            let half = |a, b| {
+                div().w_full().h(px(100.)).bg(gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(a, 0.),
+                    gpui::linear_color_stop(b, 1.),
+                ))
+            };
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(2400.))
+                .child(half(clear, lit))
+                .child(half(lit, clear))
+        }
         let s = &self.snap;
         div()
             .flex_1()
@@ -1177,7 +1198,15 @@ impl TuiView {
             .items_center()
             .justify_center()
             .gap(px(6.))
-            .child(gpui::img(crate::brand::mark()).size(px(128.)))
+            .child(
+                // soft bands behind the mark (absolute and clipped by the welcome: no layout rect moves), cool above warm
+                div()
+                    .relative()
+                    .size(px(128.))
+                    .child(glow(-1136., -150., t::INFO, 0.05))
+                    .child(glow(-1136., -70., t::ACCENT, 0.05))
+                    .child(gpui::img(crate::brand::mark()).size(px(128.))),
+            )
             .child(super::tracked("SYNTHESIS", 16., 0.32, strong()))
             .child(div().text_color(dim()).child("Autonomous coding agent"))
             .child(

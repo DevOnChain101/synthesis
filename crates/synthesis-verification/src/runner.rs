@@ -55,6 +55,23 @@ fn environment_problem(out: &str) -> Option<String> {
     Some(format!("{what}: {line}"))
 }
 
+/// The program the shell said it could not find (exit 127), named from its own message, not guessed from the
+/// command line (`cd sub && cargo test`, `sh -c ...`). `None`: other exit code, or no recognisable message.
+fn program_missing(exit: Option<i32>, out: &str) -> Option<String> {
+    static NAME: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"(?m)(?:([^\s:']+): (?:command )?not found\s*$|command not found: (\S+)|^'([^']+)' is not recognized as an internal or external command)",
+        )
+    });
+    if exit != Some(127) {
+        return None;
+    }
+    let c = NAME.captures(out)?;
+    let prog = c.iter().skip(1).flatten().next()?.as_str();
+    (prog.len() <= 64 && !prog.chars().any(char::is_control))
+        .then(|| format!("{MISSING_PROGRAM}: {prog}"))
+}
+
 /// Runner summaries that show nothing was tested (cargo: every "test result" has 0 passed).
 fn ran_nothing(out: &str) -> bool {
     if ZERO_TESTS.is_match(out) {
@@ -295,9 +312,12 @@ impl VerifyRunner {
             } else {
                 Passed
             }
-        } else if let Some(why) = (x.exit_code == Some(127))
-            .then(|| {
-                environment_problem(&x.output).unwrap_or_else(|| "tool missing: exit 127".into())
+        } else if let Some(why) = program_missing(x.exit_code, &x.output)
+            .or_else(|| {
+                (x.exit_code == Some(127)).then(|| {
+                    environment_problem(&x.output)
+                        .unwrap_or_else(|| "tool missing: exit 127".into())
+                })
             })
             .or_else(|| environment_problem(&x.output))
         {
@@ -352,6 +372,25 @@ mod unit {
                 .starts_with("credentials")
         );
         assert!(environment_problem("assertion failed: 1 == 2").is_none());
+        let pm = |e, o| program_missing(e, o).unwrap_or_default();
+        for out in [
+            "sh: cargo: command not found",
+            "sh: 1: cargo: not found",
+            "zsh: command not found: cargo",
+            "bash: line 1: cargo: command not found",
+            "'cargo' is not recognized as an internal or external command,",
+        ] {
+            assert_eq!(
+                pm(Some(127), out),
+                format!("{MISSING_PROGRAM}: cargo"),
+                "{out}"
+            );
+        }
+        // `cd sub && cargo test` and `sh -c ...`: the message names the program, not the command's first word
+        assert!(pm(Some(127), "sh: cargo: command not found").ends_with("cargo"));
+        // a real failure that merely prints the words is not a missing program
+        assert!(program_missing(Some(1), "sh: cargo: command not found").is_none());
+        assert!(program_missing(Some(127), "something else failed").is_none());
         assert!(ran_nothing(
             "running 0 tests\ntest result: ok. 0 passed; 0 failed"
         ));
