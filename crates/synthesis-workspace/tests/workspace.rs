@@ -1032,6 +1032,8 @@ fn names_that_escape_or_collide_are_refused_before_any_git_call() {
     assert!(g(&f.repo, &["worktree", "list"]).lines().count() == 1);
 }
 
+// symlinks need privilege on Windows: the planted-link cases are unix-only
+#[cfg(unix)]
 #[test]
 fn a_planted_symlink_at_the_worktree_path_is_never_written_through() {
     need_git!();
@@ -1052,7 +1054,6 @@ fn a_planted_symlink_at_the_worktree_path_is_never_written_through() {
     let base = head(&f);
     fs::create_dir_all(&wdir).unwrap();
     let outside = f.base.join("outside-target");
-    #[cfg(unix)]
     {
         // dangling link: `exists()` is false for it, git would create the target
         std::os::unix::fs::symlink(&outside, wdir.join("s-link")).unwrap();

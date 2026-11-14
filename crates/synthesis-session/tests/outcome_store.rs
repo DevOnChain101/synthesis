@@ -4,7 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -510,6 +510,7 @@ fn enabling_backs_up_first_then_migrates_once() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&m.backup), 0o600);
         assert_eq!(mode(m.backup.parent().unwrap()), 0o700);
