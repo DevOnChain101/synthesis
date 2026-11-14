@@ -23,4 +23,4 @@ The kit's brand boards (`04-brand-boards`, about 6 MB of PNG), the extras (`05-e
 
 ## App icons
 
-`swift scripts/make-icons.swift` (macOS) regenerates `01-brand/app-icons/*` and `apps/desktop/assets/icons/*` (.icns, .ico, PNGs) from `01-brand/logo/png/synthesis-symbol-transparent-1024.png` on a navy gradient with teal, violet and warm points.
+`swift scripts/make-icons.swift` (macOS) regenerates `01-brand/app-icons/*` and `apps/desktop/assets/icons/*` (.icns, .ico, PNGs) from `01-brand/logo/png/synthesis-symbol-transparent-1024.png` on a monochrome graphite gradient with a silver-lit symbol.

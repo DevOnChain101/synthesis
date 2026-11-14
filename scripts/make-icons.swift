@@ -1,5 +1,5 @@
 // Regenerates the app icons (macOS only: CoreGraphics + iconutil). Run from the repo root: swift scripts/make-icons.swift
-// Art: the transparent brand symbol on a dark navy gradient with soft teal, violet and warm points (no pure black).
+// Art: the transparent brand symbol on a monochrome graphite gradient (no pure black).
 // Writes design/01-brand/app-icons/* (full-bleed rounded square, Linux/Windows) and apps/desktop/assets/icons/* (.icns uses the Apple grid: 824 body in 1024).
 import CoreGraphics
 import Foundation
@@ -31,6 +31,12 @@ func glow(_ c: CGContext, _ x: CGFloat, _ y: CGFloat, _ r: CGFloat, _ col: (Int,
     c.drawRadialGradient(g, startCenter: CGPoint(x: x, y: y), startRadius: 0, endCenter: CGPoint(x: x, y: y), endRadius: r, options: [])
 }
 
+// Palette: monochrome graphite, no pure black. Change the look here.
+let baseTop = (74, 74, 77), baseBottom = (27, 27, 30)  // top-left warm grey to bottom-right charcoal
+let bloomAlpha: CGFloat = 0.16                          // neutral white bloom behind the symbol
+let glyphLift: CGFloat = 0.42                           // white veil over the symbol: frosted silver
+let specularAlpha: CGFloat = 0.55                       // bright specular on the upper-left of the symbol
+
 /// 1024 master; `body` is the side of the rounded square, centred (1024 = full bleed).
 func master(body: CGFloat) -> CGImage {
     let c = ctx(1024)
@@ -39,23 +45,32 @@ func master(body: CGFloat) -> CGImage {
     let path = CGPath(roundedRect: rect, cornerWidth: body * 0.2237, cornerHeight: body * 0.2237, transform: nil)
     c.saveGState()
     c.addPath(path); c.clip()
-    // base: deep navy, top-left lighter to bottom-right deeper (CG origin is bottom-left)
-    let base = CGGradient(colorsSpace: cs, colors: [rgb(22, 32, 58), rgb(14, 20, 40)] as CFArray, locations: [0, 1])!
-    c.drawLinearGradient(base, start: CGPoint(x: o, y: o + body), end: CGPoint(x: o + body, y: o), options: [])
-    glow(c, o + body * 0.18, o + body * 0.84, body * 0.80, (46, 128, 168), 0.62)   // teal-blue, top-left
-    glow(c, o + body * 0.88, o + body * 0.14, body * 0.75, (104, 70, 184), 0.60)   // violet, bottom-right
-    glow(c, o + body * 0.86, o + body * 0.80, body * 0.38, (196, 122, 96), 0.22)   // warm accent, top-right
-    // symbol: old icon showed it ~62% of the body; the transparent master spans ~78% of its canvas
+    // CG origin is bottom-left: start top-left, end bottom-right
+    let base = CGGradient(colorsSpace: cs, colors: [rgb(baseTop.0, baseTop.1, baseTop.2), rgb(baseBottom.0, baseBottom.1, baseBottom.2)] as CFArray, locations: [0, 1])!
+    c.drawLinearGradient(base, start: CGPoint(x: o, y: o + body), end: CGPoint(x: o + body * 0.8, y: o + body * 0.1), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    glow(c, 512, 512, body * 0.5, (255, 255, 255), bloomAlpha)
+    // soft inner shadow at the bottom
+    let sh = CGGradient(colorsSpace: cs, colors: [rgb(0, 0, 0, 0), rgb(0, 0, 0, 0.14)] as CFArray, locations: [0, 1])!
+    c.drawLinearGradient(sh, start: CGPoint(x: 0, y: o + body * 0.14), end: CGPoint(x: 0, y: o), options: [])
+    // symbol on its own layer so the lift and specular only touch the symbol; soft shadow below it
     let s = body * 0.80
-    c.draw(load("design/01-brand/logo/png/synthesis-symbol-transparent-1024.png"),
+    let g = ctx(1024)
+    g.draw(load("design/01-brand/logo/png/synthesis-symbol-transparent-1024.png"),
            in: CGRect(x: 512 - s / 2, y: 512 - s / 2, width: s, height: s))
+    g.setBlendMode(.sourceAtop)
+    g.setFillColor(rgb(255, 255, 255, glyphLift)); g.fill(CGRect(x: 0, y: 0, width: 1024, height: 1024))
+    let spec = CGGradient(colorsSpace: cs, colors: [rgb(255, 255, 255, specularAlpha), rgb(255, 255, 255, 0)] as CFArray, locations: [0, 1])!
+    g.drawLinearGradient(spec, start: CGPoint(x: 512 - s * 0.45, y: 512 + s * 0.45), end: CGPoint(x: 512, y: 512), options: [])
+    c.setShadow(offset: CGSize(width: 0, height: -body * 0.025), blur: body * 0.04, color: rgb(0, 0, 0, 0.35))
+    c.draw(g.makeImage()!, in: CGRect(x: 0, y: 0, width: 1024, height: 1024))
+    c.setShadow(offset: .zero, blur: 0)
     c.restoreGState()
-    // subtle edge highlight, brighter at the top
+    // thin rim, lighter at the top
     c.saveGState()
     c.addPath(path); c.clip()
-    c.addPath(path); c.setLineWidth(body * 0.004 * 2)
+    c.addPath(path); c.setLineWidth(body * 0.008)
     c.replacePathWithStrokedPath(); c.clip()
-    let hi = CGGradient(colorsSpace: cs, colors: [rgb(255, 255, 255, 0.28), rgb(255, 255, 255, 0.04)] as CFArray, locations: [0, 1])!
+    let hi = CGGradient(colorsSpace: cs, colors: [rgb(255, 255, 255, 0.30), rgb(255, 255, 255, 0.05)] as CFArray, locations: [0, 1])!
     c.drawLinearGradient(hi, start: CGPoint(x: 0, y: o + body), end: CGPoint(x: 0, y: o), options: [])
     c.restoreGState()
     return c.makeImage()!
