@@ -346,7 +346,9 @@ fn scan(root: &Path, extra: &HashSet<String>) -> (HashMap<String, Entry>, bool) 
             if ft.is_dir() {
                 let skip = SKIP_DIRS.contains(&name.as_str())
                     || (rel.is_empty() && ROOT_SKIP_DIRS.contains(&name.as_str()))
-                    || (name == "target" && dir.join("Cargo.toml").exists());
+                    || (name == "target" && dir.join("Cargo.toml").exists())
+                    // any tool-made cache or build tree (cargo's target dir, wherever it is) tags itself
+                    || e.path().join("CACHEDIR.TAG").is_file();
                 if !skip {
                     stack.push((e.path(), child));
                 }
@@ -383,6 +385,41 @@ mod tests {
         let f = p.join(rel);
         fs::create_dir_all(f.parent().unwrap()).unwrap();
         fs::write(f, c).unwrap();
+    }
+
+    #[test]
+    fn build_output_trees_are_not_changes_or_weakened_tests() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        // a cargo target dir that is not beside a Cargo.toml, and a tagged build dir
+        for t in ["out/target", "tools/build-cache"] {
+            w(
+                p,
+                &format!("{t}/CACHEDIR.TAG"),
+                "Signature: 8a477f597d28d172789f06886806bc55",
+            );
+            w(
+                p,
+                &format!("{t}/debug/build/x/depfile_tests.rs"),
+                "#[test]\nfn a() {}\n",
+            );
+        }
+        w(p, "src.js", "1");
+        let b = Baseline::take(p, vec![]);
+        fs::remove_file(p.join("out/target/debug/build/x/depfile_tests.rs")).unwrap();
+        w(p, "tools/build-cache/debug/new_tests.rs", "x");
+        let d = b.drift();
+        assert!(
+            d.changed.is_empty() && d.weakened.is_empty(),
+            "{:?} {:?}",
+            d.changed,
+            d.weakened
+        );
+        // control: the same removal in a source tree is seen
+        w(p, "tests/t.test.js", "x\n");
+        let b = Baseline::take(p, vec![]);
+        fs::remove_file(p.join("tests/t.test.js")).unwrap();
+        assert!(!b.drift().weakened.is_empty());
     }
 
     #[test]

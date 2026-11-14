@@ -55,6 +55,20 @@ fn environment_problem(out: &str) -> Option<String> {
     Some(format!("{what}: {line}"))
 }
 
+/// The shell could not find the check's program (it is not on the sandbox PATH): the reason names it.
+fn program_missing(command: Option<&str>, exit: Option<i32>, out: &str) -> Option<String> {
+    static NOT_FOUND: LazyLock<Regex> = LazyLock::new(|| {
+        re(r"(?im)command not found|is not recognized as an internal or external command")
+    });
+    if exit != Some(127) && !NOT_FOUND.is_match(out) {
+        return None;
+    }
+    let prog = command?
+        .split_whitespace()
+        .find(|w| !w.contains('=') || w.starts_with(['/', '.']))?;
+    Some(format!("{MISSING_PROGRAM}: {prog}"))
+}
+
 /// Runner summaries that show nothing was tested (cargo: every "test result" has 0 passed).
 fn ran_nothing(out: &str) -> bool {
     if ZERO_TESTS.is_match(out) {
@@ -295,9 +309,12 @@ impl VerifyRunner {
             } else {
                 Passed
             }
-        } else if let Some(why) = (x.exit_code == Some(127))
-            .then(|| {
-                environment_problem(&x.output).unwrap_or_else(|| "tool missing: exit 127".into())
+        } else if let Some(why) = program_missing(r.command.as_deref(), x.exit_code, &x.output)
+            .or_else(|| {
+                (x.exit_code == Some(127)).then(|| {
+                    environment_problem(&x.output)
+                        .unwrap_or_else(|| "tool missing: exit 127".into())
+                })
             })
             .or_else(|| environment_problem(&x.output))
         {
@@ -352,6 +369,16 @@ mod unit {
                 .starts_with("credentials")
         );
         assert!(environment_problem("assertion failed: 1 == 2").is_none());
+        assert_eq!(
+            program_missing(
+                Some("FOO=1 cargo fmt --check"),
+                Some(127),
+                "sh: cargo: command not found"
+            )
+            .as_deref(),
+            Some("program not found in the sandbox PATH: cargo")
+        );
+        assert!(program_missing(Some("cargo test"), Some(101), "test failed").is_none());
         assert!(ran_nothing(
             "running 0 tests\ntest result: ok. 0 passed; 0 failed"
         ));

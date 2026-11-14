@@ -483,6 +483,69 @@ async fn verify_run_checks_reach_the_gate() {
     );
 }
 
+/// A read-only run that used an Execute-class tool (a browser lookup) leaves no verification report at all;
+/// the same run with a file changed (tracker) still goes through the gate.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_execute_tool_that_changed_no_file_does_not_start_verification() {
+    use synthesis_verification::{CompletionGate, GateConfig, VerifyRunner};
+    for (changes, expect_report) in [(false, false), (true, true)] {
+        let t = Arc::new(ChangesNothing(changes));
+        let t2 = t.clone();
+        let mut rig = Rig::build(
+            Opts {
+                tools: ToolBox::empty().with_tool(Probe::new(
+                    "browser_open",
+                    SideEffectClass::Execute,
+                    0,
+                    "r",
+                )),
+                allow: vec!["browser_open".into()],
+                ..Opts::default()
+            },
+            vec![
+                Turn::tool("b", "browser_open", json!({"url": "https://example.com"})),
+                Turn::text("done"),
+            ],
+            move |h, r| {
+                let rt = r.rt.clone();
+                h.with_change_tracker(t2).with_gate(Box::new(move |s| {
+                    CompletionGate::new(
+                        VerifyRunner::new(rt.clone(), &s.id, Arc::new(s.workspace.clone())),
+                        GateConfig::default(),
+                    )
+                }))
+            },
+        );
+        rig.run("x").await;
+        let reports = rig.find(|e| match e {
+            Event::VerificationCompleted { summary, .. } => Some(summary.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            !reports.is_empty(),
+            expect_report,
+            "changes={changes}: {reports:?}"
+        );
+    }
+}
+
+struct ChangesNothing(bool);
+impl synthesis_harness::ChangeTracker for ChangesNothing {
+    fn changed<'a>(
+        &'a self,
+        _: &'a synthesis_core::WorkspaceContext,
+        _: &'a str,
+    ) -> synthesis_harness::BoxFut<'a, Vec<String>> {
+        let v = if self.0 {
+            vec!["out.txt".to_string()]
+        } else {
+            vec![]
+        };
+        Box::pin(async move { v })
+    }
+}
+
 // ---- event sink failure ---------------------------------------------------------------------
 
 #[tokio::test]

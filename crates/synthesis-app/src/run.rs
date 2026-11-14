@@ -1678,6 +1678,11 @@ pub fn prepare(
             child_env.insert(k.clone(), v.clone());
         }
     }
+    // commands and verification checks find the user's own toolchains (`cargo`) even when the app was
+    // started with a minimal PATH (a desktop launch)
+    if let Some(p) = child_env.get_mut("PATH") {
+        *p = synthesis_config::with_user_tool_dirs(p, &h.user);
+    }
     let rt = Arc::new(TerminalRuntime::new(sandbox_mode));
     let notify_policy = policy.as_ref().ok().cloned();
     rt.open_session_sandboxed(&sid, ws.clone(), child_env.clone(), policy.ok());

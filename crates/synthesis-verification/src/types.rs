@@ -107,12 +107,17 @@ pub(crate) const SKIPPED_TESTS: &str = "skipped tests";
 pub(crate) const TEST_FILES_MODIFIED: &str = "test files modified";
 pub(crate) const PREREQ_GUARD_REMOVED: &str = "prerequisite guard removed";
 pub(crate) const PLANNED_TEST: &str = "planned test check not passed";
+/// `blocked_reason` prefix of a check whose program the shell could not find.
+pub const MISSING_PROGRAM: &str = "program not found in the sandbox PATH";
+/// The one limitation that names such a program for all the checks that needed it.
+pub(crate) const BLOCKED_MISSING: &str = "blocked: program not found in the sandbox PATH";
 pub(crate) const MODEL_ONLY: &str = "model-declared checks only";
 pub(crate) const NOOP_CHECK: &str = "no-op check";
 pub(crate) const FLAKY: &str = "flaky";
 pub(crate) const DEFS_CHANGED: &str = "check definitions changed";
 /// Limitations the one-line summary (and so `verification.completed`) repeats.
-const SUMMARY_LIMITATIONS: [&str; 8] = [
+const SUMMARY_LIMITATIONS: [&str; 9] = [
+    BLOCKED_MISSING,
     SKIPPED_TESTS,
     TEST_FILES_MODIFIED,
     PREREQ_GUARD_REMOVED,
