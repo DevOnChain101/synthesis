@@ -7164,7 +7164,6 @@ name = "synthesis-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "cap-std",
  "clap",
  "futures-util",
  "globset",
