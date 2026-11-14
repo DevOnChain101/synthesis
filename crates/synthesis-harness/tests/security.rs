@@ -632,3 +632,41 @@ async fn bash_side_effects_are_recorded_through_the_change_tracker() {
     assert_eq!(out.changed_files, ["out.txt"]);
     assert_eq!(t.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+struct Nothing;
+impl synthesis_harness::ChangeTracker for Nothing {}
+
+/// Non-inert command (`touch` is not in the auto-safe list) so only the tracker can tell.
+async fn bash_run(h_tracker: bool) -> synthesis_harness::TaskOutcome {
+    let mut rig = Rig::build(
+        Opts {
+            tools: ToolBox::empty().with_tool(Probe::new("Bash", SideEffectClass::Execute, 0, "r")),
+            allow: vec!["Bash".into()],
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool("b", "Bash", json!({"command": "touch out.txt"})),
+            Turn::text("ok"),
+        ],
+        move |h, _| {
+            if h_tracker {
+                h.with_change_tracker(Arc::new(Tracker(Default::default())))
+            } else {
+                h.with_change_tracker(Arc::new(Nothing))
+            }
+        },
+    );
+    rig.run("x").await
+}
+
+#[tokio::test]
+async fn a_lookup_that_changed_nothing_without_a_gate_is_not_unverified() {
+    let out = bash_run(false).await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+}
+
+#[tokio::test]
+async fn a_command_that_changed_files_without_a_gate_stays_unverified() {
+    let out = bash_run(true).await;
+    assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
+}

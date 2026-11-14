@@ -1438,10 +1438,10 @@ impl Harness {
                 task.pending_approval.store(false, Ordering::SeqCst);
                 // A shell may have changed anything, even when it fails.
                 let changed = self.tracker.changed(&task.workspace, &task.task_id).await;
-                // With a gate only files the task changed ask for verification: a browser lookup or a `curl`
-                // leaves nothing to check, and the gate's own workspace snapshot still catches a change the
-                // tracker missed. Without a gate nothing could tell, so any such command counts.
-                if !inert && (self.gate.is_none() || !changed.is_empty()) {
+                // Only files the task changed ask for verification: a browser lookup or a `curl` leaves nothing
+                // to check (with a gate, its own workspace snapshot still catches a change the tracker missed;
+                // without one there is no "unverified" banner for a run that changed nothing).
+                if !inert && !changed.is_empty() {
                     task.side_effects.store(true, Ordering::SeqCst);
                 }
                 for f in changed {
