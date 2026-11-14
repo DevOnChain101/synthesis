@@ -117,7 +117,142 @@ pub struct SynthesisSettings {
     pub network_allowed_hosts: Option<Vec<String>>,
     /// The list above came from managed settings (the command line cannot add to it).
     pub network_allowed_hosts_managed: bool,
+    /// `orchestrator` (outcome orchestration): user and managed settings only, managed wins.
+    pub orchestrator: OrchestratorSettings,
     pub compat: Compat,
+}
+
+/// Ceilings, equal to `synthesis_core::outcome` (`MAX_PARALLEL_WORKERS`, `MAX_ATTEMPTS_PER_WORK_ITEM`);
+/// this crate does not depend on core.
+const ORCH_MAX_PARALLEL: u64 = 16;
+const ORCH_MAX_ATTEMPTS: u64 = 10;
+
+/// Every key `synt.orchestrator` accepts (`attempt` is an object with the two `attempt.*` keys).
+pub const ORCHESTRATOR_KEYS: [&str; 9] = [
+    "enabled",
+    "max_parallel_workers",
+    "max_attempts_per_work_item",
+    "max_cost_usd",
+    "attempt",
+    "worktree_retention_days",
+    "decision_expiry_hours",
+    "idle_exit_minutes",
+    "version",
+];
+
+/// `synt.orchestrator.*` (plan section 5): shared by every surface, so security- and
+/// money-relevant values are never per surface. Defaults are the plan's D10 and D9/D20 answers;
+/// `enabled` is false until the explicit enable step (a project file can never set it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrchestratorSettings {
+    pub enabled: bool,
+    pub max_parallel_workers: u32,
+    /// Attempts per work item, the first included (D10: 2 retries, so 3).
+    pub max_attempts_per_work_item: u32,
+    /// Cap per outcome. No default: the person names it in the contract (D10).
+    pub max_cost_usd: Option<f64>,
+    pub attempt_max_cost_usd: Option<f64>,
+    pub attempt_max_wall_secs: Option<u64>,
+    pub worktree_retention_days: u32,
+    pub decision_expiry_hours: u32,
+    pub idle_exit_minutes: u32,
+}
+
+impl Default for OrchestratorSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_parallel_workers: 2,
+            max_attempts_per_work_item: 3,
+            max_cost_usd: None,
+            attempt_max_cost_usd: None,
+            attempt_max_wall_secs: None,
+            worktree_retention_days: 7,
+            decision_expiry_hours: 24,
+            idle_exit_minutes: 10,
+        }
+    }
+}
+
+fn bad(diags: &mut Vec<String>, what: &str, key: &str, want: &str) {
+    diags.push(format!(
+        "{what}: synt.orchestrator.{key} must be {want}, kept"
+    ));
+}
+
+impl OrchestratorSettings {
+    /// Reads one `synt.orchestrator` object over `self`. A wrong value is reported (key name only,
+    /// never the value) and the previous value stays, so a layer can only change what it states
+    /// correctly.
+    fn apply(&mut self, o: &Value, what: &str, diags: &mut Vec<String>) {
+        let Some(o) = o.as_object() else {
+            diags.push(format!(
+                "{what}: synt.orchestrator is not an object, ignored"
+            ));
+            return;
+        };
+        let int = |v: &Value, lo: u64, hi: u64| v.as_u64().filter(|n| (lo..=hi).contains(n));
+        let money = |v: &Value| v.as_f64().filter(|n| n.is_finite() && *n > 0.0);
+        for (k, v) in o {
+            match k.as_str() {
+                "enabled" => match v.as_bool() {
+                    Some(b) => self.enabled = b,
+                    None => bad(diags, what, k, "true or false"),
+                },
+                "max_parallel_workers" => match int(v, 1, ORCH_MAX_PARALLEL) {
+                    Some(n) => self.max_parallel_workers = n as u32,
+                    None => bad(diags, what, k, "a whole number from 1 to 16"),
+                },
+                "max_attempts_per_work_item" => match int(v, 1, ORCH_MAX_ATTEMPTS) {
+                    Some(n) => self.max_attempts_per_work_item = n as u32,
+                    None => bad(diags, what, k, "a whole number from 1 to 10"),
+                },
+                "max_cost_usd" => match money(v) {
+                    Some(n) => self.max_cost_usd = Some(n),
+                    None => bad(diags, what, k, "a positive number"),
+                },
+                "worktree_retention_days" => match int(v, 1, 3650) {
+                    Some(n) => self.worktree_retention_days = n as u32,
+                    None => bad(diags, what, k, "a whole number from 1 to 3650"),
+                },
+                "decision_expiry_hours" => match int(v, 1, 720) {
+                    Some(n) => self.decision_expiry_hours = n as u32,
+                    None => bad(diags, what, k, "a whole number from 1 to 720"),
+                },
+                "idle_exit_minutes" => match int(v, 1, 1440) {
+                    Some(n) => self.idle_exit_minutes = n as u32,
+                    None => bad(diags, what, k, "a whole number from 1 to 1440"),
+                },
+                "attempt" => match v.as_object() {
+                    None => bad(diags, what, k, "an object"),
+                    Some(a) => {
+                        for (ak, av) in a {
+                            match ak.as_str() {
+                                "max_cost_usd" => match money(av) {
+                                    Some(n) => self.attempt_max_cost_usd = Some(n),
+                                    None => bad(diags, what, "attempt.max_cost_usd", "a positive number"),
+                                },
+                                "max_wall_secs" => match int(av, 1, 7 * 24 * 3600) {
+                                    Some(n) => self.attempt_max_wall_secs = Some(n),
+                                    None => bad(diags, what, "attempt.max_wall_secs", "a whole number of seconds"),
+                                },
+                                _ => diags.push(format!(
+                                    "{what}: synt.orchestrator.attempt.{ak} is not a setting, ignored"
+                                )),
+                            }
+                        }
+                    }
+                },
+                "version" => {}
+                "network" => diags.push(format!(
+                    "{what}: synt.orchestrator.network is not a setting; use synt.sandbox.network.allowedHosts, ignored"
+                )),
+                _ => diags.push(format!(
+                    "{what}: synt.orchestrator.{k} is not a setting, ignored"
+                )),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -855,6 +990,19 @@ impl Settings {
                 self.diagnostics.push(format!(
                     "{what}: synt.sandbox.network.allowedHosts must be a list of strings"
                 ));
+            }
+        }
+        // Behaviour, budgets and the on/off switch are the person's or the organisation's call,
+        // never a repository's, and never a surface's (`synt.cli` / `synt.tui` are rendering only).
+        if let Some(o) = n.get("orchestrator") {
+            if what != "user settings" && what != "managed settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.orchestrator is read from user or managed settings only, ignored"
+                ));
+            } else {
+                self.synthesis
+                    .orchestrator
+                    .apply(o, what, &mut self.diagnostics);
             }
         }
         let num = |o: Option<&Value>, k: &str| o.and_then(|b| b.get(k)).and_then(Value::as_u64);
