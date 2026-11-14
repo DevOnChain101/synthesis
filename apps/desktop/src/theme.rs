@@ -29,6 +29,28 @@ pub fn fill(c: t::Rgb) -> Hsla {
     }
 }
 
+/// `a` with `k` (0..1) of `b` mixed in.
+pub fn mix(a: t::Rgb, b: t::Rgb, k: f32) -> t::Rgb {
+    let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * k).round() as u8;
+    [m(a[0], b[0]), m(a[1], b[1]), m(a[2], b[2])]
+}
+
+/// The two ends of the window ground: the brand BG drifting from a cool tint at the top to a warm one at the
+/// bottom, so the app never sits on a flat near-black. Small steps: the text tokens keep their contrast (tested).
+pub fn ground_stops() -> (t::Rgb, t::Rgb) {
+    (mix(t::BG, t::INFO, 0.05), mix(t::BG, t::ACCENT_DEEP, 0.14))
+}
+
+/// The window ground at the window opacity (see [`ground_stops`]); `fill(t::BG)` with a soft drift.
+pub fn ground() -> gpui::Background {
+    let (top, bottom) = ground_stops();
+    gpui::linear_gradient(
+        180.,
+        gpui::linear_color_stop(fill(top), 0.),
+        gpui::linear_color_stop(fill(bottom), 1.),
+    )
+}
+
 /// A surface that must stay readable at any window opacity (the approval dock, the Settings popup): always opaque.
 pub fn solid(c: t::Rgb) -> Hsla {
     hsla(c)
@@ -142,6 +164,34 @@ pub(crate) fn opacity_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ground_is_never_flat_black_and_text_keeps_its_contrast_on_it() {
+        let lum = |c: t::Rgb| {
+            let l = |v: u8| {
+                let v = f64::from(v) / 255.;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * l(c[0]) + 0.7152 * l(c[1]) + 0.0722 * l(c[2])
+        };
+        let ratio = |a: t::Rgb, b: t::Rgb| {
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        let (top, bottom) = ground_stops();
+        assert_ne!(top, bottom);
+        for g in [top, bottom] {
+            assert!(g != [0, 0, 0] && g.iter().any(|v| *v > t::BG[2]), "{g:?}");
+            for fg in [t::MUTED, t::TEXT, t::TEXT_STRONG] {
+                assert!(ratio(fg, g) >= 4.5, "{fg:?} on {g:?}");
+            }
+        }
+        assert_eq!(mix([0, 0, 0], [200, 100, 50], 0.5), [100, 50, 25]);
+    }
 
     #[test]
     fn every_mode_has_its_own_label_colour_and_icon() {

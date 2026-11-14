@@ -1153,7 +1153,7 @@ impl Render for TuiView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(crate::theme::fill(t::BG))
+            .bg(crate::theme::ground())
             .font_family(MONO)
             .font_weight(FontWeight::NORMAL)
             .text_size(px(12.5))
