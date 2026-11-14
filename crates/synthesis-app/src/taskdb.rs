@@ -43,7 +43,10 @@ impl TaskDb {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if v != synthesis_session::SCHEMA_VERSION_LATEST {
+        // v5 (outcomes enabled) only adds tables and `sessions.kind`: the task rows are the same
+        if !(synthesis_session::SCHEMA_VERSION_LATEST..=synthesis_session::SCHEMA_VERSION_SUPPORTED)
+            .contains(&v)
+        {
             return Err(format!(
                 "session database schema v{v}, this build writes task rows for v{}",
                 synthesis_session::SCHEMA_VERSION_LATEST

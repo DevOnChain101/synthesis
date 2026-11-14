@@ -31,6 +31,15 @@ pub enum Error {
     TranscriptChanged(PathBuf),
     OutsideWorkspace(PathBuf),
     Invalid(String),
+    /// The database is below schema v5: outcomes were never enabled here.
+    OutcomesNotEnabled,
+    /// A compare-and-swap on an aggregate's `revision` lost: reload and decide again.
+    RevisionConflict {
+        aggregate: &'static str,
+        id: String,
+        expected: i64,
+        actual: i64,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -63,6 +72,19 @@ impl std::fmt::Display for Error {
             ),
             Self::OutsideWorkspace(p) => write!(f, "{} is outside the workspace", p.display()),
             Self::Invalid(s) => write!(f, "{s}"),
+            Self::OutcomesNotEnabled => write!(
+                f,
+                "outcome orchestration is not enabled for this store (run `synt outcome enable`)"
+            ),
+            Self::RevisionConflict {
+                aggregate,
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{aggregate} {id} is at revision {actual}, not {expected}: reload and retry"
+            ),
         }
     }
 }

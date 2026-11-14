@@ -32,7 +32,7 @@ use synthesis_events::{
 use time::OffsetDateTime;
 
 use crate::error::{Error, Result};
-use crate::{node, schema};
+use crate::{clean, node, schema};
 
 /// Redacted event payloads above this go to an artifact (events.md §5, session-store B.2).
 pub const MAX_INLINE_PAYLOAD: usize = 8 * 1024;
@@ -49,6 +49,28 @@ const RUNNING_STATES: [SessionStatus; 3] = [
     SessionStatus::Verifying,
 ];
 
+/// SQL conjunct that keeps the hidden outcome control sessions (`kind = 'outcome'`, schema v5)
+/// out of a lister or a cleaner. Empty below v5, where the column does not exist, so the
+/// statements of a v4 database are exactly the old ones.
+pub(crate) fn chat_only(conn: &Connection, alias: &str) -> Result<String> {
+    Ok(if schema::user_version(conn)? >= schema::OUTCOMES {
+        format!(" AND {alias}.kind = 'chat'")
+    } else {
+        String::new()
+    })
+}
+
+/// [`chat_only`] for the cleaners: also keeps the session of an attempt, which `attempts` and the
+/// evidence artifacts point at (deleting it would orphan them). Empty below v5.
+pub(crate) fn cleanable_only(conn: &Connection, alias: &str) -> Result<String> {
+    let chat = chat_only(conn, alias)?;
+    Ok(if chat.is_empty() {
+        chat
+    } else {
+        format!("{chat} AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.session_id = {alias}.id)")
+    })
+}
+
 /// The store's timestamp format (UTC, milliseconds), comparable as text.
 pub fn timestamp() -> String {
     now()
@@ -63,13 +85,13 @@ pub(crate) fn now() -> String {
         .expect("format utc timestamp")
 }
 
-fn enum_str<T: Serialize>(v: &T) -> String {
+pub(crate) fn enum_str<T: Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
         Ok(Value::String(s)) => s,
         _ => unreachable!("unit-variant enum serialises to a string"),
     }
 }
-fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T> {
+pub(crate) fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T> {
     Ok(serde_json::from_value(Value::String(s.to_string()))?)
 }
 
@@ -268,6 +290,10 @@ pub struct StoreOptions {
     pub keep_recent_deltas: u64,
     /// Total artifact bytes per session (disk quota).
     pub max_artifact_bytes_per_session: Option<u64>,
+    /// Schema version to migrate an older database to. The default stays at the version every
+    /// released binary reads, so a plain open never upgrades the store (outcomes are opt-in,
+    /// ADR-016 item 9); the explicit enable step passes [`schema::OUTCOMES`].
+    pub schema_target: i64,
 }
 
 /// Event byte accounting is a scan, so it runs once per this many appended events.
@@ -285,8 +311,18 @@ impl Default for StoreOptions {
             max_event_bytes_per_session: Some(512 * 1024 * 1024),
             keep_recent_deltas: 1000,
             max_artifact_bytes_per_session: Some(4 * 1024 * 1024 * 1024),
+            schema_target: schema::DEFAULT_TARGET,
         }
     }
+}
+
+/// A schema upgrade this open performed on an existing database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub from: i64,
+    pub to: i64,
+    /// The consistent copy taken before the first change (`backups/pre-v<to>-<time>/synt.db`).
+    pub backup: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +340,7 @@ pub struct Store {
     mirror: bool,
     redactor: Arc<Redactor>,
     limits: Limits,
+    migration: Option<MigrationReport>,
 }
 
 /// One local calendar day of [`Reader::usage_by_day`]; `day` counts days since 1970-01-01.
@@ -580,9 +617,23 @@ impl Store {
         ensure_db_file(&synthesis_home.join("synt.db"))?;
         // Two processes opening a fresh home at once: `connect` retries its setup; the migration
         // is retried here too.
+        let target = opts.schema_target;
+        let mut migration = None;
         retry_busy(Duration::from_secs(15), || {
             let mut conn = connect(synthesis_home, false)?;
-            schema::migrate(&mut conn, &now())
+            let from = schema::user_version(&conn)?;
+            // An existing database is copied before any upgrade (a fresh one holds nothing). A
+            // failed backup stops the migration: no backup, no change.
+            if migration.is_none() && from > 0 && from < target.min(schema::LATEST) {
+                let to = target.min(schema::LATEST);
+                let backup = clean::backup_to(
+                    synthesis_home,
+                    &format!("pre-v{to}"),
+                    OffsetDateTime::now_utc(),
+                )?;
+                migration = Some(MigrationReport { from, to, backup });
+            }
+            schema::migrate(&mut conn, &now(), target)
         })?;
         Ok(Store {
             home: synthesis_home.to_path_buf(),
@@ -595,11 +646,22 @@ impl Store {
                 max_artifact_bytes: opts.max_artifact_bytes_per_session,
                 redact_snapshots: opts.redact_snapshots,
             },
+            migration,
         })
+    }
+
+    /// The upgrade this open performed, if any (with its backup path).
+    pub fn migration(&self) -> Option<&MigrationReport> {
+        self.migration.as_ref()
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Masks the configured secrets in `v` (everything persisted goes through this).
+    pub(crate) fn redact_value(&self, v: &mut Value) {
+        self.redactor.redact_value(v);
     }
 
     /// Retention of attached images: in every session not touched for `days` days (`updated_at`
@@ -715,13 +777,14 @@ impl Store {
         let cutoff = (now - min_age).format(&fmt).expect("format utc timestamp");
         let mut conn = connect(&self.home, false)?;
         conn.busy_timeout(Duration::from_millis(200))?;
+        let chat = cleanable_only(&conn, "s")?;
         let ids: Vec<String> = {
-            let mut st = conn.prepare(
+            let mut st = conn.prepare(&format!(
                 "SELECT id FROM sessions s WHERE id != ?1 AND updated_at < ?2 \
                  AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=s.id) \
                  AND NOT EXISTS (SELECT 1 FROM tasks WHERE session_id=s.id) \
-                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id)",
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id){chat}"
+            ))?;
             st.query_map([keep, &cutoff], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?
         };
@@ -847,7 +910,7 @@ impl Store {
         self.create_inner(new, mirror)
     }
 
-    fn create_inner(
+    pub(crate) fn create_inner(
         &self,
         new: NewSession<'_>,
         mirror: impl FnOnce(&str, &str) -> Option<PathBuf>,
@@ -1115,7 +1178,7 @@ const SESSION_COLS: &str = "id,status,workspace_id,workspace_root,cwd,additional
   permission_mode,permission_policy_id,budget,usage,event_cursor,checkpoint_id,title,parent_session_id,
   parent_tool_call_id,legacy_transcript_path,created_at,updated_at,git_info";
 
-fn bad(e: impl std::fmt::Display) -> rusqlite::Error {
+pub(crate) fn bad(e: impl std::fmt::Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.to_string().into())
 }
 
@@ -1286,8 +1349,9 @@ impl Reader {
 
     /// Newest first; `cwd` filters by the persisted working directory.
     pub fn list_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let chat = chat_only(&self.conn, "sessions")?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC, id"
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} ORDER BY updated_at DESC, id"
         ))?;
         let rows = st.query_map([cwd], session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1296,8 +1360,9 @@ impl Reader {
     /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
     /// every launch leaves behind when nothing was typed) and the closed ones.
     pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let chat = chat_only(&self.conn, "sessions")?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) \
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} \
              AND closed_at IS NULL \
              AND (EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) \
                OR EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)) \
@@ -1688,7 +1753,7 @@ pub fn file_state_hash(p: &Path) -> String {
     }
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1895,6 +1960,35 @@ impl SessionWriter {
             agent_id: agent,
             kind: kind.to_string(),
             payload,
+        })
+    }
+
+    /// Runs `f` in one IMMEDIATE transaction on this session's connection; events appended
+    /// through the [`EventTx`] commit or roll back together with whatever `f` writes (the outbox
+    /// rule of ADR-016 item 3). A busy database re-runs `f` from scratch, so `f` must not have
+    /// effects outside the transaction.
+    pub(crate) fn event_tx<T>(
+        &mut self,
+        mut f: impl FnMut(&mut EventTx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        retry_busy(Duration::from_secs(15), || {
+            let tx = self
+                .reader
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let out = {
+                let mut et = EventTx {
+                    tx: &tx,
+                    key: &self.chain_key,
+                    home: &self.reader.home,
+                    limits: &self.limits,
+                    sid: &self.id,
+                    redactor: &self.redactor,
+                };
+                f(&mut et)?
+            };
+            tx.commit()?;
+            Ok(out)
         })
     }
 
@@ -2449,6 +2543,42 @@ impl SessionWriter {
             files,
             created_at: ts,
         })
+    }
+}
+
+/// A session's transaction with event append (see [`SessionWriter::event_tx`]).
+pub(crate) struct EventTx<'a> {
+    pub(crate) tx: &'a Transaction<'a>,
+    key: &'a [u8; 32],
+    home: &'a Path,
+    limits: &'a Limits,
+    sid: &'a str,
+    redactor: &'a Redactor,
+}
+
+impl EventTx<'_> {
+    /// Redacts and appends an untyped event of this session; returns its `seq`.
+    pub(crate) fn append(&mut self, kind: &str, mut payload: Value) -> Result<u64> {
+        self.redactor.redact_value(&mut payload);
+        append_tx(
+            self.tx,
+            self.key,
+            self.home,
+            self.limits,
+            self.sid,
+            &now(),
+            (&None, &None, &None),
+            kind,
+            &payload,
+        )
+    }
+
+    pub(crate) fn redact_str(&self, s: &str) -> String {
+        self.redactor.redact_str(s)
+    }
+
+    pub(crate) fn redact_value(&self, v: &mut Value) {
+        self.redactor.redact_value(v);
     }
 }
 
