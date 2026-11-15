@@ -260,6 +260,20 @@ impl SettingsSchema {
             Field::new("synt.sandbox.network.allowedHosts", Execution, "Hosts for --network hosts", List(ListItem::Text))
                 .scope(Scope::UserManaged)
                 .help("Hosts commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`. Only through the egress proxy; a name never reaches a private address. It limits destinations, not what is sent to an allowed host. Managed settings replace this list."),
+            Field::new("synt.sandbox.limits.fileSizeMiB", Execution, "Sandbox: largest file (MiB)", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(4096)).help("Largest file one sandboxed process may write (RLIMIT_FSIZE, Linux). 0 = no limit."),
+            Field::new("synt.sandbox.limits.memoryMiB", Execution, "Sandbox: memory (MiB)", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(8192)).help("Memory cap of the sandboxed commands (cgroup v2 memory.max). Linux with a delegated cgroup only; elsewhere it is NOT enforced (synt doctor says so). 0 = no limit."),
+            Field::new("synt.sandbox.limits.diskQuotaMiB", Execution, "Sandbox: disk growth (MiB)", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(20480)).help("How much the workspace and temp dir may grow during one command before it is killed (checked every few seconds, so it can overshoot; minimum 1024). 0 = no limit."),
+            Field::new("synt.sandbox.limits.tasks", Execution, "Sandbox: processes and threads", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(1024)).help("Cap on tasks of the sandboxed commands (cgroup v2 pids.max); same availability as the memory cap. 0 = no limit."),
+            Field::new("synt.sandbox.limits.openFiles", Execution, "Sandbox: open files", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(0)).help("RLIMIT_NOFILE for sandboxed commands (Linux). 0 = not set."),
+            Field::new("synt.sandbox.limits.processes", Execution, "Sandbox: RLIMIT_NPROC", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(0)).help("RLIMIT_NPROC (Linux). It counts ALL your processes, not only the sandbox's, so a low value makes fork fail; prefer tasks. 0 = not set."),
+            Field::new("synt.sandbox.limits.cpuSeconds", Execution, "Sandbox: CPU seconds", Int { min: 0, max: 100_000_000 })
+                .scope(Scope::UserManaged).def(json!(0)).help("RLIMIT_CPU per process (Linux). 0 = not set."),
             b("synt.modelInfo.fetch", Execution, "Fetch model info at start", true)
                 .help("Ask each provider's /v1/models for context windows and limits."),
             Field::new("synt.compat.write_node_transcripts", Execution, "Write Node-format transcripts", Bool)

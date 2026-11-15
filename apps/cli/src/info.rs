@@ -219,6 +219,10 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         "  network (`synt run --network deny|loopback|hosts|allow`, default deny): {}",
         network_support(&*best)
     );
+    out!("  resource limits (`synt.sandbox.limits.*`, defaults shown):");
+    for l in synthesis_sandbox::ResourceLimits::default().status() {
+        out!("    {}", san(&l));
+    }
     #[cfg(target_os = "macos")]
     if let Some(b) = synthesis_sandbox::SeatbeltBackend::detect() {
         out!(

@@ -71,7 +71,7 @@ fn run_in_denying(
     };
     assert_eq!(
         bwrap.network_guarantee(&policy.network),
-        synthesis_sandbox::Guarantee::Weak // not Strong: see the pathname-socket test below
+        synthesis_sandbox::Guarantee::Weak // not raised to Strong: see the pathname-socket test below
     );
     let c = SandboxedCommand {
         program: program.into(),
@@ -194,14 +194,14 @@ fn vsock_is_denied_inside_a_proxied_run_but_inet_and_unix_work() {
     assert_eq!(errno("1"), "errno=0", "AF_UNIX still works");
 }
 
-/// What `--ro-bind / /` exposes, precisely: /tmp, /run, /var/run and the denied paths are masked
-/// (a host socket there is unreachable); a pathname socket ANYWHERE else on the host filesystem
-/// (the workspace parent, `$HOME` outside the denied credential dirs) can still be connect()ed:
-/// a read-only bind does not stop connect(). That is why Proxied is Weak on Linux until the read
-/// allow-list lands. The last assertion pins the residual: when it starts failing, the allow-list
-/// landed; raise the guarantee and update the docs.
+/// With the read allow-list only the system dirs, the readable roots and the writable roots exist
+/// inside: a host pathname socket under /tmp, /run, a denied dir or ANYWHERE ELSE (the workspace's
+/// parent, `$HOME`, `/var/lib/...`) is unreachable. What stays reachable is a socket inside a
+/// directory the policy itself grants (here: the workspace), because a read-only or writable bind
+/// does not stop connect(). The last assertion pins that residual; it is why Proxied stays `Weak`
+/// on Linux (docs/specs/sandbox-hardening.md section 1).
 #[test]
-fn host_pathname_unix_sockets_are_masked_only_in_tmp_run_and_denied_paths() {
+fn host_pathname_unix_sockets_are_reachable_only_inside_granted_dirs() {
     let Some(py) = python() else {
         require(false, "python3");
         return;
@@ -214,7 +214,8 @@ fn host_pathname_unix_sockets_are_masked_only_in_tmp_run_and_denied_paths() {
     let proxy_sock = run_dir.path().join("egress.sock");
     let in_tmp = tempfile::tempdir().unwrap(); // the system temp dir (/tmp)
     let denied = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let exposed = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    // not under /tmp (masked anyway) and not granted: hidden by the allow-list alone
+    let elsewhere = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let reach = |dir: &Path, deny: &[&Path]| {
         let (_l, path) = unix_listener(dir);
         let o = run_in_denying(
@@ -236,9 +237,14 @@ fn host_pathname_unix_sockets_are_masked_only_in_tmp_run_and_denied_paths() {
         "ok",
         "a socket in a denied dir must be hidden"
     );
-    assert_eq!(
-        reach(exposed.path(), &[]),
+    assert_ne!(
+        reach(elsewhere.path(), &[]),
         "ok",
-        "residual risk: other host pathname sockets are reachable"
+        "a socket in a dir that is not on the allow-list must be hidden"
+    );
+    assert_eq!(
+        reach(work.path(), &[]),
+        "ok",
+        "residual risk: a socket inside a granted dir is reachable"
     );
 }

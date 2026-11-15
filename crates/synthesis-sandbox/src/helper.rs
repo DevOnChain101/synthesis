@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{NetworkPolicy, SandboxError, SandboxPolicy, validate};
+use crate::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy, validate};
 
 pub const HELPER_NAME: &str = "synthesis-sandbox-exec";
 const VERSION: u32 = 1;
@@ -78,6 +78,62 @@ pub fn decode_policy(s: &str) -> Result<SandboxPolicy, SandboxError> {
     };
     validate(&p)?;
     Ok(p)
+}
+
+/// Value of the helper's leading `--limits` argument: `core=0` always, then the set limits.
+pub fn limits_arg(l: &ResourceLimits) -> String {
+    let mut v = vec!["core=0".to_string()];
+    for (k, x) in [
+        ("fsize", l.fsize),
+        ("nofile", l.nofile),
+        ("nproc", l.nproc),
+        ("cpu", l.cpu_secs),
+        ("mem", l.memory),
+        ("tasks", l.tasks),
+    ] {
+        v.extend(x.map(|x| format!("{k}={x}")));
+    }
+    v.join(",")
+}
+
+/// Strict inverse of [`limits_arg`] (`disk_quota` is not part of it). Unknown keys, repeated
+/// keys, a `core` other than 0 and non-decimal numbers are errors.
+pub fn parse_limits_arg(s: &str) -> Result<ResourceLimits, SandboxError> {
+    let bad = |m: String| SandboxError::InvalidPolicy(format!("--limits: {m}"));
+    let mut l = ResourceLimits {
+        fsize: None,
+        memory: None,
+        tasks: None,
+        disk_quota: None,
+        ..Default::default()
+    };
+    let mut seen: Vec<&str> = vec![];
+    for part in s.split(',') {
+        let (k, v) = part
+            .split_once('=')
+            .ok_or_else(|| bad(format!("{part:?}")))?;
+        let n: u64 = v
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| v.parse().ok())
+            .flatten()
+            .ok_or_else(|| bad(format!("{part:?}")))?;
+        if seen.contains(&k) {
+            return Err(bad(format!("{k} given twice")));
+        }
+        seen.push(k);
+        match k {
+            "core" if n == 0 => {}
+            "fsize" => l.fsize = Some(n),
+            "nofile" => l.nofile = Some(n),
+            "nproc" => l.nproc = Some(n),
+            "cpu" => l.cpu_secs = Some(n),
+            "mem" => l.memory = Some(n),
+            "tasks" => l.tasks = Some(n),
+            _ => return Err(bad(format!("{part:?}"))),
+        }
+    }
+    Ok(l)
 }
 
 /// argv without the executable name -> (policy, program, program args).
@@ -155,6 +211,34 @@ mod tests {
             ..Default::default()
         };
         assert!(encode_policy(&hosts).is_err());
+    }
+
+    #[test]
+    fn limits_arg_roundtrip_and_strict() {
+        let l = ResourceLimits {
+            nofile: Some(256),
+            cpu_secs: Some(60),
+            disk_quota: None,
+            ..Default::default()
+        };
+        let a = limits_arg(&l);
+        assert_eq!(
+            a,
+            "core=0,fsize=4294967296,nofile=256,cpu=60,mem=8589934592,tasks=1024"
+        );
+        assert_eq!(parse_limits_arg(&a).unwrap(), l);
+        for bad in [
+            "",
+            "core=1",
+            "fsize",
+            "fsize=+1",
+            "fsize=-1",
+            "x=1",
+            "cpu=1,cpu=2",
+            "cpu=1e3",
+        ] {
+            assert!(parse_limits_arg(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

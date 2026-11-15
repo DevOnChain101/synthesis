@@ -1,11 +1,11 @@
 # Sandbox hardening (design, owner-approved)
 
-Status: egress control is implemented (this document, section 1). Sections 2 to 5 are approved design, built in later PRs. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
+Status: egress control (section 1), the Linux read allow-list (section 2) and resource limits (section 3) are implemented. Sections 4 and 5 are approved design, built in later PRs. Sections 2 and 3 were written on macOS: the Linux paths compile for Linux and are covered by unit tests plus the Linux CI jobs, nothing else. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
 
 ## Owner decisions
 
 1. `--unattended` MAY use `--network hosts` (strictly tighter than `allow`). It still refuses `--network allow` and `loopback`.
-2. The whole of `/etc` stays read-only readable for now; the read allow-list (section 2) comes in a later PR.
+2. The whole of `/etc` stays read-only readable for now (a minimal `/etc` set is a later step).
 3. `readScope: host` is forbidden under `--unattended`.
 4. Default limits: rlimits on (core 0, fsize 4 GiB); memory 8 GiB and tasks 1024 when cgroups exist; disk quota 20 GiB with a 1 GiB floor. A missing cgroup does NOT block an unattended run (a notice says so).
 5. A managed host list overrides the user's list (it is not merged).
@@ -48,7 +48,9 @@ Environment of the command (`build_env`): every inherited proxy variable (any na
 
 ### Residual risk: host pathname unix sockets (Linux)
 
-Under `Proxied`, bubblewrap keeps the network namespace, which hides abstract unix sockets and every TCP/UDP route except the bridge. It does NOT hide pathname unix sockets on the host filesystem: the root is bound read-only (`--ro-bind / /`), and a read-only bind does not stop `connect()`. Masked: `/tmp` (fresh tmpfs), `/run` and `/var/run` (tmpfs: docker, podman, containerd, snapd, systemd, `$XDG_RUNTIME_DIR`, gpg-agent in the runtime dir), and the standard policy's denied paths (`~/.ssh`, `~/.gnupg`, `~/.docker`, `~/.colima`, `~/.rd`, `~/.lima`, `~/.local/share/containers`, `~/.config/containers`, the directory of `$SSH_AUTH_SOCK`, tmux). Reachable: a pathname socket anywhere else (a service socket in `$HOME` or the workspace's parent, `/var/lib/...`). A reachable socket is a way around the proxy and the host list. Therefore the Linux guarantee for `Proxied` is capped at `Weak` until the read allow-list (section 2) hides the rest of the filesystem. `crates/synthesis-sandbox/tests/egress.rs` pins this: hidden under `/tmp` and in a denied dir, reachable elsewhere (that last assertion should start failing when the allow-list lands; then raise the guarantee). macOS Seatbelt denies `AF_UNIX` connects outright.
+Superseded in part by section 2: the paragraph below describes the state BEFORE the read allow-list (the root bound read-only). Now only a pathname socket inside a directory the policy grants is reachable; the cap at `Weak` stays until that has been checked on a real host.
+
+Under `Proxied`, bubblewrap keeps the network namespace, which hides abstract unix sockets and every TCP/UDP route except the bridge. It does NOT hide pathname unix sockets on the host filesystem: the root is bound read-only (`--ro-bind / /`), and a read-only bind does not stop `connect()`. Masked: `/tmp` (fresh tmpfs), `/run` and `/var/run` (tmpfs: docker, podman, containerd, snapd, systemd, `$XDG_RUNTIME_DIR`, gpg-agent in the runtime dir), and the standard policy's denied paths (`~/.ssh`, `~/.gnupg`, `~/.docker`, `~/.colima`, `~/.rd`, `~/.lima`, `~/.local/share/containers`, `~/.config/containers`, the directory of `$SSH_AUTH_SOCK`, tmux). Reachable: a pathname socket anywhere else (a service socket in `$HOME` or the workspace's parent, `/var/lib/...`). A reachable socket is a way around the proxy and the host list. Therefore the Linux guarantee for `Proxied` is capped at `Weak`. `crates/synthesis-sandbox/tests/egress.rs` pins the current state: hidden under `/tmp`, in a denied dir and in a dir that is not granted; reachable inside a granted dir (the workspace). macOS Seatbelt denies `AF_UNIX` connects outright.
 
 ### Limits (honest)
 
@@ -63,15 +65,51 @@ Under `Proxied`, bubblewrap keeps the network namespace, which hides abstract un
 
 ### Residual: another session's `sessions/<id>/lock` (open item, not fixed)
 
-A sandboxed command can open `~/.synt/sessions/<other id>/lock` read-only and `flock` it, which makes that session look dead-but-held to `synt stop`/liveness checks (denial of service only; no data). `sessions/` has to stay readable because the command may read the session's own spilled tool outputs, and `deny_paths` are subtrees, so the narrow rule (deny read of `sessions/*/lock`, any id) cannot be expressed by the current policy. Per backend: Seatbelt could add a `(regex #"^<home>/sessions/[^/]+/lock$")` deny (a new policy field, macOS only); bubblewrap mounts the filesystem read-only already (a read-only fd still locks) and can only hide lock files that exist at launch (`nonexistent deny_paths ... are not protected`); Landlock grants subtrees and cannot carve a child out. A deny that exists on one backend only would leave the same hole on the others, so it is left until the Linux read allow-list (section 2) exists, at which point `sessions/` can be exposed per session (own directory only) on every backend.
+A sandboxed command can open `~/.synt/sessions/<other id>/lock` read-only and `flock` it, which makes that session look dead-but-held to `synt stop`/liveness checks (denial of service only; no data). `sessions/` has to stay readable because the command may read the session's own spilled tool outputs, and `deny_paths` are subtrees, so the narrow rule (deny read of `sessions/*/lock`, any id) cannot be expressed by the current policy. Per backend: Seatbelt could add a `(regex #"^<home>/sessions/[^/]+/lock$")` deny (a new policy field, macOS only); bubblewrap mounts the filesystem read-only already (a read-only fd still locks) and can only hide lock files that exist at launch (`nonexistent deny_paths ... are not protected`); Landlock grants subtrees and cannot carve a child out. A deny that exists on one backend only would leave the same hole on the others, so it was left until the Linux read allow-list (section 2) existed. That is now true on bubblewrap (the synt home is not mounted unless granted), but exposing `sessions/` per session (own directory only) on every backend is not done.
 
-## 2. Linux read allow-list (not built)
+## 2. Linux read allow-list (built, bubblewrap and WSL)
 
-Today bubblewrap mounts the whole filesystem read-only and hides only `deny_paths`. Target: bind only an allow-list (`/usr`, `/bin`, `/lib*`, a minimal `/etc` set, `/proc`, `/dev`, the workspace, `readable_roots`). Decision 2: until then all of `/etc` is readable. Decision 3: `readScope: host` (the opt-out that exposes the host filesystem) is forbidden under `--unattended`.
+`BwrapBackend::args_on` no longer binds `/`. The root is an empty tmpfs; read-only binds (a symlink such as `/bin -> usr/bin` is recreated as a symlink) are made for:
 
-## 3. Resource limits (not built)
+- `SYSTEM_READ`: `/usr /bin /sbin /lib /lib32 /lib64 /etc /sys /opt` (those that exist), plus `/proc` and `/dev` as before (`--proc`, `--dev`), and fresh tmpfs on `/tmp`, `/run`, a real `/var/run`;
+- the policy's `readable_roots` that exist (for the standard policy: toolchain dirs under `$HOME` such as `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.local`, PATH install prefixes, Linuxbrew, plus every `--sandbox-read`), except roots under `~/.config` other than `~/.config/git` (named exception: git's own configuration);
+- `~/.gitconfig` (named exception: git needs it);
+- the writable roots, the private tmp dir, then `readonly_paths`, then `deny_paths` (tmpfs or `/dev/null`) exactly as before.
 
-Defaults for sandboxed commands: `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 4 GiB; with cgroups v2 memory 8 GiB and tasks 1024; a disk quota of 20 GiB for the workspace and temp dir with a 1 GiB floor. No cgroup means no memory/tasks limit and a start notice, never a refusal of an unattended run (decision 4). Applied by the helper before exec (`setrlimit` through a safe wrapper crate, no `unsafe` here).
+Not mounted, hence default-denied: other users' homes and `/root`, `/home` outside the roots above, `~/.config` (except `~/.config/git`), `~/.ssh`, `~/.aws`, `~/.gnupg`, the synt home and its state (also still in `deny_paths`: a second layer), `/var`, `/mnt`, `/media`, `/srv`, `/boot` and any other top-level directory. Landlock was already an allow-list and is unchanged (its `~/.config` root is still granted: the standard policy offers it; narrowing it is not part of this step).
+
+Known limits, unchanged or new:
+
+- All of `/etc`, `/sys` and `/opt` remain readable (decision 2), as does `~/.local` (pip/uv/pipx data, but also other tools' data under `~/.local/share`).
+- A tool that keeps files outside this list stops working until the user grants the directory with `--sandbox-read` (e.g. a toolchain under `/nix`, `/var/lib`, `/srv`).
+- `readScope: host` (decision 3) is not built; nothing offers a way to bind the whole filesystem any more, so there is nothing to forbid yet.
+- The sandboxed command still sees every pathname unix socket inside a directory the policy grants (see the residual risk in section 1).
+- This is a mount-namespace allow-list, not a security boundary: filesystem stays `Weak`, `Proxied` stays `Weak`. Raising either needs a reviewer and a run on a real Linux host.
+
+Tests: unit tests on the argument list (every OS, `linux.rs`), real bubblewrap tests (`crates/synthesis-sandbox/tests/egress.rs`, the `real` module in `linux.rs`), the red-team case `read-home-outside-allowlist` (work dir outside `/tmp`: bubblewrap puts a tmpfs on `/tmp`, so a file under it would be invisible for the wrong reason) with its positive control.
+
+## 3. Resource limits (built; Linux only, plus the disk watchdog everywhere)
+
+`SandboxPolicy::limits` (`ResourceLimits`), defaults from decision 4. Settings: `synt.sandbox.limits.{fileSizeMiB, memoryMiB, diskQuotaMiB, tasks, openFiles, processes, cpuSeconds}`, whole numbers, `0` = off, read from user and managed settings only (a project copy is ignored with a diagnostic). Interpreted in `synthesis-app` (`resource_limits`); `diskQuotaMiB` is raised to the 1 GiB floor.
+
+| Limit | Default | Mechanism | Enforced where |
+|---|---|---|---|
+| core dumps | 0, always | `RLIMIT_CORE` | Linux, helper |
+| file size | 4 GiB | `RLIMIT_FSIZE` | Linux, helper |
+| open files, CPU seconds | off | `RLIMIT_NOFILE`, `RLIMIT_CPU` | Linux, helper |
+| processes | off | `RLIMIT_NPROC`: it counts ALL of the user's processes, so a low value breaks `fork` for the sandbox whenever the user has that many; opt-in only | Linux, helper |
+| memory 8 GiB, tasks 1024 | on | cgroup v2 `memory.max` (+ `memory.swap.max` 0), `pids.max` in a child `synt-sandbox-<parent pid>` of the helper's own cgroup, only when `memory` and `pids` are in that cgroup's `subtree_control` and it is writable | Linux, best effort; else NOT enforced |
+| disk growth 20 GiB (min 1 GiB) | on | watchdog thread in `synthesis-terminal` (`disk.rs`) | every backend, sandboxed commands only |
+
+How it is applied: `synthesis-sandbox-exec --limits <spec> [--no-vsock] -- <program> ...` (`limits_arg` / `parse_limits_arg`, strict; a bad spec exits 126 and runs nothing), through `rustix::process::setrlimit` (no `unsafe` here). A value above the current hard limit is lowered to it. The helper runs in front of bubblewrap when it is found next to `synt` (always for Landlock, which needs it anyway); it is REQUIRED for `--network hosts` and on WSL. Without it a plain bubblewrap command runs without limits and `synt doctor` says `rlimits: NOT enforced`. rlimits and the cgroup are inherited by every descendant.
+
+Honest limits:
+
+- No cgroup means no memory/tasks cap. `synt run` prints a notice and `synt doctor` a `NOT enforced` line; an unattended run still starts (decision 4). A container or a login shell without systemd delegation typically has no cgroup.
+- The cgroup is per run (named after the helper's parent pid), not per command: concurrent commands share one memory and tasks budget, and the empty directory stays behind after the run (nothing is left to remove it after exec).
+- The disk watchdog measures growth of the writable roots and tmp dir since the command started (apparent file sizes, net of deletions) every 5 s or four times a walk, whichever is longer; a fast writer overshoots the quota by what it writes in that time, and a walk stops after 2 million entries (a larger tree is under-counted). The kill is reported like an output-limit kill (`output_limit_exceeded`) with a line in the command's output. A command writing outside those directories (where the sandbox allows it, e.g. `/dev/shm`) is not counted.
+- Seatbelt (macOS) and Windows get none of the rlimits or the cgroup.
+- None of this has run on a real Linux host except through CI; `limits.rs` checks the rlimits through `/proc/self/limits`, the cgroup path is only reported.
 
 ## 4. MCP and browser sandbox (not built)
 

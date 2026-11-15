@@ -35,8 +35,10 @@
 //! bubblewrap needs unprivileged user namespaces; Ubuntu 24.04 blocks them via AppArmor
 //! (`kernel.apparmor_restrict_unprivileged_userns=1`), so `detect` probes by running it.
 //! `bwrap` is located only at the absolute [`BWRAP_CANDIDATES`] (never via `PATH`) and must not
-//! be group/world-writable. bwrap exposes the whole filesystem read-only (readable_roots is not
-//! a read restriction); deny_paths are hidden, `/run`, `/var/run` and `/tmp` are fresh tmpfs
+//! be group/world-writable. bwrap starts from an empty tmpfs root and binds read-only only the
+//! system dirs (`SYSTEM_READ`), the policy's `readable_roots` that are not under `~/.config`
+//! (except `~/.config/git`) and `~/.gitconfig`; everything else on the host is absent (read
+//! allow-list, docs/specs/sandbox-hardening.md section 2). deny_paths are hidden, `/run`, `/var/run` and `/tmp` are fresh tmpfs
 //! (so no docker/ssh-agent/tmux sockets), `readonly_paths` are read-only bind mounts (a bind
 //! mount point cannot be renamed or removed: EBUSY), and `tmp_dir` is bind-mounted writable.
 //! **Weak is defence in depth, not a security boundary.** None of this has been run on a Linux
@@ -336,6 +338,106 @@ pub fn run_egress_bridge(
 
 #[cfg(target_os = "linux")]
 pub use ll::{landlock_abi, restrict_current_process};
+
+/// The user's own cgroup v2 directory, when a child cgroup there gets the memory and pids
+/// controllers (delegated through `cgroup.subtree_control`, e.g. a systemd user session) and is
+/// writable. The error is the reason the limits would be unenforced.
+#[cfg(target_os = "linux")]
+fn cgroup_dir() -> Result<PathBuf, String> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").map_err(|e| e.to_string())?;
+    let rel = own
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or("cgroup v2 is not in use")?;
+    let rel = Path::new(rel.trim_start_matches('/'));
+    if rel
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("odd cgroup path {rel:?}"));
+    }
+    let dir = Path::new("/sys/fs/cgroup").join(rel);
+    let ctl = std::fs::read_to_string(dir.join("cgroup.subtree_control"))
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    for c in ["memory", "pids"] {
+        if !ctl.split_whitespace().any(|x| x == c) {
+            return Err(format!(
+                "the {c} controller is not delegated to {}",
+                dir.display()
+            ));
+        }
+    }
+    rustix::fs::access(&dir, rustix::fs::Access::WRITE_OK)
+        .map_err(|e| format!("{} is not writable: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Whether `memory`/`tasks` limits can be enforced here (Linux cgroup v2 delegated to the user);
+/// `Err(reason)` means they are NOT enforced (a notice, never a refusal: decision 4).
+pub fn cgroup_status() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return cgroup_dir().map(|_| ());
+    #[cfg(not(target_os = "linux"))]
+    Err("cgroup limits exist on Linux only".into())
+}
+
+/// Helper side, before exec: `RLIMIT_CORE` 0 and the set rlimits on this process (inherited by
+/// every descendant; a value above the current hard limit is lowered to it), then the memory and
+/// tasks caps through a per-run child cgroup when [`cgroup_status`] allows (best effort and
+/// silent: the helper's stderr belongs to the command; `synt doctor` reports the state). The
+/// child cgroup stays after exec (nothing is left to remove it) and is shared by the run's
+/// commands.
+#[cfg(target_os = "linux")]
+pub fn apply_limits(l: &ResourceLimits) -> Result<(), SandboxError> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let set = |r: Resource, v: u64| {
+        let v = getrlimit(r).maximum.map_or(v, |m| m.min(v));
+        setrlimit(
+            r,
+            Rlimit {
+                current: Some(v),
+                maximum: Some(v),
+            },
+        )
+        .map_err(|e| SandboxError::Unavailable(format!("setrlimit {r:?}: {e}")))
+    };
+    set(Resource::Core, 0)?;
+    for (r, v) in [
+        (Resource::Fsize, l.fsize),
+        (Resource::Nofile, l.nofile),
+        (Resource::Nproc, l.nproc),
+        (Resource::Cpu, l.cpu_secs),
+    ] {
+        if let Some(v) = v {
+            set(r, v)?;
+        }
+    }
+    if l.memory.is_some() || l.tasks.is_some() {
+        let _ = join_cgroup(l);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn join_cgroup(l: &ResourceLimits) -> Result<(), String> {
+    let dir = cgroup_dir()?.join(format!(
+        "synt-sandbox-{}",
+        std::os::unix::process::parent_id()
+    ));
+    match std::fs::create_dir(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.to_string()),
+        _ => {}
+    }
+    let put = |f: &str, v: String| std::fs::write(dir.join(f), v).map_err(|e| format!("{f}: {e}"));
+    if let Some(m) = l.memory {
+        put("memory.max", m.to_string())?;
+        let _ = put("memory.swap.max", "0".into()); // swap would stretch the cap; absent without swap accounting
+    }
+    if let Some(t) = l.tasks {
+        put("pids.max", t.to_string())?;
+    }
+    put("cgroup.procs", "0".into()) // "0" = the writing process
+}
 
 const SYSTEM_READ: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/proc", "/sys", "/opt",
@@ -743,6 +845,8 @@ impl SandboxBackend for LinuxLandlockBackend {
         helper_outside_writable(&self.helper, &p)?;
         landlock_rules(&p)?; // overlap errors surface here, not inside the child
         let mut args: Vec<OsString> = vec![
+            "--limits".into(),
+            limits_arg(&p.limits).into(),
             crate::encode_policy(&p)?.into(),
             "--".into(),
             c.program.clone(),
@@ -756,6 +860,14 @@ impl SandboxBackend for LinuxLandlockBackend {
             clear_env: true,
         })
     }
+}
+
+/// A read root inside `~/.config` is not bound (the standard policy offers them for the other
+/// backends), except `~/.config/git`: that directory holds tokens of many tools, git's own is the
+/// one a sandboxed command needs.
+fn config_hidden(root: &Path, home: &Path) -> bool {
+    let config = home.join(".config");
+    root.starts_with(&config) && !root.starts_with(config.join("git"))
 }
 
 pub struct BwrapBackend {
@@ -807,9 +919,6 @@ impl BwrapBackend {
             "--unshare-pid",
             "--unshare-ipc",
             "--new-session",
-            "--ro-bind",
-            "/",
-            "/",
             "--dev",
             "/dev",
             "--proc",
@@ -825,6 +934,30 @@ impl BwrapBackend {
             a.push(flag.into());
             a.extend(parts.iter().map(|p| p.as_os_str().to_owned()));
         };
+        // Read allow-list (docs/specs/sandbox-hardening.md section 2): the root is an empty tmpfs
+        // and only these are bound into it, read-only. Everything else on the host (other homes,
+        // `~/.config`, `~/.aws`, synt state, host sockets outside them) does not exist inside.
+        for s in SYSTEM_READ.iter().filter(|s| **s != "/proc") {
+            let s = Path::new(s);
+            match std::fs::read_link(s) {
+                Ok(t) => push(&[t.as_path(), s], "--symlink"), // /bin -> usr/bin, /lib64 -> usr/lib64
+                Err(_) if s.is_dir() => push(&[s, s], "--ro-bind"),
+                Err(_) => {}
+            }
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_absolute());
+        // Named exceptions: git's global config, and `~/.config/git` alone out of `~/.config`.
+        let gitconfig = home.as_ref().map(|h| h.join(".gitconfig"));
+        for r in policy
+            .readable_roots
+            .iter()
+            .chain(&gitconfig)
+            .filter(|r| r.exists() && !home.as_deref().is_some_and(|h| config_hidden(r, h)))
+        {
+            push(&[r, r], "--ro-bind");
+        }
         // /var/run is normally a symlink to /run (already hidden); mask it only when it is real.
         if std::fs::symlink_metadata("/var/run").is_ok_and(|m| m.is_dir()) {
             push(&[Path::new("/var/run")], "--tmpfs");
@@ -905,10 +1038,10 @@ impl SandboxBackend for BwrapBackend {
     fn network_guarantee(&self, mode: &NetworkPolicy) -> Guarantee {
         match mode {
             // Fresh net namespace whose only exit is the bridge; needs the helper (bridge, seccomp).
-            // Capped at Weak: the root is bound read-only, not hidden, so a command can still
-            // connect() to a host PATHNAME unix socket outside /run, /var/run, /tmp and the denied
-            // paths (docs/specs/sandbox-hardening.md, residual risk). Strong waits for the read
-            // allow-list.
+            // Kept at Weak: with the read allow-list a host PATHNAME unix socket is reachable only
+            // inside a dir the policy grants (system dirs, readable roots, the workspace); that is
+            // narrower but not closed, and unverified on a real Linux host until CI has run
+            // (docs/specs/sandbox-hardening.md, residual risk). Raising it needs a reviewer.
             NetworkPolicy::Proxied(EgressEndpoint::Unix(_)) if self.helper.is_some() => {
                 Guarantee::Weak
             }
@@ -922,9 +1055,9 @@ impl SandboxBackend for BwrapBackend {
             network: Guarantee::Strong,
             process_tree: Guarantee::Strong,
             notes: vec![
-                "writes confined to writable_roots, tmp_dir and a private /tmp; /run is a fresh tmpfs; reads are NOT confined except deny_paths (whole fs mounted read-only)".into(),
+                "writes confined to writable_roots, tmp_dir and a private /tmp; /run is a fresh tmpfs; reads: only the system dirs (all of /etc, /sys, /opt), readable_roots (toolchains under $HOME, `.local` included), ~/.gitconfig and the writable roots exist inside; other homes, ~/.config (except ~/.config/git), synt state and the rest of the host are absent".into(),
                 "Weak: defence in depth, not a security boundary".into(),
-                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; Proxied keeps the fresh namespace and bridges 127.0.0.1:3128 to the proxy's unix socket (needs the helper) but is Weak: host pathname unix sockets outside /run, /var/run, /tmp and the denied paths stay connectable until the read allow-list lands; allow_exec=false is rejected".into(),
+                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; Proxied keeps the fresh namespace and bridges 127.0.0.1:3128 to the proxy's unix socket (needs the helper) but is Weak: a host pathname unix socket inside a granted dir (system dirs, readable roots, the workspace) stays connectable; allow_exec=false is rejected".into(),
                 "requires unprivileged user namespaces (blocked by default on Ubuntu 24.04 AppArmor)".into(),
                 "nonexistent deny_paths/readonly_paths are not protected; mount points make existing ones rename-proof".into(),
             ],
@@ -1002,16 +1135,31 @@ impl BwrapBackend {
         }
         let mut args = Self::args_on(policy, &inner, wsl);
         let mut program: OsString = self.path.clone().into();
-        // The seccomp deny (vsock, io_uring, x32) runs in front of bwrap: on WSL, and whenever
-        // the network is proxied (io_uring could otherwise open sockets around the namespace).
-        if wsl.is_some() || bridge.is_some() {
-            let helper = helper_or_err(if wsl.is_some() {
+        // The helper runs in front of bwrap: it sets the rlimits (and joins the cgroup) that every
+        // descendant inherits, and, on WSL or when the network is proxied, installs the seccomp deny
+        // (vsock, io_uring, x32; io_uring could otherwise open sockets around the namespace).
+        // Those two REQUIRE it; elsewhere it is used when found and a command runs without limits
+        // when it is not (`synt doctor` says so).
+        let strict = wsl.is_some() || bridge.is_some();
+        let helper = if strict {
+            Some(helper_or_err(if wsl.is_some() {
                 "WSL"
             } else {
                 "--network hosts"
-            })?;
+            })?)
+        } else {
+            self.helper
+                .clone()
+                .filter(|h| helper_outside_writable(h, policy).is_ok())
+        };
+        if let Some(helper) = helper {
             helper_outside_writable(&helper, policy)?;
-            args.splice(0..0, ["--no-vsock".into(), "--".into(), program]);
+            let mut pre: Vec<OsString> = vec!["--limits".into(), limits_arg(&policy.limits).into()];
+            if strict {
+                pre.push("--no-vsock".into());
+            }
+            pre.extend(["--".into(), program]);
+            args.splice(0..0, pre);
             program = helper.into();
         }
         Ok(SandboxedCommand {
@@ -1094,10 +1242,61 @@ mod tests {
             "--proc /proc",
             "--dev /dev",
             "--tmpfs /tmp",
-            "--ro-bind / /",
         ] {
             assert!(j.contains(f), "{f} in {j}");
         }
+        assert!(
+            !j.contains("--ro-bind / /"),
+            "the root is no longer bound: {j}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(j.contains("--ro-bind /usr /usr"), "{j}");
+    }
+
+    #[test]
+    fn read_allow_list_binds_only_named_roots() {
+        let t = tempfile::tempdir().unwrap();
+        let (tools, gone) = (t.path().join("tools"), t.path().join("gone"));
+        std::fs::create_dir(&tools).unwrap();
+        let pol = SandboxPolicy {
+            readable_roots: vec![tools.clone(), gone.clone()],
+            ..Default::default()
+        };
+        let c = SandboxedCommand {
+            program: "/bin/true".into(),
+            ..Default::default()
+        };
+        let j = BwrapBackend::args(&pol, &c)
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let t = tools.display();
+        assert!(j.contains(&format!("--ro-bind {t} {t}")), "{j}");
+        assert!(
+            !j.contains(&gone.display().to_string()),
+            "a missing root is skipped: {j}"
+        );
+        let v: Vec<_> = BwrapBackend::args(&pol, &c)
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        for hidden in ["/home", "/root", "/var", "/mnt", "/"] {
+            assert!(
+                !v.windows(2).any(|w| w[0] == "--ro-bind" && w[1] == hidden),
+                "{hidden} in {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_dir_is_hidden_except_git() {
+        let h = p("/home/u");
+        let hidden = |s: &str| config_hidden(&p(s), &h);
+        assert!(hidden("/home/u/.config") && hidden("/home/u/.config/nvim"));
+        assert!(hidden("/home/u/.config/gitx"));
+        assert!(!hidden("/home/u/.config/git") && !hidden("/home/u/.config/git/ignore"));
+        assert!(!hidden("/home/u/.cargo") && !hidden("/home/u/.local/share"));
     }
 
     #[test]
@@ -1140,8 +1339,10 @@ mod tests {
         let w = b.wrap(&pol, &c).unwrap();
         assert_eq!(w.program, p("/h/synthesis-sandbox-exec").into_os_string());
         assert!(w.clear_env && w.cwd == c.cwd);
-        assert_eq!(&w.args[1..], ["--", "sh", "-c", "true"]);
-        let back = crate::decode_policy(w.args[0].to_str().unwrap()).unwrap();
+        assert_eq!(&w.args[3..], ["--", "sh", "-c", "true"]);
+        assert_eq!(w.args[0], "--limits");
+        assert!(crate::parse_limits_arg(w.args[1].to_str().unwrap()).is_ok());
+        let back = crate::decode_policy(w.args[2].to_str().unwrap()).unwrap();
         assert!(back.writable_roots.contains(&p("/work")) && back.network == NetworkPolicy::Deny);
         let old = LinuxLandlockBackend::new(p("/h"), 3);
         assert!(matches!(
@@ -1173,7 +1374,7 @@ mod tests {
             ..Default::default()
         };
         let w = b.wrap(&pol, &SandboxedCommand::default()).unwrap();
-        let back = crate::decode_policy(w.args[0].to_str().unwrap()).unwrap();
+        let back = crate::decode_policy(w.args[2].to_str().unwrap()).unwrap();
         assert!(back.writable_roots.contains(&p("/work-tmp")));
         for bad in ["/tmp", "/run", "/var/run"] {
             assert!(
@@ -1752,7 +1953,7 @@ mod tests {
         };
         let w = b.wrap_on(&pol, &c, Some(&ctx)).unwrap();
         assert_eq!(w.program, p("/h/synthesis-sandbox-exec").into_os_string());
-        assert_eq!(&w.args[..3], ["--no-vsock", "--", "/usr/bin/bwrap"]);
+        assert_eq!(&w.args[2..5], ["--no-vsock", "--", "/usr/bin/bwrap"]);
         assert!(w.env.is_empty(), "{:?}", w.env);
         // no helper on WSL: refused, not run without the seccomp filter
         let nohelper = BwrapBackend { helper: None, ..b };
@@ -1796,7 +1997,7 @@ mod tests {
         // not WSL: the seccomp deny still runs in front of bwrap
         let w = b.wrap_on(&pol, &c, None).unwrap();
         assert_eq!(w.program, p("/h/synthesis-sandbox-exec").into_os_string());
-        assert_eq!(&w.args[..3], ["--no-vsock", "--", "/usr/bin/bwrap"]);
+        assert_eq!(&w.args[2..5], ["--no-vsock", "--", "/usr/bin/bwrap"]);
         let j = joined(w.args.clone());
         assert!(j.contains("--unshare-net") && !j.contains("--share-net"));
         assert!(j.contains("--ro-bind /run-dir /run-dir"), "{j}");
@@ -1985,10 +2186,10 @@ mod tests {
                 ..Default::default()
             };
             let w = b.wrap_on(&pol, &c, Some(&ctx)).unwrap();
-            // behind the helper: [helper, --no-vsock, --, bwrap, args...]; run bwrap directly
-            assert_eq!(&w.args[..2], ["--no-vsock", "--"]);
-            let o = Command::new(&w.args[2])
-                .args(&w.args[3..])
+            // behind the helper: [helper, --limits, spec, --no-vsock, --, bwrap, args...]; run bwrap directly
+            assert_eq!(&w.args[2..4], ["--no-vsock", "--"]);
+            let o = Command::new(&w.args[4])
+                .args(&w.args[5..])
                 .env_clear()
                 .envs(w.env.iter().cloned())
                 .output()
@@ -1999,7 +2200,7 @@ mod tests {
                 o.status,
                 String::from_utf8_lossy(&o.stderr),
                 String::from_utf8_lossy(&o.stdout),
-                &w.args[3..]
+                &w.args[5..]
             );
             Some(String::from_utf8_lossy(&o.stdout).into_owned())
         }
@@ -2007,6 +2208,7 @@ mod tests {
         #[test]
         fn a_denied_key_file_reads_empty_inside() {
             let Some(b) = bwrap() else { return };
+            let b = BwrapBackend { helper: None, ..b };
             // not under /tmp: bwrap mounts a fresh tmpfs there, which would hide the file anyway
             let d = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
             let key = d.path().join("chain.key");
@@ -2021,12 +2223,13 @@ mod tests {
                     ..Default::default()
                 };
                 let pol = SandboxPolicy {
+                    readable_roots: vec![d.path().to_path_buf()], // not on the allow-list otherwise
                     deny_paths: deny,
                     network: NetworkPolicy::Allow,
                     ..Default::default()
                 };
                 let w = b.wrap_on(&pol, &c, None).unwrap();
-                // no WSL and no proxy: not behind the helper, so `program` is bwrap itself
+                // no WSL, no proxy and no helper: `program` is bwrap itself
                 assert_eq!(w.program, b.path.clone().into_os_string());
                 let o = Command::new(&w.program)
                     .args(&w.args)
