@@ -40,7 +40,19 @@ fn pol(w: &Path) -> SandboxPolicy {
 }
 
 fn wrapped(policy: &SandboxPolicy, cwd: &Path, prog: &str, args: &[&str]) -> Command {
-    let w = backend()
+    wrapped_in(policy, cwd, prog, args, None)
+}
+
+/// With `journal`, the run keeps its crash-recovery journal there instead of the shared default,
+/// so that runs of OTHER tests (which recover any dead run they find) cannot touch it.
+fn wrapped_in(
+    policy: &SandboxPolicy,
+    cwd: &Path,
+    prog: &str,
+    args: &[&str],
+    journal: Option<&Path>,
+) -> Command {
+    let mut w = backend()
         .wrap(
             policy,
             &SandboxedCommand {
@@ -51,6 +63,12 @@ fn wrapped(policy: &SandboxPolicy, cwd: &Path, prog: &str, args: &[&str]) -> Com
             },
         )
         .unwrap();
+    if let Some(j) = journal {
+        let mut spec: serde_json::Value =
+            serde_json::from_str(w.args[1].to_str().unwrap()).unwrap();
+        spec["journal_dir"] = serde_json::json!(j);
+        w.args[1] = spec.to_string().into();
+    }
     let mut c = Command::new(&w.program);
     c.args(&w.args)
         .env_clear()
@@ -257,8 +275,20 @@ fn the_guarded_directory_itself_cannot_be_renamed_or_replaced() {
         acl_dump(&p, &r)
     );
     // control: files below it are still writable (git needs its lock files and index)
-    let ok = sh(&p, &r, r"echo x> .git\index.lock && del .git\index.lock");
-    assert!(ok.status.success(), "control: {}", text(&ok));
+    let mk = sh(&p, &r, r"echo x> .git\index.lock");
+    assert!(
+        mk.status.success() && r.join(".git/index.lock").exists(),
+        "control (create): {}\n{}",
+        text(&mk),
+        acl_dump(&p, &r)
+    );
+    let rm = sh(&p, &r, r"del .git\index.lock");
+    assert!(
+        !r.join(".git/index.lock").exists(),
+        "control (delete): {}\n{}",
+        text(&rm),
+        acl_dump(&p, &r)
+    );
     // and the read-only child stays read-only
     assert!(!sh(&p, &r, r"echo evil> .git\hooks\h2").status.success());
 }
@@ -533,9 +563,16 @@ fn an_overlapping_run_fails_closed_and_does_not_lift_the_protection_of_the_first
 #[test]
 fn a_launcher_killed_outright_is_recovered_by_the_next_run() {
     let (_w, r, p) = guarded();
+    let j = tempfile::tempdir().unwrap(); // not the shared journal: other tests would recover it
     let probe = probe_in(&r);
     let before = acl_tree(&r);
-    let mut c = wrapped(&p, &r, probe.to_str().unwrap(), &["sleep", "30"]);
+    let mut c = wrapped_in(
+        &p,
+        &r,
+        probe.to_str().unwrap(),
+        &["sleep", "30"],
+        Some(j.path()),
+    );
     c.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let mut b = c.spawn().unwrap();
@@ -543,19 +580,27 @@ fn a_launcher_killed_outright_is_recovered_by_the_next_run() {
     b.kill().unwrap(); // TerminateProcess: no cleanup runs
     let _ = b.wait();
     std::thread::sleep(std::time::Duration::from_secs(1));
-    // the honest part: the protections and the dead SID's ACEs are still there
+    // the honest part: the protections and the dead SID's ACEs are still there, and so is the journal
     assert_ne!(
         before,
         acl_tree(&r),
         "nothing was left behind, the kill did not test anything"
     );
-    // the next sandboxed run restores them (and deletes the dead run's profile)
-    let o = sh(&p, &r, "echo hi");
+    assert!(std::fs::read_dir(j.path()).unwrap().count() == 1);
+    // the next sandboxed run restores them (and deletes the dead run's profile and journal)
+    let o = wrapped_in(&p, &r, CMD, &["/c", "echo hi"], Some(j.path()))
+        .output()
+        .unwrap();
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(
         before,
         acl_tree(&r),
         "recovery did not restore the original ACLs"
+    );
+    assert_eq!(
+        std::fs::read_dir(j.path()).unwrap().count(),
+        0,
+        "journal left"
     );
 }
 

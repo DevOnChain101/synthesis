@@ -180,7 +180,7 @@ Everything inherits: descendants of the program are in the same container and jo
 - The release workflow does not yet ship `synthesis-sandbox-exec.exe` on Windows, so a released build keeps the old behaviour (no backend) until it does.
 - Concurrency: the cuts are per path and cannot be shared. A second run that needs a path the first one has cut (or one inside or above it) is REFUSED (exit 126, "another sandboxed command in this workspace ...") before it changes anything; tested (the first run keeps failing to write into `.git/hooks`, ACLs identical afterwards). Runs that need no common cut path run concurrently.
 - Grants of the user profile, Windows, Program Files (3 variables), ProgramData, the Synthesis home, the helper's directory, or any ancestor of these, are refused. Grants below them are fine.
-- Hard links and junctions: a junction from the workspace to an outside directory gave no access and no ACL change (tested). A hard link shares its file's DACL, so the workspace grant reaches the linked outside file during the run; the CI test prints what was observed and asserts only the restore afterwards.
+- Hard links and junctions: a junction from the workspace to an outside directory gave no access and no ACL change (tested). A hard link shares its file's DACL, so the workspace grant reaches the linked outside file during the run; the CI test asserts only the restore afterwards; whether the linked file is readable during the run is NOT established (the CI log hides passing tests' output).
 - rlimits other than memory and the process count, the disk quota being the existing watchdog, and `--network loopback|hosts` are not available. 
 
 ### Modes and doctor
