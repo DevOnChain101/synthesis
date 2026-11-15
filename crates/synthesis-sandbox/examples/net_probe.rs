@@ -5,6 +5,7 @@
 //!   net_probe child <file>         write "x" to <file>; exit 0 = it worked
 //!   net_probe spawn <file>         run `net_probe child <file>` as a child process: exit 0 = the child
 //!                                  worked, 1 = it ran and failed, 3 = it could not be started
+//!   net_probe tryw <file> <secs>   try to write <file> for <secs>; exit 0 = a write worked
 //!   net_probe sleep <secs>         just wait (keeps a sandbox alive while a test looks at it)
 //!   net_probe loopback             bind/listen/connect/accept on 127.0.0.1 and ::1, then probe two
 //!                                  non-loopback addresses; prints LOOPBACK_OK, remote_denied/REMOTE_CONNECTED
@@ -62,6 +63,17 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        ["tryw", file, secs] => {
+            // keep trying to write <file> for <secs>: exit 0 = a write worked at some point
+            let end = std::time::Instant::now() + Duration::from_secs(secs.parse().unwrap_or(1));
+            while std::time::Instant::now() < end {
+                if std::fs::write(file, "x").is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            ExitCode::FAILURE
+        }
         ["sleep", secs] => {
             std::thread::sleep(Duration::from_secs(secs.parse().unwrap_or(1)));
             ExitCode::SUCCESS

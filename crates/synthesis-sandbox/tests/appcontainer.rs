@@ -247,6 +247,23 @@ fn a_readonly_path_inside_a_writable_root_is_readable_not_writable() {
 }
 
 #[test]
+fn the_guarded_directory_itself_cannot_be_renamed_or_replaced() {
+    let (_w, r, p) = guarded();
+    let o = sh(&p, &r, r"ren .git .git2");
+    assert!(
+        !o.status.success() && r.join(".git/hooks").exists() && !r.join(".git2").exists(),
+        "{}\n{}",
+        text(&o),
+        acl_dump(&p, &r)
+    );
+    // control: files below it are still writable (git needs its lock files and index)
+    let ok = sh(&p, &r, r"echo x> .git\index.lock && del .git\index.lock");
+    assert!(ok.status.success(), "control: {}", text(&ok));
+    // and the read-only child stays read-only
+    assert!(!sh(&p, &r, r"echo evil> .git\hooks\h2").status.success());
+}
+
+#[test]
 fn the_children_of_a_guarded_directory_cannot_be_renamed_away() {
     let (_w, r, p) = guarded();
     let o = sh(&p, &r, r"ren .git\hooks hooks.bak");
@@ -467,5 +484,136 @@ fn the_exit_code_comes_through() {
     assert_eq!(
         sh(&pol(w.path()), w.path(), "exit 7").status.code(),
         Some(7)
+    );
+}
+
+/// Spawn a long-lived container that keeps trying to write into the read-only hooks directory.
+fn long_run(p: &SandboxPolicy, r: &Path, secs: &str) -> std::process::Child {
+    let probe = probe_in(r);
+    let target = r.join(r".git\hooks\planted");
+    let mut c = wrapped(
+        p,
+        r,
+        probe.to_str().unwrap(),
+        &["tryw", target.to_str().unwrap(), secs],
+    );
+    c.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c.spawn().unwrap()
+}
+
+#[test]
+fn an_overlapping_run_fails_closed_and_does_not_lift_the_protection_of_the_first() {
+    let (_w, r, p) = guarded();
+    let before = acl_tree(&r.join(".git"));
+    let mut b = long_run(&p, &r, "9");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    // a second run that needs the same cuts: refused, before it changes anything
+    let a = sh(&p, &r, "echo hi");
+    assert_eq!(a.status.code(), Some(126), "{}", text(&a));
+    assert!(
+        text(&a).contains("another sandboxed command"),
+        "{}",
+        text(&a)
+    );
+    // the first run kept trying to write into hooks the whole time and never could
+    let code = b.wait().unwrap().code();
+    assert_eq!(
+        code,
+        Some(1),
+        "the first run was able to write into the read-only dir"
+    );
+    assert!(!r.join(r".git\hooks\planted").exists());
+    // both runs are gone: everything is as it was
+    assert_eq!(before, acl_tree(&r.join(".git")));
+    // and the next run works again
+    assert!(sh(&p, &r, "echo hi").status.success());
+}
+
+#[test]
+fn a_launcher_killed_outright_is_recovered_by_the_next_run() {
+    let (_w, r, p) = guarded();
+    let probe = probe_in(&r);
+    let before = acl_tree(&r);
+    let mut c = wrapped(&p, &r, probe.to_str().unwrap(), &["sleep", "30"]);
+    c.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut b = c.spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    b.kill().unwrap(); // TerminateProcess: no cleanup runs
+    let _ = b.wait();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    // the honest part: the protections and the dead SID's ACEs are still there
+    assert_ne!(
+        before,
+        acl_tree(&r),
+        "nothing was left behind, the kill did not test anything"
+    );
+    // the next sandboxed run restores them (and deletes the dead run's profile)
+    let o = sh(&p, &r, "echo hi");
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        before,
+        acl_tree(&r),
+        "recovery did not restore the original ACLs"
+    );
+}
+
+/// `mklink` from the host side.
+fn mklink(kind: &str, link: &Path, target: &Path) {
+    let o = Command::new(CMD)
+        .args([
+            "/c",
+            "mklink",
+            kind,
+            &link.display().to_string(),
+            &target.display().to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "mklink {kind}: {}", text(&o));
+}
+
+#[test]
+fn a_junction_from_the_workspace_to_an_outside_dir_gives_no_access_and_changes_no_acl() {
+    let (w, outside) = (ws(), ws());
+    std::fs::write(outside.path().join("key.txt"), "TOPSECRET").unwrap();
+    mklink("/J", &w.path().join("jn"), outside.path());
+    let before = acl_tree(outside.path());
+    let o = sh(&pol(w.path()), w.path(), r"type jn\key.txt");
+    assert!(!text(&o).contains("TOPSECRET"), "{}", text(&o));
+    let after = acl_tree(outside.path());
+    assert!(!after.contains("S-1-15-2-"), "{after}");
+    assert_eq!(before, after);
+    // control: the workspace's own files are readable
+    std::fs::write(w.path().join("own.txt"), "mine").unwrap();
+    assert!(text(&sh(&pol(w.path()), w.path(), "type own.txt")).contains("mine"));
+}
+
+#[test]
+fn a_hard_link_from_the_workspace_to_an_outside_file_is_restored_after_the_run() {
+    let (w, outside) = (ws(), ws());
+    let f = outside.path().join("key.txt");
+    std::fs::write(&f, "TOPSECRET").unwrap();
+    mklink("/H", &w.path().join("hl.txt"), &f);
+    let before = acl_tree(outside.path());
+    // A hard link shares the file's DACL, so the grant on the workspace reaches the file. What the
+    // run could read is RECORDED here (docs/specs/sandbox-hardening.md section 5), the ACLs must
+    // be back to the original afterwards.
+    let o = sh(&pol(w.path()), w.path(), "type hl.txt");
+    eprintln!(
+        "HARDLINK read during the run: {}",
+        text(&o).contains("TOPSECRET")
+    );
+    let after = acl_tree(outside.path());
+    assert!(!after.contains("S-1-15-2-"), "{after}");
+    assert_eq!(before, after);
+    let c = Command::new(CMD)
+        .args(["/c", "type", &f.display().to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        text(&c).contains("TOPSECRET"),
+        "control: the owner still reads it"
     );
 }

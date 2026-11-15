@@ -235,7 +235,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     #[cfg(windows)]
     match synthesis_sandbox::appcontainer_probe() {
         Ok(h) => out!(
-            "  appcontainer available: true (helper {}); network {}",
+            "  appcontainer available: true (helper {}; used only under --sandbox enforce, never by best-effort); network {}",
             h.display(),
             network_support(&synthesis_sandbox::AppContainerBackend::new(h.clone()))
         ),

@@ -14,8 +14,8 @@
 //! program suspended inside the AppContainer and the job with ONLY the three standard handles
 //! inherited, resumes it, waits, then closes the job (killing leftovers), removes the ACEs and
 //! deletes the profile. If the launcher itself is killed the job dies with it (kill on close);
-//! the ACEs and the profile are then left behind, harmless because their SID no longer exists
-//! as a usable principal (see the spec).
+//! the ACEs, the cuts and the profile are then left behind (NOT harmless) until the next
+//! launcher restores them from the journal (`Spec::journal_dir`, see the spec).
 //!
 //! Not run on a real Windows machine by the author: CI `windows-latest` only.
 
@@ -45,6 +45,9 @@ pub enum Access {
     ReadOnly,
     /// Cut off and nothing granted: unreachable even inside a granted root.
     Hide,
+    /// For a directory that holds `ReadOnly` paths (`.git`): cut off, itself neither renamable
+    /// nor deletable, everything below it `Modify`.
+    Guard,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +75,10 @@ pub struct Spec {
     /// environment lacks). The launcher sets each one in ITS OWN environment when absent, so the
     /// program inherits them too: paths of the user's profile, not secrets.
     pub launcher_env: Vec<(String, String)>,
+    /// Directory for the journal of what a run changed (original DACLs, profile name): a launcher
+    /// killed outright leaves it, and the next launcher (or [`sweep`]) undoes it. `None`: no
+    /// journal, no crash recovery, no check for overlapping runs.
+    pub journal_dir: Option<PathBuf>,
     /// Job Object `JobMemoryLimit`, bytes, whole job.
     pub memory: Option<u64>,
     /// Job Object `ActiveProcessLimit`.
@@ -92,6 +99,17 @@ pub fn run(spec: &Spec) -> Result<u32, String> {
         return Err(format!("unsupported spec version {}", spec.version));
     }
     imp::run(spec)
+}
+
+/// Undo what launchers killed outright left behind (cut paths, ACEs of a dead SID, profiles).
+#[cfg(windows)]
+pub fn sweep(dir: &std::path::Path) -> Result<usize, String> {
+    imp::sweep(dir)
+}
+
+#[cfg(not(windows))]
+pub fn sweep(_dir: &std::path::Path) -> Result<usize, String> {
+    Err("AppContainer is Windows-only".into())
 }
 
 #[cfg(not(windows))]
@@ -120,6 +138,7 @@ mod tests {
             }],
             network: false,
             launcher_env: vec![("LOCALAPPDATA".into(), "C:/u".into())],
+            journal_dir: None,
             memory: Some(1 << 30),
             tasks: Some(8),
         };

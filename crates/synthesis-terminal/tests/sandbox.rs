@@ -70,6 +70,27 @@ impl SandboxBackend for Fake {
     }
 }
 
+struct OptIn;
+
+impl SandboxBackend for OptIn {
+    fn name(&self) -> &'static str {
+        "optin"
+    }
+    fn enforce_only(&self) -> bool {
+        true
+    }
+    fn capabilities(&self) -> SandboxCapabilities {
+        Fake(Guarantee::Weak).capabilities()
+    }
+    fn wrap(
+        &self,
+        _: &SandboxPolicy,
+        c: &SandboxedCommand,
+    ) -> Result<SandboxedCommand, SandboxError> {
+        Ok(c.clone())
+    }
+}
+
 struct NoWrap;
 
 impl SandboxBackend for NoWrap {
@@ -86,6 +107,18 @@ impl SandboxBackend for NoWrap {
     ) -> Result<SandboxedCommand, SandboxError> {
         Err(SandboxError::Unsupported("landlock only".into()))
     }
+}
+
+#[tokio::test]
+async fn an_enforce_only_backend_is_not_used_by_best_effort_but_by_enforce() {
+    let rt = TerminalRuntime::new(SandboxMode::BestEffort).with_sandbox_backend(Arc::new(OptIn));
+    let _f = open(&rt, Some(SandboxPolicy::default()));
+    let r = run(&rt, ExecSpec::new("true")).await;
+    assert!(r.sandbox.is_none() && r.unsandboxed_by_request, "{r:?}");
+    let rt = TerminalRuntime::new(SandboxMode::Enforce).with_sandbox_backend(Arc::new(OptIn));
+    let _f = open(&rt, Some(SandboxPolicy::default()));
+    let r = run(&rt, ExecSpec::new("true")).await;
+    assert!(r.sandbox.is_some() && !r.unsandboxed_by_request, "{r:?}");
 }
 
 #[tokio::test]

@@ -115,14 +115,18 @@ fn add(out: &mut Vec<Grant>, path: PathBuf, access: Access) {
 /// - `writable_roots` and `tmp_dir`: modify (read, write, delete; not change permissions).
 /// - `readonly_paths` that exist and lie in a writable root: cut, then read-only. The container
 ///   has no delete right on them, so they cannot be removed or renamed, and `Modify` does not
-///   include deleting a directory's children through the directory. The parent (`.git`) can
-///   still be renamed away as a whole, which carries `.git/hooks` with it: a documented residual.
+///   include deleting a directory's children through the directory.
+/// - `parent_guards` that exist (`.git`): guarded, so the directory itself cannot be renamed or
+///   deleted (its children are `Modify`). Applied after the cuts, before the grants.
 /// - `deny_paths` that exist and lie inside a granted root: cut, nothing granted. Outside every
 ///   granted root a path is unreachable anyway.
 ///
 /// A path that does not exist cannot carry an ACE: a protected path that is created later is NOT
 /// protected (same limit as bubblewrap's nonexistent `deny_paths`).
-pub(crate) fn plan_grants(p: &SandboxPolicy) -> Result<Vec<Grant>, SandboxError> {
+pub(crate) fn plan_grants(
+    p: &SandboxPolicy,
+    protected: &[String],
+) -> Result<Vec<Grant>, SandboxError> {
     let bad = |m: String| SandboxError::InvalidPolicy(m);
     let norm =
         |path: &Path| -> PathBuf { PathBuf::from(simplify(&canon_lossy(path).to_string_lossy())) };
@@ -141,10 +145,23 @@ pub(crate) fn plan_grants(p: &SandboxPolicy) -> Result<Vec<Grant>, SandboxError>
                 path.display()
             )));
         }
+        if let Some(hit) = protected.iter().find(|d| is_under(d, &k)) {
+            return Err(bad(format!(
+                "{what} {}: too broad, it contains {hit} (the user profile, Windows, Program Files, ProgramData, the Synthesis state or the sandbox helper)",
+                path.display()
+            )));
+        }
+        if let Some(j) = protected.last().filter(|j| is_under(&k, j)) {
+            return Err(bad(format!(
+                "{what} {}: inside the sandbox journal {j}",
+                path.display()
+            )));
+        }
         Ok(n)
     };
     let mut out: Vec<Grant> = vec![];
     let mut cuts: Vec<Grant> = vec![];
+    let mut guards: Vec<Grant> = vec![];
     let mut writable = vec![];
     for r in p.readable_roots.iter().filter(|r| r.exists()) {
         add(&mut out, check(r, "readable root")?, Access::Read);
@@ -166,14 +183,61 @@ pub(crate) fn plan_grants(p: &SandboxPolicy) -> Result<Vec<Grant>, SandboxError>
             add(&mut cuts, n, Access::ReadOnly);
         }
     }
+    for g in p.parent_guards().iter().filter(|g| g.exists()) {
+        add(&mut guards, norm(g), Access::Guard);
+    }
     for d in p.deny_paths.iter().filter(|d| d.exists()) {
         let n = norm(d);
         if in_granted(&fold(&n.to_string_lossy())) {
             add(&mut cuts, n, Access::Hide);
         }
     }
+    cuts.extend(guards);
     cuts.extend(out);
     Ok(cuts)
+}
+
+/// Directory of the sandbox journal: `$SYNT_HOME/sandbox-journal`, else `%USERPROFILE%\.synt/...`.
+fn journal_dir() -> Option<PathBuf> {
+    let home = |k: &str| {
+        std::env::var_os(k)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let base = home("SYNT_HOME").or_else(|| home("USERPROFILE").map(|u| u.join(".synt")))?;
+    Some(base.join("sandbox-journal"))
+}
+
+/// Folded directories no grant may equal or contain, journal LAST (grants below it are refused too).
+fn protected_dirs(helper: &Path, journal: &Path) -> Vec<String> {
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    let mut v: Vec<PathBuf> = [
+        "USERPROFILE",
+        "SystemRoot",
+        "windir",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
+        "SYNT_HOME",
+    ]
+    .iter()
+    .filter_map(|k| env(k))
+    .collect();
+    v.extend(env("USERPROFILE").map(|u| u.join(".synt")));
+    v.extend(helper.parent().map(Path::to_path_buf));
+    let mut out: Vec<String> = v
+        .iter()
+        .map(|d| fold(&simplify(&canon_lossy(d).to_string_lossy())))
+        .collect();
+    out.sort();
+    out.dedup();
+    out.push(fold(&simplify(&canon_lossy(journal).to_string_lossy())));
+    out
 }
 
 fn exe_name() -> String {
@@ -245,7 +309,8 @@ impl AppContainerBackend {
         appcontainer_probe().clone().map(Self::new)
     }
 
-    /// `PATH` lookup that also tries `.exe` and `.com` (batch files must go through `cmd.exe`).
+    /// `PATH` lookup that tries `.exe` and `.com` before the bare name (batch files must go through
+    /// `cmd.exe`).
     fn resolve(c: &SandboxedCommand) -> Option<PathBuf> {
         let prog = Path::new(&c.program);
         if prog.is_absolute() {
@@ -258,7 +323,8 @@ impl AppContainerBackend {
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var_os("PATH"))?;
         std::env::split_paths(&path).find_map(|d| {
-            ["", ".exe", ".com"].iter().find_map(|ext| {
+            // `x.exe` before an extensionless `x` (a planted file named like the tool)
+            [".exe", ".com", ""].iter().find_map(|ext| {
                 let mut f = d.join(prog).into_os_string();
                 f.push(ext);
                 let f = PathBuf::from(f);
@@ -273,6 +339,10 @@ impl SandboxBackend for AppContainerBackend {
         "appcontainer"
     }
 
+    fn enforce_only(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> SandboxCapabilities {
         SandboxCapabilities {
             filesystem: Guarantee::Weak,
@@ -282,8 +352,8 @@ impl SandboxBackend for AppContainerBackend {
                 "AppContainer (low-box token): files are reachable only where the policy grants them (explicit ACEs for a per-run container SID, removed at exit) plus the system locations every container may read (Windows, Program Files); `deny_paths` and `readonly_paths` inside a granted root are cut off from the grant (no access, or read only); the original ACLs are restored at exit".into(),
                 "network: no capabilities, so no outbound network and no access to services on the host's loopback (a container can still reach itself over loopback); `--network loopback` and `hosts` are refused (a loopback exemption needs administrator rights)".into(),
                 "Job Object: kill on close, memory and process-count limits, no clipboard/desktop/handle UI access; only the three standard handles are inherited".into(),
-                "NOT enforced: protection of a guarded directory's PARENT (`.git`) against rename, rlimits other than memory/process count, files under a path that did not exist at start; a launcher killed outright leaves its ACEs (of a dead SID) behind".into(),
-                "never run on a real Windows machine by the authors, CI only: Weak, not a security boundary".into(),
+                "NOT enforced: one run at a time per protected path (a second one is refused), rlimits other than memory/process count, files under a path that did not exist at start; a launcher killed outright leaves its changes until the next run restores them from the journal".into(),
+                "used only under --sandbox enforce (never by best-effort); never run on a real Windows machine by the authors, CI only: Weak, not a security boundary".into(),
             ],
         }
     }
@@ -304,6 +374,9 @@ impl SandboxBackend for AppContainerBackend {
             }
         };
         crate::linux::helper_outside_writable(&self.helper, policy)?;
+        let journal = journal_dir().ok_or_else(|| {
+            SandboxError::Unavailable("appcontainer: neither SYNT_HOME nor USERPROFILE is set, there is nowhere to keep the crash-recovery journal".into())
+        })?;
         let program = if c.program.is_empty() {
             PathBuf::new() // the preflight wraps an empty command; it is never run
         } else {
@@ -313,6 +386,11 @@ impl SandboxBackend for AppContainerBackend {
         };
         let mut line = quote_arg(&program.to_string_lossy());
         for a in &c.args {
+            if a.to_str().is_some_and(|a| a.contains('\0')) {
+                return Err(SandboxError::Unsupported(
+                    "appcontainer: NUL in an argument".into(),
+                ));
+            }
             let a = a.to_str().ok_or_else(|| {
                 SandboxError::Unsupported("appcontainer: arguments must be UTF-8".into())
             })?;
@@ -323,7 +401,8 @@ impl SandboxBackend for AppContainerBackend {
             version: VERSION,
             program,
             command_line: line,
-            grants: plan_grants(policy)?,
+            grants: plan_grants(policy, &protected_dirs(&self.helper, &journal))?,
+            journal_dir: Some(journal),
             network,
             launcher_env: LAUNCHER_ENV
                 .iter()
@@ -487,7 +566,7 @@ mod tests {
             let td = tempfile::tempdir().unwrap();
             let root = dunce::canonicalize(td.path()).unwrap();
             let p = pol(&root);
-            let g = plan_grants(&p).unwrap();
+            let g = plan_grants(&p, &[]).unwrap();
             let of = |a: Access| -> Vec<&Path> {
                 g.iter()
                     .filter(|x| x.access == a)
@@ -506,7 +585,14 @@ mod tests {
             assert_eq!(of(Access::ReadOnly), [root.join("ws/.git/hooks").as_path()]);
             // only the deny inside a granted root needs a cut; ~/.ssh is unreachable anyway
             assert_eq!(of(Access::Hide), [root.join("ws/secret").as_path()]);
-            // cuts come first, then reads and writes
+            assert_eq!(of(Access::Guard), [root.join("ws/.git").as_path()]);
+            // cuts, then guards, then reads and writes
+            let rank = |a: Access| match a {
+                Access::ReadOnly | Access::Hide => 0,
+                Access::Guard => 1,
+                _ => 2,
+            };
+            assert!(g.windows(2).all(|w| rank(w[0].access) <= rank(w[1].access)));
             let first_allow = g
                 .iter()
                 .position(|x| matches!(x.access, Access::Read | Access::Modify))
@@ -519,18 +605,47 @@ mod tests {
         }
 
         #[test]
+        fn grants_that_contain_protected_dirs_are_refused() {
+            let td = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(td.path()).unwrap();
+            std::fs::create_dir_all(root.join("home/proj")).unwrap();
+            let journal = root.join("home/.synt/sandbox-journal");
+            let prot = vec![
+                fold(&root.join("home").to_string_lossy()),
+                fold(&journal.to_string_lossy()),
+            ];
+            let mk = |w: PathBuf| SandboxPolicy {
+                writable_roots: vec![w],
+                ..Default::default()
+            };
+            // the profile itself and its ancestors: refused; a project inside it: fine
+            for bad in [root.join("home"), root.clone()] {
+                assert!(matches!(
+                    plan_grants(&mk(bad), &prot),
+                    Err(SandboxError::InvalidPolicy(_))
+                ));
+            }
+            assert!(plan_grants(&mk(root.join("home/proj")), &prot).is_ok());
+            // nothing inside the journal directory either
+            assert!(matches!(
+                plan_grants(&mk(journal.join("x")), &prot),
+                Err(SandboxError::InvalidPolicy(_))
+            ));
+        }
+
+        #[test]
         fn drive_roots_and_unc_are_refused() {
             let mut p = SandboxPolicy {
                 writable_roots: vec![PathBuf::from(r"C:\")],
                 ..Default::default()
             };
             assert!(matches!(
-                plan_grants(&p),
+                plan_grants(&p, &[]),
                 Err(SandboxError::InvalidPolicy(_))
             ));
             p.writable_roots = vec![PathBuf::from(r"\\server\share\x")];
             assert!(matches!(
-                plan_grants(&p),
+                plan_grants(&p, &[]),
                 Err(SandboxError::InvalidPolicy(_))
             ));
         }

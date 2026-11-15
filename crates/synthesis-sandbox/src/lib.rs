@@ -465,6 +465,11 @@ impl std::error::Error for SandboxError {}
 pub trait SandboxBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> SandboxCapabilities;
+    /// Used only under `--sandbox enforce`, never as the best-effort backend (it edits ACLs of the
+    /// user's real directories and has only CI evidence): the Windows AppContainer.
+    fn enforce_only(&self) -> bool {
+        false
+    }
     /// What this backend guarantees for `mode`. `None` = cannot honour it (the runtime refuses
     /// under `Enforce`). `Allow` restricts nothing, so it is trivially `Strong`. The default
     /// knows `Deny` only (`capabilities().network`); backends that can do `Loopback` override.
