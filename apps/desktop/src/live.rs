@@ -249,6 +249,68 @@ impl Dialog {
         }
     }
 
+    /// A confirmation whose first (default) option only keeps things as they are. Enter on it is safe to arm at
+    /// once (it can only cancel); the other options stay locked until the person engages the dialog. The first
+    /// option's key is checked, not assumed. The typed `/clean` confirmation (`DialogKind::Clean`) is not one.
+    pub fn safe_default(&self) -> bool {
+        matches!(
+            &self.kind,
+            DialogKind::Picker {
+                kind: PickerKind::Bypass
+                    | PickerKind::MemConfirm
+                    | PickerKind::Trust
+                    | PickerKind::Revoke
+                    | PickerKind::Clean
+                    | PickerKind::CloseWorkspace,
+                ..
+            }
+        ) && self.sel == 0
+            && self
+                .options
+                .first()
+                .is_some_and(|(k, _)| matches!(k.as_str(), "cancel" | "keep" | "no"))
+    }
+
+    /// What `TuiView::auto_ready` is compared with: an agent request's id, or the title of a safe-default
+    /// confirmation. Empty: this dialog is never armed for a bare Enter.
+    pub fn ready_id(&self) -> String {
+        match &self.kind {
+            DialogKind::Picker { title, .. } if self.safe_default() => title.clone(),
+            DialogKind::Picker { .. } | DialogKind::Rewind(_) | DialogKind::Clean(_) => {
+                String::new()
+            }
+            _ => self.id().to_string(),
+        }
+    }
+
+    /// The footer once Enter is armed on a safe-default confirmation (Enter only keeps things as they are).
+    pub fn armed_footer(&self) -> Option<&'static str> {
+        let DialogKind::Picker { kind, .. } = &self.kind else {
+            return None;
+        };
+        if !self.safe_default() {
+            return None;
+        }
+        Some(match kind {
+            PickerKind::Bypass => {
+                "Enter keeps the current mode \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+            }
+            PickerKind::Trust => {
+                "Enter keeps the folder untrusted \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+            }
+            PickerKind::Revoke => {
+                "Enter keeps it trusted \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+            }
+            PickerKind::CloseWorkspace => {
+                "Enter closes nothing \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+            }
+            PickerKind::Clean => {
+                "Enter deletes nothing \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+            }
+            _ => "Enter says no \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects",
+        })
+    }
+
     /// Digits and Enter may answer this dialog: it is a picker the person opened, or they engaged it.
     pub fn answerable(&self) -> bool {
         let send = matches!(
@@ -3502,6 +3564,19 @@ pub fn zone_minutes(t: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bypass confirmation as `Live` raises it: Cancel is first and selected, so a bare Enter cancels.
+    #[test]
+    fn the_real_bypass_dialog_defaults_to_cancel() {
+        let mut l = Live::new();
+        l.ask_bypass();
+        let d = &l.dialogs[0];
+        assert_eq!(
+            (d.sel, d.options[0].0.as_str(), d.options[1].0.as_str()),
+            (0, "cancel", "enable")
+        );
+        assert!(d.safe_default() && d.ready_id() == "Enable bypass permissions?");
+    }
 
     #[test]
     fn a_rename_answer_for_another_session_is_not_applied() {

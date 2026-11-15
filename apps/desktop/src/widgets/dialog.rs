@@ -488,7 +488,10 @@ pub fn dock(
         }
         (DialogKind::Picker { .. }, _) if d.answerable() => "Enter selects \u{b7} Esc closes",
         // a dialog nobody has touched ignores Enter and digits: they were probably meant for the prompt
-        _ if !d.answerable() => locked_hint(enter_ready),
+        _ if !d.answerable() => match d.armed_footer().filter(|_| enter_ready) {
+            Some(t) => t,
+            None => locked_hint(enter_ready),
+        },
         _ => "Enter confirms \u{b7} Esc rejects",
     };
     card = card.child(div().text_color(dim()).child(format!(

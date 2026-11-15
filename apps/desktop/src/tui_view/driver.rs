@@ -983,7 +983,10 @@ impl TuiView {
                 }
             }
             // drawn once, nothing typed ahead (see `refresh`): Enter answers, digits answer except the broadening options
-            let ready = !self.auto_ready.is_empty() && self.auto_ready == lu.live.dialogs[0].id();
+            let ready =
+                !self.auto_ready.is_empty() && self.auto_ready == lu.live.dialogs[0].ready_id();
+            // on a safe-default confirmation only the default (option 1) is ready; the dangerous options need the person's engagement
+            let safe_confirm = lu.live.dialogs[0].safe_default();
             match key {
                 "up" => lu.live.move_sel(false),
                 "down" => lu.live.move_sel(true),
@@ -1001,10 +1004,14 @@ impl TuiView {
                     && !cmd
                     && (lu.live.dialogs[0].answerable()
                         || (ready
-                            && !lu.live.dialogs[0]
-                                .options
-                                .get(usize::from(key.as_bytes()[0] - b'1'))
-                                .is_some_and(|(k, _)| broadens(k)))) =>
+                            && if safe_confirm {
+                                key == "1"
+                            } else {
+                                !lu.live.dialogs[0]
+                                    .options
+                                    .get(usize::from(key.as_bytes()[0] - b'1'))
+                                    .is_some_and(|(k, _)| broadens(k))
+                            })) =>
                 {
                     out = lu.live.pick(usize::from(key.as_bytes()[0] - b'1'), now);
                 }
