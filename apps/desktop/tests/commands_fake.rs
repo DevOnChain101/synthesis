@@ -615,3 +615,60 @@ fn new_session_root_follows_the_selection_and_refuses_instead_of_falling_back() 
             .contains("still starting")
     );
 }
+
+/// The only session of the only folder is closed: the folder stays, with a fresh session and a clean screen.
+fn only_session_is_closed(close_workspace: bool) {
+    use synthesis_desktop::{last_session, tui_view::snapshot};
+    let r = rig();
+    let root = engine::root_of(&r.ws);
+    let mut a = start(&r, None, None, None);
+    run_prompt(&mut a, "only one");
+    let closed = a.engine.sid.clone();
+    let target = if close_workspace {
+        Target::CloseWorkspace(synthesis_view::workspaces::fold_dir(
+            &r.ws.to_string_lossy(),
+        ))
+    } else {
+        Target::Close
+    };
+    let b = start_in(&r, &r.ws, Arc::new(a.engine), target, None);
+    assert_ne!(b.engine.sid, closed, "a fresh session");
+    assert_eq!(b.engine.cwd, root.to_string_lossy());
+    assert!(b.replay.is_none(), "no stale conversation");
+    // what the window paints from: the folder is listed and holds only the fresh session
+    let (mut live, e, _rx) = live_on(b.engine, b.rx, &r.cfg);
+    live.ws_key = live.live_ws_key(); // what `store_loaded` does
+    let ws = live.view.workspaces.find(&root.to_string_lossy());
+    assert!(ws.is_some_and(|w| w.sessions.iter().all(|s| s.id != closed)));
+    assert!(
+        live.view
+            .convo
+            .items
+            .iter()
+            .all(|i| !matches!(i, Item::User(_)))
+    );
+    let snap = snapshot::build(&live, 1_000_000, 0, None);
+    assert_eq!(snap.workspaces.len(), 1, "the open folder stays");
+    let ids: Vec<_> = snap.running.iter().map(|x| x.id.clone()).collect();
+    assert_eq!(ids, std::slice::from_ref(&e.sid));
+    // a restart finds the folder (a fresh session there), never the closed session
+    let home = &r.cfg.synthesis_home;
+    let last = last_session::Last {
+        sid: e.sid.clone(),
+        root: e.cwd.clone(),
+    };
+    last_session::save(home, last_session::LOCAL, &last).unwrap();
+    let (dir, resume) = last_session::from_store(home).expect("restores");
+    assert_eq!((engine::root_of(&dir), resume), (root, None));
+    engine::close_shared(e);
+}
+
+#[test]
+fn closing_the_only_session_keeps_the_folder_with_a_fresh_session() {
+    only_session_is_closed(false);
+}
+
+#[test]
+fn closing_the_only_workspace_keeps_the_folder_with_a_fresh_session() {
+    only_session_is_closed(true);
+}
