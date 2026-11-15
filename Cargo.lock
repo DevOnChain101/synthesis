@@ -7165,6 +7165,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
+ "dunce",
  "futures-util",
  "globset",
  "jsonschema",
@@ -7481,6 +7482,7 @@ dependencies = [
  "sha1 0.10.7",
  "synthesis-config",
  "synthesis-platform",
+ "synthesis-sandbox",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

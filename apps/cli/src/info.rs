@@ -250,6 +250,12 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         Err(e) => out!("browser: not found ({e})"),
     }
     out!(
+        "  mcp stdio servers: confined by the command sandbox (workspace read-only, own temp dir, network none unless `synt.mcp.servers.<name>.network`); NOT sandboxed with --sandbox off, on native Windows, or when a server has `sandbox: false`; http servers are remote and not sandboxed here"
+    );
+    out!(
+        "  browser: NOT in the command sandbox and NOT routed through the egress proxy (only Chrome's own sandbox and the URL policy apply; --no-sandbox is off unless set)"
+    );
+    out!(
         "git: {}",
         git_version(env).unwrap_or_else(|| "not found on PATH".into())
     );

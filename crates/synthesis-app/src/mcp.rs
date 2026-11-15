@@ -7,7 +7,8 @@
 //! only with `--trust-project` AND an explicit approval (`--approve-mcp NAME`, or the USER's
 //! settings `enabledMcpjsonServers` / `enableAllProjectMcpServers`; a project settings file
 //! cannot approve itself) and never when the user settings disable it. Everything else is
-//! reported as skipped and never spawned. Servers are not OS-sandboxed.
+//! reported as skipped and never spawned. Stdio servers run under the command sandbox policy
+//! ([`confine`], [`ServerSandbox`]) unless the sandbox is off or the user opts the server out.
 //! APPROVAL BINDING: an approval is tied to a hash of the definition (name, transport, command,
 //! args, url, env, headers; see [`definition_hash`]). `--approve-mcp NAME` approves the definition
 //! as it is NOW for this run only and prints it with its hash. A persisted approval must be
@@ -18,8 +19,9 @@
 //! `synt.mcp.env_passthrough` (user settings.json only), and the latter only for user-owned
 //! scopes; see `synthesis_mcp::McpOptions::env_passthrough`.
 
+use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -31,9 +33,10 @@ use synthesis_harness::{
     GuardConfig, McpCatalog, McpGuard, McpToolInfo, ServerRules, ToolBox, ToolSource,
 };
 use synthesis_mcp::{
-    McpContent, McpManager, McpOptions, McpServerConfig, McpToolResult, ServerState, expand_vars,
-    expansion_env, parse_claude_servers, parse_synthesis_mcp_servers,
+    Confine, McpContent, McpManager, McpOptions, McpServerConfig, McpToolResult, ServerState,
+    expand_vars, expansion_env, parse_claude_servers, parse_synthesis_mcp_servers,
 };
+use synthesis_sandbox::{EgressEndpoint, NetworkPolicy, SandboxPolicy, SandboxedCommand};
 use synthesis_settings::{ProjectTrust, Settings};
 use synthesis_tools::{
     Block, BoxFuture, Content, ImageSource, SideEffectClass, Tool, ToolOutput, ToolRuntime,
@@ -54,6 +57,12 @@ pub struct Plan {
     pub guard: GuardConfig,
     /// Where oversized MCP results are saved in full.
     pub artifact_dir: Option<std::path::PathBuf>,
+    /// `synt.mcp.servers.<name>` sandbox settings (see [`read_sandbox`]).
+    pub sandbox: HashMap<String, ServerSandbox>,
+    /// The OS sandbox for stdio servers; `None` = they run unconfined (see [`confine`]).
+    pub confine: Option<Confine>,
+    /// Filled by `confine` when best-effort ran a server unconfined; [`start`] reports them.
+    pub fallbacks: Arc<Mutex<Vec<String>>>,
 }
 
 /// Hex prefix length shown and the shortest prefix accepted in `NAME@HASH`.
@@ -379,6 +388,305 @@ pub fn read_guard(user_settings: &Path, project_settings: Option<&Path>) -> Guar
     cfg
 }
 
+/// Network a sandboxed stdio server gets. Default `None`: the safest setting; a server that needs
+/// the network says so in the USER's settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerNet {
+    #[default]
+    None,
+    /// Only `hosts`, through a per-server egress proxy (macOS, Linux/WSL with bubblewrap).
+    Hosts,
+    Full,
+}
+
+/// `synt.mcp.servers.<name>.{network,hosts,writable,sandbox}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerSandbox {
+    /// `sandbox: false`: this server runs outside the OS sandbox (explicit opt-out).
+    pub off: bool,
+    pub network: ServerNet,
+    pub hosts: Vec<String>,
+    /// Absolute directories the server may write (the workspace is read-only otherwise).
+    pub writable: Vec<PathBuf>,
+}
+
+/// Sandbox settings per server. The USER file, then the MANAGED file (which replaces a server's
+/// entry), may relax (`network`, `hosts`, `writable`, `sandbox: false`). A trusted project file
+/// (`None` when untrusted) can only tighten: `network: "none"`. An unknown `network` value means
+/// `none`. A managed `synt.mcp.requireSandbox: true` forbids `sandbox: false` everywhere.
+pub fn read_sandbox(
+    user: &Path,
+    managed: &Path,
+    project: Option<&Path>,
+) -> HashMap<String, ServerSandbox> {
+    let mut out: HashMap<String, ServerSandbox> = HashMap::new();
+    let servers = |p: &Path| {
+        read_obj(p)
+            .and_then(|v| v.pointer("/synt/mcp/servers").cloned())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    };
+    for p in [user, managed] {
+        for (name, r) in servers(p) {
+            let list = |k: &str| -> Vec<String> {
+                r.get(k)
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default()
+            };
+            out.insert(
+                name,
+                ServerSandbox {
+                    off: r.get("sandbox").and_then(Value::as_bool) == Some(false),
+                    network: match r.get("network").and_then(Value::as_str) {
+                        Some("hosts") => ServerNet::Hosts,
+                        Some("full") => ServerNet::Full,
+                        _ => ServerNet::None,
+                    },
+                    hosts: list("hosts"),
+                    writable: list("writable").into_iter().map(PathBuf::from).collect(),
+                },
+            );
+        }
+    }
+    // managed `synt.mcp.requireSandbox: true`: no server may opt out, whatever the user set
+    if read_obj(managed).and_then(|v| {
+        v.pointer("/synt/mcp/requireSandbox")
+            .and_then(Value::as_bool)
+    }) == Some(true)
+    {
+        out.values_mut().for_each(|e| e.off = false);
+    }
+    for (name, r) in project.map(servers).unwrap_or_default() {
+        if r.get("network").and_then(Value::as_str) == Some("none")
+            && let Some(e) = out.get_mut(&name)
+        {
+            e.network = ServerNet::None;
+        }
+    }
+    out
+}
+
+/// The policy one stdio server runs under: the run's command policy, but the workspace is
+/// read-only (writes only to the declared `writable` directories), a private temp dir of its own,
+/// and the network the server's settings give (`Hosts` needs `endpoint`).
+fn server_policy(
+    base: &SandboxPolicy,
+    ws_root: &Path,
+    rules: &ServerSandbox,
+    tmp: PathBuf,
+    endpoint: Option<EgressEndpoint>,
+) -> Result<SandboxPolicy, String> {
+    let mut p = base.clone();
+    p.writable_roots = rules
+        .writable
+        .iter()
+        .map(|w| {
+            base.check_read_root(w)
+                .map_err(|e| format!("writable: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    // The workspace is no longer writable, so its protected paths (.git/hooks, .git/config,
+    // .synt, AGENTS.md) only matter where a declared writable root contains or lies inside one.
+    let canon = |p: &Path| canon_lossy(p);
+    let writable: Vec<PathBuf> = p.writable_roots.iter().map(|w| canon(w)).collect();
+    p.readonly_paths.retain(|r| {
+        let r = canon(r);
+        writable
+            .iter()
+            .any(|w| r.starts_with(w) || w.starts_with(&r))
+    });
+    p.readable_roots.push(ws_root.to_path_buf());
+    p.tmp_dir = Some(tmp);
+    p.network = match (rules.network, endpoint) {
+        (ServerNet::None, _) => NetworkPolicy::Deny,
+        (ServerNet::Full, _) => NetworkPolicy::Allow,
+        (ServerNet::Hosts, Some(ep)) => NetworkPolicy::Proxied(ep),
+        (ServerNet::Hosts, None) => return Err("network hosts: no egress proxy".into()),
+    };
+    Ok(p)
+}
+
+/// Canonical form of the longest existing prefix of `p` plus the missing tail.
+fn canon_lossy(p: &Path) -> PathBuf {
+    let mut tail = vec![];
+    let mut cur = p;
+    loop {
+        if let Ok(c) = dunce::canonicalize(cur) {
+            return tail.iter().rev().fold(c, |a, t| a.join(t));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(par), Some(n)) => {
+                tail.push(n);
+                cur = par;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+const SANDBOX_HINT: &str = " (it runs in the OS sandbox: no network unless synt.mcp.servers.<name>.network is \"hosts\" or \"full\", $HOME and the workspace are not writable unless listed in \"writable\"; or set sandbox to false in your user settings to run it outside)";
+
+/// The OS sandbox for stdio servers. `base` is the run's command policy. `strict` (sandbox
+/// enforce): a server that cannot be confined is not started; otherwise (best-effort) it runs
+/// unconfined and the reason lands in `fallbacks` and the event stream. A server with
+/// `sandbox: false` is never confined. The per-server egress proxies (`network: hosts`) are
+/// started HERE, up front: the launch closure runs inside the async connect, where starting
+/// the proxy's own runtime would panic, so it only looks them up.
+#[allow(clippy::too_many_arguments)]
+pub fn confine(
+    base: SandboxPolicy,
+    ws_root: PathBuf,
+    tmp_root: PathBuf,
+    servers: &[McpServerConfig],
+    rules: HashMap<String, ServerSandbox>,
+    strict: bool,
+    slot: Arc<Mutex<Option<synthesis_harness::EventSink>>>,
+    fallbacks: Arc<Mutex<Vec<String>>>,
+) -> Confine {
+    type Proxy = Result<(crate::egress::EgressRun, EgressEndpoint), String>;
+    let backend_name = synthesis_sandbox::detect().name();
+    let proxies: HashMap<String, Proxy> = servers
+        .iter()
+        .filter_map(|s| {
+            let r = rules_for(&rules, s);
+            (!r.off && r.network == ServerNet::Hosts).then(|| {
+                let p = if r.hosts.is_empty() {
+                    Err("network \"hosts\" needs a non-empty \"hosts\" list".into())
+                } else {
+                    crate::egress::start(r.hosts, backend_name, slot.clone())
+                };
+                (s.name.clone(), p)
+            })
+        })
+        .collect();
+    Confine(Arc::new(move |cfg, cmd| {
+        let r = rules_for(&rules, cfg);
+        if r.off {
+            return Ok(cmd);
+        }
+        let go = || -> Result<SandboxedCommand, String> {
+            let backend = synthesis_sandbox::detect();
+            let endpoint = match (r.network, proxies.get(&cfg.name)) {
+                (ServerNet::Hosts, Some(Ok((_, ep)))) => Some(ep.clone()),
+                (ServerNet::Hosts, Some(Err(e))) => return Err(e.clone()),
+                (ServerNet::Hosts, None) => return Err("no egress proxy for this server".into()),
+                _ => None,
+            };
+            // not the name itself: it is repository-controlled text for project servers
+            let tag: String = Sha256::digest(cfg.name.as_bytes())
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let tmp = tmp_root.join(tag);
+            create_private(&tmp)?;
+            let p = server_policy(&base, &ws_root, &r, tmp, endpoint)?;
+            let caps = backend.capabilities();
+            let need = p.required.max(synthesis_sandbox::Guarantee::Weak);
+            if caps.filesystem < need || backend.network_guarantee(&p.network) < need {
+                return Err(format!(
+                    "{} cannot confine this server (filesystem {:?}, network {:?})",
+                    backend.name(),
+                    caps.filesystem,
+                    backend.network_guarantee(&p.network)
+                ));
+            }
+            backend.wrap(&p, &cmd).map_err(|e| e.to_string())
+        };
+        match go() {
+            Err(e) if !strict => {
+                let text = format!(
+                    "MCP server \"{}\" runs UNCONFINED, outside the OS sandbox ({})",
+                    san(&cfg.name),
+                    san(&e)
+                );
+                if let Some(s) = slot.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+                    s.emit(
+                        &synthesis_harness::Scope::default(),
+                        synthesis_events::Event::Notice {
+                            level: "warning".into(),
+                            text: text.clone(),
+                        },
+                    );
+                }
+                fallbacks
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(text);
+                Ok(cmd)
+            }
+            other => other.map_err(|e| format!("{e}{SANDBOX_HINT}")),
+        }
+    }))
+}
+
+/// A repository's server only ever gets the safest setting, whatever the user set for a server
+/// of the same name.
+fn rules_for(rules: &HashMap<String, ServerSandbox>, cfg: &McpServerConfig) -> ServerSandbox {
+    let user_owned = matches!(
+        cfg.scope.as_deref(),
+        None | Some("user" | "local" | "synthesis")
+    );
+    rules
+        .get(&cfg.name)
+        .filter(|_| user_owned)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn create_private(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Startup notices about stdio servers: which run outside the OS sandbox, which are confined and
+/// with what network. `confined` = the run has a `confine`.
+pub fn confinement_notices(
+    servers: &[McpServerConfig],
+    rules: &HashMap<String, ServerSandbox>,
+    confined: bool,
+) -> Vec<String> {
+    servers
+        .iter()
+        .filter(|s| s.command.is_some() && s.url.is_none())
+        .map(|s| {
+            let (n, r) = (s.name.as_str(), rules_for(rules, s));
+            if !confined || r.off {
+                format!(
+                    "MCP server \"{}\" runs OUTSIDE the OS sandbox ({}): it has your privileges",
+                    san(n),
+                    if r.off {
+                        "sandbox disabled for it in your settings"
+                    } else {
+                        "the sandbox is off for this run, or unavailable here"
+                    }
+                )
+            } else {
+                format!(
+                    "MCP server \"{}\" will start in the OS sandbox (workspace read-only, $HOME not writable), network {}{}",
+                    san(n),
+                    match r.network {
+                        ServerNet::None => "none",
+                        ServerNet::Hosts => "hosts",
+                        ServerNet::Full => "full (unrestricted)",
+                    },
+                    if r.network == ServerNet::None {
+                        " (synt.mcp.servers.<name>.network: \"hosts\" or \"full\" if it needs one)"
+                    } else {
+                        ""
+                    }
+                )
+            }
+        })
+        .collect()
+}
+
 /// `user_cfg` must be loaded with `ProjectTrust::Untrusted` (no project layer in it).
 pub fn plan(
     user_cfg: &Config,
@@ -534,6 +842,9 @@ pub fn plan_on(
         env_passthrough: vec![],
         guard: GuardConfig::default(),
         artifact_dir: None,
+        sandbox: HashMap::new(),
+        confine: None,
+        fallbacks: Arc::default(),
     }
 }
 
@@ -613,22 +924,31 @@ pub async fn start(plan: &Plan, env: &Env, cwd: &Path) -> (Arc<McpManager>, Atta
             env: env.clone(),
             env_passthrough: plan.env_passthrough.clone(),
             artifact_dir: plan.artifact_dir.clone(),
+            confine: plan.confine.clone(),
             ..McpOptions::default()
         },
     ));
     mgr.start().await;
-    let warnings = mgr
+    let mut warnings: Vec<String> = mgr
         .status()
         .into_iter()
         .filter(|s| s.state == ServerState::Failed)
         .map(|s| {
+            let hint = plan.confine.is_some()
+                && plan
+                    .servers
+                    .iter()
+                    .find(|c| c.name == s.name)
+                    .is_some_and(|c| !rules_for(&plan.sandbox, c).off);
             format!(
-                "MCP server \"{}\" failed to start: {}",
+                "MCP server \"{}\" failed to start: {}{}",
                 san(&s.name),
-                san(&s.error.unwrap_or_default())
+                san(&s.error.unwrap_or_default()),
+                if hint { SANDBOX_HINT } else { "" }
             )
         })
         .collect();
+    warnings.append(&mut plan.fallbacks.lock().unwrap_or_else(|e| e.into_inner()));
     let live = Arc::new(Live {
         mgr: mgr.clone(),
         cache: Mutex::new((0, vec![])),
@@ -1492,6 +1812,157 @@ impl Tool for McpTool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sandbox_settings_user_and_managed_relax_the_project_can_only_tighten() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |n: &str, v: serde_json::Value| {
+            let p = d.path().join(n);
+            std::fs::write(&p, json!({"synt": {"mcp": {"servers": v}}}).to_string()).unwrap();
+            p
+        };
+        let user = w(
+            "u",
+            json!({"a": {"network": "full", "sandbox": false}, "b": {"network": "hosts", "hosts": ["x.test"]}, "c": {"network": "banana"}}),
+        );
+        let managed = w("m", json!({"b": {"network": "none"}}));
+        let project = w(
+            "p",
+            json!({"a": {"network": "none"}, "z": {"network": "full", "sandbox": false}}),
+        );
+        let r = read_sandbox(&user, &managed, Some(&project));
+        assert!(
+            r["a"].off && r["a"].network == ServerNet::None,
+            "project tightens, cannot un-opt-out"
+        );
+        assert_eq!(
+            r["b"],
+            ServerSandbox::default(),
+            "managed replaces the entry"
+        );
+        assert_eq!(r["c"].network, ServerNet::None, "unknown value = none");
+        assert!(!r.contains_key("z"), "a project cannot relax a server");
+        let r = read_sandbox(&user, &managed, None);
+        assert_eq!(r["a"].network, ServerNet::Full);
+    }
+
+    #[test]
+    fn a_project_server_never_inherits_a_users_relaxation_of_the_same_name() {
+        let rules = HashMap::from([(
+            "gh".to_string(),
+            ServerSandbox {
+                off: true,
+                network: ServerNet::Full,
+                ..Default::default()
+            },
+        )]);
+        let mut c = McpServerConfig::stdio("gh", "x", vec![]);
+        for (scope, off) in [("user", true), ("local", true), ("project", false)] {
+            c.scope = Some(scope.into());
+            assert_eq!(rules_for(&rules, &c).off, off, "{scope}");
+        }
+        let n = confinement_notices(&[c], &rules, true);
+        assert!(
+            n[0].contains("will start in the OS sandbox") && n[0].contains("network none"),
+            "{n:?}"
+        );
+    }
+
+    #[test]
+    fn writable_rejects_home_denied_paths_and_symlinks_to_them_and_keeps_protected_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(d.path()).unwrap().join("ws");
+        let secret = ws.parent().unwrap().join("secret");
+        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        let mut base = SandboxPolicy::standard(&ws, &ws.join("t"));
+        base.deny_paths = vec![secret.clone()];
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, ws.parent().unwrap().join("link")).unwrap();
+        let mut bad = vec![
+            secret.clone(),
+            ws.parent().unwrap().to_path_buf(), // an ancestor of a denied path
+            secret.join("sub"),
+        ];
+        bad.extend(std::env::var_os("HOME").map(PathBuf::from));
+        #[cfg(unix)]
+        bad.push(ws.parent().unwrap().join("link"));
+        for w in bad {
+            let r = ServerSandbox {
+                writable: vec![w.clone()],
+                ..Default::default()
+            };
+            assert!(
+                server_policy(&base, &ws, &r, ws.join("m"), None).is_err(),
+                "{w:?}"
+            );
+        }
+        // a writable root over the workspace keeps .git/hooks read-only; one elsewhere needs none
+        let over = ServerSandbox {
+            writable: vec![ws.clone()],
+            ..Default::default()
+        };
+        let p = server_policy(&base, &ws, &over, ws.join("m"), None).unwrap();
+        assert!(p.readonly_paths.contains(&ws.join(".git/hooks")));
+        let inside = ServerSandbox {
+            writable: vec![ws.join(".git")],
+            ..Default::default()
+        };
+        let p = server_policy(&base, &ws, &inside, ws.join("m"), None).unwrap();
+        assert!(p.readonly_paths.contains(&ws.join(".git/hooks")));
+        let out = ServerSandbox {
+            writable: vec![ws.join("out")],
+            ..Default::default()
+        };
+        std::fs::create_dir_all(ws.join("out")).unwrap();
+        let p = server_policy(&base, &ws, &out, ws.join("m"), None).unwrap();
+        assert!(p.readonly_paths.is_empty());
+    }
+
+    #[test]
+    fn managed_require_sandbox_forbids_the_opt_out() {
+        let d = tempfile::tempdir().unwrap();
+        let user = d.path().join("u");
+        let managed = d.path().join("m");
+        std::fs::write(
+            &user,
+            json!({"synt": {"mcp": {"servers": {"a": {"sandbox": false}}}}}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &managed,
+            json!({"synt": {"mcp": {"requireSandbox": true}}}).to_string(),
+        )
+        .unwrap();
+        assert!(!read_sandbox(&user, &managed, None)["a"].off);
+        assert!(read_sandbox(&user, &d.path().join("none"), None)["a"].off);
+    }
+
+    #[test]
+    fn server_policy_makes_the_workspace_read_only_and_checks_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(d.path()).unwrap();
+        let mut base = SandboxPolicy::standard(&ws, &ws.join("t"));
+        base.network = NetworkPolicy::Allow;
+        let p = server_policy(&base, &ws, &ServerSandbox::default(), ws.join("m"), None).unwrap();
+        assert!(p.writable_roots.is_empty() && p.readonly_paths.is_empty());
+        assert!(p.readable_roots.contains(&ws));
+        assert_eq!(p.network, NetworkPolicy::Deny);
+        assert_eq!(p.tmp_dir, Some(ws.join("m")));
+        let hosts = ServerSandbox {
+            network: ServerNet::Hosts,
+            ..Default::default()
+        };
+        assert!(server_policy(&base, &ws, &hosts, ws.join("m"), None).is_err());
+        let bad = ServerSandbox {
+            writable: vec!["/".into()],
+            ..Default::default()
+        };
+        assert!(
+            server_policy(&base, &ws, &bad, ws.join("m"), None).is_err(),
+            "a filesystem root is refused"
+        );
+    }
     use super::*;
     use synthesis_config::Config;
 

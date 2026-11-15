@@ -736,7 +736,7 @@ fn mcp_script() -> Value {
 fn mcp_tool_is_callable_when_allowed_gated_otherwise_and_result_is_untrusted_data() {
     let (rig, _) = mcp_rig(&[]);
     rig.settings(json!({"permissions": {"allow": ["mcp__echo__echo"]}}));
-    let (o, ev) = rig.run(mcp_script(), &[]);
+    let (o, ev) = rig.run(mcp_script(), &["--sandbox", "off"]);
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -755,7 +755,7 @@ fn mcp_tool_is_callable_when_allowed_gated_otherwise_and_result_is_untrusted_dat
 
     // No allow rule: the call is gated (ask -> refused, with approval events).
     let (rig, _) = mcp_rig(&[]);
-    let (_, ev) = rig.run(mcp_script(), &[]);
+    let (_, ev) = rig.run(mcp_script(), &["--sandbox", "off"]);
     assert_eq!(
         find(&ev, "tool.completed")[0]["payload"]["status"],
         "denied"
@@ -774,13 +774,22 @@ fn untrusted_project_mcp_server_is_never_started() {
         &json!({"mcpServers": {"proj": {"command": "python3", "args": [srv, marker]}}}).to_string(),
     );
     let none = json!([{"text": "ok"}]);
-    let (o, _) = rig.run(none.clone(), &[]);
+    let (o, _) = rig.run(none.clone(), &["--sandbox", "off"]);
     assert!(!marker.exists(), "untrusted repo must not spawn anything");
     assert!(String::from_utf8_lossy(&o.stderr).contains("not trusted"));
-    let (o, _) = rig.run(none.clone(), &["--trust-project"]);
+    let (o, _) = rig.run(none.clone(), &["--trust-project", "--sandbox", "off"]);
     assert!(!marker.exists(), "trusted but not approved");
     assert!(String::from_utf8_lossy(&o.stderr).contains("not approved"));
-    rig.run(none, &["--trust-project", "--approve-mcp", "proj"]);
+    rig.run(
+        none,
+        &[
+            "--trust-project",
+            "--approve-mcp",
+            "proj",
+            "--sandbox",
+            "off",
+        ],
+    );
     assert!(marker.exists(), "trusted and approved");
 }
 
@@ -1175,7 +1184,10 @@ fn hostile_mcp_json_cannot_exfiltrate_environment_secrets() {
         }})
         .to_string(),
     );
-    let mut c = rig.cmd(json!([{"text": "ok"}]), &["--trust-project"]);
+    let mut c = rig.cmd(
+        json!([{"text": "ok"}]),
+        &["--trust-project", "--sandbox", "off"],
+    );
     for n in ["envleak", "envleak2", "ctrl", "urlleak", "hdrleak"] {
         c.args(["--approve-mcp", n]);
     }
@@ -1219,7 +1231,16 @@ fn edited_mcp_json_invalidates_a_hash_bound_approval() {
     };
     write("");
     let none = json!([{"text": "ok"}]);
-    let (o, ev) = rig.run(none.clone(), &["--trust-project", "--approve-mcp", "proj"]);
+    let (o, ev) = rig.run(
+        none.clone(),
+        &[
+            "--trust-project",
+            "--approve-mcp",
+            "proj",
+            "--sandbox",
+            "off",
+        ],
+    );
     assert!(marker.exists());
     // the approval stays in the record, not only on stderr
     assert!(
@@ -1245,7 +1266,13 @@ fn edited_mcp_json_invalidates_a_hash_bound_approval() {
     std::fs::remove_file(&marker).unwrap();
     rig.run(
         none.clone(),
-        &["--trust-project", "--approve-mcp", &approve],
+        &[
+            "--trust-project",
+            "--approve-mcp",
+            &approve,
+            "--sandbox",
+            "off",
+        ],
     );
     assert!(
         marker.exists(),
@@ -1254,7 +1281,16 @@ fn edited_mcp_json_invalidates_a_hash_bound_approval() {
 
     std::fs::remove_file(&marker).unwrap();
     write("; echo changed");
-    let (o, _) = rig.run(none, &["--trust-project", "--approve-mcp", &approve]);
+    let (o, _) = rig.run(
+        none,
+        &[
+            "--trust-project",
+            "--approve-mcp",
+            &approve,
+            "--sandbox",
+            "off",
+        ],
+    );
     assert!(!marker.exists(), "edited definition must not start");
     assert!(String::from_utf8_lossy(&o.stderr).contains("does not match"));
 }

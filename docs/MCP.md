@@ -19,6 +19,16 @@ User scope lives in `<SYNT_HOME>/synt.json` under `mcpServers`; project scope in
 
 * `${VAR}` / `${VAR:-default}` work in command, args, env, url and headers. A user-scope entry may read the variables listed in `synt.mcp.env_passthrough` (user `settings.json`); project and local entries only the child-env allowlist. A variable that is unset or empty makes the server fail to start with a message naming it (it never starts unauthenticated).
 * A stdio server's own `env` map is the opt-in path for credentials: names like `JIRA_API_TOKEN` are passed as written (precedence: inherited allowlist < server `env`), the parent's other secrets never are. HOME/USERPROFILE/APPDATA are inherited (`mcp-remote` keeps its OAuth cache in `~/.mcp-auth`).
+* **Sandbox.** A stdio server starts inside the command sandbox (`--sandbox enforce`, the default): the workspace is read-only, it has its own temp dir, and the network is OFF unless you say otherwise in your USER (or managed) `settings.json`:
+  ```json
+  { "synt": { "mcp": { "servers": {
+      "github": { "network": "hosts", "hosts": ["api.github.com"] },
+      "docs":   { "network": "full" },
+      "mcp-remote-thing": { "writable": ["/home/me/.mcp-auth"], "network": "full" },
+      "legacy": { "sandbox": false }
+  } } } }
+  ```
+  `network` is `none` (default), `hosts` (only the listed hosts, through a per-server proxy) or `full`; `writable` lists extra writable directories; `sandbox: false` runs that one server outside the sandbox with your privileges (managed settings can forbid it with `synt.mcp.requireSandbox: true`). A project `.synt/settings.json` can only set `network: "none"`; a server from `.mcp.json` ignores your relaxations. A server that needs the network and has none fails to start or connect: set `network`. Not sandboxed: servers on native Windows or with `--sandbox off`, and HTTP/SSE/WebSocket servers (remote). `synt run` prints one line per stdio server saying which applies.
 * HTTP/SSE `headers` are sent on every request (`Authorization: Bearer ...`, `Basic ...`, any other scheme, `X-*`, `Cookie`) and never to another origin after a redirect.
 * `type: http` is streamable HTTP; `type: sse` is the legacy transport; a bare `url` tries http, then sse. SSE needs https (http only to localhost) and refuses private addresses.
 * Per server: `tool_timeout_sec | tool_timeout_ms | timeout` (ms), `startup_timeout_sec | startup_timeout_ms`, `enabled_tools`, `disabled_tools`.

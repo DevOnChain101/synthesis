@@ -20,6 +20,7 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ClientHandler, Peer, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use synthesis_config::Env;
+use synthesis_sandbox::SandboxedCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,20 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the same name wins.
 pub const RESOURCE_READ: &str = "resource_read";
 pub const PROMPT_GET: &str = "prompt_get";
+
+/// Confines a stdio server's launch command (the OS sandbox, supplied by the application so this
+/// crate stays free of policy). An `Err` fails that server closed: it is never started unconfined.
+pub type ConfineFn =
+    dyn Fn(&McpServerConfig, SandboxedCommand) -> Result<SandboxedCommand, String> + Send + Sync;
+
+#[derive(Clone)]
+pub struct Confine(pub Arc<ConfineFn>);
+
+impl std::fmt::Debug for Confine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Confine")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct McpOptions {
@@ -64,6 +79,8 @@ pub struct McpOptions {
     /// Waits before each automatic reconnect attempt after a connection was lost (bounded; the
     /// failing call itself is never retried: it may have been a write). Empty = no auto-reconnect.
     pub reconnect_backoff: Vec<Duration>,
+    /// `None`: stdio servers run unconfined (sandbox off, or native Windows).
+    pub confine: Option<Confine>,
 }
 
 impl Default for McpOptions {
@@ -82,6 +99,7 @@ impl Default for McpOptions {
                 Duration::from_secs(4),
                 Duration::from_secs(15),
             ],
+            confine: None,
         }
     }
 }
@@ -557,11 +575,25 @@ impl Shared {
         } else {
             command.clone().into()
         };
-        let mut wrap = CommandWrap::with_new(program, |c| {
-            c.args(&cfg.args)
-                .current_dir(&self.opts.cwd)
-                .env_clear()
-                .envs(&env);
+        let mut cmd = SandboxedCommand {
+            program,
+            args: cfg.args.iter().map(Into::into).collect(),
+            env: env.iter().map(|(k, v)| (k.into(), v.into())).collect(),
+            cwd: Some(self.opts.cwd.clone()),
+            clear_env: true,
+        };
+        if let Some(Confine(f)) = &self.opts.confine {
+            cmd = f(cfg, cmd).map_err(|e| format!("not started, sandbox: {e}"))?;
+        }
+        let mut wrap = CommandWrap::with_new(&cmd.program, |c| {
+            c.args(&cmd.args);
+            if let Some(d) = &cmd.cwd {
+                c.current_dir(d);
+            }
+            if cmd.clear_env {
+                c.env_clear();
+            }
+            c.envs(cmd.env.iter().map(|(k, v)| (k, v)));
         });
         #[cfg(unix)]
         wrap.wrap(process_wrap::tokio::ProcessGroup::leader());

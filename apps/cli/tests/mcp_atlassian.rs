@@ -66,7 +66,7 @@ impl Rig {
             .arg(self.dir.path().join("ws"))
             .arg("--provider")
             .arg(format!("fake:{}", s.display()))
-            .args(["--prompt", "update the page", "--sandbox", "best-effort"])
+            .args(["--prompt", "update the page", "--sandbox", "off"])
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())

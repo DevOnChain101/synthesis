@@ -87,7 +87,7 @@ impl Rig {
             .arg(self.ws())
             .arg("--provider")
             .arg(format!("fake:{}", s.display()))
-            .args(["--prompt", "update the page", "--sandbox", "best-effort"])
+            .args(["--prompt", "update the page", "--sandbox", "off"])
             .args(flags)
             .output()
             .unwrap();

@@ -374,6 +374,9 @@ fn an_attempt_starts_no_mcp_server_and_runs_no_project_hook() {
             "x",
             "--no-cost-cap",
             "--no-worktree",
+            // the server writes outside the workspace: the control must not be blocked by the sandbox
+            "--sandbox",
+            "off",
         ])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap())

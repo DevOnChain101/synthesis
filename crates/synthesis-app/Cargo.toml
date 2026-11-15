@@ -22,6 +22,7 @@ synthesis-config = { path = "../synthesis-config" }
 synthesis-context = { path = "../synthesis-context" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-egress = { path = "../synthesis-egress" }
+dunce = "1.0.5"
 synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }
 synthesis-hooks = { path = "../synthesis-hooks" }

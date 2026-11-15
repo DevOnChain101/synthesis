@@ -1,6 +1,6 @@
 # Sandbox hardening (design, owner-approved)
 
-Status: egress control (section 1), the Linux read allow-list (section 2) and resource limits (section 3) are implemented. Sections 4 and 5 are approved design, built in later PRs. Sections 2 and 3 were written on macOS: the Linux paths compile for Linux and are covered by unit tests plus the Linux CI jobs, nothing else. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
+Status: egress control (section 1), the Linux read allow-list (section 2), resource limits (section 3) and the sandbox for stdio MCP servers (section 4) are implemented; the browser part of section 4 is NOT built (what is true instead is stated there). Section 5 is approved design. Sections 2 and 3 were written on macOS: the Linux paths compile for Linux and are covered by unit tests plus the Linux CI jobs, nothing else. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
 
 ## Owner decisions
 
@@ -112,9 +112,38 @@ Honest limits:
 - Seatbelt (macOS) and Windows get none of the rlimits or the cgroup.
 - None of this has run on a real Linux host except through CI; `limits.rs` checks the rlimits through `/proc/self/limits`, the cgroup path is only reported.
 
-## 4. MCP and browser sandbox (not built)
+## 4. MCP and browser sandbox
 
-User-owned stdio MCP servers and the browser worker run outside the OS sandbox today. Plan: MCP stdio servers run through the same `wrap` with a policy of their own (network `hosts` with the server's declared hosts, private temp, no workspace write unless declared); the browser worker keeps Chrome's own sandbox and uses the egress proxy through the absolute-form seam (section 1) so its navigation policy and the proxy agree. Both stay opt-in until measured.
+### Stdio MCP servers (implemented)
+
+`synthesis-mcp` spawns a stdio server through `McpOptions.confine` (`Confine`, supplied by `synthesis-app`: `mcp::confine`). The launch command (scrubbed env, `clear_env`) goes through the SAME `SandboxBackend::wrap` as the shell, with the run's command policy (deny paths, Linux read allow-list and toolchain roots, rlimits and cgroup limits from `synt.sandbox.limits.*`) changed in four ways: the workspace is READ-ONLY (it moves from `writable_roots` to `readable_roots`; `additionalDirectories` are not granted), the only writable places are the server's own private temp dir (`<artifacts>/mcp-tmp/<hash of name>`, 0700, `TMPDIR` forced) and the directories it declares, `readonly_paths` (`.git/hooks`, `.git/config`, `.synt`, `AGENTS.md`...) are kept only where a declared writable root contains or lies inside one, so a `writable` over the workspace or `.git` does not reopen them, and the network is the server's. The per-server egress proxies of `network: hosts` are started up front when the run is prepared (the launch itself happens inside the async connect, where a proxy cannot be started); a proxy that fails to start fails that server closed. MCP env scrubbing is unchanged: the command still starts from `Env::child_env` plus the server's own `env` map. A server whose launch cannot be confined is NOT started (fail closed; the status error says why and how to opt out), except in `--sandbox best-effort`, where it runs unconfined and a `notice` event (level warning) says so. A server that fails to start while sandboxed gets the knobs (`network`, `writable`, `sandbox`) named in its error.
+
+Per-server settings, `synt.mcp.servers.<name>` in the USER or MANAGED `settings.json` (the managed entry replaces the user's):
+
+| key | values | meaning |
+|---|---|---|
+| `network` | `none` (default), `hosts`, `full` | `none` = `NetworkPolicy::Deny`; `hosts` = a per-server egress proxy (section 1) limited to `hosts`; `full` = `Allow`, no restriction |
+| `hosts` | `["host", "host:port", ...]` | allow-list for `hosts` (same syntax and rules as `--allow-host`); empty = refused |
+| `writable` | `["/abs/dir", ...]` | extra writable directories, checked like `--sandbox-read` (no filesystem root, no `$HOME`, nothing that overlaps a denied path) |
+| `sandbox` | `false` | explicit opt-out: this server runs outside the OS sandbox with your privileges; `synt run` prints a notice naming it. A MANAGED `synt.mcp.requireSandbox: true` forbids it for every server |
+
+Relaxing (`network` other than `none`, `hosts`, `writable`, `sandbox: false`) is read from user and managed settings only. A trusted project `.synt/settings.json` can only tighten (`network: "none"` on a server the user relaxed). A server defined by a repository (scope `project`) ignores every user relaxation, even for the same name. An unknown `network` value means `none`. Default `none` is the safest setting; a server that needs the network (most hosted-API servers, `npx` downloading packages) fails to connect or start until the user sets `hosts` or `full`; servers that cache under `$HOME` (for example `mcp-remote`'s `~/.mcp-auth`) need `writable` or `sandbox: false`.
+
+What is NOT enforced:
+- Native Windows: no backend confines anything, so servers run as before (the default `--sandbox` there is off; with `enforce` the run is refused earlier). `--sandbox off` also leaves them unconfined. Startup prints a `runs OUTSIDE the OS sandbox` notice per server in these cases.
+- HTTP, SSE and WebSocket servers are remote: nothing local to confine; their URL checks (`check_remote_url`) are unchanged.
+- `network: hosts` needs bubblewrap (Linux, WSL2) or Seatbelt (macOS) and the helper on Linux; elsewhere the launch is refused. A host proxy configured in `HTTP(S)_PROXY` is not chained through.
+- The weaknesses of the backend apply (Seatbelt and bubblewrap filesystem are Weak, section 2 and docs/SECURITY.md). A server cannot write the workspace, but it can read all of it, including `.env` files, and it is still a program that may be handed secrets by its own `env` map.
+- The browser credential gate (`browser_login`, saved logins refused while a stdio server is configured, `synt.browser.allow_with_mcp`) is unchanged: it still counts every stdio server, whether sandboxed or not.
+- Not verified on a real Linux or Windows host beyond CI. macOS Seatbelt was exercised locally by `crates/synthesis-app/tests/mcp_sandbox.rs`.
+
+### Browser worker (NOT built; stated, not claimed)
+
+Chrome runs outside the command sandbox and outside the egress proxy. It keeps Chrome's own sandbox, the `UrlPolicy` (private and metadata addresses, rebinding check), a scrubbed environment and its own temp or persistent profile directory. Putting it under `wrap` was judged unsafe to ship without a real machine to measure on:
+- Chrome's own sandbox cannot nest inside Seatbelt (macOS: `sandbox_init` fails in the renderer) and needs unprivileged user namespaces or its own seccomp inside bubblewrap; the only way to make it start is `--no-sandbox`, which would trade a browser-grade sandbox for a weaker one around the process that renders hostile pages.
+- Routing through the egress proxy needs absolute-form forwarding (section 1 seam) and proxy credentials, which Chrome does not accept on the command line (they would need CDP `Fetch.authRequired` handling), and a loopback allowance for its CDP port on the TCP transport.
+
+Until that is built and measured, `synt doctor` prints `browser: NOT in the command sandbox and NOT routed through the egress proxy`, and docs/SECURITY.md says the same. Open work, in order: absolute-form forwarding plus `--proxy-server` with `Fetch.authRequired`; then a Linux Landlock or bubblewrap wrapper tested with Chrome's own sandbox kept on; a macOS wrapper is likely not possible without `--no-sandbox`.
 
 ## 5. Windows
 
