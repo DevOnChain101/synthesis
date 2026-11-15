@@ -247,6 +247,12 @@ impl TaskStart {
         self.baseline.drift().changed
     }
 
+    /// Weakened-test findings and changed check definitions against this snapshot now.
+    pub fn flagged_now(&self) -> Vec<String> {
+        let d = self.baseline.drift();
+        d.weakened.into_iter().chain(d.defs).collect()
+    }
+
     /// A resumed session without a saved snapshot is compared with the last
     /// commit instead of with the (possibly already weakened) current files.
     pub fn take_resumed(ws: &WorkspaceContext) -> Self {
@@ -307,6 +313,7 @@ pub struct CompletionGate {
     /// Files already different from the snapshot when this task began (earlier, unverified
     /// tasks of the session): they alone do not make a Q&A task need the gate.
     preexisting: BTreeSet<String>,
+    preexisting_flagged: BTreeSet<String>,
     /// Commands that failed and then passed on a re-run in this task.
     flaky: BTreeSet<String>,
 }
@@ -327,6 +334,7 @@ impl CompletionGate {
             prev: None,
             start: None,
             preexisting: BTreeSet::new(),
+            preexisting_flagged: BTreeSet::new(),
             flaky: BTreeSet::new(),
         }
     }
@@ -342,6 +350,12 @@ impl CompletionGate {
     /// Paths that already differ from the snapshot at the start of this task.
     pub fn set_preexisting(&mut self, changed: Vec<String>) {
         self.preexisting = changed.into_iter().collect();
+    }
+
+    /// Weakened-test and definition findings that were already there when this task began (a dirty
+    /// tree compared with a HEAD snapshot), not carried over from an earlier task.
+    pub fn set_preexisting_flagged(&mut self, flagged: Vec<String>) {
+        self.preexisting_flagged = flagged.into_iter().collect();
     }
 
     /// [`begin`](Self::begin) with a fresh snapshot of this gate's workspace.
@@ -389,10 +403,13 @@ impl CompletionGate {
             None => None,
         };
         // New changes since this task began, or weakening and definition changes at all (those
-        // carry over from earlier tasks of the session).
+        // carry over from earlier tasks of the session), except what a resumed session's HEAD
+        // snapshot shows of the tree's own dirty state.
         let drifted = drift.as_ref().is_some_and(|d| {
-            !d.weakened.is_empty()
-                || !d.defs.is_empty()
+            d.weakened
+                .iter()
+                .any(|w| !self.preexisting_flagged.contains(w))
+                || d.defs.iter().any(|f| !self.preexisting_flagged.contains(f))
                 || d.changed.iter().any(|f| !self.preexisting.contains(f))
         });
         if !has_user && !st.side_effects && !drifted && st.model_checks.is_empty() {

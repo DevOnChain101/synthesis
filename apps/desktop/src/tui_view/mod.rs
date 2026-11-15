@@ -289,16 +289,15 @@ impl TuiView {
 
     /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
     /// stuck to the newest row unless the person scrolled up.
-    fn refresh(&mut self, window: &mut Window, cx: &gpui::App) {
+    fn refresh(&mut self, window: &mut Window) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
-        // The agent's own requests (approval, plan, question) are ready for Enter once their first frame is drawn
-        // with nothing typed in the prompt: while the dialog is up the keys do not reach the prompt, so an empty
-        // prompt means no Enter in flight was meant for it. A key that arrived before this frame is swallowed.
-        // Digits stay locked for the broadening options ("always allow", auto mode) until the person touches the
-        // dialog (arrow, Tab or click: `engaged`).
-        if lu.prompt.read(cx).value().is_empty()
-            && let Some(d) = lu.live.dialogs.first()
+        // The agent's own requests (approval, plan, question) are ready for Enter once their first frame is drawn,
+        // whatever the prompt holds (a draft left there used to lock Enter until an arrow key): a key that arrived
+        // before this frame is swallowed, and so is one within `ARM_MS` of the dialog appearing. Digits stay locked
+        // for the broadening options ("always allow", auto mode) until the person touches the dialog (arrow, Tab or
+        // click: `engaged`).
+        if let Some(d) = lu.live.dialogs.first()
             && matches!(
                 d.kind,
                 crate::live::DialogKind::Approval(_)
@@ -1074,7 +1073,7 @@ impl Render for TuiView {
         {
             chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
-        self.refresh(window, cx);
+        self.refresh(window);
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
@@ -1706,8 +1705,8 @@ mod tests {
         assert_eq!(pending(&view, vcx), 0);
     }
 
-    /// An approval is ready for Enter once its first frame is drawn (no arrow key first) when nothing is typed in the
-    /// prompt; a key before that frame, or with text typed ahead, is swallowed; a digit never picks a broadening
+    /// An approval is ready for Enter once its first frame is drawn (no arrow key first), also with a draft in the
+    /// prompt; a key before that frame is swallowed; a digit never picks a broadening
     /// option ("always allow") before the person touched the dialog.
     #[gpui::test]
     fn an_approval_answers_enter_after_its_first_frame_and_digits_never_widen_untouched(
@@ -1733,7 +1732,7 @@ mod tests {
         for (typed, drawn, key, left) in [
             (false, true, "enter", 0),
             (false, false, "enter", 1),
-            (true, true, "enter", 1),
+            (true, true, "enter", 0),
             (false, true, "2", 1),
             (false, true, "1", 0),
             (false, true, "3", 0),

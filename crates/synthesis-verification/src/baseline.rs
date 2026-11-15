@@ -112,6 +112,7 @@ impl Baseline {
             .split('\0')
             .filter(|p| {
                 !p.is_empty()
+                    && !in_skipped_dir(root, p)
                     && (is_test_path(p)
                         || is_definition_file(p)
                         || extra.contains(*p)
@@ -191,6 +192,10 @@ impl Baseline {
             _ => a.len != b.len || a.mtime != b.mtime,
         };
         for (p, old) in &self.files {
+            // an older or git-built snapshot may hold build output that `scan` never walks now
+            if in_skipped_dir(&self.root, p) {
+                continue;
+            }
             let watched_def = is_definition_file(p) || self.extra.contains(p);
             let Some(new) = now.get(p) else {
                 d.changed.push(p.clone());
@@ -375,6 +380,20 @@ fn is_build_output_tree(root: &Path, dir: &Path, rel: &str) -> bool {
     !tracked
 }
 
+/// Whether `rel` lies under a directory `scan` skips (same rules as its walk).
+fn in_skipped_dir(root: &Path, rel: &str) -> bool {
+    // recorded although not walked
+    if TOOL_DIRS.iter().any(|d| rel.starts_with(&format!("{d}/"))) {
+        return false;
+    }
+    let parts: Vec<&str> = rel.split('/').collect();
+    parts[..parts.len() - 1].iter().enumerate().any(|(i, n)| {
+        SKIP_DIRS.contains(n)
+            || (i == 0 && ROOT_SKIP_DIRS.contains(n))
+            || (*n == "target" && root.join(parts[..i].join("/")).join("Cargo.toml").exists())
+    })
+}
+
 fn scan(root: &Path, extra: &HashSet<String>) -> (HashMap<String, Entry>, bool) {
     let mut out = HashMap::new();
     let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -447,6 +466,35 @@ mod tests {
         w(p, "src.js", "1");
         let b = Baseline::take(p, vec![]);
         fs::remove_file(p.join("out/target/debug/build/x/depfile_tests.rs")).unwrap();
+        let d = b.drift();
+        assert!(
+            d.changed.is_empty() && d.weakened.is_empty(),
+            "{:?} {:?}",
+            d.changed,
+            d.weakened
+        );
+    }
+
+    #[test]
+    fn a_snapshot_holding_build_output_does_not_report_it_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        w(p, "Cargo.toml", "[package]");
+        w(p, "src.js", "1");
+        let mut b = Baseline::take(p, vec![]);
+        for rel in [
+            "target/debug/build/x/out/depfile_tests.rs",
+            "node_modules/a/t.test.js",
+        ] {
+            let e = entry(&p.join("src.js"), rel, &HashSet::new(), false).unwrap();
+            b.files.insert(
+                rel.into(),
+                Entry {
+                    inline_tests: true,
+                    ..e
+                },
+            );
+        }
         let d = b.drift();
         assert!(
             d.changed.is_empty() && d.weakened.is_empty(),

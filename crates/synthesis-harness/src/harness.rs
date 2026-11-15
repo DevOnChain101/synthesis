@@ -1166,7 +1166,7 @@ impl Harness {
                 // Freeze the planned checks and snapshot tests/definitions before anything changes.
                 if let Some(g) = gate.as_mut() {
                     let prior = lock(&self.starts).get(&task.session_id).cloned();
-                    let reused = prior.is_some();
+                    let (mut taken_now, mut from_head) = (false, false);
                     let start = match prior {
                         Some(s) => s,
                         None => {
@@ -1175,10 +1175,10 @@ impl Harness {
                             // A saved snapshot (restart/resume), else HEAD for a resumed
                             // conversation, else the workspace as it is now. A panicked scan is
                             // retried inline rather than skipped.
-                            let s = tokio::task::spawn_blocking(move || {
+                            let (s, fresh, head) = tokio::task::spawn_blocking(move || {
                                 let file = start_file(&ws);
                                 if let Some(s) = synthesis_verification::TaskStart::load(&file, &ws) {
-                                    return s;
+                                    return (s, false, false);
                                 }
                                 let s = if resumed {
                                     synthesis_verification::TaskStart::take_resumed(&ws)
@@ -1190,17 +1190,18 @@ impl Harness {
                                 {
                                     eprintln!("synt: warning: could not save the verification baseline: {e}");
                                 }
-                                s
+                                (s, !resumed, resumed)
                             })
                             .await
-                            .unwrap_or_else(|_| synthesis_verification::TaskStart::take(&task.workspace));
+                            .unwrap_or_else(|_| (synthesis_verification::TaskStart::take(&task.workspace), true, false));
+                            (taken_now, from_head) = (fresh, head);
                             let s = Arc::new(s);
                             lock(&self.starts).insert(task.session_id.clone(), s.clone());
                             s
                         }
                     };
                     // What earlier unverified tasks already changed is not this task's doing.
-                    let pre = if reused || resumed_conversation {
+                    let pre = if !taken_now {
                         let s = start.clone();
                         tokio::task::spawn_blocking(move || s.changed_now())
                             .await
@@ -1209,6 +1210,15 @@ impl Harness {
                         vec![]
                     };
                     g.set_preexisting(pre);
+                    // A HEAD snapshot just built shows the tree's own dirty state, which is not this task's doing.
+                    if from_head {
+                        let s = start.clone();
+                        g.set_preexisting_flagged(
+                            tokio::task::spawn_blocking(move || s.flagged_now())
+                                .await
+                                .unwrap_or_default(),
+                        );
+                    }
                     g.begin(start);
                 }
                 self.drive(&task, &main, &mut st, &mut gate, &req.criteria)

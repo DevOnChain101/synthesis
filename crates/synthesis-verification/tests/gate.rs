@@ -1282,3 +1282,27 @@ async fn changes_from_earlier_tasks_do_not_make_a_question_need_the_gate() {
     let d = eval_with(&mut g, &st, None).await;
     assert!(matches!(d, GateDecision::Complete(None)), "{d:?}");
 }
+
+#[tokio::test]
+async fn a_dirty_workspace_with_a_weakened_test_does_not_gate_a_chat_turn_but_an_edit_does() {
+    let f = fx(&[("a.test.js", "test('a', () => { assert(1); });\n")]);
+    let mut g = f.gate(GateConfig::default());
+    let start = g.begin_now();
+    // dirty from earlier work: a test file deleted before this task began
+    fs::remove_file(f.ws.cwd.join("a.test.js")).unwrap();
+    g.set_preexisting(start.changed_now());
+    g.set_preexisting_flagged(start.flagged_now());
+    let mut st = state(vec![], &[]);
+    st.side_effects = false;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(
+        matches!(d, GateDecision::Complete(None)),
+        "chat turn: {d:?}"
+    );
+    st.side_effects = true;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(
+        !matches!(d, GateDecision::Complete(None)),
+        "edit turn: {d:?}"
+    );
+}
