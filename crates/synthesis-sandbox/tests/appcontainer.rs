@@ -360,36 +360,58 @@ fn temp_is_private_and_the_policy_tmp_dir_is_writable() {
 #[test]
 fn grandchildren_stay_confined() {
     let (w, other) = (ws(), tempfile::tempdir().unwrap());
+    let probe = probe_in(w.path());
     let target = other.path().join("g.txt");
-    let s = format!("{CMD} /c echo x> {}", target.display());
-    let _ = sh(&pol(w.path()), w.path(), &s);
+    let spawn = |p: &SandboxPolicy| {
+        run(
+            p,
+            w.path(),
+            probe.to_str().unwrap(),
+            &["spawn", target.to_str().unwrap()],
+        )
+    };
+    // the child STARTED (not 3) and its write outside the grants failed (1)
+    let o = spawn(&pol(w.path()));
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
     assert!(!target.exists());
-    // control: the same nested command writes there once the directory is granted
+    // control: the same child writes there once the directory is granted
     let mut p = pol(w.path());
     p.writable_roots.push(canon(other.path()));
-    let ok = sh(&p, w.path(), &s);
-    assert!(target.exists(), "control: {}", text(&ok));
+    let ok = spawn(&p);
+    assert!(
+        ok.status.success() && target.exists(),
+        "control: {}",
+        text(&ok)
+    );
 }
 
 #[test]
 fn the_process_limit_applies_when_exec_is_not_allowed() {
     let w = ws();
-    let nested = format!("{CMD} /c echo ok> nested.txt");
-    // control: a child process is allowed by default
-    // (the outer cmd creates nested.txt for the redirect even when the inner one cannot start,
-    // so the CONTENT is the evidence)
-    let said = |p: &SandboxPolicy| {
-        let o = sh(p, w.path(), &nested);
-        let got = std::fs::read_to_string(w.path().join("nested.txt")).unwrap_or_default();
-        let _ = std::fs::remove_file(w.path().join("nested.txt"));
-        (got.trim().to_string(), text(&o))
+    let probe = probe_in(w.path());
+    let made = w.path().join("g.txt");
+    let spawn = |p: &SandboxPolicy| {
+        let _ = std::fs::remove_file(&made);
+        run(
+            p,
+            w.path(),
+            probe.to_str().unwrap(),
+            &["spawn", made.to_str().unwrap()],
+        )
     };
-    let (got, msg) = said(&pol(w.path()));
-    assert_eq!(got, "ok", "control: {msg}");
+    // control: a child process is allowed by default
+    let c = spawn(&pol(w.path()));
+    assert!(c.status.success() && made.exists(), "control: {}", text(&c));
     let mut p = pol(w.path());
     p.allow_exec = false; // Job Object ActiveProcessLimit = 1
-    let (got, msg) = said(&p);
-    assert_ne!(got, "ok", "the nested process ran: {msg}");
+    let o = spawn(&p);
+    assert_eq!(
+        o.status.code(),
+        Some(3),
+        "the child must not start: {}",
+        text(&o)
+    );
+    assert!(!made.exists());
 }
 
 /// `icacls <dir> /T` with the directory's own path taken out, so two runs compare equal.
@@ -408,22 +430,14 @@ fn acls_are_restored_after_the_run_cuts_included() {
     let before = acl_tree(&r);
     let o = sh(&p, &r, "echo hi> made.txt");
     assert!(o.status.success(), "{}", text(&o));
-    let after = acl_tree(&r);
-    // no per-run container SID (S-1-15-2-...) is left on any path, the file the run created included
     assert!(r.join("made.txt").exists());
-    assert!(!after.contains("S-1-15-2-"), "{after}");
-    // and everything else is exactly as it was (the new file aside)
-    let strip = |t: &str| {
-        t.split("\n\n")
-            .filter(|b| !b.contains("made.txt"))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    assert_eq!(
-        strip(&before),
-        strip(&after),
-        "before:\n{before}\nafter:\n{after}"
-    );
+    // no per-run container SID (S-1-15-2-...) is left on any path, the file the run created included
+    let with_new_file = acl_tree(&r);
+    assert!(!with_new_file.contains("S-1-15-2-"), "{with_new_file}");
+    // and everything else is exactly as it was
+    std::fs::remove_file(r.join("made.txt")).unwrap();
+    let after = acl_tree(&r);
+    assert_eq!(before, after, "before:\n{before}\nafter:\n{after}");
 }
 
 #[test]

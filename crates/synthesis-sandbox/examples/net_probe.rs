@@ -2,6 +2,9 @@
 //! is an xcrun shim that dies under Seatbelt). Exit 0 = the operation worked, 1 = it failed.
 //!   net_probe unix <socket-path>   connect to a unix socket
 //!   net_probe connect <addr>       TCP connect to <addr> (e.g. 127.0.0.1:4000); exit 0 = connected
+//!   net_probe child <file>         write "x" to <file>; exit 0 = it worked
+//!   net_probe spawn <file>         run `net_probe child <file>` as a child process: exit 0 = the child
+//!                                  worked, 1 = it ran and failed, 3 = it could not be started
 //!   net_probe sleep <secs>         just wait (keeps a sandbox alive while a test looks at it)
 //!   net_probe loopback             bind/listen/connect/accept on 127.0.0.1 and ::1, then probe two
 //!                                  non-loopback addresses; prints LOOPBACK_OK, remote_denied/REMOTE_CONNECTED
@@ -40,6 +43,25 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["child", file] => match std::fs::write(file, "x") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("write {file}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["spawn", file] => match std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(["child", file])
+                .status()
+        }) {
+            Ok(s) if s.success() => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("spawn: {e}");
+                ExitCode::from(3)
+            }
+        },
         ["sleep", secs] => {
             std::thread::sleep(Duration::from_secs(secs.parse().unwrap_or(1)));
             ExitCode::SUCCESS
@@ -62,7 +84,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: net_probe unix <path> | connect <addr> | loopback");
+            eprintln!(
+                "usage: net_probe unix <path> | connect <addr> | child <file> | spawn <file> | sleep <secs> | loopback"
+            );
             ExitCode::from(2)
         }
     }
