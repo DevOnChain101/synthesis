@@ -352,6 +352,7 @@ impl SandboxBackend for AppContainerBackend {
                 "AppContainer (low-box token): files are reachable only where the policy grants them (explicit ACEs for a per-run container SID, removed at exit) plus the system locations every container may read (Windows, Program Files); `deny_paths` and `readonly_paths` inside a granted root are cut off from the grant (no access, or read only); the original ACLs are restored at exit".into(),
                 "network: no capabilities, so no outbound network and no access to services on the host's loopback (a container can still reach itself over loopback); `--network loopback` and `hosts` are refused (a loopback exemption needs administrator rights)".into(),
                 "Job Object: kill on close, memory and process-count limits, no clipboard/desktop/handle UI access; only the three standard handles are inherited".into(),
+                "KNOWN LIMITATION: files the container creates could not be deleted by it on CI (unresolved; tools that delete files, such as git lock handling or package managers, may fail)".into(),
                 "NOT enforced: one run at a time per protected path (a second one is refused), rlimits other than memory/process count, files under a path that did not exist at start; a launcher killed outright leaves its changes until the next run restores them from the journal".into(),
                 "used only under --sandbox enforce (never by best-effort); never run on a real Windows machine by the authors, CI only: Weak, not a security boundary".into(),
             ],

@@ -388,6 +388,9 @@ fn restore_sddl(path: &Path, sddl: &str) -> Result<(), String> {
 }
 
 fn undo_rec(path: &Path, sid: PSID, rec: &UndoRec) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(()); // renamed or deleted since: nothing left to restore there
+    }
     match rec {
         UndoRec::Revoke => {
             let wpath = wide(path.as_os_str());
@@ -441,10 +444,11 @@ fn change(path: &Path, sid: PSID, access: Access) -> Result<(), String> {
     write_dacl(&wpath, path, acl, PROTECTED_DACL_SECURITY_INFORMATION)
 }
 
-// Mutexes: `synt-sb-run-<profile>` is held by the launcher for the whole run, so a journal whose
+// Mutexes (`Global\` namespace: `Local\` is per logon session, and a run started from an ssh or
+// service session next to a console one must be seen as alive): `synt-sb-run-<profile>` is held by the launcher for the whole run, so a journal whose
 // mutex can be taken belongs to a dead launcher; `synt-sb-setup` serialises start and sweep.
 fn mutex_name(tail: &str) -> Vec<u16> {
-    wide(OsStr::new(&format!("Local\\synt-sb-{tail}")))
+    wide(OsStr::new(&format!("Global\\synt-sb-{tail}")))
 }
 
 fn create_mutex(tail: &str, own: bool) -> Result<(Handle, bool), String> {
@@ -499,38 +503,99 @@ fn launcher_dead(profile: &str) -> bool {
     }
 }
 
-fn journals(dir: &Path) -> Vec<(PathBuf, JournalFile)> {
+/// A journal is trusted input only after this: it was written by us, but it sits on disk, and a
+/// recovery writes ACLs on the paths it names.
+fn validate(stem: &str, j: &JournalFile) -> Result<(), String> {
+    let digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+    if j.profile != stem
+        || !j.profile.starts_with("synt.sb.")
+        || !j
+            .profile
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    {
+        return Err(format!("bad profile name {:?}", j.profile));
+    }
+    if !j.sid.starts_with("S-1-15-2-") || !digits(&j.sid) {
+        return Err(format!("bad container SID {:?}", j.sid));
+    }
+    for (p, rec) in &j.entries {
+        let t = p.to_string_lossy();
+        let b = t.as_bytes();
+        let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+        if !drive || t.contains("..") || t.contains('\0') {
+            return Err(format!("path {t:?} is not an absolute local drive path"));
+        }
+        if let UndoRec::Restore { sddl } = rec
+            && (!sddl.starts_with("D:")
+                || sddl.len() > 65_536
+                || ["O:", "G:", "S:"].iter().any(|m| sddl.contains(m)))
+        {
+            return Err("saved descriptor is not a DACL-only SDDL".into());
+        }
+    }
+    Ok(())
+}
+
+/// Every `*.json` journal; one that cannot be read, parsed or validated is an `Err` (never
+/// dropped silently: callers treat it as a conflict and keep it).
+fn journals(dir: &Path) -> Vec<(PathBuf, Result<JournalFile, String>)> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            let j = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
-            Some((p, j))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .map(|p| {
+            let stem = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let j = std::fs::read(&p)
+                .map_err(|e| e.to_string())
+                .and_then(|b| serde_json::from_slice::<JournalFile>(&b).map_err(|e| e.to_string()))
+                .and_then(|j| validate(&stem, &j).map(|()| j));
+            (p, j)
         })
         .collect()
 }
 
-/// Undo what a dead launcher left (caller holds the setup mutex).
+/// Undo what a dead launcher left (caller holds the setup mutex). A journal whose undo failed in
+/// any step is KEPT (and so is the profile) to be retried; an invalid one is left alone.
 fn recover(dir: &Path) -> usize {
     let mut n = 0;
     for (file, j) in journals(dir) {
+        let j = match j {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!(
+                    "synthesis-sandbox-exec: recovery: ignoring {} ({e})",
+                    file.display()
+                );
+                continue;
+            }
+        };
         if !launcher_dead(&j.profile) {
             continue;
         }
+        let mut ok = false;
         if let Ok(sid) = sid_from_text(&j.sid) {
+            ok = true;
             for (p, rec) in j.entries.iter().rev() {
                 if let Err(e) = undo_rec(p, sid.0, rec) {
+                    ok = false;
                     eprintln!("synthesis-sandbox-exec: recovery: {e}");
                 }
             }
         }
-        let w = wide(OsStr::new(&j.profile));
-        // SAFETY: NUL-terminated name.
-        unsafe { DeleteAppContainerProfile(w.as_ptr()) };
-        let _ = std::fs::remove_file(file);
-        n += 1;
+        if ok {
+            let w = wide(OsStr::new(&j.profile));
+            // SAFETY: NUL-terminated name.
+            unsafe { DeleteAppContainerProfile(w.as_ptr()) };
+            let _ = std::fs::remove_file(file);
+            n += 1;
+        }
     }
     n
 }
@@ -560,7 +625,20 @@ fn check_conflicts(dir: &Path, grants: &[Grant]) -> Result<(), String> {
         .filter(|g| !matches!(g.access, Access::Read | Access::Modify))
         .map(|g| fold(&g.path))
         .collect();
-    for (_, j) in journals(dir) {
+    for (file, j) in journals(dir) {
+        let j = match j {
+            Ok(j) => j,
+            Err(e) if ours.is_empty() => {
+                let _ = e;
+                continue;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "unreadable or invalid sandbox journal {} ({e}): it may record protections that are still in place, so no path can be cut until it is dealt with; remove it by hand once you have checked what it records",
+                    file.display()
+                ));
+            }
+        };
         if launcher_dead(&j.profile) {
             continue;
         }
@@ -592,7 +670,10 @@ impl Applied {
         self.file.entries.clone_from(&self.done);
         if let Some(p) = &self.journal {
             let t = serde_json::to_vec(&self.file).map_err(|e| e.to_string())?;
-            std::fs::write(p, t).map_err(|e| format!("journal {}: {e}", p.display()))?;
+            // temp file + rename: a crash never leaves a half-written journal
+            let tmp = p.with_extension("tmp");
+            std::fs::write(&tmp, t).map_err(|e| format!("journal {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, p).map_err(|e| format!("journal {}: {e}", p.display()))?;
         }
         Ok(())
     }
@@ -600,12 +681,16 @@ impl Applied {
 
 impl Drop for Applied {
     fn drop(&mut self) {
+        let mut failed = false;
         for (p, rec) in self.done.iter().rev() {
             if let Err(e) = undo_rec(p, self.sid, rec) {
+                failed = true;
                 eprintln!("synthesis-sandbox-exec: cleanup: {e}");
             }
         }
-        if let Some(p) = &self.journal {
+        // a journal of an undo that failed is the only record of what is still changed: keep it
+        // (the launcher is gone afterwards, so the next run retries it)
+        if let (Some(p), false) = (&self.journal, failed) {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -626,6 +711,9 @@ fn apply(profile: &Profile, spec: &Spec) -> Result<Applied, String> {
         Some(d) => {
             std::fs::create_dir_all(d).map_err(|e| format!("journal dir {}: {e}", d.display()))?;
             let setup = Setup::take()?;
+            // owner and SYSTEM only, no inheritance from the parent: the journal decides what a
+            // later recovery writes, so no container (or other user) may touch it
+            restore_sddl(d, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)")?;
             recover(d);
             check_conflicts(d, &spec.grants)?;
             a.journal = Some(d.join(format!("{}.json", profile.text)));
@@ -655,10 +743,28 @@ fn apply(profile: &Profile, spec: &Spec) -> Result<Applied, String> {
 /// The job to terminate on Ctrl-C / console close, so the normal cleanup runs.
 static JOB: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
+/// Publishes the job to the console handler and withdraws it on drop, on every path out of `run`.
+struct JobSlot;
+
+impl JobSlot {
+    fn set(h: HANDLE) -> Self {
+        JOB.store(h, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for JobSlot {
+    fn drop(&mut self) {
+        JOB.store(null_mut(), Ordering::SeqCst);
+    }
+}
+
 unsafe extern "system" fn on_ctrl(_event: u32) -> i32 {
     let j = JOB.load(Ordering::SeqCst);
     if !j.is_null() {
-        // SAFETY: the pointer is cleared before the job handle is closed.
+        // SAFETY: `JobSlot` withdraws the pointer before the job handle is closed (it is declared
+        // after the job, so it drops first, also on early returns). A handler running at that exact
+        // instant could still see a just-closed handle: terminating a stale handle fails, harmlessly.
         unsafe { TerminateJobObject(j, 1) };
     }
     TRUE
@@ -799,7 +905,7 @@ pub fn run(spec: &Spec) -> Result<u32, String> {
     // Declaration order is drop order on every early return: job, then ACEs, then profile.
     let acl = apply(&profile, spec)?;
     let jobh = job(spec)?;
-    JOB.store(jobh.0, Ordering::SeqCst);
+    let jobslot = JobSlot::set(jobh.0);
     // SAFETY: `on_ctrl` is a valid handler for the life of the process.
     unsafe { SetConsoleCtrlHandler(Some(on_ctrl), TRUE) };
 
@@ -934,7 +1040,7 @@ pub fn run(spec: &Spec) -> Result<u32, String> {
         return Err(last_error("GetExitCodeProcess"));
     }
     drop(process);
-    JOB.store(null_mut(), Ordering::SeqCst);
+    drop(jobslot);
     drop(jobh); // kill leftovers before the ACEs and the profile go
     drop(acl);
     drop(profile);

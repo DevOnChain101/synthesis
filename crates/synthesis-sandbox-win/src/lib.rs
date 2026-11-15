@@ -72,8 +72,9 @@ pub struct Spec {
     pub network: bool,
     /// Variables the system needs to build the container's process (CreateProcess fails with
     /// `ERROR_ENVVAR_NOT_FOUND` when `LOCALAPPDATA` and the like are missing, which a scrubbed
-    /// environment lacks). The launcher sets each one in ITS OWN environment when absent, so the
-    /// program inherits them too: paths of the user's profile, not secrets.
+    /// environment lacks). The launcher adds each one that is absent to the explicit environment block it
+    /// passes to the program (its own environment is not modified): paths of the user's profile,
+    /// not secrets.
     pub launcher_env: Vec<(String, String)>,
     /// Directory for the journal of what a run changed (original DACLs, profile name): a launcher
     /// killed outright leaves it, and the next launcher (or [`sweep`]) undoes it. `None`: no

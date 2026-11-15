@@ -659,3 +659,67 @@ fn a_hard_link_from_the_workspace_to_an_outside_file_is_restored_after_the_run()
         "control: the owner still reads it"
     );
 }
+
+fn plain_run(p: &SandboxPolicy, r: &Path, j: &Path) -> Output {
+    wrapped_in(p, r, CMD, &["/c", "echo hi"], Some(j))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn an_unreadable_or_invalid_journal_is_a_conflict_for_cuts_and_is_kept() {
+    let (_w, r, p) = guarded();
+    let j = tempfile::tempdir().unwrap();
+    // a policy without cuts is not affected
+    let plain = pol(&r);
+    for (name, body) in [
+        ("garbage.json", "not json".to_string()),
+        // well-formed, but names a profile that is not ours and a path outside any drive letter
+        (
+            "synt.sb.1.evil.json",
+            serde_json::json!({"profile": "evil", "sid": "S-1-5-18",
+                "entries": [[r"\\server\share\x", "revoke"]]})
+            .to_string(),
+        ),
+    ] {
+        let f = j.path().join(name);
+        std::fs::write(&f, body).unwrap();
+        let o = plain_run(&p, &r, j.path());
+        assert_eq!(o.status.code(), Some(126), "{name}: {}", text(&o));
+        assert!(
+            text(&o).contains("unreadable or invalid sandbox journal"),
+            "{}",
+            text(&o)
+        );
+        assert!(f.exists(), "{name} was dropped");
+        assert!(
+            plain_run(&plain, &r, j.path()).status.success(),
+            "{name}: no cuts"
+        );
+        assert!(f.exists(), "{name} was dropped by a run without cuts");
+        std::fs::remove_file(f).unwrap();
+    }
+    assert!(plain_run(&p, &r, j.path()).status.success());
+}
+
+#[test]
+fn a_journal_whose_undo_fails_is_kept() {
+    let (_w, r, p) = guarded();
+    let j = tempfile::tempdir().unwrap();
+    // a dead run (no such mutex holder) whose saved descriptor cannot be applied
+    let f = j.path().join("synt.sb.1.dead.json");
+    std::fs::write(
+        &f,
+        serde_json::json!({"profile": "synt.sb.1.dead", "sid": "S-1-15-2-1-2-3-4-5-6-7",
+            "entries": [[r.join("open").display().to_string(), {"restore": {"sddl": "D:(not valid)"}}]]})
+        .to_string(),
+    )
+    .unwrap();
+    let o = plain_run(&p, &r, j.path());
+    assert!(
+        o.status.success(),
+        "the new run itself is fine: {}",
+        text(&o)
+    );
+    assert!(f.exists(), "a journal of a failed recovery was deleted");
+}
