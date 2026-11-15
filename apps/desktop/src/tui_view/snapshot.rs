@@ -399,19 +399,6 @@ pub fn ago(now: i64, then: i64) -> String {
     }
 }
 
-/// `124000` -> `124,000`.
-fn grouped(n: u64) -> String {
-    let d = n.to_string();
-    let mut out = String::new();
-    for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// The Usage month section of the classic CLI (tokens): the calendar grid, its heat levels and the summary rows,
 /// from the shared `synthesis_view::usage` month logic. `days` empty: the history is still being read.
 fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32, now: i64) -> MonthUse {
@@ -709,7 +696,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 (
                     "context".into(),
                     if window > 0 {
-                        format!("{} tokens", grouped(window))
+                        format!("{} / {}", tok(used), tok(window))
                     } else {
                         "?".into()
                     },
@@ -1156,7 +1143,7 @@ mod tests {
         );
         assert_eq!(
             s.session.rows[2],
-            ("context".to_string(), "200,000 tokens".to_string())
+            ("context".to_string(), "124k / 200k".to_string())
         );
         assert_eq!(
             (
@@ -1166,6 +1153,22 @@ mod tests {
             ),
             (ActKind::Prompt, "run the tests", 0)
         );
+        // /clear: the per-conversation figures start over, the window and the clock stay
+        l.view.panes.apply(&ev(
+            4,
+            "2026-11-07T10:00:03Z",
+            "assistant.message",
+            json!({"stop_reason": "tool_use", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}]}),
+        ));
+        l.clear_conversation();
+        let c = build(&l, parse_ts("2026-11-07T10:00:04Z").unwrap(), 0, None);
+        assert_eq!(
+            c.session.rows[3],
+            ("tools".to_string(), "0 used".to_string())
+        );
+        assert!(c.context.turns == "0" && c.activity.is_empty());
+        assert!(l.view.panes.commands.is_empty() && l.view.panes.files.is_empty());
         assert_eq!(s.topology.len(), 8);
         let tools = s.topology.iter().find(|n| n.pos == Pos::Tools).unwrap();
         assert_eq!(tools.state, NodeState::Active, "{tools:?}");
@@ -1183,7 +1186,6 @@ mod tests {
         assert_eq!(clock_text(ms, 0), "Sat Nov 07\u{a0}\u{a0}07:54:38");
         assert_eq!(uptime(2540), "42m 20s");
         assert_eq!(uptime(3725), "1h 02m 05s");
-        assert_eq!(grouped(128_000), "128,000");
         assert_eq!(ago(10 * 60_000 + 60_000, 60_000), "10m ago");
     }
 

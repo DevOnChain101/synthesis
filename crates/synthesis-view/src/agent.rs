@@ -314,6 +314,18 @@ pub fn viewable_screenshot(root: &std::path::Path, path: &str) -> Option<std::pa
 }
 
 impl AgentPanes {
+    /// `/clear`: the panes start over. Only a background process that still runs keeps its row (so
+    /// its Kill button works and its exit still lands), without the output printed so far.
+    pub fn clear_history(&mut self) {
+        let mut commands = std::mem::take(&mut self.commands);
+        commands.retain(|c| c.source == CmdSource::Process && c.state == CmdState::Running);
+        commands.iter_mut().for_each(|c| c.tail.clear());
+        *self = Self {
+            commands,
+            ..Default::default()
+        };
+    }
+
     pub fn sub(&self, id: &str) -> Option<&SubAgent> {
         self.subs.iter().find(|s| s.id == id)
     }
@@ -920,6 +932,53 @@ mod tests {
         assert_eq!(b.agent.as_deref(), Some("a1"));
         assert_eq!(exit_code_of("x [exit code 12]"), Some(12));
         assert_eq!(exit_code_of("no code"), None);
+    }
+
+    #[test]
+    fn clear_history_keeps_only_the_running_process_without_its_output() {
+        let mut p = run(vec![
+            ev(
+                1,
+                None,
+                "tool.requested",
+                json!({"tool_call_id": "c1", "name": "Bash", "input": {"command": "ls"},
+                    "input_truncated": false}),
+            ),
+            ev(
+                2,
+                None,
+                "process.spawned",
+                json!({"process_id": "p1", "name": "npm run dev", "pid": 7}),
+            ),
+            ev(
+                3,
+                None,
+                "process.output",
+                json!({"process_id": "p1", "tool_call_id": "b2", "text": "ready\n", "seq": 1}),
+            ),
+            ev(
+                4,
+                None,
+                "tool.requested",
+                json!({"tool_call_id": "w1", "name": "browser_navigate",
+                    "input": {"url": "https://x.test"}, "input_truncated": false}),
+            ),
+        ]);
+        assert_eq!((p.commands.len(), p.browser.len()), (2, 1));
+        p.clear_history();
+        assert_eq!(p.commands.len(), 1);
+        assert_eq!(
+            (p.commands[0].id.as_str(), p.commands[0].tail.len()),
+            ("p1", 0)
+        );
+        assert!(p.browser.is_empty() && p.url.is_empty() && p.files.is_empty());
+        p.apply(&ev(
+            5,
+            None,
+            "process.exited",
+            json!({"process_id": "p1", "exit_code": 0}),
+        ));
+        assert_eq!(p.commands[0].state, CmdState::Ok);
     }
 
     #[test]
