@@ -279,10 +279,10 @@ impl SandboxBackend for AppContainerBackend {
             network: Guarantee::Weak,
             process_tree: Guarantee::Weak,
             notes: vec![
-                "AppContainer (low-box token): files are reachable only where the policy grants them (explicit ACEs for a per-run container SID, removed at exit) plus the system locations every container may read (Windows, Program Files); `deny_paths` and `readonly_paths` inside a granted root are explicit deny ACEs".into(),
-                "network: no capabilities, so no network at all, loopback included; `--network loopback` and `hosts` are refused (a loopback exemption needs administrator rights)".into(),
+                "AppContainer (low-box token): files are reachable only where the policy grants them (explicit ACEs for a per-run container SID, removed at exit) plus the system locations every container may read (Windows, Program Files); `deny_paths` and `readonly_paths` inside a granted root are cut off from the grant (no access, or read only); the original ACLs are restored at exit".into(),
+                "network: no capabilities, so no outbound network and no access to services on the host's loopback (a container can still reach itself over loopback); `--network loopback` and `hosts` are refused (a loopback exemption needs administrator rights)".into(),
                 "Job Object: kill on close, memory and process-count limits, no clipboard/desktop/handle UI access; only the three standard handles are inherited".into(),
-                "NOT enforced: protection of a guarded directory itself against rename (only its children), rlimits other than memory/process count, files under a path that did not exist at start; a launcher killed outright leaves its ACEs (of a dead SID) behind".into(),
+                "NOT enforced: protection of a guarded directory's PARENT (`.git`) against rename, rlimits other than memory/process count, files under a path that did not exist at start; a launcher killed outright leaves its ACEs (of a dead SID) behind".into(),
                 "never run on a real Windows machine by the authors, CI only: Weak, not a security boundary".into(),
             ],
         }
