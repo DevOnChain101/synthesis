@@ -300,14 +300,18 @@ impl TuiView {
         // person touches the dialog (`engaged`).
         if lu.prompt.read(cx).value().is_empty()
             && let Some(d) = lu.live.dialogs.first()
-            && matches!(
+            && (matches!(
                 d.kind,
                 crate::live::DialogKind::Approval(_)
                     | crate::live::DialogKind::Plan { .. }
                     | crate::live::DialogKind::Question { .. }
-            )
+            ) || d.safe_default())
         {
-            self.auto_ready = d.id().to_string();
+            // a confirmation whose default only keeps things as they are is armed the same way: Enter then only cancels
+            self.auto_ready = d.ready_id();
+        } else if lu.live.dialogs.is_empty() {
+            // the next confirmation (same title) needs its own first frame
+            self.auto_ready.clear();
         }
         // the tabs belong to the session: leaving one keeps them, coming back finds them
         if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
@@ -1763,6 +1767,104 @@ mod tests {
             view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx));
             let n = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
             assert_eq!(n, left, "typed={typed} drawn={drawn} key={key}");
+        }
+    }
+
+    /// A confirmation whose default only keeps things as they are (Bypass, Trust, Revoke, Close workspace, Clean,
+    /// memory confirm) answers a bare Enter after its first frame, with an empty prompt and once armed; digits
+    /// stay locked for every other option; before the first frame or with a draft nothing is answered; the footer
+    /// says what Enter does.
+    #[gpui::test]
+    fn a_safe_default_confirmation_answers_enter_but_never_the_dangerous_option(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::live::{Dialog, DialogKind, Live, PickerKind};
+        cx.update(gpui_component::init);
+        let kinds = [
+            (
+                PickerKind::Bypass,
+                "cancel",
+                "enable",
+                "Enter keeps the current mode",
+            ),
+            (
+                PickerKind::Trust,
+                "no",
+                "session",
+                "Enter keeps the folder untrusted",
+            ),
+            (
+                PickerKind::Revoke,
+                "keep",
+                "revoke",
+                "Enter keeps it trusted",
+            ),
+            (
+                PickerKind::CloseWorkspace,
+                "cancel",
+                "close:k",
+                "Enter closes nothing",
+            ),
+            (PickerKind::Clean, "cancel", "User", "Enter deletes nothing"),
+            (PickerKind::MemConfirm, "no", "yes", "Enter says no"),
+        ];
+        for (kind, safe, risky, footer) in kinds {
+            let dialog = || Dialog {
+                kind: DialogKind::Picker {
+                    kind,
+                    title: format!("{kind:?}?"),
+                    headers: vec![],
+                },
+                options: vec![(safe.into(), "Safe".into()), (risky.into(), "Risky".into())],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            };
+            let d = dialog();
+            assert!(d.safe_default() && !d.answerable(), "{kind:?}");
+            assert!(
+                d.armed_footer().is_some_and(|f| f.starts_with(footer)),
+                "{kind:?}"
+            );
+            // a dangerous option first is never armed
+            let mut bad = dialog();
+            bad.options.swap(0, 1);
+            assert!(
+                !bad.safe_default() && bad.armed_footer().is_none(),
+                "{kind:?}"
+            );
+            // (typed ahead, draw first, key, dialogs left)
+            for (typed, drawn, key, left) in [
+                (false, true, "enter", 0),
+                (false, false, "enter", 1),
+                (true, true, "enter", 1),
+                (false, true, "2", 1),
+                (false, true, "1", 0),
+            ] {
+                let (view, vcx) = cx.add_window_view(|window, cx| {
+                    TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+                });
+                let mut l = Live::new();
+                l.starting = false;
+                view.update(vcx, |t, _| t.set_live(l));
+                if typed {
+                    view.update_in(vcx, |t, window, cx| {
+                        let p = t.live.as_ref().unwrap().prompt.clone();
+                        p.update(cx, |s, cx| s.set_value("half a sentence", window, cx));
+                    });
+                }
+                view.update(vcx, |t, _| {
+                    t.live.as_mut().unwrap().live.dialogs.push(dialog())
+                });
+                if drawn {
+                    vcx.simulate_resize(size(px(1400.), px(900.)));
+                    vcx.run_until_parked();
+                }
+                let ks = gpui::Keystroke::parse(key).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx));
+                let n = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
+                assert_eq!(n, left, "{kind:?} typed={typed} drawn={drawn} key={key}");
+            }
         }
     }
 

@@ -16,7 +16,7 @@ impl TuiView {
         // Enter is armed: nothing in the prompt, the first frame drawn (`refresh`) and the arming delay over
         let enter_ready = lu.live.dialogs.first().is_some_and(|d| {
             !self.auto_ready.is_empty()
-                && self.auto_ready == d.id()
+                && self.auto_ready == d.ready_id()
                 && now_ms() >= d.armed_until
                 && lu.prompt.read(cx).value().is_empty()
         });
