@@ -97,6 +97,16 @@ pub trait WorkerHost {
     fn abort(&mut self, _w: &mut OutcomeWriter, _handle: &mut Self::Handle, _why: &str) {}
 }
 
+/// The decision lifecycle of the outcome (expiry, invalidation, grants, answered decisions):
+/// [`crate::DecisionDriver`] is the real one. Its notes are reported with the tick's errors.
+pub trait Decisions {
+    fn drive(
+        &mut self,
+        w: &mut OutcomeWriter,
+        now: OffsetDateTime,
+    ) -> Result<Vec<String>, SchedError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Passed,
@@ -232,6 +242,8 @@ pub struct Scheduler<H: WorkerHost, V: Verifier> {
     pub verifier: V,
     pub cfg: SchedConfig,
     pub control: Control,
+    /// The decision lifecycle, driven on every tick (none: decisions are left to someone else).
+    pub decisions: Option<Box<dyn Decisions>>,
     running: Vec<(WorkItemId, H::Handle)>,
     not_before: BTreeMap<WorkItemId, OffsetDateTime>,
 }
@@ -249,6 +261,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
             verifier,
             cfg,
             control: Control::default(),
+            decisions: None,
             running: vec![],
             not_before: BTreeMap::new(),
         }
@@ -314,6 +327,16 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         if cancel.is_set() {
             self.verifier.cancel();
             return self.finish_cancel(w, rep);
+        }
+
+        // 1b. decisions: expiry, invalidation, grants for answered ones (soft: errors are reported)
+        if let Some(d) = self.decisions.as_mut() {
+            match d.drive(w, now) {
+                Ok(notes) => rep
+                    .errors
+                    .extend(notes.into_iter().map(|n| format!("decisions: {n}"))),
+                Err(e) => rep.errors.push(format!("decisions: {e}")),
+            }
         }
 
         let items = Self::plan_items(w)?;

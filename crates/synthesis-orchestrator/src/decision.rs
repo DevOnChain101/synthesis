@@ -7,7 +7,6 @@
 //! restart. The text in the brief comes from the model and tool output: it is data, truncated and
 //! stripped of control characters, and it never carries a pre-selected choice.
 
-use sha2::{Digest, Sha256};
 use synthesis_core::outcome::{glob_matches, hidden_char};
 use synthesis_events::{Event, Record};
 use synthesis_session::outcome::{
@@ -30,13 +29,6 @@ pub(crate) fn clean(s: &str) -> String {
     }
 }
 
-fn sha(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 fn ts(t: OffsetDateTime) -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
@@ -52,10 +44,10 @@ struct Blocked {
     question: Option<(String, Vec<String>)>,
     /// The worker asked to leave plan mode (`ExitPlanMode`).
     plan: bool,
-    /// Calls that needed an approval nobody could give (`tool: input`, untruncated).
-    asked: Vec<String>,
-    /// Calls the contract's own rules refused (`tool: input`, untruncated).
-    denied: Vec<String>,
+    /// Calls that needed an approval nobody could give (tool, raw input).
+    asked: Vec<(String, serde_json::Value)>,
+    /// Calls the contract's own rules refused (tool, raw input).
+    denied: Vec<(String, serde_json::Value)>,
 }
 
 fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreError> {
@@ -99,7 +91,7 @@ fn blocked_of(store: &Store, session_id: &str) -> Result<Option<Blocked>, StoreE
                     ..
                 } => {
                     if let Some((name, input)) = requested.get(&tool_call_id) {
-                        let call = format!("{name}: {input}");
+                        let call = (name.clone(), input.clone());
                         if preview.trim_start().starts_with("Permission denied") {
                             denied.push(call);
                         } else {
@@ -142,7 +134,7 @@ const MAX_RULE_LEN: usize = 1_000;
 /// case-insensitive file systems, and anything too long or too costly to check counts as covered.
 /// This errs toward NOT offering a grant; it is a best-effort FILTER for what the brief offers,
 /// not an authority: PR-10 must check a grant against the contract itself.
-fn rule_denied(deny: &[String], rule: &str) -> bool {
+pub(crate) fn rule_denied(deny: &[String], rule: &str) -> bool {
     let family = |t: &str| match t {
         "Write" | "MultiEdit" | "NotebookEdit" => "Edit".to_owned(),
         t => t.to_owned(),
@@ -188,6 +180,62 @@ fn rule_denied(deny: &[String], rule: &str) -> bool {
     })
 }
 
+/// The exact allow rule for one refused call, derived from its raw input (never from text a
+/// person or a model wrote for the brief): an edit becomes `Edit(/<path relative to the
+/// worktree>)`, a shell command `Bash(<that command>)` (an exact rule, not a prefix). `None` for
+/// anything else, a path outside the worktree, or text the rule syntax cannot carry safely.
+pub(crate) fn scoped_rule(
+    tool: &str,
+    input: &serde_json::Value,
+    worktree: &std::path::Path,
+) -> Option<String> {
+    let printable =
+        |t: &str| !t.is_empty() && t.len() <= 300 && t.chars().all(|c| matches!(c, ' '..='~'));
+    match tool {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+            let p = input
+                .get("file_path")
+                .or_else(|| input.get("notebook_path"))?
+                .as_str()?;
+            let path = std::path::Path::new(p);
+            let rel = if path.is_absolute() {
+                path.strip_prefix(worktree)
+                    .map(std::path::Path::to_path_buf)
+                    .or_else(|_| {
+                        let canon = std::fs::canonicalize(worktree).map_err(|_| ())?;
+                        path.strip_prefix(&canon)
+                            .map(std::path::Path::to_path_buf)
+                            .map_err(|_| ())
+                    })
+                    .ok()?
+            } else {
+                path.to_path_buf()
+            };
+            if !rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return None;
+            }
+            let text = rel.to_str()?.to_owned();
+            let plain = printable(&text)
+                && !text.chars().any(|c| {
+                    matches!(
+                        c,
+                        '(' | ')' | '[' | ']' | '{' | '}' | '!' | '*' | '?' | '\\'
+                    )
+                })
+                && !text.is_empty();
+            plain.then(|| format!("Edit(/{text})"))
+        }
+        "Bash" => {
+            let c = input.get("command")?.as_str()?;
+            (printable(c) && !c.contains(['(', ')'])).then(|| format!("Bash({c})"))
+        }
+        _ => None,
+    }
+}
+
 /// Stores (or finds) the Decision for a `blocked` attempt and makes it `pending`. `Ok(None)` when
 /// the session says nothing about why it blocked.
 pub fn record_blocked_decision(
@@ -196,6 +244,7 @@ pub fn record_blocked_decision(
     item: &WorkItemRecord,
     attempt: &AttemptRecord,
     subject_commit: Option<&str>,
+    worktree: &std::path::Path,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionRecord>, StoreError> {
     let Some(b) = blocked_of(store, &attempt.session_id)? else {
@@ -226,27 +275,45 @@ pub fn record_blocked_decision(
     let rules: Vec<String> = b.needed.iter().take(MAX_RULES).cloned().collect();
     // every needed rule is checked, not only the first few shown; and a grant is not offered for
     // a list too long to review
+    // the rules a grant would carry: one exact rule per call that asked, from the raw calls; a call
+    // that has none (another tool, a path outside the worktree) makes the whole action ungrantable
+    let scoped: Vec<Option<String>> = b
+        .asked
+        .iter()
+        .map(|(t, i)| scoped_rule(t, i, worktree))
+        .collect();
+    let mut grant_rules: Vec<String> = scoped.iter().flatten().cloned().collect();
+    grant_rules.sort();
+    grant_rules.dedup();
     let grantable = !b.needed.is_empty()
         && b.needed.len() <= MAX_RULES
         && b.needed.iter().map(String::len).sum::<usize>() <= 10 * MAX_RULE_LEN
-        && !b.needed.iter().any(|r| denied_by_contract(r));
+        && !b.needed.iter().any(|r| denied_by_contract(r))
+        && !b.asked.is_empty()
+        && scoped.iter().all(Option::is_some)
+        && !grant_rules.is_empty()
+        && grant_rules.len() <= MAX_RULES
+        && !grant_rules.iter().any(|r| denied_by_contract(r));
     let shown_rules: Vec<String> = rules.iter().map(|r| clean(r)).collect();
     let refused: Vec<String> = b
         .asked
         .iter()
         .chain(&b.denied)
         .take(MAX_RULES)
-        .map(|c| clean(c))
+        .map(|(t, i)| clean(&format!("{t}: {i}")))
         .collect();
-    // the hash covers everything the worker reported, in full; the brief shows a cleaned, shortened
-    // view. Grants (PR-10) must be made from the stored full action, never from the brief.
+    // The FULL action is stored with the decision (the store hashes it into the binding); the brief
+    // shows a cleaned, shortened view. A grant is derived from the stored action, never from the
+    // brief or from anything a caller says.
     let full_action = |extra: &str| {
-        format!(
-            "{extra}\n{}\n{}\n{}",
-            b.needed.join("\n"),
-            b.asked.join("\n"),
-            b.denied.join("\n")
-        )
+        serde_json::json!({
+            "about": extra,
+            "needed": b.needed,
+            "calls": b.asked.iter().map(|(t, i)| serde_json::json!({"tool": t, "input": i, "asked": true}))
+                .chain(b.denied.iter().map(|(t, i)| serde_json::json!({"tool": t, "input": i, "asked": false})))
+                .collect::<Vec<_>>(),
+            "grant_rules": if grantable { grant_rules.clone() } else { vec![] },
+        })
     };
     let (kind, why, delta, alternatives, action) = match (&b.question, b.reason.as_str()) {
         (Some((prompt, options)), _) if b.reason == "needs_user_input" => (
@@ -262,7 +329,7 @@ pub fn record_blocked_decision(
                     .map(|o| serde_json::json!({"id": clean(o), "label": clean(o)}))
                     .collect()
             },
-            full_action(&format!("{prompt}\n{}", options.join("\n"))),
+            serde_json::json!({"question": prompt, "options": options}),
         ),
         _ if b.plan && b.reason == "needs_user_input" => (
             "blocked",
@@ -275,7 +342,7 @@ pub fn record_blocked_decision(
             let alternatives = if grantable {
                 vec![serde_json::json!({
                     "id": "grant_once",
-                    "label": format!("allow exactly {} in one new attempt", shown_rules.join(", "))
+                    "label": format!("allow exactly {} in one new attempt", grant_rules.iter().map(|r| clean(r)).collect::<Vec<_>>().join(", "))
                 })]
             } else {
                 vec![serde_json::json!({"id": "retry", "label": "run the work item again"})]
@@ -307,9 +374,11 @@ pub fn record_blocked_decision(
     let truncated = b.needed.len() > MAX_RULES
         || b.needed
             .iter()
-            .chain(&b.asked)
-            .chain(&b.denied)
-            .any(|t| clean(t).chars().count() != t.chars().count());
+            .any(|t| clean(t).chars().count() != t.chars().count())
+        || b.asked.iter().chain(&b.denied).any(|(t, i)| {
+            let text = format!("{t}: {i}");
+            clean(&text).chars().count() != text.chars().count()
+        });
     let brief = serde_json::json!({
         "why": why,
         "delta_from_contract": delta,
@@ -317,18 +386,20 @@ pub fn record_blocked_decision(
         "evidence": {"work_item": item.key, "attempt_ordinal": attempt.ordinal,
                      "attempt_session": attempt.session_id, "reason": clean(&b.reason),
                      "refused_calls": refused,
-                     "action_sha256": sha(&action), "text_shortened_or_cleaned": truncated},
+                     "text_shortened_or_cleaned": truncated},
         "unknowns": [],
         "safe_default": "HOLD",
     });
-    let binding = serde_json::json!({
-        "contract_version": contract_version,
-        "plan_version": item.plan_version,
-        "subject_commit": subject_commit,
-        "policy_hash": policy_hash,
-        "action_hash": sha(&action),
-        "attempt_ordinal": attempt.ordinal,
-    });
+    // `action_hash` is the store's: it overwrites this placeholder with the hash of the stored action
+    let binding = crate::grants::decision_binding(
+        contract_version,
+        outcome.plan_version.unwrap_or(item.plan_version),
+        subject_commit,
+        &policy_hash,
+        "",
+        attempt.ordinal,
+        &item.id,
+    );
     let hours = i64::from(w.decision_expiry_hours().min(24));
     let mut key = format!("{}:{}:{kind}", item.key, attempt.ordinal);
     key.truncate(128);
@@ -338,6 +409,7 @@ pub fn record_blocked_decision(
         brief,
         binding: binding.clone(),
         expires_at: ts(now + time::Duration::hours(hours)),
+        action: Some(action),
     })?;
     if !fresh {
         return Ok(Some(d));
@@ -346,7 +418,7 @@ pub fn record_blocked_decision(
         &d.id,
         d.revision,
         synthesis_core::outcome::DecisionState::Pending,
-        &binding,
+        &d.binding,
         &synthesis_session::outcome::Effects::default(),
     )?;
     Ok(w.list_decisions(w.id())?.into_iter().find(|x| x.id == d.id))
@@ -422,5 +494,49 @@ mod tests {
             "{:?}",
             t0.elapsed()
         );
+    }
+
+    #[test]
+    fn a_grant_rule_is_exact_and_comes_from_the_raw_call() {
+        use serde_json::json;
+        let wt = std::path::Path::new("/w/tree");
+        let edit = |p: &str| scoped_rule("Write", &json!({"file_path": p}), wt);
+        assert_eq!(edit("outside.txt").as_deref(), Some("Edit(/outside.txt)"));
+        assert_eq!(edit("/w/tree/src/a.rs").as_deref(), Some("Edit(/src/a.rs)"));
+        assert_eq!(
+            scoped_rule("NotebookEdit", &json!({"notebook_path": "n/x.ipynb"}), wt).as_deref(),
+            Some("Edit(/n/x.ipynb)")
+        );
+        // outside the worktree, climbing out, globs, rule syntax, odd text: no rule
+        for bad in [
+            "/etc/passwd",
+            "../x",
+            "a/../../x",
+            "a/*.rs",
+            "src/(x)",
+            "a[1]",
+            "a\\b",
+            "",
+            "bad\u{1b}",
+        ] {
+            assert_eq!(edit(bad), None, "{bad:?}");
+        }
+        // a command becomes an exact rule; anything the syntax cannot carry does not
+        let bash = |c: &str| scoped_rule("Bash", &json!({"command": c}), wt);
+        assert_eq!(bash("cargo test").as_deref(), Some("Bash(cargo test)"));
+        for bad in ["", "echo (x)", "a\nb", &"x".repeat(301)] {
+            assert_eq!(bash(bad), None, "{bad:?}");
+        }
+        // other tools are never grantable
+        for t in ["Read", "WebFetch", "browser_navigate", "mcp__s__t", "Task"] {
+            assert_eq!(
+                scoped_rule(
+                    t,
+                    &json!({"file_path": "a", "command": "b", "url": "c"}),
+                    wt
+                ),
+                None
+            );
+        }
     }
 }

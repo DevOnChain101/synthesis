@@ -612,6 +612,7 @@ impl Runner<'_> {
                 &it,
                 attempt,
                 subject.as_deref(),
+                &git.worktree,
                 time::OffsetDateTime::now_utc(),
             )?;
         }

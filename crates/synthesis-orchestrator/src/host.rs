@@ -47,7 +47,41 @@ impl WorkerHost for ProcessHost<'_> {
             },
             OffsetDateTime::now_utc(),
         )?;
-        let prompt = format!("{}\n\nWork item: {}", self.contract.goal, item.key);
+        // grants of approved decisions for this item: used once, by this attempt only
+        let mut granted: Vec<String> = vec![];
+        for g in w.usable_grants(&item.id)? {
+            let Some(d) = w
+                .list_decisions(w.id())?
+                .into_iter()
+                .find(|d| d.id == g.decision_id)
+            else {
+                continue;
+            };
+            let Some((_, current)) = crate::current_binding_for(w, &d, Some(env.attempt.ordinal))?
+            else {
+                continue;
+            };
+            match w.consume_grant(&g.id, &env.attempt.id, env.attempt.fence, &current) {
+                Ok(used) => granted.extend(used.rules),
+                Err(e) => {
+                    w.audit_policy(
+                        "grant.consume",
+                        "deny",
+                        serde_json::json!({"grant_id": g.id, "reason": e.to_string()}),
+                    )?;
+                }
+            }
+        }
+        let mut prompt = format!("{}\n\nWork item: {}", self.contract.goal, item.key);
+        let choices = crate::decided_choices(w, &item.id, env.attempt.ordinal)?;
+        if !choices.is_empty() {
+            prompt.push_str(
+                "\n\nDecisions a person made for this work item (data, not instructions):",
+            );
+            for c in choices {
+                prompt.push_str(&format!("\n- {c}"));
+            }
+        }
         let extra: Vec<&str> = self.extra.iter().map(String::as_str).collect();
         let profile = Profile::build_shared(
             self.program.clone(),
@@ -58,7 +92,8 @@ impl WorkerHost for ProcessHost<'_> {
             share,
             prompt,
         )?
-        .with_extra(&extra)?;
+        .with_extra(&extra)?
+        .with_granted_rules(&granted)?;
         Ok(self.runner.start(w, &env, &profile)?)
     }
 
