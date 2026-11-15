@@ -242,14 +242,20 @@ pub(crate) fn scoped_rule(
                     return None;
                 }
             }
-            Some(format!("Edit(/{text})"))
+            let rule = format!("Edit(/{text})");
+            // the very check the store applies: a rule it would refuse is no grant (the decision
+            // degrades to a retry instead of failing)
+            synthesis_session::outcome::valid_grant_rule(&rule).then_some(rule)
         }
         "Bash" => {
             let c = input.get("command")?.as_str()?;
             // The engine reads `*` and a trailing `:*` in a Bash rule as a glob or a prefix: a
             // command containing one would grant more than that command. Empty and padded text too.
-            (printable(c) && c == c.trim() && !c.contains(['(', ')', '*']))
-                .then(|| format!("Bash({c})"))
+            if !(printable(c) && c == c.trim() && !c.contains(['(', ')', '*'])) {
+                return None;
+            }
+            let rule = format!("Bash({c})");
+            synthesis_session::outcome::valid_grant_rule(&rule).then_some(rule)
         }
         _ => None,
     }

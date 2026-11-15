@@ -814,7 +814,7 @@ pub struct GrantRecord {
 /// A rule a grant may carry: an exact `Edit(/path)` or `Bash(command)` of printable ASCII, no `*`
 /// (the engine reads `*` and a trailing `:*` in a Bash rule as a glob or a prefix, so a command
 /// containing one would grant more than that command), no glob characters in an edit path.
-fn valid_grant_rule(r: &str) -> bool {
+pub fn valid_grant_rule(r: &str) -> bool {
     let edit = r.strip_prefix("Edit(/");
     let bash = r.strip_prefix("Bash(");
     let body = edit.or(bash).and_then(|b| b.strip_suffix(')'));
@@ -3401,7 +3401,7 @@ impl OutcomeTx<'_, '_> {
                 binding.to_string(),
                 binding_hash,
                 d.expires_at,
-                now(),
+                ts(self.now),
                 action_text
             ],
         )?;
