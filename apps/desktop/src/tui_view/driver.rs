@@ -3724,6 +3724,53 @@ mod switch_tests {
         assert_eq!(cached, 2);
     }
 
+    /// `/close` of the open session, as the window runs it: the engine is replaced by a fresh one
+    /// (what `switch` does), and nothing of the closed session stays on screen or in the lists.
+    #[gpui::test]
+    fn closing_the_open_session_shows_a_fresh_one_in_the_same_folder(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let c = Arc::new(cfg.clone());
+        let w = open(cx, cfg, l, true);
+        let first = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        let closed = first.engine.sid.clone();
+        w.0.update(w.1, |t, cx| t.engine_ready(Ok(first), cx));
+        w.1.run_until_parked();
+        let prior =
+            w.0.update(w.1, |t, _| t.live.as_mut().unwrap().live.engine.take());
+        let fresh = build(
+            &c,
+            c.project.clone(),
+            prior,
+            Some(Target::Close),
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        w.0.update(w.1, |t, cx| t.engine_ready(Ok(fresh), cx));
+        w.1.run_until_parked();
+        w.0.update(w.1, |t, _| {
+            // the next frame builds the snapshot from the live state
+            let lu = t.live.as_mut().unwrap();
+            let l = &lu.live;
+            assert_ne!(l.sid, closed);
+            assert!(
+                l.view
+                    .convo
+                    .items
+                    .iter()
+                    .all(|i| !matches!(i, Item::User(_)))
+            );
+            let snap = crate::tui_view::snapshot::build(l, now_ms(), 0, None);
+            let ids: Vec<_> = snap.running.iter().map(|r| r.id.as_str()).collect();
+            assert!(ids.contains(&l.sid.as_str()) && !ids.contains(&closed.as_str()));
+            assert_eq!(snap.workspaces.len(), 1, "the open folder stays");
+            let e = lu.live.engine.take().unwrap();
+            lu.live.engine = None;
+            engine::close_shared(e);
+        });
+    }
+
     #[gpui::test]
     fn the_engine_starts_with_the_first_line_and_that_line_is_kept(cx: &mut TestAppContext) {
         let (_t, cfg, l) = setup();

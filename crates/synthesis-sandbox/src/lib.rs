@@ -691,12 +691,13 @@ fn toolchain_read_roots(
     deny: &[PathBuf],
     path_var: Option<&std::ffi::OsStr>,
 ) -> Vec<PathBuf> {
+    // `deny` resolved once: `add` runs for every directory it walks
     fn add(dir: PathBuf, deny: &[PathBuf], out: &mut Vec<PathBuf>) {
         let real = canon_lossy(&dir);
-        if deny.iter().any(|d| real.starts_with(canon_lossy(d))) {
+        if deny.iter().any(|d| real.starts_with(d)) {
             return;
         }
-        if !deny.iter().any(|d| canon_lossy(d).starts_with(&real)) {
+        if !deny.iter().any(|d| d.starts_with(&real)) {
             return out.push(dir);
         }
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -706,6 +707,8 @@ fn toolchain_read_roots(
             }
         }
     }
+    let deny: Vec<PathBuf> = deny.iter().map(|d| canon_lossy(d)).collect();
+    let deny = &deny[..];
     let mut out = vec![];
     let dirs = TOOLCHAIN_DIRS.iter().map(|d| home.join(d));
     let fixed = dirs.chain(cfg!(target_os = "linux").then(|| "/home/linuxbrew/.linuxbrew".into()));
