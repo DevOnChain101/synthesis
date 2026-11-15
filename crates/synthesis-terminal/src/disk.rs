@@ -3,8 +3,9 @@
 //! slower on a big tree) and publishes the growth; `Proc::enforce` kills the tree when it
 //! reaches the quota. It measures apparent file sizes (a sparse file over-counts, which only
 //! kills early), net of deletions, and a fast writer overshoots by what it writes between two
-//! walks; the per-file cap is `RLIMIT_FSIZE` (Linux). shortcut: a walk stops after `MAX_ENTRIES`
-//! entries, so a tree larger than that under-counts; raise it or switch to `statvfs` if that bites.
+//! walks; deleted-but-still-open files and writes outside the roots (`/dev/shm`) are not seen; the per-file cap is `RLIMIT_FSIZE` (Linux). A walk that reaches `MAX_ENTRIES`
+//! entries is NOT used (a partial sum would be a wrong total): the quota is then unenforced and a warning is printed once.
+//! shortcut: raise it or switch to `statvfs` if that bites.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,10 +45,20 @@ impl Watch {
 }
 
 fn watch(w: &Weak<Watch>, roots: &[PathBuf], every: Duration) {
-    let mut base = None;
+    let (mut base, mut warned) = (None, false);
     while w.strong_count() > 0 {
         let t = std::time::Instant::now();
-        let used: u64 = roots.iter().map(|r| size_of_tree(r)).sum();
+        let used: Option<u64> = roots.iter().map(|r| size_of_tree(r)).sum();
+        let Some(used) = used else {
+            // fail-safe: never publish a partial total; say once that the quota is not enforced
+            if !std::mem::replace(&mut warned, true) {
+                eprintln!(
+                    "synt: warning: disk quota NOT enforced: the workspace has more than {MAX_ENTRIES} entries and cannot be measured"
+                );
+            }
+            std::thread::sleep(every.max(t.elapsed() * 4));
+            continue;
+        };
         let base = *base.get_or_insert(used);
         let Some(s) = w.upgrade() else { return };
         s.growth.store(used.saturating_sub(base), Ordering::Relaxed);
@@ -56,15 +67,16 @@ fn watch(w: &Weak<Watch>, roots: &[PathBuf], every: Duration) {
     }
 }
 
-/// Sum of regular-file sizes under `root` (symlinks are not followed, errors are skipped).
-fn size_of_tree(root: &Path) -> u64 {
+/// Sum of regular-file sizes under `root` (symlinks are not followed, errors are skipped); `None`
+/// when the walk hit `MAX_ENTRIES`, because a partial sum is not a measurement.
+fn size_of_tree(root: &Path) -> Option<u64> {
     let (mut total, mut seen) = (0u64, 0usize);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             seen += 1;
             if seen > MAX_ENTRIES {
-                return total;
+                return None;
             }
             match e.metadata() {
                 Ok(m) if m.is_dir() => stack.push(e.path()),
@@ -73,7 +85,7 @@ fn size_of_tree(root: &Path) -> u64 {
             }
         }
     }
-    total
+    Some(total)
 }
 
 #[cfg(test)]
@@ -107,6 +119,6 @@ mod tests {
         std::fs::write(t.path().join("b"), [0u8; 5]).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(t.path().join("d/a"), t.path().join("l")).unwrap();
-        assert_eq!(size_of_tree(t.path()), 15);
+        assert_eq!(size_of_tree(t.path()), Some(15));
     }
 }

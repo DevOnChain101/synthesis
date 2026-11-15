@@ -376,7 +376,16 @@ fn cgroup_dir() -> Result<PathBuf, String> {
 /// `Err(reason)` means they are NOT enforced (a notice, never a refusal: decision 4).
 pub fn cgroup_status() -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    return cgroup_dir().map(|_| ());
+    return cgroup_dir().and_then(|d| {
+        // a real probe: make a child, write both files, remove it (joining is the one step not tried)
+        let p = d.join(format!("synt-probe-{}", std::process::id()));
+        std::fs::create_dir(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let r = ["memory.max", "pids.max"]
+            .iter()
+            .try_for_each(|f| std::fs::write(p.join(f), "max").map_err(|e| format!("{f}: {e}")));
+        let _ = std::fs::remove_dir(&p);
+        r
+    });
     #[cfg(not(target_os = "linux"))]
     Err("cgroup limits exist on Linux only".into())
 }
@@ -412,8 +421,11 @@ pub fn apply_limits(l: &ResourceLimits) -> Result<(), SandboxError> {
             set(r, v)?;
         }
     }
-    if l.memory.is_some() || l.tasks.is_some() {
-        let _ = join_cgroup(l);
+    if (l.memory.is_some() || l.tasks.is_some())
+        && let Err(e) = join_cgroup(l)
+    {
+        // stderr is the command's, but a silent gap is worse
+        eprintln!("synthesis-sandbox-exec: notice: memory/tasks limits NOT applied: {e}");
     }
     Ok(())
 }
@@ -424,19 +436,28 @@ fn join_cgroup(l: &ResourceLimits) -> Result<(), String> {
         "synt-sandbox-{}",
         std::os::unix::process::parent_id()
     ));
-    match std::fs::create_dir(&dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.to_string()),
-        _ => {}
-    }
+    let fresh = match std::fs::create_dir(&dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(e.to_string()),
+    };
     let put = |f: &str, v: String| std::fs::write(dir.join(f), v).map_err(|e| format!("{f}: {e}"));
-    if let Some(m) = l.memory {
-        put("memory.max", m.to_string())?;
-        let _ = put("memory.swap.max", "0".into()); // swap would stretch the cap; absent without swap accounting
-    }
-    if let Some(t) = l.tasks {
-        put("pids.max", t.to_string())?;
-    }
-    put("cgroup.procs", "0".into()) // "0" = the writing process
+    let go = || {
+        if let Some(m) = l.memory {
+            put("memory.max", m.to_string())?;
+            let _ = put("memory.swap.max", "0".into()); // swap would stretch the cap; absent without swap accounting
+        }
+        if let Some(t) = l.tasks {
+            put("pids.max", t.to_string())?;
+        }
+        put("cgroup.procs", "0".into()) // "0" = the writing process
+    };
+    // a cgroup this call made and could not fill or join is removed: no half-set limits left behind
+    go().inspect_err(|_| {
+        if fresh {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    })
 }
 
 const SYSTEM_READ: &[&str] = &[
@@ -1155,9 +1176,17 @@ impl BwrapBackend {
                 "--network hosts"
             })?)
         } else {
-            self.helper
-                .clone()
-                .filter(|h| helper_outside_writable(h, policy).is_ok())
+            self.helper.clone().filter(|h| match helper_outside_writable(h, policy) {
+                Ok(()) => true,
+                Err(e) => {
+                    static WARNED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("synt: warning: rlimits and cgroup limits NOT enforced for this run: {e}");
+                    }
+                    false
+                }
+            })
         };
         if let Some(helper) = helper {
             helper_outside_writable(&helper, policy)?;
@@ -2268,6 +2297,76 @@ mod tests {
             assert_eq!(cat(&key, vec![key.clone()]), "", "denied: reads empty");
             assert_eq!(cat(&db, vec![]), "DBBYTES", "control: dir readable");
             assert_eq!(cat(&db, vec![bk.clone()]), "", "denied dir: reads empty");
+        }
+
+        /// Runs `script` under `/bin/sh` in a plain (no WSL, no helper) bubblewrap sandbox.
+        fn sh(pol: &SandboxPolicy, cwd: &Path, script: &str) -> Option<String> {
+            let b = BwrapBackend {
+                helper: None,
+                ..bwrap()?
+            };
+            let c = SandboxedCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                cwd: Some(cwd.to_path_buf()),
+                ..Default::default()
+            };
+            let w = b.wrap_on(pol, &c, None).unwrap();
+            let o = Command::new(&w.program)
+                .args(&w.args)
+                .env_clear()
+                .envs(w.env.iter().cloned())
+                .output()
+                .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&o.stderr).contains("bwrap:"),
+                "{o:?}"
+            );
+            Some(String::from_utf8_lossy(&o.stdout).into_owned())
+        }
+
+        #[test]
+        fn the_cgroup_tree_cannot_be_written_from_inside() {
+            let d = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let pol = SandboxPolicy {
+                writable_roots: vec![d.path().to_path_buf()],
+                ..Default::default()
+            };
+            // `ls /sys` proves the shell and /sys work; the writes (a new cgroup, moving a pid, a limit) must all fail
+            let script = "ls /sys >/dev/null && echo sys-ok; \
+                (mkdir /sys/fs/cgroup/synt-escape) 2>/dev/null && echo MKDIR-WORKED; \
+                (echo 0 > /sys/fs/cgroup/cgroup.procs) 2>/dev/null && echo PROCS-WORKED; \
+                (echo max > /sys/fs/cgroup/memory.max) 2>/dev/null && echo LIMIT-WORKED; true";
+            let Some(out) = sh(&pol, d.path(), script) else {
+                return;
+            };
+            assert!(out.contains("sys-ok") && !out.contains("WORKED"), "{out}");
+        }
+
+        #[test]
+        fn readonly_paths_land_on_the_same_path_as_a_symlinked_workspace_bind() {
+            let t = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let real = t.path().canonicalize().unwrap().join("real");
+            std::fs::create_dir_all(real.join(".git/hooks")).unwrap();
+            std::fs::write(real.join(".git/config"), "[core]\n").unwrap();
+            let link = t.path().canonicalize().unwrap().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let pol = SandboxPolicy {
+                writable_roots: vec![link.clone()],
+                readonly_paths: vec![link.join(".git/hooks"), link.join(".git/config")],
+                ..Default::default()
+            };
+            let script = "echo ok > plain && echo plain-ok; \
+                (echo x > .git/hooks/pre-commit) 2>/dev/null && echo HOOK-WRITTEN; \
+                (echo x >> .git/config) 2>/dev/null && echo CONFIG-WRITTEN; true";
+            let Some(out) = sh(&pol, &link, script) else {
+                return;
+            };
+            assert!(
+                out.contains("plain-ok") && !out.contains("WRITTEN"),
+                "{out}"
+            );
+            assert!(real.join("plain").exists() && !real.join(".git/hooks/pre-commit").exists());
         }
 
         #[test]

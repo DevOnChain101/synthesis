@@ -80,7 +80,7 @@ Not mounted, hence default-denied: other users' homes and `/root`, `/home` outsi
 
 Known limits, unchanged or new:
 
-- All of `/etc`, `/sys` and `/opt` remain readable (decision 2), as does `~/.local` (pip/uv/pipx data, but also other tools' data under `~/.local/share`).
+- All of `/etc`, `/sys` and `/opt` remain readable (decision 2; `/sys` is read-only, a real-bubblewrap test checks that the cgroup tree there cannot be written), as does `~/.local` (pip/uv/pipx data, but also shell history of fish/atuin and other tools' data under `~/.local/share`), and `~/.gitconfig` (it can contain tokens inlined in URLs or helper settings).
 - A tool that keeps files outside this list stops working until the user grants the directory with `--sandbox-read` (e.g. a toolchain under `/nix`, `/var/lib`, `/srv`).
 - `readScope: host` (decision 3) is not built; nothing offers a way to bind the whole filesystem any more, so there is nothing to forbid yet.
 - The sandboxed command still sees every pathname unix socket inside a directory the policy grants (see the residual risk in section 1).
@@ -98,16 +98,17 @@ Tests: unit tests on the argument list (every OS, `linux.rs`), real bubblewrap t
 | file size | 4 GiB | `RLIMIT_FSIZE` | Linux, helper |
 | open files, CPU seconds | off | `RLIMIT_NOFILE`, `RLIMIT_CPU` | Linux, helper |
 | processes | off | `RLIMIT_NPROC`: it counts ALL of the user's processes, so a low value breaks `fork` for the sandbox whenever the user has that many; opt-in only | Linux, helper |
-| memory 8 GiB, tasks 1024 | on | cgroup v2 `memory.max` (+ `memory.swap.max` 0), `pids.max` in a child `synt-sandbox-<parent pid>` of the helper's own cgroup, only when `memory` and `pids` are in that cgroup's `subtree_control` and it is writable | Linux, best effort; else NOT enforced |
+| memory 8 GiB, tasks 1024 | on | cgroup v2 `memory.max` (+ `memory.swap.max` 0), `pids.max` in a child `synt-sandbox-<parent pid>` of the helper's own cgroup, only when `memory` and `pids` are in that cgroup's `subtree_control` and it is writable (`status()` probes this by making and removing a child; a cgroup created but not filled or joined is removed, and the helper prints a notice) | Linux, best effort; else NOT enforced |
 | disk growth 20 GiB (min 1 GiB) | on | watchdog thread in `synthesis-terminal` (`disk.rs`) | every backend, sandboxed commands only |
 
 How it is applied: `synthesis-sandbox-exec --limits <spec> [--no-vsock] -- <program> ...` (`limits_arg` / `parse_limits_arg`, strict; a bad spec exits 126 and runs nothing), through `rustix::process::setrlimit` (no `unsafe` here). A value above the current hard limit is lowered to it. The helper runs in front of bubblewrap when it is found next to `synt` (always for Landlock, which needs it anyway); it is REQUIRED for `--network hosts` and on WSL. Without it a plain bubblewrap command runs without limits and `synt doctor` says `rlimits: NOT enforced`. rlimits and the cgroup are inherited by every descendant.
 
 Honest limits:
 
-- No cgroup means no memory/tasks cap. `synt run` prints a notice and `synt doctor` a `NOT enforced` line; an unattended run still starts (decision 4). A container or a login shell without systemd delegation typically has no cgroup.
+- No cgroup means no memory/tasks cap. `synt run` prints a notice and `synt doctor` a `NOT enforced` line; an unattended run still starts (decision 4).
 - The cgroup is per run (named after the helper's parent pid), not per command: concurrent commands share one memory and tasks budget, and the empty directory stays behind after the run (nothing is left to remove it after exec).
-- The disk watchdog measures growth of the writable roots and tmp dir since the command started (apparent file sizes, net of deletions) every 5 s or four times a walk, whichever is longer; a fast writer overshoots the quota by what it writes in that time, and a walk stops after 2 million entries (a larger tree is under-counted). The kill is reported like an output-limit kill (`output_limit_exceeded`) with a line in the command's output. A command writing outside those directories (where the sandbox allows it, e.g. `/dev/shm`) is not counted.
+- A bubblewrap command whose helper lies under a writable root runs WITHOUT limits; a warning is printed once.
+- The disk watchdog measures growth of the writable roots and tmp dir since the command started (apparent file sizes, net of deletions) every 5 s or four times a walk, whichever is longer; a fast writer overshoots the quota by what it writes in that time, and a walk that reaches 2 million entries is discarded (the quota is then NOT enforced; one warning). Deleted-but-open files are not seen. The kill is reported like an output-limit kill (`output_limit_exceeded`) with a line in the command's output. A command writing outside those directories (where the sandbox allows it, e.g. `/dev/shm`) is not counted.
 - Seatbelt (macOS) and Windows get none of the rlimits or the cgroup.
 - None of this has run on a real Linux host except through CI; `limits.rs` checks the rlimits through `/proc/self/limits`, the cgroup path is only reported.
 
