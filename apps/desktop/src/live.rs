@@ -872,7 +872,6 @@ impl Live {
             self.view.status.context.set_window(w);
         }
         self.images.clear();
-        self.note("new conversation", false);
     }
 
     /// A line in the chat that is not from the model: a warning (`true`) or the result of something the

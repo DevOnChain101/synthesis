@@ -1696,7 +1696,6 @@ impl App {
                     self.ran_task = false;
                     self.activity = activity_for(&self.cfg, &[]);
                     self.activity.model = clean_line(&self.model);
-                    self.chat.note("new conversation", "");
                     self.attachments.clear();
                     out.push(Cmd::ClearConversation);
                 }

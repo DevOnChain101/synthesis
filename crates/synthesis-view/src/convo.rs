@@ -745,6 +745,8 @@ impl Convo {
                 true,
                 format!("memory reflection failed: {}", sanitize_for_display(error)),
             ),
+            // nothing retrieved says nothing: no line
+            Event::MemoryRetrieved { ids, .. } if ids.is_empty() => {}
             Event::MemoryRetrieved { ids, tokens, .. } => self.internal(format!(
                 "memory: {} note(s) retrieved ({tokens} tokens)",
                 ids.len()
@@ -1464,6 +1466,11 @@ mod tests {
             json!({"ids":["m1"],"tokens":12,"candidates":3}),
             "memory: 1 note(s) retrieved (12 tokens)",
         );
+        let c = one(
+            "memory.retrieved",
+            json!({"ids":[],"tokens":0,"candidates":0}),
+        );
+        assert!(c.items.is_empty(), "{:?}", c.items);
         internal(
             "memory.quarantined",
             json!({"id":"m","rule":"r1"}),
