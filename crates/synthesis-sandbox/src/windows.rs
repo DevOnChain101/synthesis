@@ -105,20 +105,20 @@ fn add(out: &mut Vec<Grant>, path: PathBuf, access: Access) {
     }
 }
 
-/// What the helper grants the container, from the policy. Order matters (the helper applies it
-/// in order and removes it in reverse): DENIES FIRST, then reads, then writes. A deny set after the
-/// allow on a path that already inherited it did not take effect on CI (measured); set first it is
-/// an explicit ACE on its path and the later allow only adds inherited ACEs behind it.
+/// What the helper does for the container, from the policy. Order matters (the helper applies it
+/// in order and undoes it in reverse): the CUTS first, then reads, then writes, so a cut path is
+/// already protected when the grant of its parent propagates down. There are no deny ACEs: on CI a
+/// deny ACE for the container SID did not stop a read, so a protected path is instead cut off from
+/// the grants of its parents (an AppContainer has no access without an ACE naming it).
 ///
 /// - `readable_roots` that exist: read and execute.
 /// - `writable_roots` and `tmp_dir`: modify (read, write, delete; not change permissions).
-/// - `readonly_paths` that exist and lie in a writable root: write/delete/rename denied.
-/// - `parent_guards` that exist: `FILE_DELETE_CHILD` denied on the directory, so its children
-///   (`.git/hooks`, `.git/config`) cannot be renamed away. The guard directory ITSELF can still
-///   be renamed through its parent (the parent's delete-child right is what allows it and the
-///   workspace root must keep it): a documented residual.
-/// - `deny_paths` that exist and lie inside a granted root: everything denied. Outside every
-///   granted root a path is unreachable anyway (an AppContainer has no ACE there).
+/// - `readonly_paths` that exist and lie in a writable root: cut, then read-only. The container
+///   has no delete right on them, so they cannot be removed or renamed, and `Modify` does not
+///   include deleting a directory's children through the directory. The parent (`.git`) can
+///   still be renamed away as a whole, which carries `.git/hooks` with it: a documented residual.
+/// - `deny_paths` that exist and lie inside a granted root: cut, nothing granted. Outside every
+///   granted root a path is unreachable anyway.
 ///
 /// A path that does not exist cannot carry an ACE: a protected path that is created later is NOT
 /// protected (same limit as bubblewrap's nonexistent `deny_paths`).
@@ -144,7 +144,7 @@ pub(crate) fn plan_grants(p: &SandboxPolicy) -> Result<Vec<Grant>, SandboxError>
         Ok(n)
     };
     let mut out: Vec<Grant> = vec![];
-    let mut denies: Vec<Grant> = vec![];
+    let mut cuts: Vec<Grant> = vec![];
     let mut writable = vec![];
     for r in p.readable_roots.iter().filter(|r| r.exists()) {
         add(&mut out, check(r, "readable root")?, Access::Read);
@@ -163,20 +163,17 @@ pub(crate) fn plan_grants(p: &SandboxPolicy) -> Result<Vec<Grant>, SandboxError>
     for r in p.readonly_paths.iter().filter(|r| r.exists()) {
         let n = norm(r);
         if in_writable(&fold(&n.to_string_lossy())) {
-            add(&mut denies, n, Access::DenyWrite);
+            add(&mut cuts, n, Access::ReadOnly);
         }
-    }
-    for g in p.parent_guards().iter().filter(|g| g.exists()) {
-        add(&mut denies, norm(g), Access::DenyDeleteChild);
     }
     for d in p.deny_paths.iter().filter(|d| d.exists()) {
         let n = norm(d);
         if in_granted(&fold(&n.to_string_lossy())) {
-            add(&mut denies, n, Access::DenyAll);
+            add(&mut cuts, n, Access::Hide);
         }
     }
-    denies.extend(out);
-    Ok(denies)
+    cuts.extend(out);
+    Ok(cuts)
 }
 
 fn exe_name() -> String {
@@ -506,17 +503,10 @@ mod tests {
                 of(Access::Modify),
                 [root.join("ws").as_path(), root.join("ws-tmp").as_path()]
             );
-            assert_eq!(
-                of(Access::DenyWrite),
-                [root.join("ws/.git/hooks").as_path()]
-            );
-            assert_eq!(
-                of(Access::DenyDeleteChild),
-                [root.join("ws/.git").as_path()]
-            );
-            // only the deny inside a granted root needs an ACE; ~/.ssh is unreachable anyway
-            assert_eq!(of(Access::DenyAll), [root.join("ws/secret").as_path()]);
-            // denies come first, then reads and writes
+            assert_eq!(of(Access::ReadOnly), [root.join("ws/.git/hooks").as_path()]);
+            // only the deny inside a granted root needs a cut; ~/.ssh is unreachable anyway
+            assert_eq!(of(Access::Hide), [root.join("ws/secret").as_path()]);
+            // cuts come first, then reads and writes
             let first_allow = g
                 .iter()
                 .position(|x| matches!(x.access, Access::Read | Access::Modify))

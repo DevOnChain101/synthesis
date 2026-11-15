@@ -12,7 +12,7 @@ use windows_sys::Win32::Foundation::{
     SetHandleInformation, TRUE, WAIT_FAILED,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
     NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
     TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
@@ -20,13 +20,13 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, FreeSid, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, FreeSid,
+    GetAce, GetAclInformation, INHERITED_ACE, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC,
-    WRITE_OWNER,
+    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -136,67 +136,19 @@ pub fn probe() -> Result<(), String> {
     Profile::create().map(drop)
 }
 
-fn mask_and_inherit(a: Access, dir: bool) -> (u32, u32, i32) {
-    let write = FILE_WRITE_DATA
-        | FILE_APPEND_DATA
-        | FILE_WRITE_EA
-        | FILE_WRITE_ATTRIBUTES
-        | DELETE
-        | FILE_DELETE_CHILD
-        | WRITE_DAC
-        | WRITE_OWNER;
-    let inherit = if dir {
-        SUB_CONTAINERS_AND_OBJECTS_INHERIT
-    } else {
-        NO_INHERITANCE
-    };
-    let (mask, mode) = match a {
-        Access::Read => (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, GRANT_ACCESS),
-        // generic write without WRITE_DAC/WRITE_OWNER (not part of it), plus delete
-        Access::Modify => (
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
-            GRANT_ACCESS,
-        ),
-        Access::DenyAll => (0x1F01FF, DENY_ACCESS), // FILE_ALL_ACCESS
-        Access::DenyWrite => (write, DENY_ACCESS),
-        Access::DenyDeleteChild => (FILE_DELETE_CHILD, DENY_ACCESS),
-    };
-    let inherit = if a == Access::DenyDeleteChild {
-        NO_INHERITANCE
-    } else {
-        inherit
-    };
-    (mask, inherit, mode)
+fn mask(a: Access) -> u32 {
+    match a {
+        // `ReadOnly` is a cut (see `Island`) that keeps this much
+        Access::Read | Access::ReadOnly => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        // generic write (no WRITE_DAC/WRITE_OWNER, no FILE_DELETE_CHILD) plus delete of the object
+        Access::Modify => FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+        Access::Hide => 0,
+    }
 }
 
-/// Edit the DACL of `path` for `sid`: add an ACE (`mode` from `mask_and_inherit`) or, with
-/// `revoke`, remove every explicit ACE of that SID. Setting a DACL through
-/// `SetNamedSecurityInfoW` also propagates inheritable ACEs to existing children.
-fn edit_dacl(path: &Path, sid: PSID, g: Option<Access>, dir: bool) -> Result<(), String> {
-    let (mask, inherit, mode) = match g {
-        Some(a) => mask_and_inherit(a, dir),
-        None => (0, NO_INHERITANCE, REVOKE_ACCESS),
-    };
-    let wpath = wide(path.as_os_str());
-    let mut old: *mut ACL = null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
-    // SAFETY: `wpath` is NUL-terminated; the out pointers are valid; on success `sd` owns `old`.
-    let r = unsafe {
-        GetNamedSecurityInfoW(
-            wpath.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            &mut old,
-            null_mut(),
-            &mut sd,
-        )
-    };
-    if r != 0 {
-        return Err(format!("read ACL of {}: error {r}", path.display()));
-    }
-    let _sd = Local(sd);
+/// An explicit ACE for `sid` (or, with `mode` `REVOKE_ACCESS`, removal of every explicit ACE of
+/// that SID) merged into `old`; the result is a new ACL owned by the caller.
+fn acl_with(old: *mut ACL, sid: PSID, mask: u32, inherit: u32, mode: i32) -> Result<Local, String> {
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: mask,
         grfAccessMode: mode,
@@ -213,19 +165,54 @@ fn edit_dacl(path: &Path, sid: PSID, g: Option<Access>, dir: bool) -> Result<(),
     // SAFETY: `ea` is one valid entry whose SID outlives the call; `old` is valid (or null).
     let r = unsafe { SetEntriesInAclW(1, &ea, old, &mut new) };
     if r != 0 {
-        return Err(format!("build ACL for {}: error {r}", path.display()));
+        return Err(format!("build ACL: error {r}"));
     }
-    let _new = Local(new.cast());
-    // SAFETY: `wpath` is NUL-terminated and `new` is a valid ACL; the DACL is left unprotected
-    // so inheritance keeps working.
+    Ok(Local(new.cast()))
+}
+
+/// The DACL of `path`: the security descriptor that owns it (keep it alive) and the ACL pointer.
+fn read_dacl(wpath: &[u16], path: &Path) -> Result<(Local, *mut ACL), String> {
+    let mut acl: *mut ACL = null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `wpath` is NUL-terminated; the out pointers are valid; on success `sd` owns `acl`.
     let r = unsafe {
-        SetNamedSecurityInfoW(
+        GetNamedSecurityInfoW(
             wpath.as_ptr(),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION,
             null_mut(),
             null_mut(),
-            new,
+            &mut acl,
+            null_mut(),
+            &mut sd,
+        )
+    };
+    if r != 0 {
+        return Err(format!("read ACL of {}: error {r}", path.display()));
+    }
+    let sd = Local(sd);
+    if acl.is_null() {
+        // a NULL DACL means "everyone"; editing it would turn it into a restrictive one
+        return Err(format!(
+            "{} has a NULL DACL, refusing to edit it",
+            path.display()
+        ));
+    }
+    Ok((sd, acl))
+}
+
+/// `flags` is `0` (leave the protection as it is), `PROTECTED_...` or `UNPROTECTED_...`. Setting a
+/// DACL also propagates the inheritable ACEs to the existing children.
+fn write_dacl(wpath: &[u16], path: &Path, acl: *const ACL, flags: u32) -> Result<(), String> {
+    // SAFETY: `wpath` is NUL-terminated and `acl` is a valid ACL.
+    let r = unsafe {
+        SetNamedSecurityInfoW(
+            wpath.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | flags,
+            null_mut(),
+            null_mut(),
+            acl,
             null(),
         )
     };
@@ -235,16 +222,113 @@ fn edit_dacl(path: &Path, sid: PSID, g: Option<Access>, dir: bool) -> Result<(),
     Ok(())
 }
 
-/// The ACEs this run added; removed on drop (also when `run` fails half way).
+/// Clears the "inherited" flag of every ACE in place, so that the ACEs survive protecting the DACL
+/// (a protected DACL no longer gets them from the parent) as ordinary explicit ones.
+fn make_explicit(acl: *mut ACL) -> Result<(), String> {
+    let mut info = ACL_SIZE_INFORMATION {
+        AceCount: 0,
+        AclBytesInUse: 0,
+        AclBytesFree: 0,
+    };
+    // SAFETY: `acl` is valid; `info` has the size of the class asked for.
+    let ok = unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut info).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == FALSE {
+        return Err(last_error("GetAclInformation"));
+    }
+    for i in 0..info.AceCount {
+        let mut ace: *mut c_void = null_mut();
+        // SAFETY: `i` is below the ACE count of `acl`; `ace` points into `acl` on success.
+        if unsafe { GetAce(acl, i, &mut ace) } == FALSE {
+            return Err(last_error("GetAce"));
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER, and the ACL is our own private copy.
+        unsafe {
+            let h = ace.cast::<ACE_HEADER>();
+            (*h).AceFlags &= !(INHERITED_ACE as u8);
+        }
+    }
+    Ok(())
+}
+
+/// What was changed on one path, to be undone by `Drop`.
+enum Undo {
+    /// Remove the explicit ACEs of the container SID.
+    Revoke,
+    /// The path was cut off from inheritance; put its original DACL back and let it inherit again.
+    /// `_sd` owns `acl`.
+    Restore { _sd: Local, acl: *mut ACL },
+}
+
+/// A path was changed to `access` for `sid`; returns how to undo it.
+fn apply_one(path: &Path, sid: PSID, access: Access) -> Result<Undo, String> {
+    let wpath = wide(path.as_os_str());
+    let dir = path.is_dir();
+    let inherit = if dir {
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT
+    } else {
+        NO_INHERITANCE
+    };
+    match access {
+        Access::Read | Access::Modify => {
+            let (_sd, old) = read_dacl(&wpath, path)?;
+            let new = acl_with(old, sid, mask(access), inherit, GRANT_ACCESS)?;
+            write_dacl(&wpath, path, new.0.cast(), 0)?;
+            Ok(Undo::Revoke)
+        }
+        Access::Hide | Access::ReadOnly => {
+            // The container has no access unless an ACE names it, so "no access below here" means
+            // "no ACE for the container below here": cut the path off from the grants of its
+            // parents. (Deny ACEs for the container SID were measured on CI and did not stop a
+            // read, so none is used.) The original DACL is kept to restore it exactly.
+            let (sd0, original) = read_dacl(&wpath, path)?;
+            let (_sd1, work) = read_dacl(&wpath, path)?;
+            make_explicit(work)?;
+            let new = if access == Access::ReadOnly {
+                Some(acl_with(work, sid, mask(access), inherit, GRANT_ACCESS)?)
+            } else {
+                None
+            };
+            let acl = new.as_ref().map_or(work, |n| n.0.cast());
+            write_dacl(&wpath, path, acl, PROTECTED_DACL_SECURITY_INFORMATION)?;
+            Ok(Undo::Restore {
+                _sd: sd0,
+                acl: original,
+            })
+        }
+    }
+}
+
+fn undo_one(path: &Path, sid: PSID, undo: &Undo) -> Result<(), String> {
+    let wpath = wide(path.as_os_str());
+    match undo {
+        Undo::Revoke => {
+            let (_sd, old) = read_dacl(&wpath, path)?;
+            let new = acl_with(old, sid, 0, NO_INHERITANCE, REVOKE_ACCESS)?;
+            write_dacl(&wpath, path, new.0.cast(), 0)
+        }
+        Undo::Restore { acl, .. } => {
+            write_dacl(&wpath, path, *acl, UNPROTECTED_DACL_SECURITY_INFORMATION)
+        }
+    }
+}
+
+/// What this run changed; undone in reverse on drop (also when `run` fails half way).
 struct Applied<'a> {
     sid: PSID,
-    paths: Vec<&'a Path>,
+    done: Vec<(&'a Path, Undo)>,
 }
 
 impl Drop for Applied<'_> {
     fn drop(&mut self) {
-        for p in self.paths.iter().rev() {
-            if let Err(e) = edit_dacl(p, self.sid, None, false) {
+        for (p, u) in self.done.iter().rev() {
+            if let Err(e) = undo_one(p, self.sid, u) {
                 eprintln!("synthesis-sandbox-exec: cleanup: {e}");
             }
         }
@@ -252,14 +336,12 @@ impl Drop for Applied<'_> {
 }
 
 fn apply<'a>(sid: PSID, grants: &'a [Grant]) -> Result<Applied<'a>, String> {
-    let mut done = Applied { sid, paths: vec![] };
+    let mut a = Applied { sid, done: vec![] };
     for g in grants {
-        let dir = g.path.is_dir();
-        // recorded first: a half-applied edit is still revoked
-        done.paths.push(&g.path);
-        edit_dacl(&g.path, sid, Some(g.access), dir)?;
+        let undo = apply_one(&g.path, sid, g.access)?;
+        a.done.push((&g.path, undo));
     }
-    Ok(done)
+    Ok(a)
 }
 
 fn job(spec: &Spec) -> Result<Handle, String> {

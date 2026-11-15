@@ -29,22 +29,22 @@ mod imp;
 /// Wire version of [`Spec`]; the launcher refuses any other.
 pub const VERSION: u32 = 1;
 
-/// What the AppContainer SID gets on a path. Read/Modify are allow ACEs, the others deny ACEs
-/// (Windows evaluates explicit deny ACEs first, so they win over a grant on a parent).
+/// What the AppContainer SID gets on a path. An AppContainer has no access unless an ACE names
+/// its SID, so there is no deny: `Hide` and `ReadOnly` CUT the path off from the grants of its
+/// parents (its DACL is protected, then restored exactly at exit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
     /// Read, list and execute; inherited by children.
     Read,
-    /// Read, write, execute and delete (not change permissions or owner); inherited.
+    /// Read, write, execute and delete the object (not change permissions or owner, not delete a
+    /// directory's children through the directory); inherited.
     Modify,
-    /// Every right denied; inherited.
-    DenyAll,
-    /// Write, delete, rename-away, change permissions denied; inherited. Reads stay as granted.
-    DenyWrite,
-    /// Only `FILE_DELETE_CHILD` denied, on the directory itself (not inherited): its entries
-    /// cannot be renamed or removed through it.
-    DenyDeleteChild,
+    /// Cut off, then `Read`: readable, never writable, renamable or removable, even inside a
+    /// `Modify` root.
+    ReadOnly,
+    /// Cut off and nothing granted: unreachable even inside a granted root.
+    Hide,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub struct Spec {
     pub program: PathBuf,
     /// The full command line, already quoted (`lpCommandLine`).
     pub command_line: String,
-    /// Applied in order (removed in reverse). Denies come first: see `plan_grants`.
+    /// Applied in order, undone in reverse. The cuts (`Hide`, `ReadOnly`) come first: see `plan_grants`.
     pub grants: Vec<Grant>,
     /// Add the `internetClient`, `internetClientServer` and `privateNetworkClientServer`
     /// capabilities. Without them the container has no network at all (loopback included).
@@ -116,7 +116,7 @@ mod tests {
             command_line: "a.exe /c".into(),
             grants: vec![Grant {
                 path: PathBuf::from("C:/w"),
-                access: Access::DenyDeleteChild,
+                access: Access::ReadOnly,
             }],
             network: false,
             launcher_env: vec![("LOCALAPPDATA".into(), "C:/u".into())],
@@ -124,7 +124,7 @@ mod tests {
             tasks: Some(8),
         };
         let j = serde_json::to_string(&s).unwrap();
-        assert!(j.contains("deny_delete_child"));
+        assert!(j.contains("read_only"));
         assert_eq!(serde_json::from_str::<Spec>(&j).unwrap(), s);
         let extra = j.replacen("\"network\"", "\"extra\":1,\"network\"", 1);
         assert!(serde_json::from_str::<Spec>(&extra).is_err());

@@ -227,11 +227,9 @@ fn a_readonly_path_inside_a_writable_root_is_readable_not_writable() {
         "{}",
         dump()
     );
-    assert!(
-        !sh(&p, &r, r"del .git\hooks\pre-commit").status.success(),
-        "{}",
-        dump()
-    );
+    // (`del` does not report failure through its exit status: look at the file)
+    let _ = sh(&p, &r, r"del .git\hooks\pre-commit");
+    assert!(r.join(".git/hooks/pre-commit").exists(), "{}", dump());
     assert!(
         !sh(&p, &r, r"echo evil> .git\hooks\new-hook")
             .status
@@ -263,28 +261,20 @@ fn the_children_of_a_guarded_directory_cannot_be_renamed_away() {
 #[test]
 fn no_network_the_hosts_loopback_included() {
     let w = ws();
-    let probe = Path::new(env!("CARGO_BIN_EXE_synthesis-sandbox-exec"))
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join("net_probe.exe");
-    assert!(
-        probe.exists(),
-        "build the example first: {}",
-        probe.display()
-    );
     let local = probe_in(w.path()); // inside the workspace grant: executable there
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); // a "service" of the host
     let addr = listener.local_addr().unwrap().to_string();
-    let connect = |c: &mut Command| c.args(["connect", &addr]).output().unwrap();
-    let control = connect(&mut Command::new(&local));
+    let control = Command::new(&local)
+        .args(["connect", &addr])
+        .output()
+        .unwrap();
     assert!(control.status.success(), "control: {}", text(&control));
-    let o = connect(&mut wrapped(
+    let o = run(
         &pol(w.path()),
         w.path(),
         local.to_str().unwrap(),
-        &[],
-    ));
+        &["connect", &addr],
+    );
     // the program must have STARTED in the container (126 = the helper could not), and failed
     assert!(
         o.status.code().is_some_and(|c| c != 0 && c != 126),
@@ -402,23 +392,37 @@ fn the_process_limit_applies_when_exec_is_not_allowed() {
     assert_ne!(got, "ok", "the nested process ran: {msg}");
 }
 
+/// `icacls <dir> /T` with the directory's own path taken out, so two runs compare equal.
+fn acl_tree(d: &Path) -> String {
+    let o = Command::new(r"C:\Windows\System32\icacls.exe")
+        .arg(d)
+        .arg("/T")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).replace(&d.display().to_string(), "<ws>")
+}
+
 #[test]
-fn acls_are_restored_after_the_run() {
-    let w = ws();
-    let before = icacls(w.path());
-    let o = sh(&pol(w.path()), w.path(), "echo hi> made.txt");
+fn acls_are_restored_after_the_run_cuts_included() {
+    let (_w, r, p) = guarded();
+    let before = acl_tree(&r);
+    let o = sh(&p, &r, "echo hi> made.txt");
     assert!(o.status.success(), "{}", text(&o));
-    // no per-run container SID (S-1-15-2-...) left on the directory or on the file it created
-    for p in [w.path().to_path_buf(), w.path().join("made.txt")] {
-        let a = icacls(&p);
-        assert!(
-            !a.contains("S-1-15-2-") && !a.contains("APPLICATION PACKAGE"),
-            "{a}"
-        );
-    }
+    let after = acl_tree(&r);
+    // no per-run container SID (S-1-15-2-...) is left on any path, the file the run created included
+    assert!(r.join("made.txt").exists());
+    assert!(!after.contains("S-1-15-2-"), "{after}");
+    // and everything else is exactly as it was (the new file aside)
+    let strip = |t: &str| {
+        t.split("\n\n")
+            .filter(|b| !b.contains("made.txt"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
     assert_eq!(
-        before.replace(&w.path().display().to_string(), ""),
-        icacls(w.path()).replace(&w.path().display().to_string(), "")
+        strip(&before),
+        strip(&after),
+        "before:\n{before}\nafter:\n{after}"
     );
 }
 
