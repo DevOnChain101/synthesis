@@ -222,7 +222,8 @@ fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
     fs::write(home.join("chain.key"), [7u8; 32]).unwrap();
     fs::write(home.join("readable.txt"), "ok\n").unwrap();
     if cfg!(target_os = "linux") {
-        // positive control: bubblewrap shows the rest of the home, only the state paths are denied
+        // read allow-list: the rest of the home is not mounted in bubblewrap at all (the `ok` check
+        // above proves a read of the source works, so this is not a broken shell)
         let ctl = run(
             "ctl",
             &format!(
@@ -231,7 +232,11 @@ fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
             ),
             20,
         );
-        assert_eq!(ctl.result(), "passed", "{:?}", ctl.problem);
+        assert_eq!(
+            ctl.result(),
+            "failed",
+            "a file outside the allow-list was readable"
+        );
     }
     let key = run(
         "key",

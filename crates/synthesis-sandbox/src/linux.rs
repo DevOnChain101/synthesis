@@ -1134,6 +1134,13 @@ impl BwrapBackend {
             .collect();
         }
         let mut args = Self::args_on(policy, &inner, wsl);
+        if bridge.is_some() {
+            // The bridge runs INSIDE the sandbox, where only the allow-list exists: bind the helper
+            // binary itself (read-only, just that file) in front of the final `-- program args`.
+            let h = Path::new(&inner.program);
+            let at = args.len() - inner.args.len() - 2;
+            args.splice(at..at, ["--ro-bind".into(), h.into(), h.into()]);
+        }
         let mut program: OsString = self.path.clone().into();
         // The helper runs in front of bwrap: it sets the rlimits (and joins the cgroup) that every
         // descendant inherits, and, on WSL or when the network is proxied, installs the seccomp deny
@@ -2001,6 +2008,12 @@ mod tests {
         let j = joined(w.args.clone());
         assert!(j.contains("--unshare-net") && !j.contains("--share-net"));
         assert!(j.contains("--ro-bind /run-dir /run-dir"), "{j}");
+        assert!(
+            j.contains(
+                "--ro-bind /h/synthesis-sandbox-exec /h/synthesis-sandbox-exec -- /h/synthesis-sandbox-exec --egress-bridge"
+            ),
+            "the bridge binary must exist inside the allow-list: {j}"
+        );
         assert!(
             j.ends_with(
                 "-- /h/synthesis-sandbox-exec --egress-bridge /run-dir/e.sock 3128 -- curl -V"
