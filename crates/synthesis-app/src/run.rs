@@ -1739,7 +1739,7 @@ pub fn prepare(
     }
     let rt = Arc::new(TerminalRuntime::new(sandbox_mode));
     let notify_policy = policy.as_ref().ok().cloned();
-    rt.open_session_sandboxed(&sid, ws.clone(), child_env.clone(), policy.ok());
+    rt.open_session_sandboxed(&sid, ws.clone(), child_env.clone(), policy.clone().ok());
     // Notifier (`synt.notify`, user/managed settings only): governed runs, nobody watching.
     let notifier = if governed {
         match crate::notify::read_config(&h.synthesis, &synthesis_settings::managed_settings_path())
@@ -2177,6 +2177,33 @@ pub fn prepare(
             .as_deref(),
     );
     mplan.artifact_dir = Some(artifact_root.join("mcp"));
+    mplan.sandbox = crate::mcp::read_sandbox(
+        &h.synthesis.join("settings.json"),
+        &synthesis_settings::managed_settings_path(),
+        (trust == ProjectTrust::Trusted && !inert)
+            .then(|| settings.project_root.join(".synt").join("settings.json"))
+            .as_deref(),
+    );
+    // stdio servers get the command policy (read-only workspace, per-server network); with the
+    // sandbox off, or no policy, they run as before and the notice below says so
+    if sandbox_mode != SandboxMode::Off
+        && let Ok(p) = &policy
+    {
+        mplan.confine = Some(crate::mcp::confine(
+            p.clone(),
+            ws.root.clone(),
+            artifact_root.join("mcp-tmp"),
+            mplan.sandbox.clone(),
+            sandbox_mode == SandboxMode::Enforce,
+            failover_slot.clone(),
+        ));
+    }
+    for n in
+        crate::mcp::confinement_notices(&mplan.servers, &mplan.sandbox, mplan.confine.is_some())
+    {
+        eprintln!("synt: {n}");
+        notices.push(n);
+    }
     // Printed now and kept in `notices`, which become `notice` events.
     for n in &mplan.notices {
         let n = sanitize_for_display(n);

@@ -7481,6 +7481,7 @@ dependencies = [
  "sha1 0.10.7",
  "synthesis-config",
  "synthesis-platform",
+ "synthesis-sandbox",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
