@@ -1418,6 +1418,7 @@ fn decision(key: &str, binding: Value) -> NewDecision {
         brief: json!({"why": "which API shape", "alternatives": ["A", "B"], "safe_default": "HOLD"}),
         binding,
         expires_at: hours(2),
+        action: None,
     }
 }
 
@@ -2660,6 +2661,7 @@ fn n1_b_a_replaced_decision_row_does_not_verify() {
             "binding_hash",
             "expires_at",
             "created_at",
+            "action",
         ]
         .into_iter()
         .map(String::from)
@@ -2749,11 +2751,23 @@ fn n3_plan_attempt_and_grant_columns_are_one_way() {
         assert!(db.execute(sql, []).is_err(), "{sql}");
     }
     let (d, _) = w.new_decision(&decision("g", binding())).unwrap();
+    // (a grant row written by plain SQL has no valid MAC and is never used; the triggers still hold)
     db.execute(
-        "INSERT INTO grants(id,decision_id,action_hash,expires_at) VALUES ('g1',?1,'h','2099')",
-        [d.id.as_str()],
+        "INSERT INTO grants(id,decision_id,outcome_id,work_item_id,rules,action_hash,expires_at,created_at,mac) \
+         VALUES ('g1',?1,?2,?3,'[]','h','2099','2026',?4)",
+        rusqlite::params![d.id.as_str(), w.id().as_str(), item(&items, "test").as_str(), "ab".repeat(32)],
     )
     .unwrap();
+    assert!(
+        w.list_grants(w.id()).unwrap().is_empty(),
+        "no valid MAC: not a grant"
+    );
+    assert!(
+        db.execute("UPDATE grants SET rules='[\"Bash\"]'", [])
+            .is_err(),
+        "rules are immutable"
+    );
+    assert!(db.execute("DELETE FROM grants", []).is_err());
     db.execute("UPDATE grants SET consumed_at='t1'", [])
         .unwrap();
     assert!(
@@ -3181,5 +3195,273 @@ fn an_outbox_filter_leaves_other_kinds_and_keys_alone() {
     assert_eq!(
         w.claim_outbox(now, &OutboxFilter::kinds(&[])).unwrap(),
         None
+    );
+}
+
+// ---- PR-10: grants derived from the stored action ----
+
+fn later() -> OffsetDateTime {
+    OffsetDateTime::now_utc() + time::Duration::hours(3)
+}
+
+/// An `approval_needed` decision with a stored action (the rules a grant would carry) on the
+/// `implement` item, `pending`; the stored binding is what every later check uses.
+fn grant_decision(
+    e: &Env,
+    store: &Store,
+    kind: &str,
+    action: Option<Value>,
+) -> (OutcomeWriter, DecisionRecord, WorkItemId) {
+    try_grant_decision(e, store, kind, action).unwrap()
+}
+
+fn try_grant_decision(
+    e: &Env,
+    store: &Store,
+    kind: &str,
+    action: Option<Value>,
+) -> Result<(OutcomeWriter, DecisionRecord, WorkItemId), Error> {
+    let (mut w, items) = ready_outcome(e, store);
+    let it = item(&items, "implement").clone();
+    let nd = NewDecision {
+        kind: kind.into(),
+        dedupe_key: "grant".into(),
+        brief: json!({"why": "needs a permission", "alternatives": [
+            {"id": "grant_once", "label": "allow it once"}, {"id": "retry", "label": "retry"}],
+            "safe_default": "HOLD"}),
+        binding: json!({"contract_version": 1, "plan_version": 1, "subject_commit": "abc",
+            "policy_hash": "p1", "action_hash": "caller-says-so", "attempt_ordinal": 1,
+            "work_item_id": it}),
+        expires_at: hours(2),
+        action,
+    };
+    let (d, _) = w.new_decision(&nd)?;
+    w.transition_decision(&d.id, 1, DecisionState::Pending, &d.binding, NONE)
+        .unwrap();
+    let d = w.list_decisions(w.id()).unwrap().remove(0);
+    Ok((w, d, it))
+}
+
+/// An attempt that is starting (what consumes a grant): the item leased, the attempt `starting`.
+fn starting_attempt(
+    e: &Env,
+    store: &Store,
+    w: &mut OutcomeWriter,
+    it: &WorkItemId,
+    sess: &str,
+) -> AttemptRecord {
+    if w.list_work_items(w.id())
+        .unwrap()
+        .iter()
+        .any(|i| i.id == *it && i.state == WorkItemState::Created)
+    {
+        item_to(w, it, WorkItemState::Ready).unwrap();
+    }
+    item_to(w, it, WorkItemState::Leased).unwrap();
+    e.child(store, sess, w.control_session_id());
+    w.new_attempt(it, 1, sess, "local-inproc", NONE).unwrap().0
+}
+
+fn the_action() -> Value {
+    json!({"needed": ["Write"], "calls": [{"tool": "Write", "input": {"file_path": "outside.txt"}, "asked": true}],
+           "grant_rules": ["Edit(/outside.txt)"]})
+}
+
+#[test]
+fn a_grant_is_derived_from_the_stored_action_and_the_store_owns_the_action_hash() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    // the label the person reads is derived from the rules, not trusted as given
+    let label = d.brief["alternatives"][0]["label"].as_str().unwrap();
+    assert_eq!(label, "allow exactly Edit(/outside.txt) in one new attempt");
+    // a caller-supplied action hash is overwritten by the hash of the stored action
+    assert_ne!(d.binding["action_hash"], "caller-says-so");
+    assert_eq!(
+        w.decision_action(&d.id).unwrap().unwrap()["grant_rules"],
+        json!(["Edit(/outside.txt)"])
+    );
+    // a pending decision grants nothing
+    assert!(w.create_grant(&d.id, &d.binding, 24).is_err());
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    let g = w.create_grant(&d.id, &d.binding, 24).unwrap();
+    // the rules are exactly the stored ones; the caller named only the decision
+    assert_eq!(g.rules, ["Edit(/outside.txt)"]);
+    assert_eq!(g.action_hash, d.binding["action_hash"].as_str().unwrap());
+    assert_eq!(w.list_grants(w.id()).unwrap(), std::slice::from_ref(&g));
+    assert_eq!(w.usable_grants(&it).unwrap().len(), 1);
+    assert!(
+        w.create_grant(&d.id, &d.binding, 24).is_err(),
+        "one grant per decision"
+    );
+    // audited in the chained events
+    let k = kinds(&w);
+    assert!(
+        k.iter().any(|x| x == "grant.created") && k.iter().any(|x| x == "policy.decision"),
+        "{k:?}"
+    );
+}
+
+#[test]
+fn only_a_person_approved_grant_once_of_an_approval_needed_decision_can_grant() {
+    for (kind, choice) in [
+        ("approval_needed", "retry"),
+        ("approval_needed", "reject"),
+        ("ambiguity", "grant_once"),
+    ] {
+        let e = env();
+        let store = e.v5();
+        let (mut w, d, _) = grant_decision(&e, &store, kind, Some(the_action()));
+        w.resolve_decision(&resolution(&d, choice), &d.binding)
+            .unwrap();
+        assert!(
+            w.create_grant(&d.id, &d.binding, 24).is_err(),
+            "{kind} {choice}"
+        );
+        assert!(w.list_grants(w.id()).unwrap().is_empty());
+    }
+    // a decision that offers grant_once must carry exact, grantable rules: nothing else is stored
+    for action in [
+        None,
+        Some(json!({"needed": ["Write"]})),
+        Some(json!({"grant_rules": []})),
+        Some(json!({"grant_rules": ["Edit(/a\u{1b}[31m)"]})),
+        // the engine reads `*` and a trailing `:*` as a glob or a prefix: not exact rules
+        Some(json!({"grant_rules": ["Bash(python:*)"]})),
+        Some(json!({"grant_rules": ["Bash(*)"]})),
+        Some(json!({"grant_rules": ["Bash(ls *)"]})),
+        Some(json!({"grant_rules": ["Bash(git * main)"]})),
+        Some(json!({"grant_rules": ["Edit(/a*)"]})),
+        Some(json!({"grant_rules": ["Edit(/a?)"]})),
+        Some(json!({"grant_rules": ["Bash()"]})),
+        Some(json!({"grant_rules": ["Bash( ls)"]})),
+        Some(json!({"grant_rules": ["Read(/a)"]})),
+        Some(json!({"grant_rules": ["Edit(/ok)", 7]})),
+    ] {
+        let e = env();
+        let store = e.v5();
+        assert!(
+            try_grant_decision(&e, &store, "approval_needed", action.clone()).is_err(),
+            "{action:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stored_action_rewritten_by_sql_cannot_grant() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, _) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    let db = e.db();
+    assert!(
+        db.execute("UPDATE decisions SET action='{}'", []).is_err(),
+        "the trigger refuses it"
+    );
+    // a writer that drops the trigger and widens the rule still fails the binding's action hash
+    db.execute_batch("DROP TRIGGER decisions_immutable")
+        .unwrap();
+    db.execute(
+        "UPDATE decisions SET action=json_set(action,'$.grant_rules',json('[\"Bash\"]'))",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(w.decision_action(&d.id), Err(Error::Tampered(_))));
+    assert!(matches!(
+        w.create_grant(&d.id, &d.binding, 24),
+        Err(Error::Tampered(_))
+    ));
+}
+
+#[test]
+fn a_grant_is_refused_and_unusable_once_the_binding_moved_it_expired_or_it_was_revoked_or_used() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    // a changed commit: not the decision the person saw
+    let mut moved = d.binding.clone();
+    moved["subject_commit"] = json!("def");
+    assert!(matches!(
+        w.create_grant(&d.id, &moved, 24),
+        Err(Error::Stale(_))
+    ));
+    let g = w.create_grant(&d.id, &d.binding, 24).unwrap();
+    let a = starting_attempt(&e, &store, &mut w, &it, "att-g");
+    // stale binding at consumption
+    assert!(matches!(
+        w.consume_grant(&g.id, &a.id, a.fence, &moved),
+        Err(Error::Stale(_))
+    ));
+    // another attempt's fence
+    assert!(
+        w.consume_grant(&g.id, &a.id, a.fence + 9, &d.binding)
+            .is_err()
+    );
+    // used once
+    w.consume_grant(&g.id, &a.id, a.fence, &d.binding).unwrap();
+    assert!(
+        w.consume_grant(&g.id, &a.id, a.fence, &d.binding).is_err(),
+        "twice"
+    );
+    assert!(w.usable_grants(&it).unwrap().is_empty());
+    assert!(
+        w.revoke_grant(&g.id, "late").is_err(),
+        "a used grant cannot be revoked"
+    );
+
+    // revoked before use
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    let g = w.create_grant(&d.id, &d.binding, 24).unwrap();
+    w.revoke_grant(&g.id, "the person changed their mind \u{1b}[31m")
+        .unwrap();
+    assert!(w.usable_grants(&it).unwrap().is_empty());
+    let a = starting_attempt(&e, &store, &mut w, &it, "att-r");
+    assert!(
+        w.consume_grant(&g.id, &a.id, a.fence, &d.binding).is_err(),
+        "revoked"
+    );
+    assert!(w.revoke_grant(&g.id, "again").is_err());
+    assert!(kinds(&w).iter().any(|x| x == "grant.revoked"));
+
+    // expired: three hours on, a one-hour grant is gone
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    w.create_grant(&d.id, &d.binding, 1).unwrap();
+    assert_eq!(w.usable_grants(&it).unwrap().len(), 1);
+    let w = w.with_clock(later);
+    assert!(w.usable_grants(&it).unwrap().is_empty(), "expired");
+}
+
+#[test]
+fn a_grant_row_without_a_valid_mac_is_never_used() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
+        .unwrap();
+    e.db()
+        .execute(
+            "INSERT INTO grants(id,decision_id,outcome_id,work_item_id,rules,action_hash,expires_at,created_at,mac) \
+             VALUES ('forged',?1,?2,?3,'[\"Bash\"]',?4,'2099-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',?5)",
+            params![d.id.as_str(), w.id().as_str(), it.as_str(), d.binding["action_hash"].as_str().unwrap(), "cd".repeat(32)],
+        )
+        .unwrap();
+    assert!(w.list_grants(w.id()).unwrap().is_empty());
+    assert!(w.usable_grants(&it).unwrap().is_empty());
+    let a = starting_attempt(&e, &store, &mut w, &it, "att-f");
+    assert!(
+        w.consume_grant("forged", &a.id, a.fence, &d.binding)
+            .is_err()
     );
 }

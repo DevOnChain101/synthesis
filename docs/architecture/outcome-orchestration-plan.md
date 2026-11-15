@@ -162,6 +162,7 @@ Mapping to the design's list: design PR-01 -> PR-01, PR-02 -> PR-02, PR-03 -> PR
 - Risk: High (runs agent-written tests on the host under the sandbox). Rollback: flag. Size: L. Security review: mandatory.
 
 ### PR-10 Decisions, grants, audit
+- **Status (implemented):** `DecisionDriver` (expiry, invalidation, grants, answered decisions) on the scheduler's `Decisions` seam, the store's `create_grant`/`usable_grants`/`consume_grant`/`revoke_grant`/`audit_policy`, `decisions.action`, MAC'd `grants`, `policy.decision` and `grant.*` events, grant rules as `--allow` flags of one attempt. See ADR-019 PR-10 notes. Not done: the protocol commands and surfaces (PR-11), the orchestrator process that runs the driver (PR-12), `request_evidence`/`edit_scope` re-briefing, a live `OrchGateway`.
 - Scope: durable decision lifecycle (rows, not live asks), single-answerer CAS and the race table of ADR-019 section 5, brief builder (structured, no recommended/selected field), dedupe, bindings, expiry timer, invalidation on contract/plan/commit/policy change, one-shot grant that starts a new attempt, `policy.decision` events.
 - Crates: `synthesis-orchestrator`, `synthesis-session`.
 - Tests: stale decision replay after a commit change is rejected; revoked grant; expiry moves to HOLD, never approve; dedupe; no default choice in the brief schema; AC-09, AC-10 (data shape).

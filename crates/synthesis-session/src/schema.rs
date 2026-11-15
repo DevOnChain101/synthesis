@@ -143,7 +143,8 @@ CREATE TABLE decisions(
   brief TEXT NOT NULL CHECK(json_valid(brief)),
   binding TEXT NOT NULL CHECK(json_valid(binding)),
   binding_hash TEXT NOT NULL,
-  expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+  expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  action TEXT CHECK(action IS NULL OR json_valid(action)));   -- the full action a grant is derived from; its hash is in the binding
 -- one open decision per (key, binding); a finished one does not block a new binding
 CREATE UNIQUE INDEX decisions_open ON decisions(outcome_id, dedupe_key, binding_hash)
   WHERE state IN ('preparing','pending','needs_more_info');
@@ -156,7 +157,13 @@ CREATE TABLE decision_approvals(
   UNIQUE(decision_id, decision_revision));
 CREATE TABLE grants(
   id TEXT PRIMARY KEY, decision_id TEXT NOT NULL REFERENCES decisions(id),
-  action_hash TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT);
+  outcome_id TEXT NOT NULL REFERENCES outcomes(id), work_item_id TEXT NOT NULL REFERENCES work_items(id),
+  rules TEXT NOT NULL CHECK(json_valid(rules)),   -- derived from the decision's stored action, never from a caller
+  action_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  consumed_at TEXT, consumed_by_attempt TEXT REFERENCES attempts(id),
+  revoked_at TEXT, revoked_reason TEXT,
+  mac TEXT NOT NULL);   -- HMAC over the immutable columns under a subkey of the chain key
+CREATE UNIQUE INDEX grants_one_per_decision ON grants(decision_id);
 CREATE TABLE outcome_commands(
   id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
   idempotency_key TEXT NOT NULL, kind TEXT NOT NULL,
@@ -203,7 +210,7 @@ CREATE TRIGGER evidence_immutable BEFORE UPDATE OF id, outcome_id, work_item_id,
 CREATE TRIGGER evidence_no_delete BEFORE DELETE ON evidence
   BEGIN SELECT RAISE(ABORT, 'evidence is never deleted'); END;
 CREATE TRIGGER decisions_immutable BEFORE UPDATE OF id, outcome_id, kind, dedupe_key, brief, binding,
-    binding_hash, expires_at, created_at ON decisions
+    binding_hash, expires_at, created_at, action ON decisions
   BEGIN SELECT RAISE(ABORT, 'a decision brief and binding are immutable'); END;
 CREATE TRIGGER decisions_resolution_needs_approval BEFORE UPDATE OF state ON decisions
   WHEN NEW.state IN ('approved','rejected','needs_more_info')
@@ -269,8 +276,15 @@ CREATE TRIGGER attempts_policy_once BEFORE UPDATE OF bound_contract_version, bou
 CREATE TRIGGER attempts_reserved_once BEFORE UPDATE OF reserved_usd ON attempts
   WHEN OLD.reserved_usd IS NOT NULL AND (NEW.reserved_usd IS NULL OR NEW.reserved_usd > OLD.reserved_usd)
   BEGIN SELECT RAISE(ABORT, 'a budget reservation is set once and can only be lowered'); END;
-CREATE TRIGGER grants_consume_once BEFORE UPDATE OF consumed_at ON grants
+CREATE TRIGGER grants_consume_once BEFORE UPDATE OF consumed_at, consumed_by_attempt ON grants
   WHEN OLD.consumed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a grant is consumed once'); END;
+CREATE TRIGGER grants_revoke_once BEFORE UPDATE OF revoked_at, revoked_reason ON grants
+  WHEN OLD.revoked_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a grant is revoked once'); END;
+CREATE TRIGGER grants_immutable BEFORE UPDATE OF id, decision_id, outcome_id, work_item_id, rules,
+    action_hash, expires_at, created_at, mac ON grants
+  BEGIN SELECT RAISE(ABORT, 'a grant is immutable (it is consumed or revoked, nothing else)'); END;
+CREATE TRIGGER grants_no_delete BEFORE DELETE ON grants
+  BEGIN SELECT RAISE(ABORT, 'grants are never deleted'); END;
 -- a finished command keeps its request and result
 CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempotency_key, kind, params,
     expected_revision, from_surface, created_at ON outcome_commands
@@ -278,7 +292,7 @@ CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempoten
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
 -- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
-INSERT INTO schema_migrations(version, applied_at) VALUES (1007, 'outcome-ddl-rev-7');
+INSERT INTO schema_migrations(version, applied_at) VALUES (1008, 'outcome-ddl-rev-8');
 "#,
 ];
 
@@ -289,7 +303,7 @@ pub const OUTCOMES: i64 = 5;
 /// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
 /// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
 /// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
-pub const OUTCOME_DDL_MARKER: i64 = 1007;
+pub const OUTCOME_DDL_MARKER: i64 = 1008;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 

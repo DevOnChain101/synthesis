@@ -1806,3 +1806,86 @@ fn a_retry_after_a_partial_failure_runs_and_records_only_the_missing_checks() {
     assert_eq!(ids.iter().filter(|i| *i == "beta").count(), 2, "{ids:?}");
     to_verified(&mut w).unwrap();
 }
+
+#[test]
+fn a_grant_the_profile_refuses_is_not_burned_by_the_failed_start() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let it = items.iter().find(|(k, _)| k == "one").unwrap().1.clone();
+    // item `one` waits for a decision whose grant is `Bash(git push)`, which the contract denies
+    // (git.push is unlisted): the grant exists, but no profile may carry it
+    for to in [
+        WorkItemState::Ready,
+        WorkItemState::Leased,
+        WorkItemState::Running,
+        WorkItemState::WaitingDecision,
+    ] {
+        let rev = w.get_work_item(&it).unwrap().revision;
+        w.transition_work_item(&it, rev, to, &Effects::default())
+            .unwrap();
+    }
+    let o = w.get_outcome(w.id()).unwrap();
+    let (c, ..) = w.get_contract(w.id(), o.contract_version).unwrap();
+    let policy_hash = compile_envelope(&c.envelope, &[]).unwrap().policy_hash();
+    let binding = decision_binding(
+        o.contract_version,
+        o.plan_version.unwrap(),
+        None,
+        &policy_hash,
+        "",
+        0,
+        &it,
+    );
+    let fmt = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    let (d, _) = w
+        .new_decision(&NewDecision {
+            kind: "approval_needed".into(),
+            dedupe_key: "g".into(),
+            brief: serde_json::json!({"why": "x", "alternatives": [{"id": "grant_once", "label": "x"}], "safe_default": "HOLD"}),
+            binding,
+            expires_at: (OffsetDateTime::now_utc() + time::Duration::hours(2)).format(&fmt).unwrap(),
+            action: Some(serde_json::json!({"grant_rules": ["Bash(git push)"]})),
+        })
+        .unwrap();
+    w.transition_decision(
+        &d.id,
+        1,
+        DecisionState::Pending,
+        &d.binding,
+        &Effects::default(),
+    )
+    .unwrap();
+    let d = w.list_decisions(w.id()).unwrap().remove(0);
+    w.resolve_decision(
+        &Resolution {
+            decision_id: d.id.clone(),
+            decision_revision: d.revision,
+            approver: "user:cli".into(),
+            choice: "grant_once".into(),
+            brief_sha256: d.brief_sha256.clone(),
+        },
+        &d.binding,
+    )
+    .unwrap();
+    let g = w.create_grant(&d.id, &d.binding, 24).unwrap();
+    let rev = w.get_work_item(&it).unwrap().revision;
+    w.transition_work_item(&it, rev, WorkItemState::Ready, &Effects::default())
+        .unwrap();
+    let s = Script("exit 0".into());
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), cfg());
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(
+        rep.errors
+            .iter()
+            .any(|e| e.contains("not allowed for an outcome attempt")),
+        "the start was refused: {rep:?}"
+    );
+    // the grant is still there, unused: a refused start does not burn it
+    let again = w.usable_grants(&it).unwrap();
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0].id, g.id);
+    assert!(again[0].consumed_at.is_none());
+}

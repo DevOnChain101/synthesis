@@ -13,6 +13,12 @@ pub const PLAN_CREATED: &str = "plan.created";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";
 pub const DECISION_RESOLVED: &str = "decision.resolved";
+pub const GRANT_CREATED: &str = "grant.created";
+pub const GRANT_CONSUMED: &str = "grant.consumed";
+pub const GRANT_REVOKED: &str = "grant.revoked";
+/// Every authorization the orchestrator makes or refuses (grants, expiry, invalidation): action, result,
+/// reason and the policy hash. Denials are never suppressed.
+pub const POLICY_DECISION: &str = "policy.decision";
 pub const EVIDENCE_RECORDED: &str = "evidence.recorded";
 pub const COMMAND_FINISHED: &str = "outcome.command_finished";
 

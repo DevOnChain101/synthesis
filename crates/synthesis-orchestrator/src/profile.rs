@@ -64,6 +64,8 @@ pub struct Profile {
     envelope: Envelope,
     compiled: CompiledEnvelope,
     extra: Vec<String>,
+    /// Rules of one-shot grants this attempt uses (and no other attempt does).
+    granted: Vec<String>,
 }
 
 impl Profile {
@@ -138,6 +140,7 @@ impl Profile {
             envelope: contract.envelope.clone(),
             compiled,
             extra: vec![],
+            granted: vec![],
         })
     }
 
@@ -155,6 +158,31 @@ impl Profile {
     /// What the envelope compiled to.
     pub fn compiled(&self) -> &CompiledEnvelope {
         &self.compiled
+    }
+
+    /// Adds the rules of one-shot grants (they were consumed for this attempt): each must be an
+    /// exact `Edit(/path)` or `Bash(command)` rule of printable ASCII, and none may be covered by a
+    /// deny rule of the compiled contract (a grant never exceeds what the contract denies).
+    pub fn with_granted_rules(mut self, rules: &[String]) -> Result<Self, ProfileError> {
+        for r in rules {
+            let shape = (r.starts_with("Edit(/") || r.starts_with("Bash(")) && r.ends_with(')');
+            let plain = r.len() <= 300 && r.chars().all(|c| matches!(c, ' '..='~'));
+            // the engine reads `*` (and a trailing `:*`) as a glob or prefix: an exact rule has none
+            let exact = !r.contains('*')
+                && !(r.starts_with("Edit(") && r.contains(['?', '[', ']', '{', '}', '!']));
+            if !shape || !plain || !exact || crate::decision::rule_denied(&self.compiled.deny, r) {
+                return Err(ProfileError::Forbidden(r.clone()));
+            }
+        }
+        if rules.len() > 10 {
+            return Err(ProfileError::Forbidden("more than 10 granted rules".into()));
+        }
+        self.granted = rules.to_vec();
+        Ok(self)
+    }
+
+    pub fn granted_rules(&self) -> &[String] {
+        &self.granted
     }
 
     /// Adds allow-listed options (`--provider X`, `--model X`, `--max-turns N`,
@@ -219,6 +247,9 @@ impl Profile {
         ]);
         v.extend(["--permission-mode".into(), CompiledEnvelope::MODE.into()]);
         v.extend(self.compiled.args());
+        for r in &self.granted {
+            v.extend(["--allow".into(), r.into()]);
+        }
         v.extend(["--output-format".into(), "json".into()]);
         v.extend(self.extra.iter().map(OsString::from));
         // `--prompt=<text>`: a prompt that starts with `-` is a value, not a flag

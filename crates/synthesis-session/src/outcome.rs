@@ -595,6 +595,85 @@ impl Reader {
         contract_authentic(&self.conn, key.as_ref(), id, version)
     }
 
+    /// The full action stored with a decision (`None` when it has none), only if it still hashes to
+    /// the `action_hash` of the binding (and the binding to its hash): anything else is tampering.
+    pub fn decision_action(&self, id: &DecisionId) -> Result<Option<Value>> {
+        need_v5(&self.conn)?;
+        let (action, binding, hash): (Option<String>, String, String) = self
+            .conn
+            .query_row(
+                "SELECT action,binding,binding_hash FROM decisions WHERE id=?1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("decision {id}")))?;
+        let tampered = |why: &str| Error::Tampered(format!("decision {id}: {why}"));
+        if sha_hex(binding.as_bytes()) != hash {
+            return Err(tampered("the binding does not match its hash"));
+        }
+        let Some(text) = action else {
+            return Ok(None);
+        };
+        let b: Value = serde_json::from_str(&binding)?;
+        if b.get("action_hash").and_then(Value::as_str) != Some(sha_hex(text.as_bytes()).as_str()) {
+            return Err(tampered(
+                "the stored action is not the one the binding names",
+            ));
+        }
+        Ok(Some(serde_json::from_str(&text)?))
+    }
+
+    /// The grants of an outcome (all states), authentic ones only: a row whose MAC does not verify
+    /// is not returned.
+    pub fn list_grants(&self, id: &OutcomeId) -> Result<Vec<GrantRecord>> {
+        need_v5(&self.conn)?;
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            return Ok(vec![]);
+        };
+        let mut st = self.conn.prepare(
+            "SELECT id,decision_id,outcome_id,work_item_id,rules,action_hash,expires_at,created_at,consumed_at,consumed_by_attempt,revoked_at,mac \
+             FROM grants WHERE outcome_id=?1 ORDER BY created_at, id",
+        )?;
+        let rows = st.query_map([id.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, String>(11)?,
+            ))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (gid, dec, oc, item, rules, ah, exp, created, consumed, by, revoked, m) = row?;
+            let parts = grant_parts(&gid, &dec, &oc, &item, &rules, &ah, &exp, &created);
+            if !mac_ok(&key, "grant", &parts, &m) {
+                continue;
+            }
+            out.push(GrantRecord {
+                id: gid,
+                decision_id: DecisionId::parse(&dec).map_err(refuse)?,
+                work_item_id: WorkItemId::parse(&item).map_err(refuse)?,
+                rules: serde_json::from_str(&rules)?,
+                action_hash: ah,
+                expires_at: exp,
+                created_at: created,
+                consumed_at: consumed,
+                consumed_by_attempt: by,
+                revoked_at: revoked,
+            });
+        }
+        Ok(out)
+    }
+
     /// The resolution of a decision, only if everything the approval authorised still holds: the
     /// MAC (over the decision, its outcome, kind, revision, binding hash, expiry, brief hash,
     /// approver, choice and time) verifies, the binding hash is the hash of the stored binding,
@@ -713,6 +792,64 @@ impl Reader {
             .query_map([id.as_str()], command_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// A one-shot permission for a new attempt of one work item, derived from an approved decision's
+/// stored action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRecord {
+    pub id: String,
+    pub decision_id: DecisionId,
+    pub work_item_id: WorkItemId,
+    /// Allow rules (`Edit(/outside.txt)`, `Bash(git status)`), exactly those the stored action carries.
+    pub rules: Vec<String>,
+    pub action_hash: String,
+    pub expires_at: String,
+    pub created_at: String,
+    pub consumed_at: Option<String>,
+    pub consumed_by_attempt: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// A rule a grant may carry: an exact `Edit(/path)` or `Bash(command)` of printable ASCII, no `*`
+/// (the engine reads `*` and a trailing `:*` in a Bash rule as a glob or a prefix, so a command
+/// containing one would grant more than that command), no glob characters in an edit path.
+pub fn valid_grant_rule(r: &str) -> bool {
+    let edit = r.strip_prefix("Edit(/");
+    let bash = r.strip_prefix("Bash(");
+    let body = edit.or(bash).and_then(|b| b.strip_suffix(')'));
+    r.len() <= 300
+        && r.chars().all(|c| matches!(c, ' '..='~'))
+        && !r.contains('*')
+        && body.is_some_and(|b| {
+            !b.is_empty()
+                && b == b.trim()
+                && !b.contains(['(', ')'])
+                && (bash.is_some() || !b.contains(['?', '[', ']', '{', '}', '!']))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grant_parts<'a>(
+    id: &'a str,
+    decision: &'a str,
+    outcome: &'a str,
+    item: &'a str,
+    rules: &'a str,
+    action_hash: &'a str,
+    expires_at: &'a str,
+    created_at: &'a str,
+) -> [&'a str; 8] {
+    [
+        id,
+        decision,
+        outcome,
+        item,
+        rules,
+        action_hash,
+        expires_at,
+        created_at,
+    ]
 }
 
 /// A decision resolution whose approval row was verified.
@@ -1303,6 +1440,10 @@ pub struct NewDecision {
     pub binding: Value,
     /// A store-format timestamp in the future, within `decision_expiry_hours` of the settings.
     pub expires_at: String,
+    /// The FULL action the decision is about (what a grant is derived from; the brief only shows a
+    /// shortened view). The store hashes it into `binding.action_hash` itself (a caller-supplied
+    /// `action_hash` is overwritten) and keeps it immutable.
+    pub action: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -1491,6 +1632,207 @@ impl OutcomeWriter {
 
     pub fn new_decision(&mut self, d: &NewDecision) -> Result<(DecisionRecord, bool)> {
         self.atomically(|tx| tx.new_decision(d))
+    }
+
+    /// Is `current` still the binding the decision was made with (compared as the store compares
+    /// it: redacted, hashed)?
+    pub fn binding_is_current(&mut self, d: &DecisionRecord, current: &Value) -> Result<bool> {
+        self.atomically(|tx| Ok(tx.binding_current(d, current)))
+    }
+
+    /// Turns an APPROVED `grant_once` decision into a one-shot grant (ADR-019 section 4). The
+    /// caller names the decision and nothing else: the rules come from the action stored with
+    /// the decision (checked against the binding's action hash), the approval must verify (MAC),
+    /// the decision must be of kind `approval_needed`, and `current_binding` must still be the
+    /// binding the person saw (contract, plan, commit, policy, attempt). A grant never outlives
+    /// `decision_expiry_hours` of the settings.
+    pub fn create_grant(
+        &mut self,
+        decision: &DecisionId,
+        current_binding: &Value,
+        ttl_hours: u32,
+    ) -> Result<GrantRecord> {
+        let d = self
+            .list_decisions(self.id())?
+            .into_iter()
+            .find(|x| x.id == *decision)
+            .ok_or_else(|| Error::NotFound(format!("decision {decision}")))?;
+        if d.kind != "approval_needed" {
+            return Err(Error::Invalid(
+                "only an approval_needed decision can grant a permission".into(),
+            ));
+        }
+        match self.verified_resolution(decision)? {
+            Some(r) if r.state == DecisionState::Approved && r.choice == "grant_once" => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "only a decision a person approved with grant_once can grant".into(),
+                ));
+            }
+        }
+        let action = self
+            .decision_action(decision)?
+            .ok_or_else(|| Error::Invalid("the decision has no stored action".into()))?;
+        let rules: Vec<String> = action
+            .get("grant_rules")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| r.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let listed = action
+            .get("grant_rules")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if rules.is_empty()
+            || rules.len() > 10
+            || rules.len() != listed
+            || rules.iter().any(|r| !valid_grant_rule(r))
+        {
+            return Err(Error::Invalid(
+                "the stored action carries no grantable rules".into(),
+            ));
+        }
+        let item = d
+            .binding
+            .get("work_item_id")
+            .and_then(Value::as_str)
+            .and_then(|s| WorkItemId::parse(s).ok())
+            .ok_or_else(|| Error::Invalid("the decision binding names no work item".into()))?;
+        let ttl = ttl_hours.clamp(1, self.policy.decision_expiry_hours.max(1));
+        self.atomically(|tx| tx.insert_grant(&d, current_binding, &item, &rules, ttl))
+    }
+
+    /// The grants a new attempt of `item` may use now: authentic, not consumed, not revoked, not
+    /// expired, and the decision behind them still verifies as approved.
+    pub fn usable_grants(&self, item: &WorkItemId) -> Result<Vec<GrantRecord>> {
+        let now = (self.clock)();
+        let mut out = vec![];
+        for g in self.list_grants(self.id())? {
+            let live = g.work_item_id == *item
+                && g.consumed_at.is_none()
+                && g.revoked_at.is_none()
+                && parse_ts(&g.expires_at).is_some_and(|t| t > now);
+            if live
+                && self
+                    .verified_resolution(&g.decision_id)?
+                    .is_some_and(|r| r.state == DecisionState::Approved && r.choice == "grant_once")
+            {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Uses a grant for the attempt that is starting: once. Refused when it is consumed, revoked,
+    /// expired, not for this attempt's work item, the attempt's fence is stale, the decision no
+    /// longer verifies as approved, or `current_binding` is no longer the one the person saw.
+    pub fn consume_grant(
+        &mut self,
+        grant_id: &str,
+        attempt: &AttemptId,
+        fence: i64,
+        current_binding: &Value,
+    ) -> Result<GrantRecord> {
+        let g = self
+            .usable_grants_any(grant_id)?
+            .ok_or_else(|| Error::Invalid("the grant is not usable".into()))?;
+        let d = self
+            .list_decisions(self.id())?
+            .into_iter()
+            .find(|x| x.id == g.decision_id)
+            .ok_or_else(|| Error::NotFound(format!("decision {}", g.decision_id)))?;
+        self.atomically(|tx| {
+            let a = tx.live_attempt(attempt, fence)?;
+            if a.work_item_id != g.work_item_id {
+                return Err(Error::Invalid(
+                    "the grant is for another work item".into(),
+                ));
+            }
+            if !tx.binding_current(&d, current_binding) {
+                return Err(Error::Stale(
+                    "the contract, plan, commit or policy changed since the decision was shown"
+                        .into(),
+                ));
+            }
+            let at = ts(tx.now);
+            let n = tx.et.tx.execute(
+                "UPDATE grants SET consumed_at=?2, consumed_by_attempt=?3 WHERE id=?1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?2",
+                params![g.id, at, attempt.as_str()],
+            )?;
+            if n != 1 {
+                return Err(Error::Invalid("the grant was already used".into()));
+            }
+            let payload = json!({"grant_id": g.id, "decision_id": g.decision_id,
+                                 "attempt_id": attempt, "rules": g.rules, "action_hash": g.action_hash});
+            tx.et.append(ev::GRANT_CONSUMED, payload.clone())?;
+            tx.et.append(
+                ev::POLICY_DECISION,
+                json!({"action": "grant.consume", "result": "allow", "grant": payload}),
+            )?;
+            Ok(())
+        })?;
+        Ok(g)
+    }
+
+    /// An authentic, unconsumed, unrevoked, unexpired grant by id with a verified approval behind it.
+    fn usable_grants_any(&self, grant_id: &str) -> Result<Option<GrantRecord>> {
+        let mut found = None;
+        for g in self
+            .list_grants(self.id())?
+            .into_iter()
+            .filter(|g| g.id == grant_id)
+        {
+            found = self
+                .usable_grants(&g.work_item_id)?
+                .into_iter()
+                .find(|x| x.id == grant_id);
+        }
+        Ok(found)
+    }
+
+    /// Withdraws an unused grant (the binding changed, the contract denies it now, a person said
+    /// so). A consumed grant cannot be revoked: it was used.
+    pub fn revoke_grant(&mut self, grant_id: &str, reason: &str) -> Result<()> {
+        let reason: String = reason
+            .chars()
+            .filter(|c| matches!(c, ' '..='~'))
+            .take(200)
+            .collect();
+        self.atomically(|tx| {
+            let at = ts(tx.now);
+            let n = tx.et.tx.execute(
+                "UPDATE grants SET revoked_at=?2, revoked_reason=?3 WHERE id=?1 AND outcome_id=?4 \
+                   AND consumed_at IS NULL AND revoked_at IS NULL",
+                params![grant_id, at, reason, tx.id.as_str()],
+            )?;
+            if n != 1 {
+                return Err(Error::Invalid(
+                    "no unused grant with that id to revoke".into(),
+                ));
+            }
+            let payload = json!({"grant_id": grant_id, "reason": reason});
+            tx.et.append(ev::GRANT_REVOKED, payload.clone())?;
+            tx.et.append(
+                ev::POLICY_DECISION,
+                json!({"action": "grant.revoke", "result": "deny", "grant": payload}),
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Records a refusal or another authorization in the chained audit trail (`policy.decision`).
+    pub fn audit_policy(&mut self, action: &str, result: &str, detail: Value) -> Result<()> {
+        let (action, result) = (action.to_owned(), result.to_owned());
+        self.atomically(|tx| {
+            tx.et.append(
+                ev::POLICY_DECISION,
+                json!({"action": action, "result": result, "detail": detail}),
+            )?;
+            Ok(())
+        })
     }
 
     /// The orchestrator's own decision transitions (prepare, expire, invalidate). A person's
@@ -2967,8 +3309,58 @@ impl OutcomeTx<'_, '_> {
             })?;
         let _ = expires;
         let (mut brief, mut binding) = (d.brief.clone(), d.binding.clone());
+        // An `approval_needed` decision that offers `grant_once` must carry the exact rules it
+        // would grant, and the label the person reads is DERIVED from them (not trusted as given).
+        if d.kind == "approval_needed" && offers(&brief, "grant_once") {
+            let rules: Vec<String> = d
+                .action
+                .as_ref()
+                .and_then(|a| a.get("grant_rules"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let listed = d
+                .action
+                .as_ref()
+                .and_then(|a| a.get("grant_rules"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if rules.is_empty()
+                || rules.len() > 10
+                || rules.len() != listed
+                || !rules.iter().all(|r| valid_grant_rule(r))
+            {
+                return Err(Error::Invalid(
+                    "a decision that offers grant_once needs exact grantable rules in its action"
+                        .into(),
+                ));
+            }
+            let label = format!("allow exactly {} in one new attempt", rules.join(", "));
+            if let Some(alts) = brief.get_mut("alternatives").and_then(Value::as_array_mut) {
+                for a in alts.iter_mut() {
+                    if a.get("id").and_then(Value::as_str) == Some("grant_once")
+                        && let Some(o) = a.as_object_mut()
+                    {
+                        o.insert("label".into(), Value::String(label.clone()));
+                    }
+                }
+            }
+        }
         self.et.redact_value(&mut brief);
         self.et.redact_value(&mut binding);
+        // the action's hash is the store's own: nobody can bind a decision to an action it does not hold
+        let action_text = d.action.as_ref().map(|a| {
+            let mut a = a.clone();
+            self.et.redact_value(&mut a);
+            a.to_string()
+        });
+        if let (Some(t), Some(b)) = (&action_text, binding.as_object_mut()) {
+            b.insert("action_hash".into(), Value::String(sha_hex(t.as_bytes())));
+        }
         let binding_hash = sha_hex(binding.to_string().as_bytes());
         let latest: Option<DecisionRecord> = self
             .et
@@ -2998,8 +3390,8 @@ impl OutcomeTx<'_, '_> {
         }
         let id = DecisionId::parse(&new_uuid()).map_err(refuse)?;
         self.et.tx.execute(
-            "INSERT INTO decisions(id,outcome_id,kind,dedupe_key,state,revision,brief,binding,binding_hash,expires_at,created_at) \
-             VALUES (?1,?2,?3,?4,'preparing',1,?5,?6,?7,?8,?9)",
+            "INSERT INTO decisions(id,outcome_id,kind,dedupe_key,state,revision,brief,binding,binding_hash,expires_at,created_at,action) \
+             VALUES (?1,?2,?3,?4,'preparing',1,?5,?6,?7,?8,?9,?10)",
             params![
                 id.as_str(),
                 self.id.as_str(),
@@ -3009,7 +3401,8 @@ impl OutcomeTx<'_, '_> {
                 binding.to_string(),
                 binding_hash,
                 d.expires_at,
-                now()
+                ts(self.now),
+                action_text
             ],
         )?;
         let rec = self.et.tx.query_row(
@@ -3046,6 +3439,92 @@ impl OutcomeTx<'_, '_> {
             )));
         }
         Ok(d)
+    }
+
+    /// Stores a grant for an approved decision whose binding is still current. The caller has
+    /// already verified the approval and read the rules from the decision's stored action.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_grant(
+        &mut self,
+        d: &DecisionRecord,
+        current_binding: &Value,
+        item: &WorkItemId,
+        rules: &[String],
+        ttl_hours: u32,
+    ) -> Result<GrantRecord> {
+        if !self.binding_current(d, current_binding) {
+            return Err(Error::Stale(
+                "the contract, plan, commit or policy changed since the decision was shown".into(),
+            ));
+        }
+        let in_outcome: bool = self.et.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_items WHERE id=?1 AND outcome_id=?2)",
+            params![item.as_str(), self.id.as_str()],
+            |r| r.get(0),
+        )?;
+        if !in_outcome {
+            return Err(Error::NotFound(format!("work item {item}")));
+        }
+        let exists: bool = self.et.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM grants WHERE decision_id=?1)",
+            [d.id.as_str()],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Err(Error::Invalid(
+                "a grant for this decision already exists".into(),
+            ));
+        }
+        let action_hash = d
+            .binding
+            .get("action_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Invalid("the decision binding has no action hash".into()))?
+            .to_owned();
+        let id = new_uuid();
+        let (created, expires) = (
+            ts(self.now),
+            ts(self.now + time::Duration::hours(i64::from(ttl_hours))),
+        );
+        let rules_text = serde_json::to_string(rules)?;
+        let m = mac(
+            self.et.key(),
+            "grant",
+            &grant_parts(
+                &id,
+                d.id.as_str(),
+                self.id.as_str(),
+                item.as_str(),
+                &rules_text,
+                &action_hash,
+                &expires,
+                &created,
+            ),
+        );
+        self.et.tx.execute(
+            "INSERT INTO grants(id,decision_id,outcome_id,work_item_id,rules,action_hash,expires_at,created_at,mac) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![id, d.id.as_str(), self.id.as_str(), item.as_str(), rules_text, action_hash, expires, created, m],
+        )?;
+        let payload = json!({"grant_id": id, "decision_id": d.id, "work_item_id": item,
+                             "rules": rules, "action_hash": action_hash, "expires_at": expires});
+        self.et.append(ev::GRANT_CREATED, payload.clone())?;
+        self.et.append(
+            ev::POLICY_DECISION,
+            json!({"action": "grant.create", "result": "allow", "grant": payload}),
+        )?;
+        Ok(GrantRecord {
+            id,
+            decision_id: d.id.clone(),
+            work_item_id: item.clone(),
+            rules: rules.to_vec(),
+            action_hash,
+            expires_at: expires,
+            created_at: created,
+            consumed_at: None,
+            consumed_by_attempt: None,
+            revoked_at: None,
+        })
     }
 
     fn binding_current(&self, d: &DecisionRecord, current: &Value) -> bool {

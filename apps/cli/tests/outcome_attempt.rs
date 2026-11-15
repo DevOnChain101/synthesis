@@ -982,3 +982,179 @@ fn user_settings_cannot_widen_the_compiled_envelope_of_an_attempt() {
         "{brief}"
     );
 }
+
+// ---- PR-10: a blocked attempt, a person's answer, a one-shot grant, a new attempt ----
+
+#[test]
+fn a_person_grants_one_refused_write_and_only_the_next_attempt_may_make_it() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    // attempt 1: refused (outside src/**), the decision names exactly that write
+    let (mut w, it, _, settled) = run_with(
+        &r,
+        &src_only(),
+        "write",
+        script(vec![write_call("w1", "outside.txt")]),
+    );
+    assert_eq!(settled.unwrap().end, WorkerEnd::Blocked);
+    let d = decisions(&w).remove(0);
+    assert_eq!(d.kind, "approval_needed");
+    assert_eq!(
+        w.decision_action(&d.id).unwrap().unwrap()["grant_rules"],
+        json!(["Edit(/outside.txt)"]),
+        "the grant rules come from the raw call, not from the brief"
+    );
+    // AC-10: the brief has the shape of a decision, offers choices and pre-selects none
+    for k in [
+        "why",
+        "delta_from_contract",
+        "alternatives",
+        "evidence",
+        "unknowns",
+        "safe_default",
+    ] {
+        assert!(d.brief.get(k).is_some(), "{k} in {}", d.brief);
+    }
+    assert_eq!(d.brief["safe_default"], "HOLD");
+    for k in [
+        "selected",
+        "recommended",
+        "default",
+        "default_choice",
+        "preselected",
+    ] {
+        assert!(d.brief.get(k).is_none(), "{k}");
+    }
+    assert!(
+        d.brief["alternatives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a.get("id").is_some() && a.get("label").is_some())
+    );
+    assert_eq!(d.row_state, DecisionState::Pending);
+    // the person answers: not an unknown choice, not a stale brief; then grant_once
+    let (_, current) = synthesis_orchestrator::current_binding_for(&w, &d, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        w.binding_is_current(&d, &current).unwrap(),
+        "the binding recomputes to the stored one"
+    );
+    let res = |choice: &str, brief: &str| Resolution {
+        decision_id: d.id.clone(),
+        decision_revision: d.revision,
+        approver: "user:cli".into(),
+        choice: choice.into(),
+        brief_sha256: brief.into(),
+    };
+    assert!(
+        w.resolve_decision(&res("yes please", &d.brief_sha256), &current)
+            .is_err()
+    );
+    assert!(
+        w.resolve_decision(&res("grant_once", &"0".repeat(64)), &current)
+            .is_err()
+    );
+    w.resolve_decision(&res("grant_once", &d.brief_sha256), &current)
+        .unwrap();
+    let mut driver = synthesis_orchestrator::DecisionDriver::default();
+    let notes =
+        synthesis_orchestrator::Decisions::drive(&mut driver, &mut w, OffsetDateTime::now_utc())
+            .unwrap();
+    assert!(notes.iter().any(|n| n.contains("created")), "{notes:?}");
+    assert_eq!(w.get_work_item(&it).unwrap().state, WorkItemState::Ready);
+
+    // attempt 2 writes the granted file AND another one: only the granted one is allowed
+    let script_path = r.dir.path().join("script.json");
+    std::fs::write(
+        &script_path,
+        script(vec![
+            write_call("w1", "outside.txt"),
+            write_call("w2", "other.txt"),
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let spawn = SyntSpawn {
+        log: r.dir.path().join("worker2.log"),
+        env: Some(worker_env(&r)),
+    };
+    let mut policy = OutcomePolicy::new(true, 16, 10, 24);
+    policy.attempt_max_wall_secs = Some(120);
+    let host = ProcessHost {
+        allocator: Allocator {
+            store: &r.store,
+            worktrees: &r.wm,
+            platform: Platform::current(),
+            artifact_root: r.dir.path().join("art"),
+        },
+        runner: Runner::new(
+            &r.store,
+            &r.wm,
+            &spawn,
+            &OsProbe,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        ),
+        contract: src_only(),
+        policy,
+        program: PathBuf::from(env!("CARGO_BIN_EXE_synt")),
+        extra: vec![
+            "--provider".into(),
+            format!("fake:{}", script_path.display()),
+        ],
+        source: r.repo.clone(),
+        base_commit: r.head.clone(),
+        worker_kind: "local-engine",
+    };
+    let mut sched = Scheduler::new(host, HandOff, SchedConfig::new(1, 3));
+    let (stop, reports) = sched
+        .run(&mut w, &OffsetDateTime::now_utc, Duration::from_millis(50))
+        .unwrap();
+    assert!(matches!(stop, Stop::Blocked(_)), "{stop:?} {reports:?}");
+    let attempts = w.list_attempts(&it).unwrap();
+    assert_eq!(attempts.len(), 2, "{reports:?}");
+    let worktree = r.home.join("worktrees").join(&attempts[1].session_id);
+    assert!(
+        worktree.join("outside.txt").exists(),
+        "the granted write was made"
+    );
+    assert!(
+        !worktree.join("other.txt").exists(),
+        "a write nobody granted was refused"
+    );
+    // the grant was used once, by that attempt, and the new decision asks only for the other file
+    let grants = w.list_grants(w.id()).unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(
+        grants[0].consumed_by_attempt.as_deref(),
+        Some(attempts[1].id.as_str())
+    );
+    let second = decisions(&w)
+        .into_iter()
+        .find(|x| x.id != d.id)
+        .expect("a second decision");
+    assert_eq!(
+        w.decision_action(&second.id).unwrap().unwrap()["grant_rules"],
+        json!(["Edit(/other.txt)"])
+    );
+    // the audit trail holds the grant's life
+    let kinds: Vec<String> = w
+        .read_events(w.control_session_id(), 0, 5000)
+        .unwrap()
+        .into_iter()
+        .filter_map(|rec| match rec {
+            synthesis_events::Record::Unknown(raw) => Some(raw.kind),
+            _ => None,
+        })
+        .collect();
+    for k in ["grant.created", "grant.consumed", "policy.decision"] {
+        assert!(kinds.iter().any(|x| x == k), "{k} in {kinds:?}");
+    }
+    // a third attempt has no grant: the used one cannot be used again
+    assert!(w.usable_grants(&it).unwrap().is_empty());
+}

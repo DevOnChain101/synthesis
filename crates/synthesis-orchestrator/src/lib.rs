@@ -12,6 +12,7 @@ mod alloc;
 mod decision;
 mod envelope;
 mod gitsafe;
+mod grants;
 mod host;
 mod planner;
 mod proc;
@@ -29,6 +30,9 @@ pub use gitsafe::{
     ChangeReport, Entry, Scratch, change_flags, changed_files, file_edits, fresh_checkout,
     inspect_change,
 };
+pub use grants::{
+    DecisionDriver, GRANT_TTL_HOURS, current_binding_for, decided_choices, decision_binding,
+};
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
@@ -40,8 +44,8 @@ pub use runner::{
     settle_item,
 };
 pub use sched::{
-    Control, HandOff, SchedConfig, SchedError, Scheduler, Stop, TickReport, Verdict, Verifier,
-    WorkerHost, pick_in_order,
+    Control, Decisions, HandOff, SchedConfig, SchedError, Scheduler, Stop, TickReport, Verdict,
+    Verifier, WorkerHost, pick_in_order,
 };
 pub use verify::{
     CheckRun, CheckRunner, IndependentVerifier, SCOPE_CHECK, SandboxRunner, VerifyError,
