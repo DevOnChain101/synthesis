@@ -167,7 +167,10 @@ impl Profile {
         for r in rules {
             let shape = (r.starts_with("Edit(/") || r.starts_with("Bash(")) && r.ends_with(')');
             let plain = r.len() <= 300 && r.chars().all(|c| matches!(c, ' '..='~'));
-            if !shape || !plain || crate::decision::rule_denied(&self.compiled.deny, r) {
+            // the engine reads `*` (and a trailing `:*`) as a glob or prefix: an exact rule has none
+            let exact = !r.contains('*')
+                && !(r.starts_with("Edit(") && r.contains(['?', '[', ']', '{', '}', '!']));
+            if !shape || !plain || !exact || crate::decision::rule_denied(&self.compiled.deny, r) {
                 return Err(ProfileError::Forbidden(r.clone()));
             }
         }

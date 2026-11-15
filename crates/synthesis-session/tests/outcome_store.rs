@@ -3212,6 +3212,15 @@ fn grant_decision(
     kind: &str,
     action: Option<Value>,
 ) -> (OutcomeWriter, DecisionRecord, WorkItemId) {
+    try_grant_decision(e, store, kind, action).unwrap()
+}
+
+fn try_grant_decision(
+    e: &Env,
+    store: &Store,
+    kind: &str,
+    action: Option<Value>,
+) -> Result<(OutcomeWriter, DecisionRecord, WorkItemId), Error> {
     let (mut w, items) = ready_outcome(e, store);
     let it = item(&items, "implement").clone();
     let nd = NewDecision {
@@ -3226,11 +3235,11 @@ fn grant_decision(
         expires_at: hours(2),
         action,
     };
-    let (d, _) = w.new_decision(&nd).unwrap();
+    let (d, _) = w.new_decision(&nd)?;
     w.transition_decision(&d.id, 1, DecisionState::Pending, &d.binding, NONE)
         .unwrap();
     let d = w.list_decisions(w.id()).unwrap().remove(0);
-    (w, d, it)
+    Ok((w, d, it))
 }
 
 /// An attempt that is starting (what consumes a grant): the item leased, the attempt `starting`.
@@ -3263,6 +3272,9 @@ fn a_grant_is_derived_from_the_stored_action_and_the_store_owns_the_action_hash(
     let e = env();
     let store = e.v5();
     let (mut w, d, it) = grant_decision(&e, &store, "approval_needed", Some(the_action()));
+    // the label the person reads is derived from the rules, not trusted as given
+    let label = d.brief["alternatives"][0]["label"].as_str().unwrap();
+    assert_eq!(label, "allow exactly Edit(/outside.txt) in one new attempt");
     // a caller-supplied action hash is overwritten by the hash of the stored action
     assert_ne!(d.binding["action_hash"], "caller-says-so");
     assert_eq!(
@@ -3309,19 +3321,30 @@ fn only_a_person_approved_grant_once_of_an_approval_needed_decision_can_grant() 
         );
         assert!(w.list_grants(w.id()).unwrap().is_empty());
     }
-    // no stored action, or no grant rules in it: nothing to grant
+    // a decision that offers grant_once must carry exact, grantable rules: nothing else is stored
     for action in [
         None,
         Some(json!({"needed": ["Write"]})),
         Some(json!({"grant_rules": []})),
         Some(json!({"grant_rules": ["Edit(/a\u{1b}[31m)"]})),
+        // the engine reads `*` and a trailing `:*` as a glob or a prefix: not exact rules
+        Some(json!({"grant_rules": ["Bash(python:*)"]})),
+        Some(json!({"grant_rules": ["Bash(*)"]})),
+        Some(json!({"grant_rules": ["Bash(ls *)"]})),
+        Some(json!({"grant_rules": ["Bash(git * main)"]})),
+        Some(json!({"grant_rules": ["Edit(/a*)"]})),
+        Some(json!({"grant_rules": ["Edit(/a?)"]})),
+        Some(json!({"grant_rules": ["Bash()"]})),
+        Some(json!({"grant_rules": ["Bash( ls)"]})),
+        Some(json!({"grant_rules": ["Read(/a)"]})),
+        Some(json!({"grant_rules": ["Edit(/ok)", 7]})),
     ] {
         let e = env();
         let store = e.v5();
-        let (mut w, d, _) = grant_decision(&e, &store, "approval_needed", action.clone());
-        w.resolve_decision(&resolution(&d, "grant_once"), &d.binding)
-            .unwrap();
-        assert!(w.create_grant(&d.id, &d.binding, 24).is_err(), "{action:?}");
+        assert!(
+            try_grant_decision(&e, &store, "approval_needed", action.clone()).is_err(),
+            "{action:?}"
+        );
     }
 }
 

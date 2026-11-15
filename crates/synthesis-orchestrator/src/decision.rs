@@ -226,11 +226,30 @@ pub(crate) fn scoped_rule(
                     )
                 })
                 && !text.is_empty();
-            plain.then(|| format!("Edit(/{text})"))
+            if !plain {
+                return None;
+            }
+            // protected paths (.git, .synt, AGENTS.md, CI and shell startup files ...) are never granted
+            let full = worktree.join(&rel);
+            if synthesis_permissions::is_protected_path(&[worktree.to_path_buf()], &full) {
+                return None;
+            }
+            // a link on the way (or as the file) would make the lexical rule mean another place
+            let mut walk = worktree.to_path_buf();
+            for c in rel.components() {
+                walk.push(c);
+                if std::fs::symlink_metadata(&walk).is_ok_and(|m| m.file_type().is_symlink()) {
+                    return None;
+                }
+            }
+            Some(format!("Edit(/{text})"))
         }
         "Bash" => {
             let c = input.get("command")?.as_str()?;
-            (printable(c) && !c.contains(['(', ')'])).then(|| format!("Bash({c})"))
+            // The engine reads `*` and a trailing `:*` in a Bash rule as a glob or a prefix: a
+            // command containing one would grant more than that command. Empty and padded text too.
+            (printable(c) && c == c.trim() && !c.contains(['(', ')', '*']))
+                .then(|| format!("Bash({c})"))
         }
         _ => None,
     }
@@ -526,8 +545,33 @@ mod tests {
         // a command becomes an exact rule; anything the syntax cannot carry does not
         let bash = |c: &str| scoped_rule("Bash", &json!({"command": c}), wt);
         assert_eq!(bash("cargo test").as_deref(), Some("Bash(cargo test)"));
-        for bad in ["", "echo (x)", "a\nb", &"x".repeat(301)] {
+        // `*` and a trailing `:*` are read by the engine as a glob and a prefix: never an exact rule
+        for bad in [
+            "",
+            "echo (x)",
+            "a\nb",
+            &"x".repeat(301),
+            "python:*",
+            "*",
+            "ls *",
+            "git * main",
+            "ls*",
+            " ls",
+            "ls ",
+        ] {
             assert_eq!(bash(bad), None, "{bad:?}");
+        }
+        // protected paths are never granted
+        for p in [
+            ".git/config",
+            ".git/hooks/pre-commit",
+            "sub/.git/config",
+            ".synt/settings.json",
+            "AGENTS.md",
+            ".envrc",
+            ".github/workflows/x.yml",
+        ] {
+            assert_eq!(edit(p), None, "{p}");
         }
         // other tools are never grantable
         for t in ["Read", "WebFetch", "browser_navigate", "mcp__s__t", "Task"] {
@@ -540,5 +584,24 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_worktree_makes_an_edit_ungrantable() {
+        use serde_json::json;
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path();
+        std::fs::create_dir_all(wt.join("real")).unwrap();
+        std::fs::write(wt.join("a.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("/etc", wt.join("dirlink")).unwrap();
+        std::os::unix::fs::symlink(wt.join("a.txt"), wt.join("filelink")).unwrap();
+        let edit = |p: &str| scoped_rule("Write", &json!({"file_path": p}), wt);
+        // a plain directory, an existing file and a new file are fine (the control)
+        assert_eq!(edit("real/new.txt").as_deref(), Some("Edit(/real/new.txt)"));
+        assert_eq!(edit("a.txt").as_deref(), Some("Edit(/a.txt)"));
+        // a link as a parent directory or as the file itself: the lexical rule would mean another place
+        assert_eq!(edit("dirlink/x"), None);
+        assert_eq!(edit("filelink"), None);
     }
 }

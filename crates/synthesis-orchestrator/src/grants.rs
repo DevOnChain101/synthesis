@@ -228,6 +228,17 @@ impl Decisions for DecisionDriver {
                         if stale && g.consumed_at.is_none() && g.revoked_at.is_none() {
                             w.revoke_grant(&g.id, "the binding changed before the grant was used")?;
                             notes.push(format!("grant {} revoked: the binding changed", g.id));
+                        } else if !stale && w.usable_grants(&item_id)?.iter().any(|x| x.id == g.id)
+                        {
+                            // a crash between creating the grant and making the item ready
+                            let item = Self::item(w, &item_id)?;
+                            if item.state == WorkItemState::WaitingDecision {
+                                go(w, &item_id, WorkItemState::Ready)?;
+                                notes.push(format!(
+                                    "grant {} is unused: {} runs again",
+                                    g.id, item.key
+                                ));
+                            }
                         }
                         continue;
                     }

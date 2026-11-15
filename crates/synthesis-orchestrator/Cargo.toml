@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
+synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-sandbox = { path = "../synthesis-sandbox" }
 synthesis-session = { path = "../synthesis-session" }
 synthesis-verification = { path = "../synthesis-verification" }
@@ -32,7 +33,6 @@ test-seam = []
 rustix = { version = "1", default-features = false, features = ["process"] }
 
 [dev-dependencies]
-synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-orchestrator = { path = ".", features = ["test-seam"] }
 synthesis-config = { path = "../synthesis-config" }
 tempfile = "3"

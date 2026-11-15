@@ -811,6 +811,24 @@ pub struct GrantRecord {
     pub revoked_at: Option<String>,
 }
 
+/// A rule a grant may carry: an exact `Edit(/path)` or `Bash(command)` of printable ASCII, no `*`
+/// (the engine reads `*` and a trailing `:*` in a Bash rule as a glob or a prefix, so a command
+/// containing one would grant more than that command), no glob characters in an edit path.
+fn valid_grant_rule(r: &str) -> bool {
+    let edit = r.strip_prefix("Edit(/");
+    let bash = r.strip_prefix("Bash(");
+    let body = edit.or(bash).and_then(|b| b.strip_suffix(')'));
+    r.len() <= 300
+        && r.chars().all(|c| matches!(c, ' '..='~'))
+        && !r.contains('*')
+        && body.is_some_and(|b| {
+            !b.is_empty()
+                && b == b.trim()
+                && !b.contains(['(', ')'])
+                && (bash.is_some() || !b.contains(['?', '[', ']', '{', '}', '!']))
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn grant_parts<'a>(
     id: &'a str,
@@ -1671,9 +1689,7 @@ impl OutcomeWriter {
         if rules.is_empty()
             || rules.len() > 10
             || rules.len() != listed
-            || rules.iter().any(|r| {
-                r.is_empty() || r.len() > 300 || !r.chars().all(|c| matches!(c, ' '..='~'))
-            })
+            || rules.iter().any(|r| !valid_grant_rule(r))
         {
             return Err(Error::Invalid(
                 "the stored action carries no grantable rules".into(),
@@ -1743,7 +1759,7 @@ impl OutcomeWriter {
             }
             let at = ts(tx.now);
             let n = tx.et.tx.execute(
-                "UPDATE grants SET consumed_at=?2, consumed_by_attempt=?3 WHERE id=?1 AND consumed_at IS NULL AND revoked_at IS NULL",
+                "UPDATE grants SET consumed_at=?2, consumed_by_attempt=?3 WHERE id=?1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?2",
                 params![g.id, at, attempt.as_str()],
             )?;
             if n != 1 {
@@ -3293,6 +3309,47 @@ impl OutcomeTx<'_, '_> {
             })?;
         let _ = expires;
         let (mut brief, mut binding) = (d.brief.clone(), d.binding.clone());
+        // An `approval_needed` decision that offers `grant_once` must carry the exact rules it
+        // would grant, and the label the person reads is DERIVED from them (not trusted as given).
+        if d.kind == "approval_needed" && offers(&brief, "grant_once") {
+            let rules: Vec<String> = d
+                .action
+                .as_ref()
+                .and_then(|a| a.get("grant_rules"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let listed = d
+                .action
+                .as_ref()
+                .and_then(|a| a.get("grant_rules"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if rules.is_empty()
+                || rules.len() > 10
+                || rules.len() != listed
+                || !rules.iter().all(|r| valid_grant_rule(r))
+            {
+                return Err(Error::Invalid(
+                    "a decision that offers grant_once needs exact grantable rules in its action"
+                        .into(),
+                ));
+            }
+            let label = format!("allow exactly {} in one new attempt", rules.join(", "));
+            if let Some(alts) = brief.get_mut("alternatives").and_then(Value::as_array_mut) {
+                for a in alts.iter_mut() {
+                    if a.get("id").and_then(Value::as_str) == Some("grant_once")
+                        && let Some(o) = a.as_object_mut()
+                    {
+                        o.insert("label".into(), Value::String(label.clone()));
+                    }
+                }
+            }
+        }
         self.et.redact_value(&mut brief);
         self.et.redact_value(&mut binding);
         // the action's hash is the store's own: nobody can bind a decision to an action it does not hold

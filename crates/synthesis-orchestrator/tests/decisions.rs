@@ -484,6 +484,11 @@ fn a_granted_rule_must_be_exact_and_inside_the_contract() {
         "Edit",                       // not exact
         "Bash(rm -rf /",              // not a rule
         "WebFetch(domain:evil.test)", // network is denied
+        "Bash(python:*)",             // a prefix, not the command
+        "Bash(*)",
+        "Bash(ls *)",
+        "Bash(git * main)",
+        "Edit(/a*)",
     ] {
         assert!(
             matches!(
@@ -495,4 +500,33 @@ fn a_granted_rule_must_be_exact_and_inside_the_contract() {
     }
     let many: Vec<String> = (0..11).map(|i| format!("Edit(/f{i})")).collect();
     assert!(base().with_granted_rules(&many).is_err());
+}
+
+#[test]
+fn a_live_unused_grant_moves_a_waiting_item_to_ready_on_the_next_tick() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "g",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/src/a.txt)"]),
+        2,
+    );
+    answer(&mut w, &d, "grant_once");
+    // the owner crashed right after the grant was written, before the item was made ready
+    w.create_grant(&d.id, &d.binding, 24).unwrap();
+    assert_eq!(
+        w.get_work_item(&it).unwrap().state,
+        WorkItemState::WaitingDecision
+    );
+    let mut driver = DecisionDriver::default();
+    let notes = driver.drive(&mut w, OffsetDateTime::now_utc()).unwrap();
+    assert!(notes.iter().any(|n| n.contains("runs again")), "{notes:?}");
+    assert_eq!(w.get_work_item(&it).unwrap().state, WorkItemState::Ready);
+    assert_eq!(w.list_grants(w.id()).unwrap().len(), 1, "no second grant");
 }
