@@ -791,6 +791,13 @@ impl TerminalRuntime {
             if caps.filesystem == Guarantee::None {
                 continue;
             }
+            if mode == SandboxMode::BestEffort && backend.enforce_only() {
+                why.push(format!(
+                    "{} is available but opt-in: it edits ACLs of your real directories and has only CI evidence; use --sandbox enforce to run commands in it",
+                    backend.name()
+                ));
+                continue;
+            }
             // An unusable backend (None) never passes, whatever the policy asks.
             let required = policy.required.max(Guarantee::Weak);
             // Allow restricts nothing (Strong); Deny/Loopback must be honoured by the backend.

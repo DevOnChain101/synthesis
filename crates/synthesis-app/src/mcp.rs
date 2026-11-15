@@ -566,6 +566,12 @@ pub fn confine(
         }
         let go = || -> Result<SandboxedCommand, String> {
             let backend = synthesis_sandbox::detect();
+            if !strict && backend.enforce_only() {
+                return Err(format!(
+                    "{} is only used under --sandbox enforce (it edits ACLs of your real directories and has only CI evidence)",
+                    backend.name()
+                ));
+            }
             let endpoint = match (r.network, proxies.get(&cfg.name)) {
                 (ServerNet::Hosts, Some(Ok((_, ep)))) => Some(ep.clone()),
                 (ServerNet::Hosts, Some(Err(e))) => return Err(e.clone()),

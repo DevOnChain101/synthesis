@@ -187,7 +187,7 @@ pub fn sandbox_default_notice(c: &Common) -> Option<String> {
         return Some("sandbox: --sandbox best-effort is enforce on WSL (WSL is not isolation: Windows programs and drives stay reachable without the sandbox); only --sandbox off runs commands unconfined".to_string());
     }
     (c.sandbox.is_none() && c.sandbox_mode() == SandboxMode::BestEffort).then(|| {
-        "sandbox: this OS has no command confinement (Windows Job Object only), so commands run UNCONFINED with your privileges; pass --sandbox enforce to refuse them instead".to_string()
+        "sandbox: this OS has no command confinement (Windows Job Object only), so commands run UNCONFINED with your privileges; pass --sandbox enforce to run them in the experimental AppContainer sandbox (needs synthesis-sandbox-exec.exe next to synt.exe) or to refuse them when it is unavailable".to_string()
     })
 }
 

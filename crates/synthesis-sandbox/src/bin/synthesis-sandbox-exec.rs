@@ -6,6 +6,9 @@
 //! `synthesis-sandbox-exec --egress-bridge <socket> <port> -- <program> [args...]` (inside the
 //! bubblewrap net namespace, `--network hosts`) forwards `127.0.0.1:<port>` to the egress proxy's
 //! unix socket while `<program>` runs as its child; exit code = the program's.
+//! `synthesis-sandbox-exec --appcontainer <spec json>` (Windows only, see `windows.rs`) runs the
+//! program named in the spec inside an AppContainer and Job Object, removes the ACEs it added,
+//! and exits with the program's exit code; 126: nothing could be run.
 //! Any form may start with `--limits <spec>` (see `limits_arg`): rlimits and, when a cgroup v2 is
 //! delegated, memory/tasks caps are applied first. `--limits <spec> -- <program> [args...]`
 //! alone applies just those.
@@ -78,8 +81,30 @@ fn fail(code: u8, e: &dyn std::fmt::Display) -> std::process::ExitCode {
     std::process::ExitCode::from(code)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    eprintln!("synthesis-sandbox-exec: Landlock is Linux-only");
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let [flag, spec] = args.as_slice() else {
+        eprintln!("synthesis-sandbox-exec: usage: --appcontainer <spec json>");
+        return std::process::ExitCode::from(126);
+    };
+    let run = (flag == "--appcontainer")
+        .then(|| spec.to_str())
+        .flatten()
+        .ok_or_else(|| "usage: --appcontainer <spec json>".to_string())
+        .and_then(synthesis_sandbox::run_appcontainer);
+    match run {
+        // the program's own exit code (32 bits on Windows)
+        Ok(code) => std::process::exit(code as i32),
+        Err(e) => {
+            eprintln!("synthesis-sandbox-exec: {e}");
+            std::process::ExitCode::from(126)
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn main() -> std::process::ExitCode {
+    eprintln!("synthesis-sandbox-exec: Linux (Landlock) and Windows (AppContainer) only");
     std::process::ExitCode::from(126)
 }

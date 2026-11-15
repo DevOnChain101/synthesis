@@ -60,7 +60,9 @@ fn host_confines(home: &Path) -> bool {
         .env("SYNT_HOME", home)
         .output()
         .unwrap();
-    String::from_utf8_lossy(&o.stdout).contains("enforce_ready: yes")
+    // native Windows: the suites below are written for POSIX shells and are not run under the
+    // AppContainer (it is exercised by crates/synthesis-sandbox/tests/appcontainer.rs)
+    !cfg!(windows) && String::from_utf8_lossy(&o.stdout).contains("enforce_ready: yes")
 }
 
 struct Rig {
