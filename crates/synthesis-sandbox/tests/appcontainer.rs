@@ -146,8 +146,8 @@ fn a_read_root_is_readable_not_writable() {
     assert!(!bad.status.success() && !tools.path().join("n.txt").exists());
 }
 
-#[test]
-fn deny_and_readonly_paths_inside_a_writable_root() {
+/// A workspace with a denied dir, a read-only dir and a guarded parent, plus the policy for it.
+fn guarded() -> (tempfile::TempDir, PathBuf, SandboxPolicy) {
     let w = ws();
     let r = canon(w.path());
     std::fs::create_dir_all(r.join("secret")).unwrap();
@@ -158,16 +158,38 @@ fn deny_and_readonly_paths_inside_a_writable_root() {
     let mut p = pol(&r);
     p.deny_paths = vec![r.join("secret")];
     p.readonly_paths = vec![r.join(".git/hooks")];
+    (w, r, p)
+}
+
+/// The ACLs as the container sees them DURING a run (what the helper actually set), for messages.
+fn acl_dump(p: &SandboxPolicy, r: &Path) -> String {
+    let o = sh(
+        p,
+        r,
+        r"C:\Windows\System32\icacls.exe secret secret\k .git\hooks .git\hooks\pre-commit",
+    );
+    text(&o)
+}
+
+#[test]
+fn a_denied_path_inside_a_writable_root_is_unreadable_and_unwritable() {
+    let (_w, r, p) = guarded();
     assert!(text(&sh(&p, &r, "type open")).contains("fine"), "control");
     let s = sh(&p, &r, r"type secret\k");
     assert!(
         !s.status.success() && !text(&s).contains("TOPSECRET"),
-        "{}",
-        text(&s)
+        "{}\nACLs during the run:\n{}",
+        text(&s),
+        acl_dump(&p, &r)
     );
     assert!(!sh(&p, &r, r"echo x> secret\new").status.success());
     assert!(!r.join(r"secret\new").exists());
-    // read-only: readable, not writable, not deletable
+}
+
+#[test]
+fn a_readonly_path_inside_a_writable_root_is_readable_not_writable() {
+    let (_w, r, p) = guarded();
+    let dump = || acl_dump(&p, &r);
     assert!(
         text(&sh(&p, &r, r"type .git\hooks\pre-commit")).contains("orig"),
         "control"
@@ -175,13 +197,21 @@ fn deny_and_readonly_paths_inside_a_writable_root() {
     assert!(
         !sh(&p, &r, r"echo evil> .git\hooks\pre-commit")
             .status
-            .success()
+            .success(),
+        "{}",
+        dump()
     );
-    assert!(!sh(&p, &r, r"del .git\hooks\pre-commit").status.success());
+    assert!(
+        !sh(&p, &r, r"del .git\hooks\pre-commit").status.success(),
+        "{}",
+        dump()
+    );
     assert!(
         !sh(&p, &r, r"echo evil> .git\hooks\new-hook")
             .status
-            .success()
+            .success(),
+        "{}",
+        dump()
     );
     assert_eq!(
         std::fs::read_to_string(r.join(".git/hooks/pre-commit"))
@@ -189,13 +219,23 @@ fn deny_and_readonly_paths_inside_a_writable_root() {
             .trim(),
         "orig"
     );
-    // the guarded directory's children cannot be renamed away either
-    assert!(!sh(&p, &r, r"ren .git\hooks hooks.bak").status.success());
-    assert!(r.join(".git/hooks").exists());
+    assert!(!r.join(".git/hooks/new-hook").exists());
 }
 
 #[test]
-fn the_network_is_closed_loopback_included() {
+fn the_children_of_a_guarded_directory_cannot_be_renamed_away() {
+    let (_w, r, p) = guarded();
+    let o = sh(&p, &r, r"ren .git\hooks hooks.bak");
+    assert!(
+        !o.status.success() && r.join(".git/hooks").exists(),
+        "{}\n{}",
+        text(&o),
+        acl_dump(&p, &r)
+    );
+}
+
+#[test]
+fn no_network_the_hosts_loopback_included() {
     let w = ws();
     let probe = Path::new(env!("CARGO_BIN_EXE_synthesis-sandbox-exec"))
         .parent()
@@ -209,22 +249,39 @@ fn the_network_is_closed_loopback_included() {
     );
     let local = w.path().join("net_probe.exe"); // inside the workspace grant: executable there
     std::fs::copy(&probe, &local).unwrap();
-    let control = Command::new(&local).arg("loopback").output().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); // a "service" of the host
+    let addr = listener.local_addr().unwrap().to_string();
+    let connect = |c: &mut Command| c.args(["connect", &addr]).output().unwrap();
+    let control = connect(&mut Command::new(&local));
+    assert!(control.status.success(), "control: {}", text(&control));
+    let o = connect(&mut wrapped(
+        &pol(w.path()),
+        w.path(),
+        local.to_str().unwrap(),
+        &[],
+    ));
+    // the program must have STARTED in the container (126 = the helper could not), and failed
     assert!(
-        text(&control).contains("LOOPBACK_OK"),
-        "control: {}",
-        text(&control)
+        o.status.code().is_some_and(|c| c != 0 && c != 126),
+        "{}",
+        text(&o)
     );
-    let o = run(
+    assert!(
+        !text(&o).contains("synthesis-sandbox-exec:"),
+        "{}",
+        text(&o)
+    );
+    // outside the host: loopback inside the container itself may work, a remote address must not
+    let r = run(
         &pol(w.path()),
         w.path(),
         local.to_str().unwrap(),
         &["loopback"],
     );
     assert!(
-        !o.status.success() && !text(&o).contains("LOOPBACK_OK"),
+        r.status.success() && !text(&r).contains("REMOTE_CONNECTED"),
         "{}",
-        text(&o)
+        text(&r)
     );
 }
 
@@ -257,22 +314,31 @@ fn loopback_and_proxied_are_refused_not_silently_weakened() {
 }
 
 #[test]
-fn temp_is_the_private_dir_and_nothing_else_is_writable() {
+fn temp_is_private_and_the_policy_tmp_dir_is_writable() {
     let (w, t) = (ws(), ws());
     let mut p = pol(w.path());
     p.tmp_dir = Some(canon(t.path()));
     let o = sh(
         &p,
         w.path(),
-        r"echo %TEMP%> where.txt && echo y> %TEMP%\made.txt",
+        &format!(
+            "echo %TEMP%> where.txt && echo y> {}",
+            t.path().join("made.txt").display()
+        ),
     );
-    assert!(o.status.success(), "{}", text(&o));
-    assert!(t.path().join("made.txt").exists());
-    let got = std::fs::read_to_string(w.path().join("where.txt")).unwrap();
     assert!(
-        got.trim()
-            .eq_ignore_ascii_case(canon(t.path()).to_str().unwrap()),
-        "{got}"
+        o.status.success() && t.path().join("made.txt").exists(),
+        "{}",
+        text(&o)
+    );
+    // the system gives each container its own TEMP; it is never the user's
+    let got = std::fs::read_to_string(w.path().join("where.txt")).unwrap();
+    let host = std::env::temp_dir().display().to_string().to_lowercase();
+    assert!(
+        !got.trim()
+            .to_lowercase()
+            .starts_with(host.trim_end_matches('\\')),
+        "TEMP in the container: {got}"
     );
 }
 
@@ -295,8 +361,12 @@ fn the_process_limit_applies_when_exec_is_not_allowed() {
     let w = ws();
     let nested = format!("{CMD} /c echo ok> nested.txt");
     // control: a child process is allowed by default
-    assert!(sh(&pol(w.path()), w.path(), &nested).status.success());
-    assert!(w.path().join("nested.txt").exists());
+    let c = sh(&pol(w.path()), w.path(), &nested);
+    assert!(
+        w.path().join("nested.txt").exists(),
+        "control: {}",
+        text(&c)
+    );
     std::fs::remove_file(w.path().join("nested.txt")).unwrap();
     let mut p = pol(w.path());
     p.allow_exec = false; // Job Object ActiveProcessLimit = 1

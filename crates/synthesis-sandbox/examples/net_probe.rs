@@ -1,6 +1,7 @@
 //! Tiny network probe the sandbox tests run INSIDE the sandbox (instead of python3, which on macOS
 //! is an xcrun shim that dies under Seatbelt). Exit 0 = the operation worked, 1 = it failed.
 //!   net_probe unix <socket-path>   connect to a unix socket
+//!   net_probe connect <addr>       TCP connect to <addr> (e.g. 127.0.0.1:4000); exit 0 = connected
 //!   net_probe loopback             bind/listen/connect/accept on 127.0.0.1 and ::1, then probe two
 //!                                  non-loopback addresses; prints LOOPBACK_OK, remote_denied/REMOTE_CONNECTED
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -26,6 +27,18 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["connect", addr] => match addr
+            .parse::<SocketAddr>()
+            .map_err(|e| e.to_string())
+            .and_then(|a| {
+                TcpStream::connect_timeout(&a, Duration::from_secs(3)).map_err(|e| e.to_string())
+            }) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("connect {addr}: {e}");
+                ExitCode::FAILURE
+            }
+        },
         ["loopback"] => {
             for a in ["127.0.0.1", "::1"] {
                 if let Err(e) = pair(a) {
@@ -44,7 +57,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: net_probe unix <path> | loopback");
+            eprintln!("usage: net_probe unix <path> | connect <addr> | loopback");
             ExitCode::from(2)
         }
     }
