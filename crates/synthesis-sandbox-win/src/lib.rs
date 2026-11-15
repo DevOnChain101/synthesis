@@ -62,7 +62,7 @@ pub struct Spec {
     pub program: PathBuf,
     /// The full command line, already quoted (`lpCommandLine`).
     pub command_line: String,
-    /// Applied in order: grants first, denies after, so a deny always sits on top.
+    /// Applied in order (removed in reverse). Denies come first: see `plan_grants`.
     pub grants: Vec<Grant>,
     /// Add the `internetClient`, `internetClientServer` and `privateNetworkClientServer`
     /// capabilities. Without them the container has no network at all (loopback included).

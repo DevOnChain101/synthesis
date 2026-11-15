@@ -2,6 +2,7 @@
 //! is an xcrun shim that dies under Seatbelt). Exit 0 = the operation worked, 1 = it failed.
 //!   net_probe unix <socket-path>   connect to a unix socket
 //!   net_probe connect <addr>       TCP connect to <addr> (e.g. 127.0.0.1:4000); exit 0 = connected
+//!   net_probe sleep <secs>         just wait (keeps a sandbox alive while a test looks at it)
 //!   net_probe loopback             bind/listen/connect/accept on 127.0.0.1 and ::1, then probe two
 //!                                  non-loopback addresses; prints LOOPBACK_OK, remote_denied/REMOTE_CONNECTED
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -39,6 +40,10 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["sleep", secs] => {
+            std::thread::sleep(Duration::from_secs(secs.parse().unwrap_or(1)));
+            ExitCode::SUCCESS
+        }
         ["loopback"] => {
             for a in ["127.0.0.1", "::1"] {
                 if let Err(e) = pair(a) {

@@ -161,14 +161,40 @@ fn guarded() -> (tempfile::TempDir, PathBuf, SandboxPolicy) {
     (w, r, p)
 }
 
-/// The ACLs as the container sees them DURING a run (what the helper actually set), for messages.
+/// The `net_probe` example (built next to the helper); copied into `dir` so it may run there.
+fn probe_in(dir: &Path) -> PathBuf {
+    let from = Path::new(HELPER)
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("net_probe.exe");
+    assert!(from.exists(), "build the example first: {}", from.display());
+    let to = dir.join("net_probe.exe");
+    std::fs::copy(from, &to).unwrap();
+    to
+}
+
+/// The ACLs of the guarded paths while a container is running (what the helper really set),
+/// read from the host side, for failure messages.
 fn acl_dump(p: &SandboxPolicy, r: &Path) -> String {
-    let o = sh(
-        p,
-        r,
-        r"C:\Windows\System32\icacls.exe secret secret\k .git\hooks .git\hooks\pre-commit",
-    );
-    text(&o)
+    let probe = probe_in(r);
+    let mut c = wrapped(p, r, probe.to_str().unwrap(), &["sleep", "6"]);
+    let mut child = c.spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let mut out = String::new();
+    for rel in [
+        "",
+        "secret",
+        r"secret\k",
+        ".git",
+        r".git\hooks",
+        r".git\hooks\pre-commit",
+    ] {
+        out.push_str(&format!("-- {rel}\n{}\n", icacls(&r.join(rel))));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    out
 }
 
 #[test]
@@ -247,8 +273,7 @@ fn no_network_the_hosts_loopback_included() {
         "build the example first: {}",
         probe.display()
     );
-    let local = w.path().join("net_probe.exe"); // inside the workspace grant: executable there
-    std::fs::copy(&probe, &local).unwrap();
+    let local = probe_in(w.path()); // inside the workspace grant: executable there
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); // a "service" of the host
     let addr = listener.local_addr().unwrap().to_string();
     let connect = |c: &mut Command| c.args(["connect", &addr]).output().unwrap();
@@ -361,17 +386,20 @@ fn the_process_limit_applies_when_exec_is_not_allowed() {
     let w = ws();
     let nested = format!("{CMD} /c echo ok> nested.txt");
     // control: a child process is allowed by default
-    let c = sh(&pol(w.path()), w.path(), &nested);
-    assert!(
-        w.path().join("nested.txt").exists(),
-        "control: {}",
-        text(&c)
-    );
-    std::fs::remove_file(w.path().join("nested.txt")).unwrap();
+    // (the outer cmd creates nested.txt for the redirect even when the inner one cannot start,
+    // so the CONTENT is the evidence)
+    let said = |p: &SandboxPolicy| {
+        let o = sh(p, w.path(), &nested);
+        let got = std::fs::read_to_string(w.path().join("nested.txt")).unwrap_or_default();
+        let _ = std::fs::remove_file(w.path().join("nested.txt"));
+        (got.trim().to_string(), text(&o))
+    };
+    let (got, msg) = said(&pol(w.path()));
+    assert_eq!(got, "ok", "control: {msg}");
     let mut p = pol(w.path());
     p.allow_exec = false; // Job Object ActiveProcessLimit = 1
-    let o = sh(&p, w.path(), &nested);
-    assert!(!w.path().join("nested.txt").exists(), "{}", text(&o));
+    let (got, msg) = said(&p);
+    assert_ne!(got, "ok", "the nested process ran: {msg}");
 }
 
 #[test]
