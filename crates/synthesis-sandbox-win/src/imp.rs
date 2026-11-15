@@ -516,7 +516,7 @@ fn validate(stem: &str, j: &JournalFile) -> Result<(), String> {
     {
         return Err(format!("bad profile name {:?}", j.profile));
     }
-    if !j.sid.starts_with("S-1-15-2-") || !digits(&j.sid) {
+    if !j.sid.strip_prefix("S-1-15-2-").is_some_and(digits) {
         return Err(format!("bad container SID {:?}", j.sid));
     }
     for (p, rec) in &j.entries {
