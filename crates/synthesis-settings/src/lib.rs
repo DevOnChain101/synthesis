@@ -117,10 +117,25 @@ pub struct SynthesisSettings {
     pub network_allowed_hosts: Option<Vec<String>>,
     /// The list above came from managed settings (the command line cannot add to it).
     pub network_allowed_hosts_managed: bool,
+    /// `sandbox.limits.<key>` (user and managed settings only), whole numbers; the keys are
+    /// [`SANDBOX_LIMIT_KEYS`] and `0` switches that limit off. Interpreted by `synthesis-app`.
+    pub sandbox_limits: std::collections::BTreeMap<String, u64>,
     /// `orchestrator` (outcome orchestration): user and managed settings only, managed wins.
     pub orchestrator: OrchestratorSettings,
     pub compat: Compat,
 }
+
+/// Keys of `synt.sandbox.limits`: file size, memory (cgroup), disk quota in MiB; tasks (cgroup),
+/// open files, processes (`RLIMIT_NPROC`, counts all the user's processes), CPU seconds.
+pub const SANDBOX_LIMIT_KEYS: [&str; 7] = [
+    "fileSizeMiB",
+    "memoryMiB",
+    "diskQuotaMiB",
+    "tasks",
+    "openFiles",
+    "processes",
+    "cpuSeconds",
+];
 
 /// Ceilings, equal to `synthesis_core::outcome` (`MAX_PARALLEL_WORKERS`, `MAX_ATTEMPTS_PER_WORK_ITEM`);
 /// this crate does not depend on core.
@@ -1048,6 +1063,29 @@ impl Settings {
                 self.diagnostics.push(format!(
                     "{what}: synt.sandbox.wsl.hide_windows_drives must be true or false"
                 ));
+            }
+        }
+        // Resource limits are the person's or the organisation's call: a repository must not lift them.
+        if let Some(l) = n.get("sandbox").and_then(|s| s.get("limits")) {
+            if what != "user settings" && what != "managed settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.sandbox.limits is read from user or managed settings only, ignored"
+                ));
+            } else if let Some(o) = l.as_object() {
+                for (k, v) in o {
+                    match (SANDBOX_LIMIT_KEYS.contains(&k.as_str()), v.as_u64()) {
+                        (true, Some(n)) => {
+                            self.synthesis.sandbox_limits.insert(k.clone(), n);
+                        }
+                        _ => self.diagnostics.push(format!(
+                            "{what}: synt.sandbox.limits.{k} must be a whole number (one of {})",
+                            SANDBOX_LIMIT_KEYS.join(", ")
+                        )),
+                    }
+                }
+            } else {
+                self.diagnostics
+                    .push(format!("{what}: synt.sandbox.limits must be an object"));
             }
         }
         // Which hosts a command may reach is the person's or the organisation's call, never a repository's.

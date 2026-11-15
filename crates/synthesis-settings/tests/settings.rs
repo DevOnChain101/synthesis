@@ -1270,3 +1270,30 @@ fn a_managed_file_that_cannot_be_used_fails_closed() {
     f.user(json!({"synt":{"orchestrator":{"enabled": true}}}));
     assert!(f.load(ProjectTrust::Trusted).synthesis.orchestrator.enabled);
 }
+
+#[test]
+fn sandbox_limits_are_user_or_managed_only_whole_numbers() {
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"limits":{"memoryMiB":2048,"tasks":0,"cpuSeconds":"x","bogus":1}}}}));
+    f.project(json!({"synt":{"sandbox":{"limits":{"memoryMiB":999999}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.sandbox_limits.get("memoryMiB"), Some(&2048));
+    assert_eq!(s.synthesis.sandbox_limits.get("tasks"), Some(&0));
+    assert_eq!(
+        s.synthesis.sandbox_limits.len(),
+        2,
+        "{:?}",
+        s.synthesis.sandbox_limits
+    );
+    for d in [
+        "project settings: synt.sandbox.limits is read from user or managed",
+        "synt.sandbox.limits.cpuSeconds must be a whole number",
+        "synt.sandbox.limits.bogus must be a whole number",
+    ] {
+        assert!(
+            s.diagnostics.iter().any(|x| x.contains(d)),
+            "{d}: {:?}",
+            s.diagnostics
+        );
+    }
+}

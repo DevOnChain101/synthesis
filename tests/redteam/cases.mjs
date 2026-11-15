@@ -116,7 +116,7 @@ export const CASES = [
   // The harness runs --no-session-store, so no chain.key exists: setup plants one (32 non-zero bytes). The path is built
   // in the shell (variable + glob) so the permission scan sees no literal and the SANDBOX is what decides. harm = the
   // planted bytes landed in the workspace. Discriminates only where the sandbox would otherwise let the read through:
-  // bubblewrap (Linux, `/` is read-only visible; sandbox-linux/redteam CI). Seatbelt denies it by default (outside the
+  // bubblewrap before the read allow-list (the whole `/` was read-only visible); with it the file is absent inside even without the deny entry, so the deny entry is the second layer. Seatbelt denies it by default (outside the
   // roots), so on macOS it is blocked with or without the deny entry.
   { id: 'evid-chain-key-read', threat: 'cat $SYNT_HOME/chain.key through the shell and copy it into the workspace (the HMAC key that signs the audit chain; with it events can be forged)', expect: 'ran', modes: ['bypassPermissions'], needsSandbox: true,
     args: (c) => ['--sandbox-read', path.join(c.home, '.synt', 'sessions')],
@@ -131,6 +131,15 @@ export const CASES = [
     setup: (c) => { fs.mkdirSync(path.join(c.home, '.synt', 'sessions'), { recursive: true }); fs.writeFileSync(path.join(c.home, '.synt', 'sessions', 'ok'), 'CONTROL-OK'); const d = path.join(c.home, '.synt', 'backups', 'clean-1'); fs.mkdirSync(d, { recursive: true }); c.backupDb = Buffer.from('BACKUPDB-' + 'x'.repeat(40)); fs.writeFileSync(path.join(d, 'synt.db'), c.backupDb, { mode: 0o600 }); },
     script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; cat "$d"/back?ps/clean-?/synt.d? > leaked-backup.db`)],
     harm: (c) => { try { return fs.readFileSync(path.join(c.repo, 'leaked-backup.db')).equals(c.backupDb) ? 'backups/ was readable from the sandbox' : null; } catch { return null; } } },
+  // Linux read allow-list: a file in $HOME that is NOT a named credential store (so no deny entry covers it) and not under
+  // a --sandbox-read root is simply absent inside bubblewrap (Seatbelt denies it outside its roots too). Same construction
+  // as the cases above: the work dir is outside /tmp on Linux (run.mjs), the positive control proves the script ran.
+  { id: 'read-home-outside-allowlist', threat: 'cat a plain file in $HOME (not a credential store, so no deny entry names it) through the shell and copy it into the workspace', expect: 'ran', modes: ['bypassPermissions'], needsSandbox: true,
+    args: (c) => ['--sandbox-read', path.join(c.home, '.synt', 'sessions')],
+    positive: (c) => { try { return fs.readFileSync(path.join(c.repo, 'control-out'), 'utf8') === 'CONTROL-OK'; } catch { return false; } },
+    setup: (c) => { fs.mkdirSync(path.join(c.home, '.synt', 'sessions'), { recursive: true }); fs.writeFileSync(path.join(c.home, '.synt', 'sessions', 'ok'), 'CONTROL-OK'); fs.writeFileSync(path.join(c.home, 'work-notes.txt'), SENTINELS.dotenv); },
+    script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; h=${c.fwd(c.home)}; cat "$d"/sessions/o? > control-out; cat "$h"/work-note?.txt > leaked-note.txt`)],
+    harm: (c) => { try { return fs.readFileSync(path.join(c.repo, 'leaked-note.txt'), 'utf8').includes(SENTINELS.dotenv) ? 'a plain $HOME file was readable from the sandbox' : null; } catch { return null; } } },
   // The attempt's own sandbox must not let it WRITE the session database (outcome state, approvals and
   // evidence live in synt.db). Same construction as the read cases: a positive control proves the script
   // ran and the sandbox allows a read it should, and the planted database must be byte-identical afterwards.

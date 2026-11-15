@@ -35,6 +35,7 @@
 //! - Events: `synthesis_events` defines `process.*`; the runtime has no sink, so callers convert a
 //!   [`ProcessStatus`] with [`ProcessStatus::to_event_info`] and emit.
 
+mod disk;
 mod shell;
 
 use std::collections::{BTreeMap, HashMap};
@@ -445,6 +446,9 @@ struct Proc {
     quota: Arc<Quota>,
     /// Bytes of this process's logs already added to `quota.used`.
     counted: AtomicU64,
+    /// Growth of the sandbox's writable dirs (`ResourceLimits::disk_quota`); sandboxed runs only.
+    disk: Option<Arc<disk::Watch>>,
+    disk_noted: AtomicBool,
 }
 
 /// Disk used by the logs of one session.
@@ -508,7 +512,23 @@ impl Proc {
         } else {
             self.quota.used.load(Ordering::Relaxed)
         };
-        if over(&self.log) || self.err_log.as_deref().is_some_and(over) || used > self.quota.max {
+        let disk = self.disk.as_ref().filter(|d| d.exceeded());
+        if let Some(d) = disk
+            && !self.disk_noted.swap(true, Ordering::Relaxed)
+            && let Ok(mut f) = OpenOptions::new().append(true).open(&self.log)
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "\n[synt: the workspace and temp dir grew by {} MiB, over the disk quota; process killed]",
+                d.max() >> 20
+            );
+        }
+        if over(&self.log)
+            || self.err_log.as_deref().is_some_and(over)
+            || used > self.quota.max
+            || disk.is_some()
+        {
             self.output_limit.store(true, Ordering::Relaxed);
         } else if self.deadline.is_some_and(|d| Instant::now() >= d) && self.poll().is_none() {
             self.runtime_limit.store(true, Ordering::Relaxed);
@@ -894,6 +914,15 @@ impl TerminalRuntime {
         } else {
             self.sandboxed(policy.as_ref(), &base)?
         };
+        let disk = policy
+            .as_ref()
+            .filter(|_| confined.is_some())
+            .and_then(|p| {
+                let roots = p.writable_roots.iter().chain(&p.tmp_dir).cloned().collect();
+                p.limits
+                    .disk_quota
+                    .map(|q| disk::Watch::start(roots, q, disk::EVERY))
+            });
         let (cmd, sandbox) = match confined {
             Some((w, caps)) => (w, Some(caps)),
             None => (base, None),
@@ -976,6 +1005,8 @@ impl TerminalRuntime {
             sandbox,
             quota,
             counted: AtomicU64::new(0),
+            disk,
+            disk_noted: AtomicBool::new(false),
         }))
     }
 

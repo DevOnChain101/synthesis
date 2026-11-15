@@ -6,12 +6,39 @@
 //! `synthesis-sandbox-exec --egress-bridge <socket> <port> -- <program> [args...]` (inside the
 //! bubblewrap net namespace, `--network hosts`) forwards `127.0.0.1:<port>` to the egress proxy's
 //! unix socket while `<program>` runs as its child; exit code = the program's.
+//! Any form may start with `--limits <spec>` (see `limits_arg`): rlimits and, when a cgroup v2 is
+//! delegated, memory/tasks caps are applied first. `--limits <spec> -- <program> [args...]`
+//! alone applies just those.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
     use std::os::unix::process::CommandExt;
 
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [flag, spec, ..] = args.as_slice()
+        && flag == "--limits"
+    {
+        let limits = match spec
+            .to_str()
+            .ok_or_else(|| {
+                synthesis_sandbox::SandboxError::InvalidPolicy("--limits is not UTF-8".into())
+            })
+            .and_then(synthesis_sandbox::parse_limits_arg)
+        {
+            Ok(l) => l,
+            Err(e) => return fail(126, &e),
+        };
+        if let Err(e) = synthesis_sandbox::apply_limits(&limits) {
+            return fail(126, &e);
+        }
+        args.drain(..2);
+        if let [sep, program, rest @ ..] = args.as_slice()
+            && sep == "--"
+        {
+            let err = std::process::Command::new(program).args(rest).exec();
+            return fail(127, &err);
+        }
+    }
     if let [flag, sep, program, rest @ ..] = args.as_slice()
         && flag == "--no-vsock"
         && sep == "--"

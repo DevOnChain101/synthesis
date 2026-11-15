@@ -30,13 +30,18 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use helper::{HELPER_NAME, decode_policy, encode_policy, parse_helper_args};
+pub use helper::{
+    HELPER_NAME, decode_policy, encode_policy, limits_arg, parse_helper_args, parse_limits_arg,
+};
+pub use linux::cgroup_status;
 pub use linux::{
     BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, helper_status, landlock_rules,
     skipped_backends,
 };
 #[cfg(target_os = "linux")]
-pub use linux::{deny_vsock, landlock_abi, restrict_current_process, run_egress_bridge};
+pub use linux::{
+    apply_limits, deny_vsock, landlock_abi, restrict_current_process, run_egress_bridge,
+};
 pub use seatbelt::{SeatbeltBackend, seatbelt_profile};
 pub use windows::WindowsJobBackend;
 
@@ -101,6 +106,90 @@ impl EgressEndpoint {
     }
 }
 
+/// Smallest disk quota a setting may ask for (decision 4 of docs/specs/sandbox-hardening.md).
+pub const DISK_QUOTA_FLOOR: u64 = 1 << 30;
+
+/// Resource caps for a sandboxed command; `None` = not limited. Applied on Linux by the helper
+/// (`synthesis-sandbox-exec --limits`): the rlimits always, `memory`/`tasks` only when a cgroup v2
+/// is delegated to the user ([`cgroup_status`]); `RLIMIT_CORE` is always 0 whenever the helper
+/// runs. `disk_quota` is checked by the terminal runtime (a watchdog over the writable roots), not
+/// here. Seatbelt and Windows enforce none of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// `RLIMIT_FSIZE`: largest file one process may write, bytes.
+    pub fsize: Option<u64>,
+    /// `RLIMIT_NOFILE`.
+    pub nofile: Option<u64>,
+    /// `RLIMIT_NPROC`. Counts ALL processes of the user (not only the sandbox), so a low value
+    /// makes `fork` fail whenever the user has that many processes: off by default.
+    pub nproc: Option<u64>,
+    /// `RLIMIT_CPU`, seconds of CPU time per process.
+    pub cpu_secs: Option<u64>,
+    /// cgroup v2 `memory.max`, bytes (whole sandbox).
+    pub memory: Option<u64>,
+    /// cgroup v2 `pids.max` (whole sandbox).
+    pub tasks: Option<u64>,
+    /// Total bytes the writable roots and the private tmp dir may hold.
+    pub disk_quota: Option<u64>,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            fsize: Some(4 << 30),
+            nofile: None,
+            nproc: None,
+            cpu_secs: None,
+            memory: Some(8 << 30),
+            tasks: Some(1024),
+            disk_quota: Some(20 << 30),
+        }
+    }
+}
+
+impl ResourceLimits {
+    /// What is and is not enforced on this machine, one line per mechanism, for `synt doctor`;
+    /// a line containing `NOT enforced` is also the start notice (never a refusal: decision 4).
+    pub fn status(&self) -> Vec<String> {
+        let mib = |v: Option<u64>| v.map_or("off".into(), |v| format!("{} MiB", v >> 20));
+        let mut v = vec![];
+        if cfg!(target_os = "linux") {
+            v.push(match helper_status() {
+                Ok(_) => format!(
+                    "rlimits (core 0, file size {}, open files {}, processes {}, cpu {}): enforced by the helper",
+                    mib(self.fsize),
+                    self.nofile.map_or("off".into(), |n| n.to_string()),
+                    self.nproc.map_or("off".into(), |n| n.to_string()),
+                    self.cpu_secs.map_or("off".into(), |n| format!("{n} s")),
+                ),
+                Err(e) => format!("rlimits: NOT enforced, the helper is unusable ({e})"),
+            });
+            v.push(if self.memory.is_none() && self.tasks.is_none() {
+                "memory/tasks limits: off".into()
+            } else {
+                match cgroup_status() {
+                    Ok(()) => format!(
+                        "memory {} / tasks {}: enforced through a cgroup v2 (best effort per command)",
+                        mib(self.memory),
+                        self.tasks.map_or("off".into(), |n| n.to_string())
+                    ),
+                    Err(e) => format!("memory/tasks limits: NOT enforced ({e})"),
+                }
+            });
+        } else {
+            v.push("rlimits and memory/tasks limits: NOT enforced on this OS (Linux only)".into());
+        }
+        v.push(match self.disk_quota {
+            Some(q) => format!(
+                "disk quota {} of growth in the workspace and temp dir: watched by the terminal runtime every few seconds (overshoot possible)",
+                mib(Some(q))
+            ),
+            None => "disk quota: off".into(),
+        });
+        v
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SandboxPolicy {
     pub readable_roots: Vec<PathBuf>,
@@ -130,6 +219,7 @@ pub struct SandboxPolicy {
     /// workspace and `readable_roots` on a drive are bound back). Default true; the user turns it
     /// off with `synt.sandbox.wsl.hide_windows_drives` (user or managed settings).
     pub wsl_hide_drives: bool,
+    pub limits: ResourceLimits,
 }
 
 impl Default for SandboxPolicy {
@@ -145,6 +235,7 @@ impl Default for SandboxPolicy {
             env_passthrough: vec![],
             required: Guarantee::Weak,
             wsl_hide_drives: true,
+            limits: ResourceLimits::default(),
         }
     }
 }

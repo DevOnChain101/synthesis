@@ -104,6 +104,25 @@ impl NetworkArg {
 
 /// `Enforce` needs a backend that confines the filesystem and accepts the policy; `Err` is
 /// the message for the exit-2 refusal.
+/// The defaults of [`synthesis_sandbox::ResourceLimits`] with `synt.sandbox.limits` applied (`0`
+/// switches a limit off; the disk quota never goes below its 1 GiB floor).
+pub fn resource_limits(set: &BTreeMap<String, u64>) -> synthesis_sandbox::ResourceLimits {
+    let mut l = synthesis_sandbox::ResourceLimits::default();
+    let pick = |k: &str, unit: u64, default: Option<u64>| {
+        set.get(k)
+            .map_or(default, |&v| (v != 0).then(|| v.saturating_mul(unit)))
+    };
+    l.fsize = pick("fileSizeMiB", 1 << 20, l.fsize);
+    l.memory = pick("memoryMiB", 1 << 20, l.memory);
+    l.tasks = pick("tasks", 1, l.tasks);
+    l.nofile = pick("openFiles", 1, l.nofile);
+    l.nproc = pick("processes", 1, l.nproc);
+    l.cpu_secs = pick("cpuSeconds", 1, l.cpu_secs);
+    l.disk_quota = pick("diskQuotaMiB", 1 << 20, l.disk_quota)
+        .map(|q| q.max(synthesis_sandbox::DISK_QUOTA_FLOOR));
+    l
+}
+
 pub fn sandbox_preflight(
     backend: &dyn SandboxBackend,
     policy: Option<&synthesis_terminal::SandboxPolicy>,
@@ -1437,6 +1456,16 @@ pub fn prepare(
         }
     };
     let hide_drives = settings.synthesis.wsl_hide_windows_drives != Some(false);
+    let res_limits = resource_limits(&settings.synthesis.sandbox_limits);
+    if sandbox_mode != SandboxMode::Off {
+        for l in res_limits
+            .status()
+            .iter()
+            .filter(|l| l.contains("NOT enforced"))
+        {
+            eprintln!("synt: notice: {l}");
+        }
+    }
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     let state_paths = synthesis_deny.clone();
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
@@ -1444,6 +1473,7 @@ pub fn prepare(
         p.deny_paths.extend(synthesis_deny.clone());
         p.readable_roots.extend(reads.iter().cloned());
         p.wsl_hide_drives = hide_drives;
+        p.limits = res_limits;
         Ok::<_, String>(p)
     });
     // Per call an Err becomes None, which the terminal runtime REFUSES under Enforce (it only
@@ -3211,6 +3241,24 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resource_limits_apply_settings_over_the_defaults() {
+        let d = super::resource_limits(&Default::default());
+        assert_eq!(d, synthesis_sandbox::ResourceLimits::default());
+        let set = [
+            ("memoryMiB", 0),
+            ("diskQuotaMiB", 1),
+            ("openFiles", 256),
+            ("tasks", 50),
+        ]
+        .map(|(k, v)| (k.to_string(), v))
+        .into();
+        let l = super::resource_limits(&set);
+        assert_eq!((l.memory, l.nofile, l.tasks), (None, Some(256), Some(50)));
+        assert_eq!(l.disk_quota, Some(synthesis_sandbox::DISK_QUOTA_FLOOR)); // 1 MiB raised to the floor
+        assert_eq!(l.fsize, d.fsize);
+    }
+
     #[test]
     fn headless_needs_a_cost_cap_and_unattended_refuses_what_it_cannot_keep() {
         use clap::Parser;

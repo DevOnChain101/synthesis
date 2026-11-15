@@ -584,3 +584,24 @@ async fn a_signal_after_exit_is_a_no_op() {
     let after = rt.get_status(SID, &h.process_id).unwrap();
     assert_eq!((after.exit_code, after.signal), (Some(3), None));
 }
+
+/// The disk watchdog kills a sandboxed command whose writable roots grew past the quota (the
+/// walk runs every few seconds, so this takes about 6 s), and leaves an unconfined run alone.
+#[tokio::test]
+async fn disk_quota_kills_a_command_that_fills_the_workspace() {
+    let rt = TerminalRuntime::new(SandboxMode::Enforce)
+        .with_sandbox_backend(Arc::new(Fake(Guarantee::Strong)));
+    let mut policy = SandboxPolicy::default();
+    policy.limits.disk_quota = Some(1000);
+    let f = open(&rt, Some(policy));
+    let started = std::time::Instant::now();
+    let r = run(
+        &rt,
+        ExecSpec::new("sleep 1; head -c 5000 /dev/zero > big; sleep 60"),
+    )
+    .await;
+    assert!(r.output_limit_exceeded, "{r:?}");
+    assert!(r.output.contains("disk quota"), "{}", r.output);
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    assert!(f.root.join("big").exists());
+}

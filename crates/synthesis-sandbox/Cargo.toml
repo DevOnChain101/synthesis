@@ -23,6 +23,8 @@ serde_json = "1.0.154"
 landlock = "0.4.7"
 # Pure-Rust seccomp-bpf (the unsafe lives in the crate): denies socket(AF_VSOCK) on WSL.
 seccompiler = { version = "0.5.0", default-features = false }
+# setrlimit and the cgroup writability check, safe wrappers (the workspace forbids `unsafe`)
+rustix = { version = "1", default-features = false, features = ["process", "fs"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
