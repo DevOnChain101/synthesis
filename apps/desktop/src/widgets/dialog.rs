@@ -67,7 +67,7 @@ pub fn dock(
     toggle: &dyn Fn(usize) -> OnClick,
     border: gpui::Hsla,
     (max_input_h, win_h): (f32, f32),
-    engage: OnMouseDown,
+    (engage, enter_ready): (OnMouseDown, bool),
 ) -> Option<AnyElement> {
     let d = live.dialogs.first()?;
     let queued = live.dialogs.len() - 1;
@@ -488,9 +488,7 @@ pub fn dock(
         }
         (DialogKind::Picker { .. }, _) if d.answerable() => "Enter selects \u{b7} Esc closes",
         // a dialog nobody has touched ignores Enter and digits: they were probably meant for the prompt
-        _ if !d.answerable() => {
-            "\u{2191}/\u{2193} or click to choose, then Enter \u{b7} Esc rejects"
-        }
+        _ if !d.answerable() => locked_hint(enter_ready),
         _ => "Enter confirms \u{b7} Esc rejects",
     };
     card = card.child(div().text_color(dim()).child(format!(
@@ -513,6 +511,16 @@ pub fn dock(
         card.on_mouse_down(gpui::MouseButton::Left, engage)
             .into_any_element(),
     )
+}
+
+/// The footer of a request nobody has touched: Enter answers it once armed (empty prompt, first frame drawn,
+/// arming delay over), else it waits for an arrow, Tab or a click.
+pub(crate) fn locked_hint(enter_ready: bool) -> &'static str {
+    if enter_ready {
+        "Enter to confirm \u{b7} \u{2191}/\u{2193} to change \u{b7} Esc rejects"
+    } else {
+        "\u{2191}/\u{2193} or click to choose, then Enter \u{b7} Esc rejects"
+    }
 }
 
 /// The activity dot of a `/send` picker row (the Running panel's rule), `None` in any other dialog.
@@ -541,4 +549,17 @@ fn send_dot(live: &Live, d: &crate::live::Dialog, key: &str, now: i64) -> Option
         }
         .mt(px(6.)),
     )
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::locked_hint;
+
+    #[test]
+    fn the_footer_says_whether_enter_is_armed() {
+        assert!(
+            locked_hint(true).starts_with("Enter to confirm \u{b7} \u{2191}/\u{2193} to change")
+        );
+        assert!(locked_hint(false).starts_with("\u{2191}/\u{2193} or click to choose, then Enter"));
+    }
 }
