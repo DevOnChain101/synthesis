@@ -289,15 +289,17 @@ impl TuiView {
 
     /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
     /// stuck to the newest row unless the person scrolled up.
-    fn refresh(&mut self, window: &mut Window) {
+    fn refresh(&mut self, window: &mut Window, cx: &gpui::App) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
-        // The agent's own requests (approval, plan, question) are ready for Enter once their first frame is drawn,
-        // whatever the prompt holds (a draft left there used to lock Enter until an arrow key): a key that arrived
-        // before this frame is swallowed, and so is one within `ARM_MS` of the dialog appearing. Digits stay locked
-        // for the broadening options ("always allow", auto mode) until the person touches the dialog (arrow, Tab or
-        // click: `engaged`).
-        if let Some(d) = lu.live.dialogs.first()
+        // The agent's own requests (approval, plan, question) are ready for Enter once their first frame is drawn
+        // with nothing typed in the prompt: while the dialog is up the keys do not reach the prompt, so an empty
+        // prompt means no Enter in flight was meant for it. With a draft in the prompt they stay locked until the
+        // person engages the dialog (arrow, Tab or click), so a stray Enter or digit meant for the draft can never
+        // approve a tool call. Digits stay locked for the broadening options ("always allow", auto mode) until the
+        // person touches the dialog (`engaged`).
+        if lu.prompt.read(cx).value().is_empty()
+            && let Some(d) = lu.live.dialogs.first()
             && matches!(
                 d.kind,
                 crate::live::DialogKind::Approval(_)
@@ -1073,7 +1075,7 @@ impl Render for TuiView {
         {
             chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
-        self.refresh(window);
+        self.refresh(window, cx);
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
@@ -1705,8 +1707,8 @@ mod tests {
         assert_eq!(pending(&view, vcx), 0);
     }
 
-    /// An approval is ready for Enter once its first frame is drawn (no arrow key first), also with a draft in the
-    /// prompt; a key before that frame is swallowed; a digit never picks a broadening
+    /// An approval is ready for Enter once its first frame is drawn (no arrow key first) when nothing is typed in the
+    /// prompt; a key before that frame, or with a draft in the prompt, is swallowed; a digit never picks a broadening
     /// option ("always allow") before the person touched the dialog.
     #[gpui::test]
     fn an_approval_answers_enter_after_its_first_frame_and_digits_never_widen_untouched(
@@ -1732,7 +1734,8 @@ mod tests {
         for (typed, drawn, key, left) in [
             (false, true, "enter", 0),
             (false, false, "enter", 1),
-            (true, true, "enter", 0),
+            (true, true, "enter", 1),
+            (true, true, "1", 1),
             (false, true, "2", 1),
             (false, true, "1", 0),
             (false, true, "3", 0),
@@ -1761,6 +1764,54 @@ mod tests {
             let n = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
             assert_eq!(n, left, "typed={typed} drawn={drawn} key={key}");
         }
+    }
+
+    /// The real approval path (`UiMsg::Approval`, armed on arrival, drawn, then a bare Enter through `on_key`, the
+    /// function the keystroke interceptor calls) with an empty prompt: answered once the arming delay is over, no arrow.
+    #[gpui::test]
+    fn a_real_approval_with_an_empty_prompt_answers_a_bare_enter_after_arming(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        view.update(vcx, |t, _| t.set_live(l));
+        let ask = crate::engine::AskApproval {
+            id: "ap1".into(),
+            agent_id: None,
+            tool: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+            dialog: "permission",
+            prompt: String::new(),
+            reason: "needs approval".into(),
+            origin: None,
+            suggestions: vec![],
+        };
+        view.update(vcx, |t, _| {
+            let lu = t.live.as_mut().unwrap();
+            lu.live.on_msg(
+                crate::engine::UiMsg::Approval(Box::new(ask)),
+                crate::live::now_ms(),
+            );
+            lu.dirty = true;
+        });
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let enter = gpui::Keystroke::parse("enter").unwrap();
+        let left = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len())
+        };
+        view.update_in(vcx, |t, window, cx| t.on_key(&enter, window, cx));
+        assert_eq!(left(&view, vcx), 1, "inside the arming delay");
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::live::ARM_MS as u64 + 50,
+        ));
+        view.update_in(vcx, |t, window, cx| t.on_key(&enter, window, cx));
+        assert_eq!(left(&view, vcx), 0, "bare Enter after arming");
     }
 
     /// A folder chosen from the Workspace panel of the slide-over column closes the column (it used to stay
