@@ -345,6 +345,13 @@ fn std_handles() -> ([HANDLE; 3], Vec<HANDLE>) {
 }
 
 pub fn run(spec: &Spec) -> Result<u32, String> {
+    for (k, v) in &spec.launcher_env {
+        if std::env::var_os(k).is_none() {
+            // SAFETY: the launcher is single-threaded here (nothing else reads or writes the
+            // environment before the process is created).
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
     let profile = Profile::create()?;
     // network capabilities: SIDs owned by `_caps`
     let mut _caps: Vec<Local> = vec![];
@@ -460,9 +467,14 @@ pub fn run(spec: &Spec) -> Result<u32, String> {
         )
     };
     if ok == FALSE {
+        let mut names: Vec<_> = std::env::vars_os()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
         return Err(last_error(&format!(
-            "start {} in the AppContainer",
-            spec.program.display()
+            "start {} in the AppContainer (launcher environment names: {})",
+            spec.program.display(),
+            names.join(", ")
         )));
     }
     let (process, thread) = (Handle(pi.hProcess), Handle(pi.hThread));

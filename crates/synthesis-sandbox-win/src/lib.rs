@@ -67,6 +67,11 @@ pub struct Spec {
     /// Add the `internetClient`, `internetClientServer` and `privateNetworkClientServer`
     /// capabilities. Without them the container has no network at all (loopback included).
     pub network: bool,
+    /// Variables the system needs to build the container's process (CreateProcess fails with
+    /// `ERROR_ENVVAR_NOT_FOUND` when `LOCALAPPDATA` and the like are missing, which a scrubbed
+    /// environment lacks). The launcher sets each one in ITS OWN environment when absent, so the
+    /// program inherits them too: paths of the user's profile, not secrets.
+    pub launcher_env: Vec<(String, String)>,
     /// Job Object `JobMemoryLimit`, bytes, whole job.
     pub memory: Option<u64>,
     /// Job Object `ActiveProcessLimit`.
@@ -114,6 +119,7 @@ mod tests {
                 access: Access::DenyDeleteChild,
             }],
             network: false,
+            launcher_env: vec![("LOCALAPPDATA".into(), "C:/u".into())],
             memory: Some(1 << 30),
             tasks: Some(8),
         };

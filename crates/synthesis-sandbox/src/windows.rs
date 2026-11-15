@@ -17,6 +17,17 @@ use synthesis_sandbox_win::{Access, Grant, Spec, VERSION};
 
 use crate::*;
 
+/// Profile variables the helper needs in its own environment to create the container's process
+/// (see `Spec::launcher_env`); taken from the `synt` process, platform variables only.
+const LAUNCHER_ENV: &[&str] = &[
+    "LOCALAPPDATA",
+    "APPDATA",
+    "USERPROFILE",
+    "ProgramData",
+    "SystemDrive",
+    "SystemRoot",
+];
+
 /// Command lines are limited to 32767 UTF-16 units; the policy travels in the helper's argv.
 const MAX_ARGV_CHARS: usize = 30_000;
 
@@ -313,6 +324,10 @@ impl SandboxBackend for AppContainerBackend {
             command_line: line,
             grants: plan_grants(policy)?,
             network,
+            launcher_env: LAUNCHER_ENV
+                .iter()
+                .filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?)))
+                .collect(),
             memory: policy.limits.memory,
             tasks: if policy.allow_exec {
                 policy
@@ -603,7 +618,7 @@ mod tests {
         for bad in ["", "{}", r#"{"version":9}"#] {
             assert!(run_appcontainer(bad).is_err(), "{bad}");
         }
-        let rel = r#"{"version":1,"program":"cmd.exe","command_line":"cmd","grants":[],"network":false,"memory":null,"tasks":null}"#;
+        let rel = r#"{"version":1,"program":"cmd.exe","command_line":"cmd","grants":[],"network":false,"launcher_env":[],"memory":null,"tasks":null}"#;
         assert!(run_appcontainer(rel).unwrap_err().contains("absolute"));
     }
 }

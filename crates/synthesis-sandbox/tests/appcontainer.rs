@@ -98,7 +98,7 @@ fn a_secret_outside_the_grants_is_unreadable_but_readable_without_the_sandbox() 
     let outside = tempfile::tempdir().unwrap(); // %TEMP%: private to the user, never granted
     let f = outside.path().join("key.txt");
     std::fs::write(&f, "TOPSECRET").unwrap();
-    let script = format!(r#"type "{}""#, f.display());
+    let script = format!("type {}", f.display());
     let control = Command::new(CMD).args(["/c", &script]).output().unwrap();
     assert!(
         text(&control).contains("TOPSECRET"),
@@ -120,13 +120,13 @@ fn writing_outside_the_grants_is_denied() {
     let o = sh(
         &pol(w.path()),
         w.path(),
-        &format!(r#"echo x> "{}""#, target.display()),
+        &format!("echo x> {}", target.display()),
     );
     assert!(!o.status.success() && !target.exists(), "{}", text(&o));
     // the same directory is writable once it is granted
     let mut p = pol(w.path());
     p.writable_roots.push(canon(other.path()));
-    let ok = sh(&p, w.path(), &format!(r#"echo x> "{}""#, target.display()));
+    let ok = sh(&p, w.path(), &format!("echo x> {}", target.display()));
     assert!(ok.status.success() && target.exists(), "{}", text(&ok));
 }
 
@@ -137,11 +137,11 @@ fn a_read_root_is_readable_not_writable() {
     let mut p = pol(w.path());
     p.readable_roots.push(canon(tools.path()));
     let t = tools.path().join("t.txt");
-    assert!(text(&sh(&p, w.path(), &format!(r#"type "{}""#, t.display()))).contains("TOOL"));
+    assert!(text(&sh(&p, w.path(), &format!("type {}", t.display()))).contains("TOOL"));
     let bad = sh(
         &p,
         w.path(),
-        &format!(r#"echo x> "{}""#, tools.path().join("n.txt").display()),
+        &format!("echo x> {}", tools.path().join("n.txt").display()),
     );
     assert!(!bad.status.success() && !tools.path().join("n.txt").exists());
 }
@@ -280,7 +280,7 @@ fn temp_is_the_private_dir_and_nothing_else_is_writable() {
 fn grandchildren_stay_confined() {
     let (w, other) = (ws(), tempfile::tempdir().unwrap());
     let target = other.path().join("g.txt");
-    let s = format!(r#"{CMD} /c "{CMD} /c echo x> {}""#, target.display());
+    let s = format!("{CMD} /c echo x> {}", target.display());
     let _ = sh(&pol(w.path()), w.path(), &s);
     assert!(!target.exists());
     // control: the same nested command writes there once the directory is granted
@@ -293,7 +293,7 @@ fn grandchildren_stay_confined() {
 #[test]
 fn the_process_limit_applies_when_exec_is_not_allowed() {
     let w = ws();
-    let nested = format!(r#"{CMD} /c "echo ok> nested.txt""#);
+    let nested = format!("{CMD} /c echo ok> nested.txt");
     // control: a child process is allowed by default
     assert!(sh(&pol(w.path()), w.path(), &nested).status.success());
     assert!(w.path().join("nested.txt").exists());
