@@ -861,6 +861,25 @@ async fn weakening_is_still_flagged_after_a_restart() {
     assert_eq!(second.status, TaskStatus::Unverified, "{}", second.reason);
 }
 
+/// A saved snapshot loaded after a restart: what the earlier, unfinished task changed is not the
+/// next chat turn's doing, so a question after the restart does not run the gate.
+#[tokio::test]
+async fn a_chat_turn_after_a_restart_does_not_gate_the_earlier_tasks_changes() {
+    let mut turns = write_turns();
+    turns.push(Turn::text("hello, nothing to change"));
+    let mut rig = gated(gate_opts(false), turns, None);
+    let first = rig
+        .run_with(with_check("test -f a.txt"), CancellationToken::new())
+        .await;
+    assert_eq!(first.status, TaskStatus::Blocked, "{}", first.reason);
+    assert!(rig.ws.artifact_root.join("gate-baseline.json").is_file());
+    rig.harness.forget_session_baselines();
+    rig.session.status = synthesis_core::SessionStatus::Created;
+    let second = rig.run("hello").await;
+    assert_eq!(second.status, TaskStatus::Completed, "{}", second.reason);
+    assert_eq!(second.reason, "gate_not_applicable");
+}
+
 /// D12: a harness-inferred, recognised verification command (`make test` from a Makefile) runs
 /// without an explicit allow in `default` and `acceptEdits`, headless or not, so the task is not
 /// blocked only because a trusted inferred check asked. A deny rule still wins.

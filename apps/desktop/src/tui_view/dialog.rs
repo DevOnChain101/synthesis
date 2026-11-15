@@ -13,6 +13,13 @@ impl TuiView {
         let border = self
             .attention_colour()
             .unwrap_or_else(|| crate::theme::hsla(synthesis_cli_ui_render::theme::ACCENT));
+        // Enter is armed: nothing in the prompt, the first frame drawn (`refresh`) and the arming delay over
+        let enter_ready = lu.live.dialogs.first().is_some_and(|d| {
+            !self.auto_ready.is_empty()
+                && self.auto_ready == d.id()
+                && now_ms() >= d.armed_until
+                && lu.prompt.read(cx).value().is_empty()
+        });
         crate::widgets::dialog::dock(
             &lu.live,
             (&lu.dlg_scroll, &lu.body_scroll),
@@ -21,15 +28,18 @@ impl TuiView {
             border,
             ((self.win_h * 0.4).clamp(150., 420.), self.win_h),
             // a press on the panel engages it: Enter and digits answer from then on
-            Box::new(cx.listener(|this, _, _, cx| {
-                if let Some(lu) = &mut this.live
-                    && let Some(d) = lu.live.dialogs.first_mut()
-                {
-                    d.engaged = true;
-                    lu.dirty = true;
-                }
-                cx.notify();
-            })),
+            (
+                Box::new(cx.listener(|this, _, _, cx| {
+                    if let Some(lu) = &mut this.live
+                        && let Some(d) = lu.live.dialogs.first_mut()
+                    {
+                        d.engaged = true;
+                        lu.dirty = true;
+                    }
+                    cx.notify();
+                })),
+                enter_ready,
+            ),
         )
     }
 
