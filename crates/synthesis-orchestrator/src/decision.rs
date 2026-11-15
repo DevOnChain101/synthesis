@@ -496,6 +496,8 @@ mod tests {
         );
     }
 
+    // attempts run on unix (native Windows refuses them), and `/w/tree` is not an absolute path there
+    #[cfg(unix)]
     #[test]
     fn a_grant_rule_is_exact_and_comes_from_the_raw_call() {
         use serde_json::json;
