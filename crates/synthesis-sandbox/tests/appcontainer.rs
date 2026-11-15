@@ -40,7 +40,9 @@ fn pol(w: &Path) -> SandboxPolicy {
 }
 
 fn wrapped(policy: &SandboxPolicy, cwd: &Path, prog: &str, args: &[&str]) -> Command {
-    wrapped_in(policy, cwd, prog, args, None)
+    // not the default (`~/.synt` on the runner: a marker that other tests' project-root discovery finds)
+    let shared = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sandbox-journal");
+    wrapped_in(policy, cwd, prog, args, Some(&shared))
 }
 
 /// With `journal`, the run keeps its crash-recovery journal there instead of the shared default,
