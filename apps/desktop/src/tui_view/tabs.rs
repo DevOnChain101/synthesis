@@ -136,6 +136,19 @@ pub struct TabState {
     pub chat_menu: Option<super::chat_sel::ChatMenu>,
 }
 
+impl TabState {
+    /// `/clear`: what the diff, terminal and browser tabs remembered about the old conversation goes. The
+    /// file explorer (the folder, not the conversation), the selected tab and the processes stay.
+    pub(super) fn clear_conversation(&mut self) {
+        self.diff_open.clear();
+        self.diff_init = false;
+        self.frame = None;
+        self.term_open.clear();
+        self.term_sig = (0, 0, 0);
+        self.sub = None;
+    }
+}
+
 /// The project tree of the session's folder.
 #[derive(Default)]
 pub struct Tree {

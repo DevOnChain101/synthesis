@@ -1977,6 +1977,7 @@ impl TuiView {
                     e.clear_history();
                 }
                 lu.live.clear_conversation();
+                self.ts.clear_conversation();
                 lu.list_reset = true;
                 lu.stick();
             }

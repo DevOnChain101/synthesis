@@ -868,6 +868,8 @@ impl Live {
         self.view.session.project = prev.project;
         self.view.session.model = prev.model;
         self.view.convo = Default::default();
+        // the terminal, browser, diff and sub-agent panes are the conversation's too (memory is not)
+        self.view.panes.clear_history();
         if let Some(w) = self.engine.as_ref().and_then(|e| e.context_window) {
             self.view.status.context.set_window(w);
         }
