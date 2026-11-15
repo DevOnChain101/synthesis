@@ -232,6 +232,15 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     } else {
         out!("  seatbelt available: false");
     }
+    #[cfg(windows)]
+    match synthesis_sandbox::appcontainer_probe() {
+        Ok(h) => out!(
+            "  appcontainer available: true (helper {}); network {}",
+            h.display(),
+            network_support(&synthesis_sandbox::AppContainerBackend::new(h.clone()))
+        ),
+        Err(e) => out!("  appcontainer available: false: {}", san(e)),
+    }
     #[cfg(target_os = "linux")]
     for l in linux_backend_lines(
         synthesis_sandbox::LinuxLandlockBackend::detect().map(|b| network_support(&b)),
@@ -242,7 +251,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         out!("{l}");
     }
     out!(
-        "  loopback: macOS exposes HOST loopback services; bwrap = private loopback; landlock/windows unsupported"
+        "  loopback: macOS exposes HOST loopback services; bwrap = private loopback; landlock and the Windows AppContainer unsupported"
     );
 
     match synthesis_browser::discover(env, synthesis_browser::Os::current(), &|p| p.exists()) {
@@ -250,7 +259,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         Err(e) => out!("browser: not found ({e})"),
     }
     out!(
-        "  mcp stdio servers: confined by the command sandbox (workspace read-only, own temp dir, network none unless `synt.mcp.servers.<name>.network`); NOT sandboxed with --sandbox off, on native Windows, or when a server has `sandbox: false`; http servers are remote and not sandboxed here"
+        "  mcp stdio servers: confined by the command sandbox (workspace read-only, own temp dir, network none unless `synt.mcp.servers.<name>.network`); NOT sandboxed with --sandbox off, on native Windows without a usable AppContainer (see `appcontainer available`), or when a server has `sandbox: false`; http servers are remote and not sandboxed here"
     );
     out!(
         "  browser: NOT in the command sandbox and NOT routed through the egress proxy (only Chrome's own sandbox and the URL policy apply; --no-sandbox is off unless set)"

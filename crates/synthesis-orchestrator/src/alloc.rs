@@ -14,7 +14,8 @@ use synthesis_workspace::{Error as WsError, GitInfo, Origin, WorktreeManager};
 use time::OffsetDateTime;
 
 /// Where the attempts run. Writable attempts need an OS sandbox: macOS, Linux and WSL2 have one,
-/// native Windows has none (ADR-018 item 5, plan D3), so it is refused rather than run unconfined.
+/// native Windows has only the `Weak` AppContainer backend, never run on a real machine (ADR-018 item 5,
+/// plan D3), so it is still refused rather than run on that evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Platform {
     pub native_windows: bool,

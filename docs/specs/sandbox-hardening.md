@@ -1,6 +1,6 @@
 # Sandbox hardening (design, owner-approved)
 
-Status: egress control (section 1), the Linux read allow-list (section 2), resource limits (section 3) and the sandbox for stdio MCP servers (section 4) are implemented; the browser part of section 4 is NOT built (what is true instead is stated there). Section 5 is approved design. Sections 2 and 3 were written on macOS: the Linux paths compile for Linux and are covered by unit tests plus the Linux CI jobs, nothing else. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
+Status: egress control (section 1), the Linux read allow-list (section 2), resource limits (section 3) and the sandbox for stdio MCP servers (section 4) are implemented; the browser part of section 4 is NOT built (what is true instead is stated there). Section 5 (a native Windows AppContainer backend, under an ADR-010 exception) is implemented but has only ever run on CI. Sections 2 and 3 were written on macOS: the Linux paths compile for Linux and are covered by unit tests plus the Linux CI jobs, nothing else. Code: `crates/synthesis-egress` (proxy), `crates/synthesis-platform/src/net.rs` (blocked addresses), `crates/synthesis-sandbox` (plumbing), `crates/synthesis-app/src/egress.rs` (start, host list). Background: `docs/specs/sandbox.md`, `docs/SECURITY.md`, `docs/UNATTENDED.md`.
 
 ## Owner decisions
 
@@ -9,7 +9,7 @@ Status: egress control (section 1), the Linux read allow-list (section 2), resou
 3. `readScope: host` is forbidden under `--unattended`.
 4. Default limits: rlimits on (core 0, fsize 4 GiB); memory 8 GiB and tasks 1024 when cgroups exist; disk quota 20 GiB with a 1 GiB floor. A missing cgroup does NOT block an unattended run (a notice says so).
 5. A managed host list overrides the user's list (it is not merged).
-6. Native Windows keeps refusing unless `--sandbox off` is explicit. WSL2 is the supported route for autonomous runs. An AppContainer backend comes later, behind an ADR-010 exception (a separate helper crate, because the workspace forbids `unsafe`); that needs owner approval.
+6. Native Windows: WSL2 stays the supported route for autonomous runs. The owner approved (2026-11-15) an AppContainer backend as an exception to ADR-010 (`unsafe` Win32 calls in one separate crate, `synthesis-sandbox-win`; the core stays Rust). It is implemented (section 5), `Weak`, and never run on a real Windows machine. Without the helper `synthesis-sandbox-exec.exe` next to `synt.exe`, or where an AppContainer cannot be created, native Windows behaves as before: no backend, `enforce` refuses, `best-effort` and `off` run unconfined.
 
 ## 1. Egress
 
@@ -38,7 +38,7 @@ Events (docs/specs/events.md): `egress.allowed {host, port, ip}` at the 200 resp
 
 - Linux bubblewrap (guarantee `Weak`, see Residual risk below): the fresh network namespace stays (`--unshare-net`). The host proxy listens on a unix socket in a 0700 run directory that is bound read-only into the sandbox. The helper `synthesis-sandbox-exec --egress-bridge <socket> 3128 -- <cmd>` runs inside the namespace as the parent of the command and forwards `127.0.0.1:3128` to the socket with plain threads (no `unsafe`), at most 128 forwards at once, a 5 minute read timeout per side (the connect to the local socket cannot stall beyond its backlog). In `Proxied` mode EVERY bubblewrap run is also started behind the seccomp helper (`--no-vsock`: AF_VSOCK, io_uring and the x32 ABI denied), not only on WSL. Without a trusted helper the command is refused.
 - macOS Seatbelt: `(deny network*)` then `(allow network-outbound (remote ip "localhost:<port>"))` with the rendered integer port only. The proxy binds `127.0.0.1:0` and requires the Basic credential.
-- Landlock and Windows: `Proxied` reports `Guarantee::None`, so the command is refused (fail closed).
+- Landlock and the Windows AppContainer: `Proxied` reports `Guarantee::None`, so the command is refused (fail closed).
 
 Environment of the command (`build_env`): every inherited proxy variable (any name ending in `_proxy`, either case) is removed, then `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (and lowercase) are set to the proxy, `NO_PROXY=localhost,127.0.0.1`, `NODE_USE_ENV_PROXY=1`. A program that ignores the variables and connects directly simply fails: the sandbox has no other route, and no DNS (the proxy resolves).
 
@@ -109,7 +109,7 @@ Honest limits:
 - The cgroup is per run (named after the helper's parent pid), not per command: concurrent commands share one memory and tasks budget, and the empty directory stays behind after the run (nothing is left to remove it after exec).
 - A bubblewrap command whose helper lies under a writable root runs WITHOUT limits; a warning is printed once.
 - The disk watchdog measures growth of the writable roots and tmp dir since the command started (apparent file sizes, net of deletions) every 5 s or four times a walk, whichever is longer; a fast writer overshoots the quota by what it writes in that time, and a walk that reaches 2 million entries is discarded (the quota is then NOT enforced; one warning). Deleted-but-open files are not seen. The kill is reported like an output-limit kill (`output_limit_exceeded`) with a line in the command's output. A command writing outside those directories (where the sandbox allows it, e.g. `/dev/shm`) is not counted.
-- Seatbelt (macOS) and Windows get none of the rlimits or the cgroup.
+- Seatbelt (macOS) gets none of the rlimits or the cgroup. The Windows AppContainer enforces `memory` and `tasks` through a Job Object (whole job) and no rlimits.
 - None of this has run on a real Linux host except through CI; `limits.rs` checks the rlimits through `/proc/self/limits`, the cgroup path is only reported.
 
 ## 4. MCP and browser sandbox
@@ -130,7 +130,7 @@ Per-server settings, `synt.mcp.servers.<name>` in the USER or MANAGED `settings.
 Relaxing (`network` other than `none`, `hosts`, `writable`, `sandbox: false`) is read from user and managed settings only. A trusted project `.synt/settings.json` can only tighten (`network: "none"` on a server the user relaxed). A server defined by a repository (scope `project`) ignores every user relaxation, even for the same name. An unknown `network` value means `none`. Default `none` is the safest setting; a server that needs the network (most hosted-API servers, `npx` downloading packages) fails to connect or start until the user sets `hosts` or `full`; servers that cache under `$HOME` (for example `mcp-remote`'s `~/.mcp-auth`) need `writable` or `sandbox: false`.
 
 What is NOT enforced:
-- Native Windows: no backend confines anything, so servers run as before (the default `--sandbox` there is off; with `enforce` the run is refused earlier). `--sandbox off` also leaves them unconfined. Startup prints a `runs OUTSIDE the OS sandbox` notice per server in these cases.
+- Native Windows without a usable AppContainer (helper missing, AppContainer not creatable): no backend confines anything, so servers run as before (with `enforce` the run is refused earlier). `--sandbox off` also leaves them unconfined. Startup prints a `runs OUTSIDE the OS sandbox` notice per server in these cases. With the AppContainer, servers go through the same `wrap` as commands (section 5): `network: none` and `full` work, `hosts` is refused.
 - HTTP, SSE and WebSocket servers are remote: nothing local to confine; their URL checks (`check_remote_url`) are unchanged.
 - `network: hosts` needs bubblewrap (Linux, WSL2) or Seatbelt (macOS) and the helper on Linux; elsewhere the launch is refused. A host proxy configured in `HTTP(S)_PROXY` is not chained through.
 - The weaknesses of the backend apply (Seatbelt and bubblewrap filesystem are Weak, section 2 and docs/SECURITY.md). A server cannot write the workspace, but it can read all of it, including `.env` files, and it is still a program that may be handed secrets by its own `env` map.
@@ -145,6 +145,45 @@ Chrome runs outside the command sandbox and outside the egress proxy. It keeps C
 
 Until that is built and measured, `synt doctor` prints `browser: NOT in the command sandbox and NOT routed through the egress proxy`, and docs/SECURITY.md says the same. Open work, in order: absolute-form forwarding plus `--proxy-server` with `Fetch.authRequired`; then a Linux Landlock or bubblewrap wrapper tested with Chrome's own sandbox kept on; a macOS wrapper is likely not possible without `--no-sandbox`.
 
-## 5. Windows
+## 5. Windows (AppContainer, ADR-010 exception)
 
-Decision 6. Native Windows has no backend that can confine commands; `Proxied` reports no guarantee there (the command is refused), and an unattended run does not start without an explicit `--sandbox off`. WSL2 (bubblewrap plus seccomp, drives hidden) is the supported route for autonomous runs and is what the desktop uses. A native AppContainer backend would need `unsafe` Win32 calls, which ADR-010 forbids in the workspace: it would live in a separate helper crate under an explicit exception that the owner must approve first.
+Decision 6 and the exception. ADR-010 keeps the core in Rust and forbids `unsafe` in the workspace (`unsafe_code = "forbid"`). An AppContainer process can only be started through Win32 calls (`CreateAppContainerProfile`, `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, DACL edits, Job Objects), and no maintained safe wrapper exists. On 2026-11-15 the owner approved the exception: Windows API calls through `windows-sys` in small audited `unsafe` blocks, in ONE crate, `crates/synthesis-sandbox-win` (its own `[lints]`: `unsafe_code = "deny"`, `imp.rs` is the only module that opts in with `#![allow(unsafe_code)]`, every block has a `SAFETY:` note; nothing else in the workspace may use `unsafe`). The Rust core is unchanged; no helper is written in another language.
+
+### How it runs
+
+`AppContainerBackend` (`crates/synthesis-sandbox/src/windows.rs`, safe code) is chosen on Windows when `synthesis-sandbox-exec.exe` sits next to `synt.exe` and a real probe (create and delete an AppContainer profile) works. `wrap` is pure: it only builds `synthesis-sandbox-exec --appcontainer <spec json>` (strict, versioned, `deny_unknown_fields`) from the policy; the same hook serves commands and stdio MCP servers. The helper (`synthesis_sandbox_win::run`) then, in order:
+
+1. creates a throw-away AppContainer profile with a unique name (so a unique SID); no capabilities, unless the network is `Allow` (`internetClient`, `internetClientServer`, `privateNetworkClientServer`);
+2. grants that SID, with explicit ACEs (`SetNamedSecurityInfoW`, which also propagates to existing children): read and execute on `readable_roots` that exist; read, write, execute and delete (not change permissions or owner) on `writable_roots` and the private temp dir; then explicit DENY ACEs (evaluated first) for `readonly_paths` inside a writable root (write, delete, rename, change permissions), for `deny_paths` inside a granted root (everything), and `FILE_DELETE_CHILD` on the directories that guard those (`parent_guards`: `.git`), so `.git/hooks` and `.git/config` cannot be renamed away;
+3. creates a Job Object: kill on close, die on unhandled exception, `ActiveProcessLimit` (= `limits.tasks`, or 1 when `allow_exec` is false), `JobMemoryLimit` (= `limits.memory`, the whole job), and UI restrictions (desktop, display settings, exit windows, global atoms, user handles, clipboard, system parameters);
+4. starts the program SUSPENDED inside the AppContainer, with only the three standard handles inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), assigns it to the job (a failure kills it instead of resuming: fail closed), resumes, waits;
+5. closes the job (kills leftovers), REMOVES every ACE it added, in reverse order, and deletes the profile; the exit code is the program's. Exit 126: nothing was run (a policy path that does not exist, a bad spec, an API failure).
+
+Everything inherits: descendants of the program are in the same container and job. `TEMP`/`TMP` (and `TMPDIR`) are forced to the private temp dir.
+
+### What is enforced (all of it `Weak`, see the last subsection)
+
+- Files: an AppContainer reaches only what carries an ACE for its SID or for ALL APPLICATION PACKAGES (Windows, Program Files, ...). Your profile, other drives' user data and `%TEMP%` are unreachable unless granted, so the credential stores in `deny_paths` are unreachable by default and the explicit denies matter only inside a granted root.
+- Network: no capabilities means no network at all, loopback included (an AppContainer cannot reach loopback without an exemption, which needs administrator rights and persists beyond the run). `Deny` is `Weak`, `Allow` adds the three capabilities. `Loopback` and `Proxied` (`--network hosts`, MCP `network: hosts`) report `None` and `wrap` refuses: the egress proxy cannot be reached from the container.
+- Processes: Job Object as above. Windows exit codes pass through (32 bits).
+
+### What is NOT enforced or not proven
+
+- Never run on a real Windows machine by the authors; the evidence is the CI `windows-latest` job running `crates/synthesis-sandbox/tests/appcontainer.rs` (positive controls and denials), which is why both guarantees stay `Weak`. Raising one needs a reviewer and a run on a real host.
+- ACL edits are per run and reversible, never permanent: the helper removes its ACEs on exit. If the helper is killed outright (power loss, `taskkill /F` on the helper) the job dies with it (kill on close) but the ACEs of that run and the profile stay. They name a SID that nothing owns any more, so they grant nothing to anybody, but they remain visible in the ACL (as `S-1-15-2-...`) until removed by hand. A startup sweep is not built.
+- Granting a large tree is slow: `SetNamedSecurityInfoW` walks every existing child, on grant and again on revoke (a toolchain directory with 100k files costs seconds).
+- A protected path that does not exist at start (`.synt/` not created yet) cannot carry an ACE and can be created by the command; the same limit as bubblewrap's nonexistent `deny_paths`. The guard directory itself (`.git`) can still be renamed through its parent, because the workspace root must keep the delete-child right.
+- ALL APPLICATION PACKAGES stays enabled (an LPAC opt-out breaks most programs), so everything every container may read is readable, including Windows and Program Files and anything else carrying that ACE or `Everyone`. NTFS junctions and symlinks are followed by the file system after the path was granted; paths are canonicalised before granting.
+- Only the three standard handles are inherited, but a console or pseudo-console handle is passed as it is; ConPTY runs were not tested.
+- Arguments must be UTF-8; `.bat`/`.cmd` programs must be started through `cmd.exe`; a UNC or device path, or a drive root, is refused as a grant.
+- The helper is trusted by location only: it must be a regular file next to `synt.exe` and must not lie under a writable root or the temp dir. Windows ACLs on its directory are not checked (unlike Linux ownership and mode).
+- The release workflow does not yet ship `synthesis-sandbox-exec.exe` on Windows, so a released build keeps the old behaviour (no backend) until it does.
+- rlimits other than memory and the process count, the disk quota being the existing watchdog, and `--network loopback|hosts` are not available.
+
+### Modes and doctor
+
+`--sandbox enforce` uses the backend and refuses commands if it is missing or cannot apply the policy; `best-effort` falls back to unconfined with the one-line notice; `off` is unchanged. When `--sandbox` is not given the default on Windows stays `best-effort` (owner decision D10): the backend is used when it works. `--unattended` on native Windows still starts only with `enforce` (which now can succeed) or an explicit `off`. The orchestrator's refusal of writable outcome attempts on native Windows stays: it was decided on the absence of a verified backend, and a `Weak` backend never run on a real machine is not that. `synt doctor` prints `appcontainer available: true|false` with the reason (helper missing, profile creation failed), the per-mode network support, and the notes of the selected backend (what is and is not enforced); `enforce_ready` is `yes` only when the standard policy wraps.
+
+### Tests
+
+Pure, every OS: path simplification (`\\?\`, UNC, device paths), case folding, component-boundary containment, argument quoting, grant planning and ordering (Windows paths, `plan` module), wrap shape and refusals, strict spec decoding. Real, Windows CI only (`tests/appcontainer.rs`): container starts; workspace writable (control); a secret outside the grants unreadable while the same read works unsandboxed (control); write outside denied and allowed once granted (control); read root readable not writable; deny and read-only paths inside a writable root (reads, writes, delete, create, rename of the guarded directory); network closed, loopback included, with the same probe working unsandboxed (control); `Loopback`/`Proxied` refused; `TEMP` is the private dir; grandchildren confined (control); process limit with `allow_exec = false` (control: a child runs by default); ACLs restored (no container SID left on the workspace or on files the run created); fail closed (missing root, bad spec). NOT covered by any test: kill on close after the helper is killed, the memory limit, handle non-inheritance, ConPTY.

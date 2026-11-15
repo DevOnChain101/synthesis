@@ -13,7 +13,7 @@
 //! the caller decides whether that is acceptable.
 //!
 //! Guarantee model: nothing here is a container. Seatbelt is deprecated and best-effort,
-//! Landlock is allow-list only, Windows has no filesystem/network confinement yet.
+//! Landlock is allow-list only, the Windows AppContainer is `Weak` and has only run on CI.
 //!
 //! **`Guarantee::Weak` is defence in depth, NOT a security boundary.** Do not rely on a `Weak`
 //! backend (Seatbelt, bubblewrap filesystem, Landlock network) to contain a hostile process;
@@ -43,7 +43,7 @@ pub use linux::{
     apply_limits, deny_vsock, landlock_abi, restrict_current_process, run_egress_bridge,
 };
 pub use seatbelt::{SeatbeltBackend, seatbelt_profile};
-pub use windows::WindowsJobBackend;
+pub use windows::{AppContainerBackend, WindowsJobBackend, appcontainer_probe, run_appcontainer};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetworkPolicy {
@@ -58,13 +58,13 @@ pub enum NetworkPolicy {
     /// - bubblewrap: a fresh network namespace whose `lo` bwrap brings up; the loopback is
     ///   PRIVATE to the sandbox. Server and tests inside it work, host services are unreachable.
     /// - Landlock: unsupported (it can filter TCP ports, not addresses); `wrap` refuses.
-    /// - Windows: no network confinement at all.
+    /// - Windows AppContainer: unsupported (a loopback exemption needs administrator rights); `wrap` refuses.
     Loopback,
     Allow,
     /// The only way out is the per-run egress proxy (`synthesis-egress`) at this endpoint; the
     /// host allowlist stays in the proxy, this crate only does the plumbing. Backends that
     /// cannot confine the process to that endpoint report `Guarantee::None` and `wrap` refuses
-    /// (fail closed): Landlock, Windows and the null sandbox always; bubblewrap takes
+    /// (fail closed): Landlock, the Windows AppContainer and the null sandbox always; bubblewrap takes
     /// [`EgressEndpoint::Unix`], Seatbelt [`EgressEndpoint::Tcp`].
     Proxied(EgressEndpoint),
 }
@@ -113,7 +113,8 @@ pub const DISK_QUOTA_FLOOR: u64 = 1 << 30;
 /// (`synthesis-sandbox-exec --limits`): the rlimits always, `memory`/`tasks` only when a cgroup v2
 /// is delegated to the user ([`cgroup_status`]); `RLIMIT_CORE` is always 0 whenever the helper
 /// runs. `disk_quota` is checked by the terminal runtime (a watchdog over the writable roots), not
-/// here. Seatbelt and Windows enforce none of these.
+/// here. Seatbelt enforces none of these; the Windows AppContainer enforces `memory` and `tasks` (the
+/// whole job) through a Job Object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResourceLimits {
     /// `RLIMIT_FSIZE`: largest file one process may write, bytes.
@@ -175,6 +176,15 @@ impl ResourceLimits {
                     ),
                     Err(e) => format!("memory/tasks limits: NOT enforced ({e})"),
                 }
+            });
+        } else if cfg!(windows) {
+            v.push(match appcontainer_probe() {
+                Ok(_) => format!(
+                    "memory {} / tasks {}: enforced by a Job Object around each command (whole job); rlimits (file size, open files, cpu): NOT enforced on Windows",
+                    mib(self.memory),
+                    self.tasks.map_or("off".into(), |n| n.to_string())
+                ),
+                Err(e) => format!("memory/tasks limits and rlimits: NOT enforced ({e})"),
             });
         } else {
             v.push("rlimits and memory/tasks limits: NOT enforced on this OS (Linux only)".into());
@@ -531,7 +541,16 @@ pub fn detect_chain() -> Vec<Box<dyn SandboxBackend>> {
     #[cfg(target_os = "linux")]
     v.extend(linux::detect_linux());
     #[cfg(windows)]
-    v.push(Box::new(WindowsJobBackend));
+    {
+        // The AppContainer only when its helper and a real profile probe work; the job backend
+        // stays last as the honest "nothing can confine" report.
+        v.extend(
+            AppContainerBackend::detect()
+                .ok()
+                .map(|b| Box::new(b) as Box<dyn SandboxBackend>),
+        );
+        v.push(Box::new(WindowsJobBackend));
+    }
     v
 }
 

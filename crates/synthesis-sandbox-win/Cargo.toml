@@ -1,0 +1,34 @@
+[package]
+name = "synthesis-sandbox-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Windows AppContainer launcher for synthesis-sandbox: the only crate in the workspace that contains `unsafe` (ADR-010 exception, owner decision 2026-11-15)"
+
+# NOT `workspace = true`: the workspace forbids `unsafe`; this crate may not. `deny` (not `allow`)
+# means only `imp.rs`, which opts in with `#![allow(unsafe_code)]`, may contain `unsafe`.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+serde_json = "1.0.154"

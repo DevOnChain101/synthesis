@@ -713,6 +713,10 @@ pub fn skipped_backends() -> Vec<String> {
     if crate::wsl::is_wsl() {
         v.push(crate::wsl::LANDLOCK_NOT_USED.into());
     }
+    #[cfg(windows)]
+    if let Err(e) = crate::appcontainer_probe() {
+        v.push(e.clone());
+    }
     v
 }
 

@@ -7589,8 +7589,18 @@ dependencies = [
  "serde_json",
  "synthesis-egress",
  "synthesis-platform",
+ "synthesis-sandbox-win",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "synthesis-sandbox-win"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
