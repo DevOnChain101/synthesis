@@ -2193,9 +2193,11 @@ pub fn prepare(
             p.clone(),
             ws.root.clone(),
             artifact_root.join("mcp-tmp"),
+            &mplan.servers,
             mplan.sandbox.clone(),
             sandbox_mode == SandboxMode::Enforce,
             failover_slot.clone(),
+            mplan.fallbacks.clone(),
         ));
     }
     for n in
