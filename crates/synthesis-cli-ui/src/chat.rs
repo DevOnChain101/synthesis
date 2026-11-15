@@ -869,6 +869,8 @@ impl Chat {
                 // the footer shows the mode
                 self.hint(format!("mode: {}", clean_line(to)), "", false)
             }
+            // nothing retrieved says nothing: no row
+            Event::MemoryRetrieved { ids, .. } if ids.is_empty() => {}
             e if !quiet(e) => {
                 let (t, show) = describe(e);
                 let who = sub.map_or(String::new(), |a| format!("[{}] ", clean_line(&a)));
@@ -970,14 +972,6 @@ mod tests {
                 "memory: 1 note(s) retrieved (12 tokens)",
             ),
             (
-                Event::MemoryRetrieved {
-                    ids: vec![],
-                    tokens: 0,
-                    candidates: 0,
-                },
-                "memory: 0 note(s) retrieved (0 tokens)",
-            ),
-            (
                 Event::SessionModeChanged {
                     from: "default".into(),
                     to: "acceptEdits".into(),
@@ -1040,6 +1034,13 @@ mod tests {
                 "peers: listening for requests",
             ),
         ];
+        // retrieving nothing is not worth a row, even in verbose
+        let none = Event::MemoryRetrieved {
+            ids: vec![],
+            tokens: 0,
+            candidates: 0,
+        };
+        assert!(rows_of(true, none).is_empty());
         for (e, line) in hidden {
             let kind = format!("{e:?}");
             assert!(rows_of(false, e.clone()).is_empty(), "shown: {kind}");

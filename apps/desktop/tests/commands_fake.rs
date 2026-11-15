@@ -423,10 +423,9 @@ fn pickers_and_info_commands() {
     assert_eq!(live.submit("/close"), Submitted::Do(Action::Close));
     assert_eq!(live.submit("/clear"), Submitted::Do(Action::Clear));
     live.clear_conversation();
-    assert_eq!(
-        live.view.convo.items.len(),
-        1,
-        "only the new-conversation note"
+    assert!(
+        live.view.convo.items.is_empty(),
+        "no log lines on a new chat"
     );
     // nothing to compact in an empty conversation
     assert!(e.compact(None).is_err());
