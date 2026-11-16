@@ -375,3 +375,50 @@ fn goal_attempts_and_inconsistent_remaining_are_shown() {
         BudgetView::from_json(&json!({"cost_usd": {"spent": 1.0, "limit": 5.0, "remaining": 4.0}}));
     assert!(!b.cost_usd.remaining_disagrees());
 }
+
+#[test]
+fn a_hidden_entry_is_never_silently_dropped() {
+    // requires: too many entries, a non-string entry, a non-list
+    let mut v = plan();
+    v["items"][0]["requires"] = json!(vec!["a"; MAX_ROWS + 1]);
+    assert!(PlanView::from_json(&v).unwrap_err().contains("more than"));
+    let mut v = plan();
+    v["items"][0]["requires"] = json!(["a", {"key": "x"}]);
+    assert!(PlanView::from_json(&v).unwrap_err().contains("not text"));
+    let mut v = plan();
+    v["items"][0]["requires"] = json!("a");
+    assert!(PlanView::from_json(&v).is_err());
+    // the same for evidence flags and criteria ids, the criterion's check ids and the checks
+    let mut v = evidence();
+    v["flags"] = json!(vec!["tests_weakened"; MAX_ROWS + 1]);
+    assert!(EvidenceView::from_json(&v).is_err());
+    let mut v = evidence();
+    v["flags"] = json!(["ok", 7]);
+    assert!(EvidenceView::from_json(&v).is_err());
+    let mut v = evidence();
+    v["criteria_ids"] = json!([["k1"]]);
+    assert!(EvidenceView::from_json(&v).is_err());
+    let mut v = contract();
+    v["contract"]["criteria"][0]["check_ids"] = json!(["t", null]);
+    assert!(CriteriaView::from_json(&v).is_err());
+    let mut v = contract();
+    v["contract"]["checks"] = json!([{"id": "t", "command": "c"}, "x"]);
+    assert!(CriteriaView::from_json(&v).is_err());
+    v["contract"]["checks"] = json!(vec![json!({"id": "t"}); MAX_ROWS + 1]);
+    assert!(CriteriaView::from_json(&v).is_err());
+    // activity says how many events it left out
+    let evs: Vec<Value> = (0..MAX_ROWS + 3)
+        .map(|i| json!({"seq": i, "type": "x"}))
+        .collect();
+    assert!(
+        InspectorContent::activity(&evs, 9)
+            .render_text()
+            .contains("3 more events not shown")
+    );
+    // a refused read is an explicit reason on the tab
+    let mut v = plan();
+    v["items"][0]["requires"] = json!(["a", 1]);
+    let u =
+        InspectorContent::or_unavailable(InspectorTab::Workers, InspectorContent::workers(&v, &[]));
+    assert!(u.render_text().contains("not available") && u.render_text().contains("not text"));
+}

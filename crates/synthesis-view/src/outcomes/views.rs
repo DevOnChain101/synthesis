@@ -54,15 +54,22 @@ fn id(v: &Value, k: &str) -> Result<String, String> {
     }
 }
 
-fn strings(v: &Value, k: &str) -> Vec<String> {
-    v.get(k)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .take(MAX_ROWS)
-        .filter_map(Value::as_str)
-        .map(t)
-        .collect()
+/// A list of strings. Fail closed: too many entries or an entry that is not a string refuses the
+/// reply, so a hidden entry (a requirement, a flag) is never silently left out.
+fn strings(v: &Value, k: &str) -> Result<Vec<String>, String> {
+    match v.get(k) {
+        None | Some(Value::Null) => Ok(vec![]),
+        Some(Value::Array(a)) if a.len() <= MAX_ROWS => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(t)
+                    .ok_or_else(|| format!("unreadable reply: {k} has an entry that is not text"))
+            })
+            .collect(),
+        Some(Value::Array(_)) => Err(format!("{k}: more than {MAX_ROWS} entries, not shown")),
+        Some(_) => Err(format!("unreadable reply: {k} is not a list")),
+    }
 }
 
 /// Unknown fields shown at most this many per object.
@@ -192,7 +199,7 @@ impl WorkItemView {
             state: req(v, "state")?,
             revision: v.get("revision").and_then(Value::as_i64),
             retries_used: v.get("retries_used").and_then(Value::as_i64),
-            requires: strings(v, "requires"),
+            requires: strings(v, "requires")?,
             layer: None,
             attempts_listed: v.get("attempts").and_then(Value::as_array).map(Vec::len),
             extra: extra(
@@ -390,7 +397,7 @@ impl CriteriaView {
                 mandatory: x.get("mandatory").and_then(Value::as_bool),
                 manual: x.get("manual").and_then(Value::as_bool),
                 required_trust: opt(&x, "required_trust").unwrap_or_else(|| UNKNOWN.into()),
-                check_ids: strings(&x, "check_ids"),
+                check_ids: strings(&x, "check_ids")?,
                 extra: extra(
                     &x,
                     &[
@@ -404,20 +411,23 @@ impl CriteriaView {
                 ),
             });
         }
-        let checks = c
-            .get("checks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .take(MAX_ROWS)
-            .map(|k| {
-                format!(
-                    "{}: {}",
-                    opt(k, "id").unwrap_or_default(),
-                    opt(k, "command").unwrap_or_default()
-                )
-            })
-            .collect();
+        let checks = match c.get("checks") {
+            None | Some(Value::Null) => vec![],
+            Some(_) => rows_in(c, "checks")?
+                .iter()
+                .map(|k| {
+                    k.is_object()
+                        .then(|| {
+                            format!(
+                                "{}: {}",
+                                opt(k, "id").unwrap_or_default(),
+                                opt(k, "command").unwrap_or_default()
+                            )
+                        })
+                        .ok_or_else(|| "unreadable reply: a check is not an object".to_string())
+                })
+                .collect::<Result<_, _>>()?,
+        };
         let mut rest = extra(c, &["version", "goal", "criteria", "checks"]);
         rest.extend(extra(v, &["version", "hash", "approved", "contract"]));
         Ok(Self {
@@ -645,10 +655,10 @@ impl EvidenceView {
             producer: s("producer"),
             subject_commit: s("subject_commit"),
             check_id: s("check_id"),
-            criteria_ids: strings(v, "criteria_ids"),
+            criteria_ids: strings(v, "criteria_ids")?,
             result: req(v, "result")?,
             exit_code: v.get("exit_code").and_then(Value::as_i64),
-            flags: strings(v, "flags"),
+            flags: strings(v, "flags")?,
             captured_at: s("captured_at"),
             event_backed: v.get("event_backed").and_then(Value::as_bool),
             extra: extra(
@@ -891,6 +901,10 @@ impl InspectorContent {
                 .iter()
                 .take(MAX_ROWS)
                 .map(|e| format!("{}  {}  {}", n(e, "seq"), n(e, "type"), t(&e.to_string())))
+                .chain(
+                    (events.len() > MAX_ROWS)
+                        .then(|| format!("{} more events not shown", events.len() - MAX_ROWS)),
+                )
                 .collect(),
             next_event_id: Some(next_event_id),
         })
