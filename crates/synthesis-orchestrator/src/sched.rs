@@ -585,7 +585,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
             .any(|a| matches!(a.state, AttemptState::Starting | AttemptState::Running)))
     }
 
-    /// The first live attempt of a leased/running item older than `cfg.unknown_after`, named.
+    /// The first live attempt of a leased/running item we hold no handle for, older than `cfg.unknown_after`, named.
     fn overdue_unheld(
         &self,
         w: &OutcomeWriter,
@@ -598,6 +598,8 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         for it in items
             .iter()
             .filter(|i| matches!(i.state, WorkItemState::Leased | WorkItemState::Running))
+            // a worker this scheduler holds is supervised (wall cap, stop grace): never "unknown"
+            .filter(|i| !self.running.iter().any(|(id, _)| *id == i.id))
         {
             for a in w.list_attempts(&it.id)? {
                 let old = crate::retention::parse_store_time(&a.started_at)

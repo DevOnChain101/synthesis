@@ -768,8 +768,11 @@ impl Spawn for ByItem {
 }
 
 fn ready(w: &mut OutcomeWriter, it: &WorkItemId) {
-    let rev = w.get_work_item(it).unwrap().revision;
-    w.transition_work_item(it, rev, WorkItemState::Ready, &Effects::default())
+    let cur = w.get_work_item(it).unwrap();
+    if cur.state == WorkItemState::Ready {
+        return;
+    }
+    w.transition_work_item(it, cur.revision, WorkItemState::Ready, &Effects::default())
         .unwrap();
 }
 
@@ -1924,8 +1927,18 @@ fn adopted_live(
     items: &[(String, WorkItemId)],
     reserved: f64,
 ) -> (Child, AttemptRecord) {
+    adopted_live_of(r, w, items, "one", reserved)
+}
+
+fn adopted_live_of(
+    r: &Rig,
+    w: &mut OutcomeWriter,
+    items: &[(String, WorkItemId)],
+    key: &str,
+    reserved: f64,
+) -> (Child, AttemptRecord) {
     use std::os::unix::process::CommandExt;
-    let one = items.iter().find(|(n, _)| n == "one").unwrap().1.clone();
+    let one = items.iter().find(|(n, _)| n == key).unwrap().1.clone();
     ready(w, &one);
     let rev = w.get_work_item(&one).unwrap().revision;
     w.transition_work_item(&one, rev, WorkItemState::Leased, &Effects::default())
@@ -2094,6 +2107,34 @@ fn an_unknown_live_attempt_with_the_cap_used_up_blocks_the_outcome_after_its_wal
         w.list_attempts(&a.work_item_id).unwrap()[0].state,
         AttemptState::Running
     );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn a_held_worker_past_the_limit_is_not_an_unknown_attempt() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let id = w.id().clone();
+    let s = Script("sleep 30".into());
+    let mut c = cfg();
+    c.max_parallel = 1;
+    c.max_cost_usd = Some(1.0);
+    c.unknown_after = Some(Duration::from_secs(2));
+    // `one` is held by this scheduler and takes the whole cap
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), c);
+    assert_eq!(sched.tick(&mut w, clock()).unwrap().leased, ["one"]);
+    std::thread::sleep(Duration::from_secs(3));
+    // `two` is a young unheld attempt of a dead owner: the held `one` is older than the limit
+    // (supervised by its wall cap and stop grace), so nothing is unknown yet
+    let (mut child, _) = adopted_live_of(&r, &mut w, &items, "two", 0.01);
+    // what is reserved now is the whole cap
+    sched.cfg.max_cost_usd = Some(w.outcome_spend(&id).unwrap());
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(rep.stop.is_none(), "{rep:?}");
+    assert_eq!(sched.running_count(), 1, "{:?}", states(&w));
+    assert_eq!(w.get_outcome(&id).unwrap().state, OutcomeState::Running);
     child.kill().unwrap();
     child.wait().unwrap();
 }

@@ -563,7 +563,7 @@ impl SandboxView {
             SandboxSource::NotProvided => "sandbox: unknown (not provided)".to_string(),
             SandboxSource::Unreadable => "sandbox: unreadable".to_string(),
             SandboxSource::ServerReported => format!(
-                "sandbox (server-reported, not verified by this surface): backend {} guarantee {}",
+                "sandbox resolved by the owner at launch (server-reported, not verified by this surface): backend {} guarantee {}",
                 self.backend, self.guarantee
             ),
         };
