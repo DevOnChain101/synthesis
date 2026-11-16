@@ -134,6 +134,10 @@ pub struct AttemptRecord {
     /// Decision of the attempt binds to these, not to whatever the outcome says later.
     pub bound_contract_version: Option<u32>,
     pub bound_policy_hash: Option<String>,
+    /// The sandbox backend and its filesystem guarantee (`none`/`weak`/`strong`) the OWNER resolved
+    /// when it launched the worker. Never reported by the worker; absent for older attempts.
+    pub sandbox_backend: Option<String>,
+    pub sandbox_guarantee: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
 }
@@ -299,7 +303,7 @@ fn item_row(r: &Row<'_>) -> rusqlite::Result<WorkItemRecord> {
     })
 }
 
-const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.reserved_usd,a.bound_contract_version,a.bound_policy_hash,a.started_at,a.ended_at";
+const ATTEMPT_COLS: &str = "a.id,a.work_item_id,a.ordinal,a.session_id,a.worker_kind,a.state,a.revision,a.fence,a.task_status,a.subject_commit,a.retained_reason,a.worker_pid,a.worker_start,a.heartbeat_at,a.reserved_usd,a.bound_contract_version,a.bound_policy_hash,a.started_at,a.ended_at,a.sandbox_backend,a.sandbox_guarantee";
 fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
     Ok(AttemptRecord {
         id: id_col(r, 0)?,
@@ -321,6 +325,8 @@ fn attempt_row(r: &Row<'_>) -> rusqlite::Result<AttemptRecord> {
         bound_policy_hash: r.get(16)?,
         started_at: r.get(17)?,
         ended_at: r.get(18)?,
+        sandbox_backend: r.get(19)?,
+        sandbox_guarantee: r.get(20)?,
     })
 }
 
@@ -1658,6 +1664,16 @@ impl OutcomeWriter {
 
     pub fn release_budget(&mut self, id: &AttemptId, fence: i64) -> Result<()> {
         self.atomically(|tx| tx.release_budget(id, fence))
+    }
+
+    pub fn bind_sandbox(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        backend: &str,
+        guarantee: &str,
+    ) -> Result<()> {
+        self.atomically(|tx| tx.bind_sandbox(id, fence, backend, guarantee))
     }
 
     pub fn bind_policy(
@@ -3274,6 +3290,37 @@ impl OutcomeTx<'_, '_> {
         self.et.tx.execute(
             "UPDATE attempts SET bound_contract_version=?2, bound_policy_hash=?3 WHERE id=?1",
             params![id.as_str(), contract_version, policy_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Records, once, the sandbox backend and guarantee the owner resolved for this launch.
+    pub fn bind_sandbox(
+        &mut self,
+        id: &AttemptId,
+        fence: i64,
+        backend: &str,
+        guarantee: &str,
+    ) -> Result<()> {
+        if backend.is_empty()
+            || backend.len() > 64
+            || !backend
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(Error::Invalid(
+                "a sandbox backend is 1 to 64 letters, digits, - or _".into(),
+            ));
+        }
+        if !matches!(guarantee, "none" | "weak" | "strong") {
+            return Err(Error::Invalid(
+                "a sandbox guarantee is none, weak or strong".into(),
+            ));
+        }
+        self.live_attempt(id, fence)?;
+        self.et.tx.execute(
+            "UPDATE attempts SET sandbox_backend=?2, sandbox_guarantee=?3 WHERE id=?1",
+            params![id.as_str(), backend, guarantee],
         )?;
         Ok(())
     }

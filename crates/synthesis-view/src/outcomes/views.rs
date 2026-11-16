@@ -509,7 +509,7 @@ impl CriteriaView {
 
 // ---------------------------------------------------------------------------------- attempts
 
-/// What the protocol says about the sandbox of an attempt; `unknown` unless it says (it does not today).
+/// What the protocol says about the sandbox of an attempt; `unknown` unless it says (the owner records it at launch; older attempts have none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxView {
     pub source: SandboxSource,
@@ -563,7 +563,7 @@ impl SandboxView {
             SandboxSource::NotProvided => "sandbox: unknown (not provided)".to_string(),
             SandboxSource::Unreadable => "sandbox: unreadable".to_string(),
             SandboxSource::ServerReported => format!(
-                "sandbox (server-reported, not verified by this surface): backend {} guarantee {}",
+                "sandbox resolved by the owner at launch (server-reported, not verified by this surface): backend {} guarantee {}",
                 self.backend, self.guarantee
             ),
         };

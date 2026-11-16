@@ -167,6 +167,9 @@ pub struct Runner<'a> {
     pub poll: Duration,
     /// After a stop request the worker gets this long before the tree is killed.
     pub grace: Duration,
+    /// The sandbox backend and guarantee the OWNER resolved for the workers it launches
+    /// (`None`: not recorded). Written to the attempt at launch; never taken from the worker.
+    pub sandbox: Option<(String, String)>,
     /// Replaces the store call of the heartbeat (tests inject transient errors, feature
     /// `test-seam`). Always `None` in use.
     beat: Option<&'a BeatFn<'a>>,
@@ -188,6 +191,7 @@ impl<'a> Runner<'a> {
             probe,
             poll,
             grace,
+            sandbox: None,
             beat: None,
         }
     }
@@ -389,12 +393,18 @@ impl Runner<'_> {
             return Err(RunError::Store(e));
         }
         // a Decision of this attempt binds to the contract and policy it started under
-        if let Err(e) = w.bind_policy(
-            &env.attempt.id,
-            env.attempt.fence,
-            profile.contract_version(),
-            &profile.compiled().policy_hash(),
-        ) {
+        let bound = w
+            .bind_policy(
+                &env.attempt.id,
+                env.attempt.fence,
+                profile.contract_version(),
+                &profile.compiled().policy_hash(),
+            )
+            .and_then(|()| match &self.sandbox {
+                Some((b, g)) => w.bind_sandbox(&env.attempt.id, env.attempt.fence, b, g),
+                None => Ok(()),
+            });
+        if let Err(e) = bound {
             if !matches!(e, StoreError::Stale(_)) {
                 let _ = w.release_budget(&env.attempt.id, env.attempt.fence);
                 let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);

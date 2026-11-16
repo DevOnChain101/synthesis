@@ -120,6 +120,7 @@ CREATE TABLE attempts(
   task_status TEXT, subject_commit TEXT, retained_reason TEXT,
   worker_pid INTEGER, worker_start TEXT, heartbeat_at TEXT,   -- the worker process and its lease
   bound_contract_version INTEGER, bound_policy_hash TEXT,   -- the contract version and compiled-policy hash this attempt started under (set once)
+  sandbox_backend TEXT, sandbox_guarantee TEXT,   -- what the OWNER resolved for the worker at launch (set once; never from the worker)
   reserved_usd REAL,   -- the cost cap allocated to this attempt: counts as spent until a final usage is recorded
   started_at TEXT NOT NULL, ended_at TEXT,
   UNIQUE(work_item_id, ordinal));
@@ -273,6 +274,8 @@ CREATE TRIGGER attempts_worker_once BEFORE UPDATE OF worker_pid, worker_start ON
   WHEN OLD.worker_pid IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a worker is recorded once'); END;
 CREATE TRIGGER attempts_policy_once BEFORE UPDATE OF bound_contract_version, bound_policy_hash ON attempts
   WHEN OLD.bound_policy_hash IS NOT NULL BEGIN SELECT RAISE(ABORT, 'the policy an attempt started under is set once'); END;
+CREATE TRIGGER attempts_sandbox_once BEFORE UPDATE OF sandbox_backend, sandbox_guarantee ON attempts
+  WHEN OLD.sandbox_backend IS NOT NULL BEGIN SELECT RAISE(ABORT, 'the sandbox of an attempt is recorded once'); END;
 CREATE TRIGGER attempts_reserved_once BEFORE UPDATE OF reserved_usd ON attempts
   WHEN OLD.reserved_usd IS NOT NULL AND (NEW.reserved_usd IS NULL OR NEW.reserved_usd > OLD.reserved_usd)
   BEGIN SELECT RAISE(ABORT, 'a budget reservation is set once and can only be lowered'); END;
@@ -292,7 +295,7 @@ CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempoten
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
 -- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
-INSERT INTO schema_migrations(version, applied_at) VALUES (1008, 'outcome-ddl-rev-8');
+INSERT INTO schema_migrations(version, applied_at) VALUES (1009, 'outcome-ddl-rev-9');
 "#,
 ];
 
@@ -303,7 +306,7 @@ pub const OUTCOMES: i64 = 5;
 /// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
 /// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
 /// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
-pub const OUTCOME_DDL_MARKER: i64 = 1008;
+pub const OUTCOME_DDL_MARKER: i64 = 1009;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 
