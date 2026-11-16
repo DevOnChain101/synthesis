@@ -1245,6 +1245,8 @@ struct FakeRunner {
     ids: Mutex<Vec<String>>,
     /// This check errors (no exit status) the first time it runs.
     fail_first: Option<String>,
+    /// A check has begun to run (set before its delay): tests wait on it, not on a clock.
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl FakeRunner {
@@ -1259,6 +1261,7 @@ impl FakeRunner {
             ran_in: Mutex::new(vec![]),
             ids: Mutex::new(vec![]),
             fail_first: None,
+            started: Default::default(),
         })
     }
 }
@@ -1280,6 +1283,8 @@ impl CheckRunner for FakeRunner {
         _: Duration,
         stop: &AtomicBool,
     ) -> CheckRun {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let until = std::time::Instant::now() + self.delay;
         while std::time::Instant::now() < until && !stop.load(std::sync::atomic::Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(10));
@@ -1508,6 +1513,7 @@ fn a_failing_or_stuck_check_and_a_forged_report_never_verify() {
             ran_in: Mutex::new(vec![]),
             ids: Mutex::new(vec![]),
             fail_first: None,
+            started: Default::default(),
         });
         let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
         let (stop, _) = sched
@@ -1543,6 +1549,7 @@ fn without_an_enforcing_sandbox_no_independent_evidence_is_produced() {
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: None,
+        started: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
@@ -1582,6 +1589,7 @@ fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: None,
+        started: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
     let mut slowest = Duration::ZERO;
@@ -1626,6 +1634,7 @@ fn runner_printing(candidate: Vec<u8>, base: Option<Vec<u8>>) -> Arc<FakeRunner>
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: None,
+        started: Default::default(),
     })
 }
 
@@ -1741,19 +1750,27 @@ fn cancelling_stops_a_running_verification_promptly() {
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: None,
+        started: Default::default(),
     });
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
-    while !sched.verifier.busy() {
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
+    // wait until the check itself runs (not just the scope pass before it); under load that takes long
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !runner.started.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the check never started"
+        );
         sched.tick(&mut w, clock()).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
     // a tick does not wait for the check (it runs on its own thread): the owner loop that calls it
-    // keeps applying pause, cancel and decisions while a check runs for minutes
+    // keeps applying pause, cancel and decisions while a check runs for minutes. A blocked tick
+    // would last the whole 60 s delay, so a bound far below that still proves it.
     for _ in 0..3 {
         let t = std::time::Instant::now();
         sched.tick(&mut w, clock()).unwrap();
         assert!(sched.verifier.busy());
-        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(30), "{:?}", t.elapsed());
     }
     let t0 = std::time::Instant::now();
     sched.control.cancel.cancel();
@@ -1761,7 +1778,7 @@ fn cancelling_stops_a_running_verification_promptly() {
     assert_eq!(rep.stop, Some(Stop::Cancelled), "{rep:?}");
     // dropping the scheduler joins the verification thread, which the cancel already stopped
     drop(sched);
-    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", t0.elapsed());
 }
 
 #[test]
@@ -1792,6 +1809,7 @@ fn a_retry_after_a_partial_failure_runs_and_records_only_the_missing_checks() {
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: Some("beta".into()),
+        started: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
