@@ -36,7 +36,7 @@ fn the_diff_has_counts_a_patch_and_withholds_secrets_and_binaries() {
     fs::write(repo.join(".env"), "TOKEN=base-secret\n").unwrap();
     fs::write(repo.join("logo.bin"), b"\0old").unwrap();
     let base = commit_all(repo, "base");
-    fs::write(repo.join("a.txt"), "two\u{202e}x\n").unwrap();
+    fs::write(repo.join("a.txt"), "two\u{202e}\u{e0041}\u{2028}\u{600}\u{6dd}\u{70f}\u{34f}\u{115f}\u{3164}\u{ffa0}\u{fe0f}\u{e0100}x\n").unwrap();
     fs::write(repo.join(".env"), "TOKEN=hunter2-secret\n").unwrap();
     fs::write(repo.join("logo.bin"), b"\0new").unwrap();
     #[cfg(unix)]
@@ -49,10 +49,9 @@ fn the_diff_has_counts_a_patch_and_withholds_secrets_and_binaries() {
     assert_eq!((a.added, a.removed, a.binary), (Some(1), Some(1), false));
     let patch = a.patch.as_ref().unwrap();
     assert!(patch.contains("-one") && patch.contains("+two"), "{patch}");
-    assert!(
-        !patch.contains('\u{202e}'),
-        "a bidi override reached the patch"
-    );
+    for c in "\u{202e}\u{e0041}\u{2028}\u{600}\u{6dd}\u{70f}\u{34f}\u{115f}\u{3164}\u{ffa0}\u{fe0f}\u{e0100}".chars() {
+        assert!(!patch.contains(c), "{:x} reached the patch", c as u32);
+    }
     let bin = f("logo.bin");
     assert!(bin.binary && bin.patch.is_none() && bin.added.is_none());
     let env = f(".env");

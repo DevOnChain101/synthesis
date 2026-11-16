@@ -12,6 +12,7 @@ workspace = true
 # worktree manager (workspace). Nothing in `apps/*`, the CLI UI crates or `synthesis-view` may
 # depend on it (`synthesis-app/tests/surface_deps.rs` checks it); only `synthesis-app` does.
 [dependencies]
+synthesis-config = { path = "../synthesis-config" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-permissions = { path = "../synthesis-permissions" }
@@ -34,6 +35,5 @@ rustix = { version = "1", default-features = false, features = ["process"] }
 
 [dev-dependencies]
 synthesis-orchestrator = { path = ".", features = ["test-seam"] }
-synthesis-config = { path = "../synthesis-config" }
 tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled"] }

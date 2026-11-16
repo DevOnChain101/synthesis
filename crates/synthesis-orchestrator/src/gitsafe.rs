@@ -563,18 +563,13 @@ pub struct DiffReport {
     pub total_files: usize,
 }
 
-/// Format and bidi characters that change how text reads without showing (Unicode Cf subset).
-fn invisible(c: char) -> bool {
-    matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
-}
-
 /// Control and invisible format characters (ESC, CR, NUL, bidi overrides, ...) become U+FFFD; `\n`
 /// and `\t` stay when `keep_ws`.
 fn printable(s: &str, keep_ws: bool) -> String {
     s.chars()
         .map(|c| {
-            if (c.is_control() && !(keep_ws && matches!(c, '\n' | '\t'))) || invisible(c) {
+            if !(keep_ws && matches!(c, '\n' | '\t')) && synthesis_config::is_invisible_or_blank(c)
+            {
                 '\u{FFFD}'
             } else {
                 c

@@ -29,7 +29,7 @@ use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, Platform, ProcessHost, Runner,
     SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, answered_waiting,
-    apply_lifecycle, apply_queued, conclude, recover_attempts, restore_pause,
+    apply_lifecycle, apply_queued, conclude, recover_attempts, restore_pause, wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -280,7 +280,7 @@ impl<'a> Owner<'a> {
             let fresh: Vec<String> = answered_waiting(&mut ow.w)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|d| ow.unblocked_for.insert(d.clone()))
+                .filter(|d| !ow.unblocked_for.contains(d))
                 .collect();
             if !fresh.is_empty() {
                 match ow.w.transition_outcome(
@@ -290,6 +290,8 @@ impl<'a> Owner<'a> {
                     &Effects::default(),
                 ) {
                     Ok(_) => {
+                        // only a successful flip uses the answer up; a failed one retries next tick
+                        ow.unblocked_for.extend(fresh);
                         if let Ok(n) = ow.w.get_outcome(ow.w.id()) {
                             o = n;
                         }
@@ -400,6 +402,29 @@ impl<'a> Owner<'a> {
             pol.max_cost_usd
                 .map_or(b.max_cost_usd, |c| c.min(b.max_cost_usd)),
         );
+        let grace = Duration::from_secs(10);
+        cfg.unknown_after = Some(Duration::from_secs(wall_secs(&contract, pol)) + grace);
+        let mut runner = Runner::new(
+            self.store,
+            self.wm,
+            self.spawn,
+            &OsProbe,
+            Duration::from_millis(250),
+            grace,
+        );
+        // what the owner itself resolves (the worker enforces with the same `detect()`); the
+        // worker is never asked
+        let sb = synthesis_sandbox::detect();
+        use synthesis_sandbox::Guarantee;
+        runner.sandbox = Some((
+            sb.name().to_string(),
+            match sb.capabilities().filesystem {
+                Guarantee::None => "none",
+                Guarantee::Weak => "weak",
+                Guarantee::Strong => "strong",
+            }
+            .to_string(),
+        ));
         let host = ProcessHost {
             allocator: Allocator {
                 store: self.store,
@@ -407,14 +432,7 @@ impl<'a> Owner<'a> {
                 platform: Platform::current(),
                 artifact_root: self.home.join("artifacts"),
             },
-            runner: Runner::new(
-                self.store,
-                self.wm,
-                self.spawn,
-                &OsProbe,
-                Duration::from_millis(250),
-                Duration::from_secs(10),
-            ),
+            runner,
             contract,
             policy: pol.clone(),
             program: self.program.clone(),

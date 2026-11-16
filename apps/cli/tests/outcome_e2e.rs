@@ -447,6 +447,17 @@ fn a_worker_edits_a_worktree_and_an_independent_check_gives_the_verdict() {
         g(&r.repo, &["show", &format!("{commit}:src/hello.txt")]),
         "hi"
     );
+    // the owner recorded the sandbox it resolved at launch (the worker never reports it)
+    assert!(
+        imp[0]
+            .sandbox_backend
+            .as_deref()
+            .is_some_and(|b| !b.is_empty())
+    );
+    assert!(
+        matches!(imp[0].sandbox_guarantee.as_deref(), Some("weak" | "strong")),
+        "{imp:?}"
+    );
     assert_eq!(g(&r.repo, &["rev-parse", "HEAD"]), r.head);
     assert_eq!(g(&r.repo, &["status", "--porcelain"]), "");
     assert!(!r.repo.join("src/hello.txt").exists());

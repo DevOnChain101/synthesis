@@ -8,7 +8,10 @@ pub fn is_invisible_or_blank(c: char) -> bool {
             '\u{a0}'
                 | '\u{ad}'
                 | '\u{34f}'
+                | '\u{600}'..='\u{605}'
                 | '\u{61c}'
+                | '\u{6dd}'
+                | '\u{70f}'
                 | '\u{115f}'
                 | '\u{1160}'
                 | '\u{1680}'
@@ -28,4 +31,33 @@ pub fn is_invisible_or_blank(c: char) -> bool {
                 | '\u{e0000}'..='\u{e007f}'
                 | '\u{e0100}'..='\u{e01ef}'
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_invisible_or_blank;
+
+    #[test]
+    fn covers_format_tag_filler_and_selector_characters() {
+        for c in [
+            '\u{e0041}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{600}',
+            '\u{605}',
+            '\u{6dd}',
+            '\u{70f}',
+            '\u{34f}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{fe0f}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ] {
+            assert!(is_invisible_or_blank(c), "{:x}", c as u32);
+        }
+        assert!(!is_invisible_or_blank('a') && !is_invisible_or_blank('\u{606}'));
+    }
 }

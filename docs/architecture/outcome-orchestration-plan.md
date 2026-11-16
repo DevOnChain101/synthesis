@@ -281,6 +281,7 @@ External event adapters and inbox (the design's GitHub PR, AC-14); remote worker
 | D20 (new) | Orchestrator idle exit | 10 minutes with no active outcome, command or client | PR-12 |
 | D21 (new) | Notification content when no surface is open | ids and codes only through the existing notify hook; no brief text | PR-12 |
 | D22 (new) | Remove the `InProc` transport from production builds | Keep it for tests and headless CI only (test feature or `cfg(test)`), never a surface default | PR-11 |
+| D23 (new) | Sandbox of an attempt on the wire | The owner records the backend and filesystem guarantee it resolved at launch (`attempts.sandbox_*`, DDL revision 1009, set once, no MAC, never from the worker); `attempt.inspect` sends `sandbox{backend,guarantee}`, omitted for older attempts; surfaces show it as server-reported | PR-11 follow-up |
 
 ## 8. Risks specific to the plan
 

@@ -171,6 +171,10 @@ pub struct SchedConfig {
     /// [`Scheduler::run_until`] gives up after this many ticks in a row that reported errors and
     /// made no progress (nothing leased, nothing settled).
     pub max_stalled_ticks: u32,
+    /// A live attempt this scheduler holds no handle for and that could not be identified (so it
+    /// is never killed) blocks the outcome once it is older than this (the owner sets wall cap +
+    /// grace) while the cost cap is used up. `None`: never.
+    pub unknown_after: Option<Duration>,
 }
 
 /// Reports kept by [`Scheduler::run_until`]: the last ones (a long walk must not grow without bound).
@@ -185,6 +189,7 @@ impl SchedConfig {
             backoff_cap: Duration::from_secs(300),
             max_cost_usd: None,
             max_stalled_ticks: 50,
+            unknown_after: None,
         }
     }
 
@@ -522,7 +527,14 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         let items = Self::plan_items(w)?;
         // items that just succeeded may have made others ready: that is progress, not a dead end
         let moved = waiting(&items) < before;
-        rep.stop = self.stop_of(w, &items, over_budget, live_unheld > 0, &rep.errors, moved)?;
+        rep.stop = self.stop_of(
+            w,
+            &items,
+            (over_budget, live_unheld > 0),
+            &rep.errors,
+            moved,
+            now,
+        )?;
         Ok(rep)
     }
 
@@ -571,6 +583,31 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         Ok(w.list_attempts(&it.id)?
             .iter()
             .any(|a| matches!(a.state, AttemptState::Starting | AttemptState::Running)))
+    }
+
+    /// The first live attempt of a leased/running item older than `cfg.unknown_after`, named.
+    fn overdue_unheld(
+        &self,
+        w: &OutcomeWriter,
+        items: &[WorkItemRecord],
+        now: OffsetDateTime,
+    ) -> Result<Option<String>, SchedError> {
+        let Some(limit) = self.cfg.unknown_after else {
+            return Ok(None);
+        };
+        for it in items
+            .iter()
+            .filter(|i| matches!(i.state, WorkItemState::Leased | WorkItemState::Running))
+        {
+            for a in w.list_attempts(&it.id)? {
+                let old = crate::retention::parse_store_time(&a.started_at)
+                    .is_some_and(|t| now - t > limit);
+                if matches!(a.state, AttemptState::Starting | AttemptState::Running) && old {
+                    return Ok(Some(format!("attempt {} of {}", a.id, it.key)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Leased/Running without a worker: `recovering`, then `ready` while the attempt budget
@@ -647,10 +684,10 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         &mut self,
         w: &mut OutcomeWriter,
         items: &[WorkItemRecord],
-        over_budget: bool,
-        live_unheld: bool,
+        (over_budget, live_unheld): (bool, bool),
         errors: &[String],
         moved: bool,
+        now: OffsetDateTime,
     ) -> Result<Option<Stop>, SchedError> {
         // what went wrong on the way is part of why the walk ends
         let why = |r: String| {
@@ -678,6 +715,20 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
                 // worker settles (freeing or fixing its reservation) before anything is decided.
                 // Only with no live attempt left is the cap really gone.
                 if live_unheld {
+                    // ... unless that attempt outlived its wall cap and grace and nothing proves
+                    // it is the worker it claims to be: it is never killed unproven, so the
+                    // outcome ends blocked (a person looks) instead of waiting for ever.
+                    if let Some(late) = self.overdue_unheld(w, items, now)? {
+                        return self
+                            .block_outcome(
+                                w,
+                                why(format!(
+                                    "the cost cap is used up and {late} is still live past its wall cap \
+                                     (its worker could not be identified, so it was not stopped)"
+                                )),
+                            )
+                            .map(Some);
+                    }
                     return Ok(None);
                 }
                 let (spent, cap) = (w.outcome_spend(w.id())?, self.cfg.max_cost_usd);

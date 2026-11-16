@@ -123,12 +123,54 @@ fn a_normal_run_commits_the_tree_and_hands_over_to_verification() {
     );
     assert_eq!(a.subject_commit.as_deref(), Some(commit.as_str()));
     assert!(a.worker_pid.is_some() && a.heartbeat_at.is_some() && a.ended_at.is_some());
+    // no owner facts given: nothing is recorded
+    assert_eq!((a.sandbox_backend, a.sandbox_guarantee), (None, None));
     // the worker was marked as started before it ran: the worktree is never reset again
     assert!(r.wm.is_started(&env.git));
     assert!(
         r.wm.allocate_unstarted(&r.repo, &env.session_id, r.base.join("art"), &r.head)
             .is_err()
     );
+}
+
+#[test]
+fn the_owners_sandbox_facts_are_recorded_at_launch_once() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, two) = r.outcome();
+    let s = Script("exit 0".into());
+    let go = |w: &mut OutcomeWriter, it: &WorkItemId, pre: bool| {
+        let env = r
+            .allocator()
+            .allocate(w, &r.spec(it, 1), OffsetDateTime::now_utc())
+            .unwrap();
+        if pre {
+            w.bind_sandbox(&env.attempt.id, env.attempt.fence, "first", "weak")
+                .unwrap();
+        }
+        let mut run = runner(&r, &s);
+        run.sandbox = Some(("seatbelt".into(), "strong".into()));
+        run.run_attempt(
+            w,
+            &env,
+            &profile(&r, &env, &policy()),
+            &CancelFlag::default(),
+        )
+    };
+    go(&mut w, &one, false).unwrap();
+    let a = attempt(&w, &one, 1);
+    assert_eq!(a.sandbox_backend.as_deref(), Some("seatbelt"));
+    assert_eq!(a.sandbox_guarantee.as_deref(), Some("strong"));
+    // set once (trigger): a second, different record fails the launch and the first stands
+    assert!(go(&mut w, &two, true).is_err());
+    assert_eq!(
+        attempt(&w, &two, 1).sandbox_backend.as_deref(),
+        Some("first")
+    );
+    // only the closed vocabulary
+    let (a2, f) = (attempt(&w, &two, 1).id, attempt(&w, &two, 1).fence);
+    assert!(w.bind_sandbox(&a2, f, "x y", "strong").is_err());
+    assert!(w.bind_sandbox(&a2, f, "x", "maximum").is_err());
 }
 
 #[test]

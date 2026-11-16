@@ -332,10 +332,12 @@ fn binding_matches(
 pub fn answered_waiting(w: &mut OutcomeWriter) -> Result<Vec<String>, StoreError> {
     let mut out = vec![];
     for d in w.list_decisions(w.id())? {
-        let Some((item_id, _)) = current_binding_for(w, &d, None)? else {
+        let Some((item_id, current)) = current_binding_for(w, &d, None)? else {
             continue;
         };
+        // a decision for an older contract version or policy hash is not an answer to this block
         if w.decision_state(&d.id)? == DecisionState::Approved
+            && binding_matches(w, &d, &current)?
             && w.get_work_item(&item_id)?.state == WorkItemState::WaitingDecision
             && w.verified_resolution(&d.id)?.is_some()
         {

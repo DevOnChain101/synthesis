@@ -2028,3 +2028,72 @@ fn an_adopted_live_attempt_keeps_its_reservation_without_blocking_and_a_lost_one
     assert_ne!(at[0].session_id, at[1].session_id);
     assert!(w.outcome_spend(&id).unwrap() <= 2.0);
 }
+
+/// A host that never identifies or touches an adopted worker (an `unknown` attempt: its session
+/// is open somewhere, nothing proves whose process it is).
+struct BlindHost;
+
+impl WorkerHost for BlindHost {
+    type Handle = ();
+    fn start(
+        &mut self,
+        _: &mut OutcomeWriter,
+        _: &WorkItemRecord,
+        _: u32,
+        _: f64,
+        _: u32,
+    ) -> Result<(), SchedError> {
+        unreachable!("the cap is used up")
+    }
+    fn poll(
+        &mut self,
+        _: &mut OutcomeWriter,
+        _: &mut (),
+        _: &CancelFlag,
+    ) -> Result<Option<Settled>, SchedError> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn an_unknown_live_attempt_with_the_cap_used_up_blocks_the_outcome_after_its_wall_cap_unkilled() {
+    need_git!();
+    let r = rig();
+    let (mut w, items) = r.fresh();
+    let id = w.id().clone();
+    let (mut child, a) = adopted_live(&r, &mut w, &items, 1.0);
+    let mk = |after: Option<Duration>| {
+        let mut c = cfg();
+        c.max_cost_usd = Some(1.0);
+        c.unknown_after = after;
+        Scheduler::new(BlindHost, EvidenceVerifier::new(&[]), c)
+    };
+    let late = clock() + Duration::from_secs(7200);
+    let hour = Some(Duration::from_secs(3600));
+    // young: it may still be a healthy worker holding its own reservation
+    let rep = mk(hour).tick(&mut w, clock()).unwrap();
+    assert!(rep.stop.is_none(), "{rep:?}");
+    // no limit given: never decided (the old behaviour)
+    assert!(mk(None).tick(&mut w, late).unwrap().stop.is_none());
+    // a pause is a person's word and wins; so does a cancel
+    let mut sc = mk(hour);
+    sc.control.pause();
+    assert_eq!(sc.tick(&mut w, late).unwrap().stop, Some(Stop::Paused));
+    // past wall cap + grace: blocked, naming the attempt, and nothing unproven is killed
+    let rep = mk(hour).tick(&mut w, late).unwrap();
+    let Some(Stop::Blocked(why)) = &rep.stop else {
+        panic!("{rep:?}")
+    };
+    assert!(
+        why.contains(&a.id.to_string()) && why.contains("one"),
+        "{why}"
+    );
+    assert_eq!(w.get_outcome(&id).unwrap().state, OutcomeState::Blocked);
+    assert!(child.try_wait().unwrap().is_none(), "the worker was killed");
+    assert_eq!(
+        w.list_attempts(&a.work_item_id).unwrap()[0].state,
+        AttemptState::Running
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}

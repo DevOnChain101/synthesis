@@ -509,7 +509,7 @@ impl CriteriaView {
 
 // ---------------------------------------------------------------------------------- attempts
 
-/// What the protocol says about the sandbox of an attempt; `unknown` unless it says (it does not today).
+/// What the protocol says about the sandbox of an attempt; `unknown` unless it says (the owner records it at launch; older attempts have none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxView {
     pub source: SandboxSource,

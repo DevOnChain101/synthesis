@@ -423,9 +423,14 @@ fn attempts_json(r: &Reader, item: &WorkItemId) -> Result<Value, String> {
         .map_err(s)?
         .iter()
         .map(|a| {
-            json!({"id": a.id, "ordinal": a.ordinal, "session_id": a.session_id, "state": a.state,
+            let mut v = json!({"id": a.id, "ordinal": a.ordinal, "session_id": a.session_id, "state": a.state,
                "task_status": a.task_status, "subject_commit": a.subject_commit,
-               "retained_reason": a.retained_reason, "started_at": a.started_at, "ended_at": a.ended_at})
+               "retained_reason": a.retained_reason, "started_at": a.started_at, "ended_at": a.ended_at});
+            // what the owner recorded at launch; an older attempt has none, so the key is omitted
+            if let (Some(b), Some(g)) = (&a.sandbox_backend, &a.sandbox_guarantee) {
+                v["sandbox"] = json!({"backend": b, "guarantee": g});
+            }
+            v
         })
         .collect::<Vec<_>>();
     Ok(Value::Array(rows))

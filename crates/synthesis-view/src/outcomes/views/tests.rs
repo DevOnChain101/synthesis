@@ -373,6 +373,17 @@ fn extra_rows_are_capped_and_have_no_heading_authority() {
 
 #[test]
 fn sandbox_is_marked_server_reported_and_a_bad_one_is_unreadable() {
+    // the shape the owner records at launch; an older attempt sends no key at all
+    let mut v = attempt();
+    assert!(v.get("sandbox").is_none());
+    let a = AttemptView::from_json(&v, "wi_a").unwrap();
+    assert_eq!(a.sandbox.source, SandboxSource::NotProvided);
+    v["sandbox"] = json!({"backend": "seatbelt", "guarantee": "strong"});
+    let a = AttemptView::from_json(&v, "wi_a").unwrap();
+    assert_eq!(
+        (a.sandbox.backend.as_str(), a.sandbox.guarantee.as_str()),
+        ("seatbelt", "strong")
+    );
     let mut v = attempt();
     v["sandbox"] = json!({"backend": "seatbelt", "guarantee": "enforcing", "profile": "p1"});
     let a = AttemptView::from_json(&v, "wi_a").unwrap();

@@ -426,6 +426,32 @@ fn an_unused_grant_is_withdrawn_when_the_binding_moves_and_an_answered_choice_re
     );
 }
 
+#[test]
+fn an_answer_for_an_older_binding_is_not_an_answer_waiting_for_the_owner_to_unblock() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "a",
+        "ambiguity",
+        binding(&ctx, &it, |_| {}),
+        json!({"question": "Which API shape?", "options": ["REST"]}),
+        2,
+    );
+    assert!(
+        answered_waiting(&mut w).unwrap().is_empty(),
+        "not answered yet"
+    );
+    answer(&mut w, &d, "REST");
+    assert_eq!(answered_waiting(&mut w).unwrap(), [d.id.to_string()]);
+    // the plan moved after the answer: the answer no longer fits what is blocked
+    e_rewrite_binding(&r, &w, &d);
+    assert!(answered_waiting(&mut w).unwrap().is_empty());
+}
+
 /// Makes the stored binding of a decision stale by rewriting the OUTCOME's plan version (what a
 /// replan does), not the decision (its binding is immutable).
 fn e_rewrite_binding(r: &Rig, w: &OutcomeWriter, _d: &DecisionRecord) {
