@@ -72,7 +72,7 @@ pub fn body(name: &str) -> Option<&'static str> {
         "cpu" => {
             r#"<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>"#
         }
-        // the Tauri app's title bar (`index.html` `#chrome`)
+        // the design's chrome (`index.html` `#chrome`)
         "tui" => r#"<path d="M4 6h16M4 12h10M4 18h16"/><circle cx="19" cy="12" r="1.6"/>"#,
         "super-agent" => {
             r#"<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 16l.8 2.2L21 19l-2.2.8L18 22l-.8-2.2L15 19l2.2-.8z"/>"#

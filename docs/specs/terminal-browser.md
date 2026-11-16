@@ -1,0 +1,387 @@
+# Spec: Desktop Terminal and Browser tabs (design, draft 0.1, for owner review)
+
+Status: design only, nothing built. Owner decisions of 2026-11-16 (below) reverse the earlier "no terminal emulator, no PTY"
+non-goal of `docs/specs/desktop.md` section 1 and section 5 ("Interactive PTY: not wanted"). Adjacent specs: `desktop.md`
+(sections 5, 8 and 9: the tabs, `synt engine --stdio`, WSL), `events.md`, `sandbox.md`, `sandbox-hardening.md`,
+`docs/BROWSER-LOGIN.md`, `docs/SECURITY.md`. Tags: **[A]** = assumption, to be checked in the PR that depends on it.
+
+## 0. Owner decisions (2026-11-16) and non-negotiables
+
+1. No webview of any kind, no `wry`, no code, crate or wording from the former webview stack.
+2. Terminal tab = a real terminal: `alacritty_terminal` (VT parser and grid) plus a PTY, drawn by GPUI. The person types and
+   runs commands; the agent can use the same terminal.
+3. Browser tab = a usable browser view (URL bar, back, forward, reload; tabs optional) on the EXISTING Chrome runtime
+   (`crates/synthesis-browser`), shown by streaming CDP frames into GPUI and forwarding the person's mouse and keyboard over
+   CDP `Input.*`. The agent's browser tools act on the same session.
+
+Non-negotiables carried from the product (CLAUDE.md, ADR-010/011, SECURITY.md):
+- N1. Nothing the agent does through these tabs bypasses the sandbox, the permission engine (rules, asks, plan mode,
+  auto judge, protected and secret paths), the URL policy or the credential rules. Fail closed when a check cannot run.
+- N2. What the person types is the person's own: it is never fed to the model silently, never written to events, the
+  store or logs.
+- N3. No `SYNT_*` variable and no API key reaches a shell or a page. Rust never writes credentials.
+- N4. macOS, Linux, Windows (native and WSL2 mode) are all first-class; CI on all three; `unsafe` stays out of the workspace.
+- N5. Simplest design that meets 1-3. No settings key, protocol field or mode that no requirement needs.
+
+Correction of a premise: `browser.frame` today is NOT a screencast. It is one event per `browser_screenshot` PNG artifact
+(`events.md`; no image bytes in the stream). There is no `Page.startScreencast` in the runtime. Live frames are new work
+(section 2.3) and deliberately do not travel as events.
+
+---
+
+## 1. Terminal
+
+### 1.1 Options
+
+| | Design | For | Against | Verdict |
+|---|---|---|---|---|
+| T-A | One PTY shell per tab, owned by the desktop; the agent types into it (keystrokes) | Literally "the same terminal" | The shell is unconfined: every agent line escapes the sandbox, permission matching only sees keystrokes, secrets the person typed are on screen for the model | Rejected (violates N1, N2) |
+| T-B | Everything owned by the engine, person shells too, all sandboxed | One owner, one protocol | The person's own shell cannot `git push`, `ssh`, use their keys or Docker; in WSL mode a person's shell needs no engine at all | Rejected (the person's terminal must be theirs) |
+| T-C | **Two kinds of PTY in one tab.** *Personal* shells: owned by the desktop, unconfined, invisible to the agent. *Shared* shells: owned by the engine, spawned through the sandbox, readable and writable by the agent through gated tools, and typed into by the person in the same view | The agent really shares a terminal with the person, and every agent byte is gated and confined | Two spawn paths; the person must pick "shared" to collaborate | **Chosen** |
+| T-D | No PTY for the agent; keep Bash only, show its output in a terminal-looking pane | Smallest | Not what the owner asked (interactive programs, the person and the agent on the same screen) | Rejected |
+
+**Strongest reason against T-C:** a shared shell is sandboxed, so a person who opens it and runs `git push` or `ssh` there
+hits the sandbox; they must know which kind of shell they are in. Mitigation: the kind is in the tab title, the colour and
+the "agent can read this" banner; personal is the default for a tab the person opens.
+
+### 1.2 Ownership and data flow
+
+```
+ desktop process (GPUI)                                 engine (same process, or `synt engine --stdio` in WSL)
+ ┌───────────────────────────────────────────┐          ┌──────────────────────────────────────────────────┐
+ │ Terminal tab                              │          │ harness: tools pty_open/pty_send/pty_read/pty_close│
+ │  ├ Personal pty_p1 ── portable-pty ─ shell│          │   -> permission engine -> auto judge -> plan mode │
+ │  │   (desktop owns; agent cannot address) │          │ synthesis-terminal::pty  (owns SHARED PTYs)       │
+ │  └ Shared  pty_3 ◄── bytes ────────────────┼── chan / ─┤   SandboxBackend::wrap(shell) -> portable-pty     │
+ │       alacritty Term (draw)  ── person keys┼── proto ──►   alacritty Term (agent's screen view)           │
+ └───────────────────────────────────────────┘          └──────────────────────────────────────────────────┘
+```
+
+- **Personal PTY** (`origin: person`): spawned by `apps/desktop` with `portable-pty`, the person's shell (`$SHELL -l` on
+  unix, `resolve_shell` of `synthesis-terminal` on Windows), cwd = the session folder. In WSL mode it is
+  `%SystemRoot%\System32\wsl.exe -d <distro> --cd <linux cwd>` under ConPTY (the distro's login shell), with the same
+  allowlisted environment as the engine launch (`remote::allowed_env`) minus `SYNT_*`, no `WSLENV`. It never touches the
+  engine, so it survives engine restarts and session switches; it dies with its tab or the app.
+- **Shared PTY** (`origin: agent`, also when the person opens one): spawned by the engine in `synthesis-terminal` (new
+  module `pty`), wrapped exactly like a `Bash` command (`SandboxBackend::wrap`, `SandboxMode` fail-closed rules, the
+  session env from `Env::child_env`, egress `build_env`). Session-scoped: an engine restart or session end kills it. Counts
+  against `Limits` (live processes, `max_session_log_bytes`). Its output is also appended to a 0600 log under
+  `<artifact_root>/terminal/` (same cap and kill rule as today), so the session keeps a record of what the agent saw.
+- **Parsing twice is deliberate:** the desktop keeps an `alacritty_terminal::Term` per PTY for drawing; the engine keeps
+  one per shared PTY to answer `pty_read` (the screen the agent sees). Bytes are cheap; shipping rendered grids over the
+  WSL protocol is not.
+- **Bash is unchanged.** One-shot commands still go through `Bash` (exact output, exit code, artifact). The shared PTY is
+  for interactive programs (REPLs, prompts, TUIs, watch processes) and for working in front of the person. The tool
+  descriptions say so. `!cmd` is unchanged.
+
+### 1.3 Agent tools (main agent only; sub-agents and peer work get "not available")
+
+| Tool | Input | Gate | Result |
+|---|---|---|---|
+| `pty_open` | `cwd?` (inside the workspace roots) | side effect `execute`; permission like `Bash` running the user's shell (`Bash(<shell>)` rule form); plan mode refuses; auto mode goes to the judge; Windows native with no backend: refused like `Bash` under `enforce` | `{pty: "pty_N", sandbox: Guarantee}` |
+| `pty_send` | `pty`, `text` (printable, no control chars, <= 4 KiB), `enter: bool`, `keys?: [named key]` (`ctrl-c`, `ctrl-d`, `tab`, `esc`, arrows, `enter`...) | see 1.4 | `{sent: bytes}`; never echoes `text` |
+| `pty_read` | `pty`, `lines?` (<= 2000) | side effect `read`; allowed in plan mode | screen + scrollback tail as text, `UntrustedText`, redacted (1.5), <= 64 KiB, `{cursor, fg: "shell"\|"program"\|"unknown", exited?}` |
+| `pty_close` | `pty` | none beyond ownership | `{exit_code?}` |
+
+The agent can only name PTYs the engine created (`pty_N`); personal PTYs have no id in the engine and cannot be addressed.
+
+### 1.4 How an agent line is gated (`pty_send`)
+
+1. Refused when: the PTY is held by the person (1.6); the person has typed since their last Enter/Ctrl-C/Ctrl-U (`busy`);
+   the terminal has ECHO off (password prompt, unix `tcgetattr` on the master, see 1.8); the session is in plan mode;
+   `text` holds any C0/C1 control, ESC, or a bracketed-paste delimiter (escape smuggling); `keys` names anything but the
+   fixed list.
+2. When `enter: true` and the foreground process group is the shell's own (`portable-pty` `process_group_leader()` equals
+   the shell pid; [A] exposed on unix) or cannot be determined (Windows, failure): `text` is treated as a **Bash command**
+   and goes through the same path as a `Bash` call: permission rules (allow/ask/deny on `Bash(...)`), protected and secret
+   path scans (`deny_secret_reads`, `browser-profiles` rule), critical-removal checks, the auto judge with the same
+   inputs. It is sent only if that path allows it. A denied line is a tool error, nothing is written to the PTY.
+3. When another program is in the foreground (a REPL, `vim`, a `[y/N]` prompt): the input is a new permission kind
+   `PtyInput(pty_N)`: `ask` in `default`, allowed in `acceptEdits` only by an explicit rule, judged in auto mode. `ctrl-c`
+   is always allowed (stopping is never gated).
+4. Whatever passes is confined by the PTY's sandbox anyway (network, filesystem, hidden state paths). Gating is the policy,
+   the sandbox is the boundary; neither replaces the other.
+5. Events: `tool.requested` carries `text` redacted as for `Bash` input; `pty.agent_input {pty_id, tool_call_id, bytes,
+   kind}` (no text). The person's keystrokes are never an event.
+
+### 1.5 What terminal output may reach the model
+
+- Only through `pty_read`, a visible tool call (card in the chat). No background feeding, no automatic attach of terminal
+  text to a turn, nothing from personal PTYs ever (they are not in the engine).
+- `pty_read` text passes the sink redactor (private-key blocks, token patterns, the session's registered secret values)
+  BEFORE the model sees it. This deviates from `events.md` section 5.4 (tool results reach the model unredacted) on
+  purpose: a shared terminal shows what the person typed and printed, not only what the agent ran.
+- **Hold**: the person can hold a shared PTY ("Agent paused" toggle, or automatically while they type, 1.6). Output
+  written while held is withheld from the agent for good: the engine records the absolute grid line where the hold began
+  and ended; `pty_read` blanks rows in that range (and the whole screen until it has scrolled or been cleared, because a
+  full-screen program can redraw old rows). A "Clear and share" button clears the screen and lifts the blanking.
+- ECHO-off input (passwords) never appears on screen, and the agent cannot type while ECHO is off. Windows ConPTY has no
+  echo state: there, a last screen line matching `(?i)(password|passphrase|pin|token)[^:]*:\s*$` counts as ECHO off.
+
+### 1.6 Control arbitration and indicator
+
+- Each shared PTY has a holder: `shared` (default) or `person`. The person's keystrokes always go through, in any state.
+- Typing in a shared PTY marks it `busy` until Enter, Ctrl-C or Ctrl-U; the agent's `pty_send` gets `busy` (it may retry
+  later). Ctrl+Shift+H (and the header button) toggles `person` hold; `pty_send` and `pty_read` then return `held by the
+  person`. Release returns to `shared`.
+- Indicator in the tab header: `Personal` (no agent access), `Shared · agent can read and type` (accent colour), `Shared ·
+  agent running <cmd>` while an agent line runs in the foreground, `Held by you`. The agent's last line is shown as a dim
+  marker in the gutter so the person sees which commands were the agent's.
+- Event `pty.control_changed {pty_id, holder, reason}` (person action only; not every keystroke).
+
+### 1.7 Limits, sizes, cleanup
+
+- Scrollback 5 000 lines per PTY (alacritty cells are about 24 bytes: a 200-column screen is about 24 MB at the cap);
+  at most 8 personal and 4 shared PTYs (the shared ones also count in `Limits`). Fixed numbers, no setting (N5).
+- Output path: a reader thread per PTY, chunks coalesced to 16 ms or 64 KiB. Backpressure: at most 1 MiB not yet consumed
+  by the drawer (local channel) or not acknowledged by the client (WSL, `pty.ack`); past it the reader stops reading the
+  master, so the child blocks on write (the normal PTY flow control). No unbounded queue anywhere.
+- Kill on close, session end, engine restart and app exit: unix: SIGHUP to the PTY's session via closing the master, then
+  after 2 s SIGKILL to the shell's process group and every foreground group seen (`rustix` safe `kill_process_group`). Linux
+  shared PTYs: bubblewrap `--die-with-parent` takes the whole PID namespace. Windows: `ClosePseudoConsole`, then
+  `%SystemRoot%\System32\taskkill.exe /T /F /PID <pid>`. Known limit (as in `TerminalRuntime`): on macOS and Windows a
+  process that leaves its group/job (`setsid`, double fork) survives; the sandbox still confines it on macOS.
+- The person closing a tab with a running foreground program asks once ("<cmd> is running. Close?"; default Cancel).
+
+### 1.8 Platforms
+
+| | Personal PTY | Shared PTY | Notes |
+|---|---|---|---|
+| macOS | `posix_openpt` via portable-pty, `$SHELL -l` | Seatbelt wrapper | ECHO via `tcgetattr` on the master [A] |
+| Linux | same | bubblewrap + seccomp helper; Landlock only where `sandbox.md` allows | X11 and Wayland IME through GPUI |
+| Windows native | ConPTY (Windows 10 1809+), `resolve_shell` (pwsh, powershell, cmd, Git Bash) | refused under `enforce` (no backend, sandbox-hardening decision 6); with `--sandbox off` it runs, gated per 1.4 with fg = unknown | no fg-group or echo state; heuristics above; legacy conhost not supported |
+| Windows, WSL mode | `wsl.exe -d D --cd X` under ConPTY | in the distro by the engine (Linux path, bubblewrap) over the protocol (1.9) | personal shell has interop like any WSL shell: it is the person's |
+
+Environment of a personal shell: the desktop's environment minus every `SYNT_*` name and minus secret-shaped names
+(the loader's existing secret-name rule), plus `TERM=xterm-256color`, `COLORTERM=truecolor`. A login shell re-reads the
+person's profile, which may export their own keys: that is their shell. Shared shells get the `Bash` environment only.
+
+### 1.9 Protocol (engine methods; in-process calls locally, `synt engine --stdio` protocol 4 in WSL mode)
+
+Client to engine: `pty.open {cols, rows}` (a shared shell the PERSON opened: the click is the approval, so no permission ask; always sandboxed, allowed in every mode), `pty.input {id, data: base64}` (person keys, <= 64 KiB,
+500/s), `pty.resize {id, cols, rows}` (1..1000 x 1..500), `pty.hold {id, on}`, `pty.ack {id, bytes}`, `pty.close {id}`.
+Engine to client (not `Envelope`s, never stored): `{"msg":"pty.data","id","seq","data"}`, `{"msg":"pty.state","id",
+"holder","busy","echo_off","fg","exited"}`. Stored events: `pty.opened {pty_id, origin, sandbox, cols, rows}`,
+`pty.closed {pty_id, exit_code?, signal?}`, `pty.agent_input`, `pty.control_changed`. The hello's exact protocol match
+already forces client and engine to update together. Client limits of section 8 apply (lines, bytes per second).
+
+### 1.10 Rendering, input, IME, clipboard, selection (desktop)
+
+- A GPUI element paints the `Term` grid: per row, runs of equal style become one shaped text run (Fira Code, the TUI
+  palette mapped onto the 16 ANSI colours, 256 and truecolor as given), background quads, cursor shapes, selection.
+  **Zed's `terminal`/`terminal_view` crates are GPL-3.0: read for ideas only, never copied** (`deny.toml` allows no GPL).
+- Keys: GPUI keystrokes encoded per alacritty's `TermMode` (application cursor, keypad, `kitty` keyboard protocol off in
+  v1). App shortcuts (Cmd/Ctrl+1..5, Cmd/Ctrl+B/I, Esc-to-chat only via Ctrl+Esc inside a terminal) are taken first.
+- IME: the element implements GPUI's input handler: preedit drawn at the cursor, commit written as UTF-8.
+- Mouse: selection by drag (Shift+drag when the program enabled mouse reporting, which otherwise receives SGR mouse
+  reports). Copy: Cmd+C (macOS) / Ctrl+Shift+C; paste: Cmd+V / Ctrl+Shift+V, bracketed when the program asked for it.
+- Program-initiated clipboard (OSC 52) store AND load are ignored for every PTY (a program must not read the person's
+  clipboard). OSC 8 links open only on Cmd/Ctrl+click after a dock confirmation that shows the URL. Titles (OSC 0/2) are
+  stripped of control/bidi characters and clipped to 80. Bell: ignored.
+
+### 1.11 Dependency vetting (ADR-010: verify before depending)
+
+| Crate | Use | Check in PR T1 (record results in this file) |
+|---|---|---|
+| `alacritty_terminal` (Apache-2.0, alacritty org; latest seen 0.25.x [A]) | VT parser and grid only (`Term`, `vte`), NOT its `tty`/event loop | licence in `deny.toml` allow list; release cadence (ships with alacritty); default features off; `cargo deny`; build on the 5 release targets; MSRV vs workspace |
+| `portable-pty` (MIT, wezterm repo; 0.9.0, last release Feb 2025 [A]) | spawning: `env_clear`, arbitrary argv (the sandbox wrapper), ConPTY, `process_group_leader`, `get_termios` | slow release cadence is the risk: pin exactly; read its Windows code (ConPTY via `CreatePseudoConsole`), check no `openssl`; fallback if abandoned: alacritty's own `tty` module (but it cannot clear the environment: [A] verify) |
+
+Why not alacritty's `tty`: it adds to the inherited environment and owns the spawn, so the sandbox wrapper and
+`env_clear` cannot be guaranteed. `unsafe` lives inside these crates, never in ours (as with `process-wrap` today).
+
+---
+
+## 2. Browser
+
+### 2.1 Options
+
+| | Design | For | Against | Verdict |
+|---|---|---|---|---|
+| B-A | Show Chrome's own headed window (today's `synt.browser.headed`) | Exists | Not inside the app; real clicks reach the page with no arbitration; no window on Windows TCP | Rejected for the desktop |
+| B-B | Embedded webview | Native feel | Owner decision 1 | Rejected |
+| B-C | **CDP screencast into GPUI, input over CDP `Input.*`, same `BrowserRuntime` as the tools** | One session, one policy, every input passes our code (arbitration, gates) | Frame latency and cost; some browser UI (dialogs, file pickers, IME) must be rebuilt | **Chosen** |
+| B-D | Periodic `browser_screenshot` refresh | No new CDP use | 1-2 fps, artifacts on disk per frame | Rejected |
+
+**Strongest reason against B-C:** the person browses inside the agent's browser, under the agent's policy (no private
+ranges, no WebSocket, no downloads). Many everyday sites (chat apps, dashboards with live updates) break, and whatever the
+person opens is readable by the agent after hand-back. B-C is a view onto the agent's browser, not a personal browser;
+the UI says so, and "Open in your browser" hands a refused or personal URL to the OS default browser.
+
+### 2.2 Ownership and data flow
+
+- The engine owns the session's `BrowserRuntime` (as today, lazily created by the first browser tool). New engine method
+  `browser.view {on}` starts it if needed (same `BrowserConfig`, same profile rules: a saved profile still needs the
+  `browser_navigate {profile}` confirmation by the agent's tool; the person cannot pick one from the URL bar in v1).
+- **Headless in the desktop.** When the desktop hosts the view, the runtime starts headless whatever
+  `synt.browser.headed` says (a second, headed window would take the person's clicks around the arbitration). The key
+  keeps its meaning for the CLI and `synt run`; its Settings help text says so. The agent cursor and field highlight
+  become GPUI overlays drawn from `browser.action` (no `OVERLAY_JS` in this mode).
+- `browser_login` keeps its separate headed window on its own profile (BROWSER-LOGIN.md is unchanged in v1).
+
+### 2.3 Frames: transport, cost, backpressure
+
+- `Page.startScreencast {format: "jpeg", quality: 70, maxWidth, maxHeight}` on the current tab while the Browser tab is
+  visible and the window is focused or visible; `Page.stopScreencast` otherwise (zero cost when nobody looks).
+- **Latest frame wins.** The runtime keeps one slot (a `watch` channel) with the newest frame and its metadata
+  (`deviceWidth/Height`, `pageScaleFactor`, `offsetTop`, scroll offsets). `Page.screencastFrameAck` is sent only after the
+  consumer took the previous frame, so Chrome itself slows down to the consumer: bounded memory, no queue. Local: the
+  drawer takes it at the 16 ms tick; WSL: the client sends `browser.frame_ack {seq}`.
+- Cost signal [A, to measure in PR B1]: a 1280x800 JPEG at q70 is roughly 60-150 KB; at Chrome's typical 10-30 fps
+  that is up to 4.5 MB/s through the WSL pipe, within the client's 32 MiB/s limit. A cap of 30 fps is enforced by acking
+  no faster.
+- Frames are NEVER events, never written to the store or artifacts, never given to the model. Decoding (JPEG to RGBA)
+  happens off the UI thread in the desktop (`image` crate already in the lockfile [A]); dimensions capped at 4096x4096
+  before decode.
+
+### 2.4 Input mapping and coordinates
+
+- The viewport follows the pane: on resize (debounced 150 ms) `Emulation.setDeviceMetricsOverride {width, height,
+  deviceScaleFactor: min(window scale, 2)}` in CSS pixels; agent tools use element refs, not coordinates, so a resize
+  does not break them. Mapping: css_x = (pane_x - letterbox_x) / drawn_scale, css_y likewise plus `offsetTop`; points
+  outside the frame are dropped.
+- Mouse: `Input.dispatchMouseEvent` (moved, pressed, released with `clickCount`, wheel with deltas). Keys:
+  `Input.dispatchKeyEvent` with `key`, `code`, `windowsVirtualKeyCode`, `modifiers`, `text`; macOS editing shortcuts need
+  the `commands` field (`selectAll`, `copy`, `paste`, `undo`...), a fixed table. App shortcuts are taken before the pane.
+- IME: GPUI input handler -> `Input.imeSetComposition` for preedit, `Input.insertText` on commit.
+- Clipboard: paste reads the OS clipboard in the desktop and sends `Input.insertText` (the page never gets clipboard
+  API access); copy runs `getSelection().toString()` in an isolated world and writes the OS clipboard. Nothing of either
+  is logged or evented.
+
+### 2.5 Control arbitration
+
+- Holder: `agent` (default) or `person`. **Any person input in the pane (click, key, wheel, URL bar) switches to
+  `person` at once** (pause on user input). While `person` holds, every browser tool, reads included (`snapshot`,
+  `screenshot`, `console`, `network`, `tabs`), returns `browser_paused: the person is using the browser` immediately (no
+  hidden wait; the model can ask the person). An agent CDP call already in flight finishes; the next one is refused.
+- Hand-back: the "Hand back to agent" button (or the person sending a chat message, which is an explicit act) returns
+  `agent`. The button's tooltip says "The agent can read the pages open in this browser". The agent's next tool result
+  carries one line `The person used the browser; current page: <origin>` (origin only, no path, no titles). Refs from
+  before are invalid (the existing document-id rule) and the agent must snapshot again.
+- Indicator: pane border and chip `Agent is browsing` (accent) / `You are browsing · agent paused`; the agent cursor is
+  drawn only while `agent` holds. Event `browser.control_changed {holder, reason: "person_input"|"hand_back"}`.
+
+### 2.6 Navigation policy for the person
+
+- The URL bar goes through the SAME `UrlPolicy` (http/https only, `deny_domains`, private ranges, link-local and metadata
+  addresses blocked unless the user's `allow_private_network`/loopback ports allow them, a saved profile's
+  `document_allow_domains`) and the in-browser `Fetch` interception. Reason: whatever loads is readable by the agent
+  after hand-back, so the person cannot widen the agent's reach by typing. A refused URL shows the reason and an "Open in
+  your browser" button (http/https only, the person's click only, `open` / `xdg-open` / `explorer.exe` by absolute path),
+  never offered for a URL the agent produced.
+- Back/forward/reload: `Page.getNavigationHistory` / `navigateToHistoryEntry` / `Page.reload`; each is checked like a
+  navigation. Tabs: a strip from the runtime's `Tabs.order` when there is more than one; switching is person input. No
+  "new tab" button in v1 (pages open popups; the agent opens tabs).
+- WebSocket and WebTransport stay blocked as documented in SECURITY.md (constructor replaced; WebTransport at script level
+  only). This is the main UX gap of person browsing and is an owner question (section 5).
+
+### 2.7 Credentials, secrets and what the model can see
+
+- **Person logging in inside the agent's browser** is a credential hand-off without `browser_login`'s gates. Rule: the
+  first time the person focuses a password field (`input[type=password]`, checked in an isolated world on focus change)
+  on an origin in this session, key events to it are held until a dock dialog is answered: "You are logging in inside
+  the agent's browser. The agent will be able to act as you on <origin> in this session." (Cancel default). The dialog
+  is refused outright (keys dropped, notice) unless the sandbox is `enforce` or `synt.browser.allow_unsandboxed`, the same
+  `require_sandbox` rule (stdio MCP servers included) as the credential tools, because the temp profile with the cookies
+  must be out of reach of the agent's commands. [A] Today the temp profile is a `tempfile::TempDir` in the system temp
+  dir; PR B4 moves it under the session's state dir (hidden from sandboxed commands, in `synthesis_state_paths`).
+- Chrome's password manager, autofill and save prompts are switched off for the temp profile too (today: login profiles
+  only [A]).
+- **Screenshots and snapshots given to the model**: the existing `fill_secret` capture guard stays. New: fields the
+  PERSON typed into since the document loaded, every `input[type=password]`, and fields with `autocomplete` `cc-*`,
+  `one-time-code`, `current-password`, `new-password` are masked: in `browser_snapshot` their values become `[masked]`;
+  in `browser_screenshot` their rectangles (from `DOM.getBoxModel`, all frames) are filled black in Rust on the decoded
+  PNG before it is saved or returned, so page script cannot undo it. If the rectangles cannot be computed, the screenshot
+  is refused (`person input on page`). The live screencast is not masked: only the person sees it.
+- The person's keystrokes are never events, never logged; `browser.action` stays agent-only.
+
+### 2.8 Dialogs, downloads, uploads, permissions
+
+- JavaScript dialogs (`Page.javascriptDialogOpening`): shown as a dock in the pane, text sanitized and labelled
+  "This page says"; the person answers; while `agent` holds, the existing tool behaviour applies [A: today unhandled,
+  which blocks the page; PR B5 dismisses them for the agent with a tool note]. `beforeunload` is auto-accepted.
+- Downloads stay `deny` (today's `Browser.setDownloadBehavior`); a person-initiated download shows "Downloads are off in
+  the agent's browser" with "Open in your browser".
+- Uploads: `Page.setInterceptFileChooserDialog`. A chooser the person triggered opens GPUI's native file picker, then
+  `DOM.setFileInputFiles` (local engine only; refused in WSL mode in v1: the files are on the Windows side). A chooser the
+  agent triggered is cancelled (no upload tool exists).
+- Site permissions (camera, mic, geolocation, notifications, clipboard): denied with `Browser.setPermission` for the
+  context; no prompt.
+
+### 2.9 Protocol (engine methods; protocol 4 in WSL mode)
+
+Client to engine: `browser.view {on, max_w, max_h}`, `browser.frame_ack {seq}`, `browser.resize {w, h, dpr}`,
+`browser.input {kind: mouse|wheel|key|ime|text, ...}` (500/s, each field bounded), `browser.navigate {url}`,
+`browser.history {delta: -1|1}`, `browser.reload`, `browser.tab {index}`, `browser.hand_back`, `browser.dialog {accept,
+text?}`, `browser.files {paths}` (local only), `browser.login_confirm {origin, ok}`.
+Engine to client (never stored): `{"msg":"browser.screencast","seq","mime","data","w","h","css_w","css_h","offset_top"}`,
+`{"msg":"browser.state","url","title","loading","can_back","can_fwd","tabs","holder","dialog?"}` (full URL and title go
+to the window only; they are untrusted text, sanitized for display). Stored events: `browser.control_changed`; existing
+`browser.frame` and `browser.action` unchanged.
+
+### 2.10 Windows, WSL, transports
+
+- Windows native: CDP over TCP on 127.0.0.1 (no pipe without `unsafe`): any local process can reach the port. The view
+  works; persistent profiles stay refused (BROWSER-LOGIN.md). Person logins in the view (2.7) are refused on TCP too:
+  the same reason (a local process could drive the logged-in browser).
+- WSL mode: Chrome runs in the distro (installed there, or `SYNT_BROWSER_PATH`); frames cross the stdio pipe; WSLg is
+  not needed because the view is headless.
+
+---
+
+## 3. Settings keys
+
+None new. Every switch needed already exists: permission rules deny or ask `pty_open`, `pty_send`, `PtyInput(...)` and the
+browser tools (managed settings can deny them); `synt.browser.allow_unsandboxed` and `allow_private_network`/loopback
+ports keep their user-or-managed scope; `synt.browser.headed` keeps its CLI meaning. Fixed limits (scrollback, PTY
+counts, fps) are constants until someone needs them configurable.
+
+## 4. Implementation plan (each PR shippable alone; CI = fmt, clippy, tests on ubuntu, macos, windows)
+
+| # | PR | Contents | Tests (red-team marked RT) | Est. |
+|---|---|---|---|---|
+| D0 | docs | this spec; `desktop.md` non-goals, section 5 terminal/browser bullets, "Interactive PTY" line, wording of the title-bar paragraph | n/a | 0.5 d |
+| T1 | `synthesis-terminal::pty` + deps | vetting record (1.11); spawn with `env_clear` and sandbox wrap; reader with 1 MiB window; engine-side `Term`; kill rules; limits | spawn/echo/resize on 3 OSes (ConPTY on windows-latest); RT: flood 200 MB -> bounded memory and log-cap kill; RT: `setsid` child after close (Linux killed via bwrap, macOS documented); RT: env has no `SYNT_*` | 5 d |
+| T2 | desktop personal terminal | GPUI grid element, keys, mouse, selection, clipboard, IME, OSC rules, tabs in the Terminal pane, WSL personal shell via `wsl.exe` | offscreen shot of a fixed byte script (`--shot --pty-script`), `design_tests` for the pane; RT: OSC 52 load/store ignored; RT: title with bidi/escapes sanitized; RT: personal shell env without `SYNT_*`/secret names | 8 d |
+| T3 | agent tools + gates | `pty_open/send/read/close`, `PtyInput` permission kind, Bash-path matching, hold and blanking, redaction, events | RT: `pty_send` to a personal id -> unknown; RT: `cat ~/.ssh/id_rsa` and `cat .env` lines denied; RT: newline/ESC/`\e[201~` in `text` refused; RT: send while ECHO off, while busy, while held, in plan mode -> refused; RT: sub-agent and peer calls refused; RT: output during hold absent from `pty_read`; RT: `sk-ant-...` printed -> redacted; auto-judge receives the line | 6 d |
+| T4 | shared PTY in the desktop + protocol 4 (pty) | person opens shared shell, indicator, hold, gutter markers; `pty.*` methods with limits; fake `wsl.exe` path test | `remote_engine.rs` extended; RT: oversized `pty.input`, rate over 500/s, unknown id; RT: unacked window stops reading | 4 d |
+| B1 | screencast in `synthesis-browser` | `startScreencast`, latest-frame slot, ack on consume, metadata; `browser.view` method | real headless Chrome: frames arrive, stop on view off; RT: stalled consumer -> one frame held, Chrome stops sending; frames absent from events/store | 3 d |
+| B2 | desktop browser pane (view only) | decode off thread, draw, URL bar (policy-checked navigation), back/forward/reload, tabs strip, agent cursor overlay, headless override | shots with a fixed frame; RT: `file:///etc/passwd`, `http://169.254.169.254`, `http://10.0.0.1` from the URL bar refused; "Open in your browser" absent for agent URLs | 4 d |
+| B3 | input + arbitration | mouse/wheel/key/IME/clipboard mapping, viewport follow, holder switch, `browser_paused`, hand-back note | coordinate mapping unit tests (letterbox, dpr, offsetTop); RT: agent click while person holds -> refused; RT: snapshot while person holds -> refused; RT: hand-back note has origin only | 5 d |
+| B4 | credentials and masking | password-focus gate with sandbox rule, temp profile moved into state paths, password manager off for temp profiles, person-typed field masking in snapshot and screenshot (Rust-side fill) | RT: person types in a text field, agent screenshot -> rect black; RT: rect computation fails -> refused; RT: password focus without enforce -> keys dropped; RT: agent `Read` of the temp profile denied; RT: masking survives a page that removes overlays | 5 d |
+| B5 | dialogs, uploads, downloads, permissions | as 2.8 | RT: `alert` spoofing app chrome is labelled; download denied; agent-triggered chooser cancelled; camera permission denied | 3 d |
+| B6 | protocol 4 (browser) | `browser.*` methods and messages, frame ack over the pipe, limits | fake `wsl.exe` end to end; RT: frame flood vs client limits; oversized input fields | 2 d |
+
+Order: D0, T1, T2, T3, T4, B1, B2, B3, B4, B5, B6 (B1-B3 can run in parallel with T2-T4; B4 must land before the view
+accepts keystrokes into password fields: until then B3 drops key events to password fields). Total about 45 engineering
+days [A: one developer familiar with the codebase; Windows and WSL verification on real machines not included].
+Not provable in CI and listed as unverified until run on a real machine: IME on each OS, HiDPI, ConPTY with real
+programs (vim, pwsh), WSL2 end to end, Linux Wayland input.
+
+## 5. Risks
+
+- R1 Person confuses personal and shared shells (runs credentials in a shared one). Mitigated by default = personal,
+  banner, colour; residual: redaction is lossy (events.md 5.4).
+- R2 Foreground detection is unix-only; Windows falls back to treating every line as a shell command (stricter, may
+  mis-gate REPL input as Bash).
+- R3 `portable-pty` releases are slow; a ConPTY bug may need a fork (allowed registries only: a fork must be published or
+  vendored under `[patch]`, an owner call).
+- R4 Screencast latency (CDP JPEG) makes the view feel slower than a real browser; acceptable for "quick browsing" [A].
+- R5 Masking depends on detecting fields; a page that renders typed text outside an input (canvas, contenteditable
+  mirrors) is not masked. contenteditable the person typed into IS covered; canvas is not.
+- R6 The person's browsing is under the agent's restrictive policy; owner may find it too strict (section 6, Q2).
+- R7 Two `Term` parsers per shared PTY can diverge if bytes are dropped; they are never dropped (backpressure), and the
+  engine's view is the one the agent reads.
+
+## 6. Open owner decisions
+
+- Q1. Should the person be able to "share" a personal shell with the agent (read-only, after a confirmation, from that
+  moment on)? Proposed: no in v1; a selection "Send to chat" (person-initiated, quoted as user text) covers the need.
+- Q2. Person browsing with WebSocket allowed: a separate "personal" browser context the agent can never read (no tools,
+  no snapshot), visibly marked? Proposed: not in v1 (doubles the policy surface); "Open in your browser" instead.
+- Q3. Move `browser_login` into the embedded view (no separate window) later? Proposed: after B4, once the masking and
+  password gate have been used.
+- Q4. `synt.browser.headed` ignored by the desktop (2.2): acceptable, or should the desktop offer the separate window too?
+- Q5. PTY tools in the CLI (`synt`) and `synt run`: proposed desktop-only in v1 (registered only with `Front::Native` and
+  `--host desktop`), because the person cannot see or hold the PTY elsewhere.
+- Q6. `tauri-winrt-notification` is in `Cargo.lock` as a transitive Windows dependency of `notify-rust` 4.18.2 (toast notifications); decision 1 says
+  no such crate "anywhere": replace the notification dependency, or accept a transitive crate by that name?
