@@ -11,6 +11,9 @@ use serde_json::Value;
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_session::outcome::CommandState;
 
+pub mod views;
+pub use views::*;
+
 /// What every surface shows on native Windows (the orchestrator says the same; a test in the CLI
 /// keeps the two equal). Writable attempts need an OS sandbox.
 pub const WSL2_REFUSAL: &str = "outcome attempts write files and need an OS sandbox: they run on macOS, Linux and WSL2, not on native Windows; open the folder in WSL2";
