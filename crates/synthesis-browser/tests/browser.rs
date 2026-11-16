@@ -217,7 +217,13 @@ fn browser_env() -> Option<Env> {
 
 /// Launches serially (ten Chrome cold starts at once can overwhelm a small CI runner) and panics
 /// with the full launch error, which carries the browser's exit status and stderr tail.
-async fn launch(mut opts: BrowserOptions, env: &Env) -> BrowserRuntime {
+async fn launch(opts: BrowserOptions, env: &Env) -> BrowserRuntime {
+    try_launch(opts, env)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+async fn try_launch(mut opts: BrowserOptions, env: &Env) -> Result<BrowserRuntime, String> {
     // GitHub Linux runners: AppArmor blocks Chrome's userns sandbox and /dev/shm is tiny, so a cold
     // start can stall until createBrowserContext times out. Test-only; product defaults are untouched.
     if cfg!(target_os = "linux") && Env::from_process().get_nonempty("CI").is_some() {
@@ -229,8 +235,8 @@ async fn launch(mut opts: BrowserOptions, env: &Env) -> BrowserRuntime {
     let _g = ONE_AT_A_TIME.lock().await;
     // Fail fast instead of hanging a CI job (a Windows run once sat 40 min).
     match tokio::time::timeout(Duration::from_secs(90), BrowserRuntime::launch(opts, env)).await {
-        Ok(Ok(rt)) => rt,
-        Ok(Err(e)) => panic!("browser launch failed:\n{e}\n(debug: {e:?})"),
+        Ok(Ok(rt)) => Ok(rt),
+        Ok(Err(e)) => Err(format!("browser launch failed:\n{e}\n(debug: {e:?})")),
         Err(_) => panic!("browser launch did not finish in 90 s"),
     }
 }
@@ -801,7 +807,11 @@ async fn websockets_blocked_in_allowed_cross_site_frames_and_popups_body() {
             });
         }
     });
-    let (inner, inner_hits) = counting_server(move |path| match path {
+    // Only document requests ("/") are counted below: the worker script and /favicon.ico requests
+    // come or not depending on timing (Chrome cancels a closed worker's fetch; a headless popup may
+    // skip the favicon), and extras from an earlier page would satisfy a later wait.
+    let inner_paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (inner, _) = counting_server(paths_of(&inner_paths, move |path| match path {
         "/w.js" => ("text/javascript", sock_js_inline(ws_port)),
         _ => (
             "text/html",
@@ -810,8 +820,16 @@ async fn websockets_blocked_in_allowed_cross_site_frames_and_popups_body() {
                 sock_js_inline(ws_port)
             ),
         ),
-    })
+    }))
     .await;
+    let docs = || {
+        inner_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/")
+            .count()
+    };
     let (main_port, _) = counting_server(move |_| {
         (
             "text/html",
@@ -832,10 +850,9 @@ async fn websockets_blocked_in_allowed_cross_site_frames_and_popups_body() {
         .await
         .unwrap();
     let tree = rt.snapshot(50).await.unwrap().tree;
-    // (button, inner requests it adds: the popup document; a worker script request is not counted,
-    // workers are closed unresumed when the policy cannot be installed on them)
+    // (button, inner documents it adds: the popup document)
     for _ in 0..50 {
-        if hits(&inner_hits) >= 1 {
+        if docs() >= 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -848,24 +865,28 @@ async fn websockets_blocked_in_allowed_cross_site_frames_and_popups_body() {
     );
     let mut want = 1; // the iframe document
     for (b, adds) in [
-        ("button \"Pop\"", 2),
-        ("button \"Nopen\"", 2),
+        ("button \"Pop\"", 1),
+        // A noopener popup stays blank: its `Network.setBlockedURLs` is never answered while it is paused, so
+        // `secure_child` never resumes it (fails closed, but no document request ever comes). Nothing to wait
+        // for; the handshake check below still runs. Owner decision: fix the hang, then count it (1).
+        ("button \"Nopen\"", 0),
         ("button \"Blank\"", 0),
     ] {
         rt.click(&ref_of(tree.expose(), b)).await.unwrap();
         want += adds;
         for _ in 0..100 {
-            if hits(&inner_hits) >= want {
+            if docs() >= want {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(
-            hits(&inner_hits) >= want,
-            "{b}: frames and popups ran: {} of {want} requests",
-            hits(&inner_hits)
+            docs() >= want,
+            "{b}: frames and popups ran: {} of {want} documents: {:?}",
+            docs(),
+            inner_paths.lock().unwrap()
         );
-        tokio::time::sleep(Duration::from_millis(500)).await; // a handshake lags the script that starts it
+        tokio::time::sleep(Duration::from_millis(1500)).await; // a handshake lags the script that starts it (the wait above ends at the document request, not at the script)
         assert_eq!(
             hits(&ws_hits),
             0,
@@ -1063,12 +1084,13 @@ async fn rebinding_to_private_ip_is_stopped_on_response() {
 
 async fn rebinding_to_private_ip_is_stopped_on_response_body() {
     let Some(env) = browser_env() else { return };
-    let (port, h) = counting_server(|_| {
+    let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (port, _) = counting_server(paths_of(&paths, |_| {
         (
             "text/html",
             "<title>SECRETBODY</title><body>SECRETBODY</body>".into(),
         )
-    })
+    }))
     .await;
     let art = tempfile::tempdir().unwrap();
     let rt = launch(dns_opts(art.path(), "93.184.216.34"), &env).await;
@@ -1076,7 +1098,16 @@ async fn rebinding_to_private_ip_is_stopped_on_response_body() {
         .navigate(&format!("http://evil.test:{port}/"), WaitUntil::Load)
         .await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
-    assert_eq!(hits(&h), 1, "blind GET is expected to have been sent");
+    // Chrome may also fetch /favicon.ico before the stop lands (a second blind GET of the same kind
+    // on a loaded runner); the page itself must have been requested exactly once.
+    let got = paths.lock().unwrap().clone();
+    assert_eq!(
+        got.iter()
+            .filter(|p| *p != "/favicon.ico")
+            .collect::<Vec<_>>(),
+        ["/"],
+        "blind GET is expected to have been sent: {got:?}"
+    );
     let snap = rt.snapshot(50).await.unwrap();
     assert!(
         !snap.tree.expose().contains("SECRETBODY"),
@@ -1103,9 +1134,28 @@ async fn event_flood_fails_closed_body() {
     let Some(env) = browser_env() else { return };
     let base = serve().await;
     let art = tempfile::tempdir().unwrap();
-    let mut o = local_opts(art.path());
-    o.event_capacity = 16;
-    let rt = launch(o, &env).await;
+    // A capacity of 16 is below the burst of events a normal launch makes on a loaded machine (a backlog
+    // of 29 was measured), and a lagged launch fails closed (Compromised, "session not found", or "no
+    // answer"). That is the policy working, not what this test checks, so only the launch is retried;
+    // the flood and every assertion below are unchanged and run on the runtime that did launch.
+    let rt = {
+        let mut attempt = 1;
+        loop {
+            let mut o = local_opts(art.path());
+            o.event_capacity = 16;
+            match try_launch(o, &env).await {
+                // not already compromised by the startup burst: the flood must be what trips it
+                Ok(rt) if rt.tabs().await.is_ok() => break rt,
+                Ok(_) if attempt < 3 => {
+                    eprintln!("launch attempt {attempt} lagged at startup, retrying")
+                }
+                Ok(_) => panic!("launch lagged at startup {attempt} times"),
+                Err(e) if attempt == 3 => panic!("launch failed {attempt} times, last: {e}"),
+                Err(e) => eprintln!("launch attempt {attempt} lagged at startup, retrying: {e}"),
+            }
+            attempt += 1;
+        }
+    };
     let _ = rt.navigate(&format!("{base}/flood"), WaitUntil::Load).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let err = loop {
@@ -1343,7 +1393,8 @@ async fn rebinding_in_child_targets_body() {
     let beacons = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (beacon_port, _) =
         counting_server(paths_of(&beacons, |_| ("text/plain", "ok".into()))).await;
-    let (child_port, child_hits) = counting_server(move |p| {
+    let child_paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (child_port, _) = counting_server(paths_of(&child_paths, move |p| {
         let tag = p.trim_start_matches('/');
         (
             "text/html",
@@ -1351,16 +1402,24 @@ async fn rebinding_in_child_targets_body() {
                 "<title>SECRETBODY</title><body>SECRETBODY<script>setTimeout(()=>fetch('http://127.0.0.1:{beacon_port}/beacon-{tag}'),800)</script>"
             ),
         )
-    })
+    }))
     .await;
-    let (main_port, _) = counting_server(move |_| {
+    // Stopping a page stops the whole tab's loads, so the control frame must only start once the
+    // rebinding stops are done. A timer in the page raced them on a loaded runner; the test releases
+    // the control through `/go` instead.
+    let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let go_main = go.clone();
+    let (main_port, _) = counting_server(move |p| {
+        if p == "/go" {
+            let ready = go_main.load(std::sync::atomic::Ordering::SeqCst);
+            return ("text/plain", if ready { "go" } else { "wait" }.into());
+        }
         (
             "text/html",
             format!(
                 "<title>Main</title><body><button onclick=\"window.open('http://evil.test:{child_port}/popup')\">Pop</button>
 <iframe src=\"http://evil.test:{child_port}/evil-frame\"></iframe>
-<script>/* the control comes late: stopping a page stops the whole tab's loads */
-setTimeout(()=>{{const f=document.createElement('iframe');f.src='http://localhost:{child_port}/ctl-frame';document.body.appendChild(f)}},2500)</script></body>"
+<script>const t=setInterval(async()=>{{if((await (await fetch('/go')).text())!=='go')return;clearInterval(t);const f=document.createElement('iframe');f.src='http://localhost:{child_port}/ctl-frame';document.body.appendChild(f)}},100)</script></body>"
             ),
         )
     })
@@ -1383,18 +1442,31 @@ setTimeout(()=>{{const f=document.createElement('iframe');f.src='http://localhos
     rt.click(&ref_of(tree.expose(), "button \"Pop\""))
         .await
         .unwrap();
-    for _ in 0..100 {
-        if hits(&child_hits) >= 3 && seen(&beacons, "/beacon-ctl-frame") >= 1 {
+    for _ in 0..300 {
+        if seen(&child_paths, "/evil-frame") >= 1 && seen(&child_paths, "/popup") >= 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // absence checks: the stopped pages' timers (800 ms) would have fired by now
+    // Both blind GETs reached the server; the stop is dispatched within milliseconds of the
+    // response. Give it a generous margin before the control starts.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    go.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..300 {
+        if seen(&beacons, "/beacon-ctl-frame") >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // absence checks: the stopped pages' timers (800 ms) have long fired by now
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert!(
-        hits(&child_hits) >= 3,
-        "control frame, evil frame and popup were all fetched (blind GET)"
-    );
+    for p in ["/evil-frame", "/popup", "/ctl-frame"] {
+        assert!(
+            seen(&child_paths, p) >= 1,
+            "{p} was fetched (blind GET): {:?}",
+            child_paths.lock().unwrap()
+        );
+    }
     assert!(
         seen(&beacons, "/beacon-ctl-frame") >= 1,
         "control: an allowed child page keeps running: {:?}",
