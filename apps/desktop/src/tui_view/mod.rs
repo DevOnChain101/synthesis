@@ -13,6 +13,7 @@ mod clean;
 mod design_tests;
 pub mod dialog;
 pub mod driver;
+mod filesel;
 pub mod layout;
 pub mod panels;
 mod quote;

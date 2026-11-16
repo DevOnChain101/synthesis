@@ -30,6 +30,8 @@ pub struct Args {
     select: Option<Sel>,
     /// `--quote`: those lines are also quoted (see [`LiveShot`]).
     quote: bool,
+    /// `--select-text L:C-L:C` (with `--open`): from line L (1-based) char C (0-based) to the other point.
+    select_text: Option<(super::filesel::Pos, super::filesel::Pos)>,
     /// `--view tui|settings`: the view shown.
     view: crate::ui::View,
     /// `--inject FILE`: a JSONL of events applied to the live conversation after the task (rows a
@@ -81,6 +83,18 @@ fn sel_spec(s: &str) -> Option<Sel> {
     let (f, r) = s.rsplit_once(':')?;
     let (a, b) = r.split_once('-')?;
     Some((f.into(), a.parse().ok()?, b.parse().ok()?))
+}
+
+fn text_spec(s: &str) -> Option<(super::filesel::Pos, super::filesel::Pos)> {
+    let pos = |p: &str| {
+        let (l, c) = p.split_once(':')?;
+        Some(super::filesel::Pos {
+            line: l.parse::<usize>().ok()?.checked_sub(1)?,
+            col: c.parse().ok()?,
+        })
+    };
+    let (a, b) = s.split_once('-')?;
+    Some((pos(a)?, pos(b)?))
 }
 
 /// Where the keys are: `input` the prompt (accent border, caret), `chat` the chat pane without the prompt
@@ -316,6 +330,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
             .or_else(|| val("--select").and_then(|v| sel_spec(v)).map(|s| s.0)),
         select: val("--select").and_then(|v| sel_spec(v)),
         quote: args.iter().any(|a| a == "--quote"),
+        select_text: val("--select-text").and_then(|v| text_spec(v)),
         view: match val("--view").map(String::as_str) {
             Some("settings") => crate::ui::View::Settings,
             _ => crate::ui::View::Tui,
@@ -772,11 +787,19 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let a_quote_chip = a.quote && a.live.as_ref().is_none_or(|l| l.prompt.is_none());
                 if let Some((_, a, b)) = &a.select {
                     tui.update(&mut cx, |t, cx| {
-                        t.ts.sel = Some((a - 1, b - 1));
+                        t.ts.sel = t
+                            .shown_lines()
+                            .map(|l| super::filesel::Sel::lines(l, a - 1, b - 1));
                         // with a prompt the quote already went with it
                         if a_quote_chip {
                             t.quote_selection(cx);
                         }
+                    });
+                    cx.run_until_parked();
+                }
+                if let Some((x, y)) = a.select_text {
+                    tui.update(&mut cx, |t, _| {
+                        t.ts.sel = Some(super::filesel::Sel { anchor: x, head: y })
                     });
                     cx.run_until_parked();
                 }

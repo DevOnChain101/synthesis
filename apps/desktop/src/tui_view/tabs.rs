@@ -124,8 +124,10 @@ pub struct TabState {
     pub preview: Option<Preview>,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
-    /// Lines (0-based, anchor and head) selected in the preview; a drag is in progress; the right-click menu's spot.
-    pub sel: Option<(usize, usize)>,
+    /// Text (anchor and head, line and char) selected in the preview; a drag is in progress; the right-click menu's spot.
+    pub sel: Option<super::filesel::Sel>,
+    /// Window x of the preview's lines (last frame), to turn a pointer x into a column.
+    pub lines_x: std::rc::Rc<std::cell::Cell<f32>>,
     pub sel_drag: bool,
     pub menu: Option<gpui::Point<gpui::Pixels>>,
     /// Quotes waiting for the next prompt (shown as chips under the input).
@@ -1002,50 +1004,48 @@ impl TuiView {
                     .flex()
                     .flex_col()
                     .child(head(info).when(md, |h| h.child(toggle)).child(copy))
-                    .child(
+                    .child({
+                        let x = self.ts.lines_x.clone();
                         div()
                             .py(px(6.))
+                            .relative()
+                            .text_size(px(super::filesel::FONT_PX))
+                            .child(
+                                gpui::canvas(
+                                    move |b, _, _| x.set(f32::from(b.origin.x)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
                             .children(b.lines.iter().enumerate().map(|(i, l)| {
-                                let on = self
-                                    .ts
-                                    .sel
-                                    .is_some_and(|(a, z)| (a.min(z)..=a.max(z)).contains(&i));
+                                let shown = super::filesel::display(l);
+                                let mark =
+                                    self.ts.sel.and_then(|s| s.span(i, l.chars().count())).map(
+                                        |(a, z)| {
+                                            (
+                                                super::filesel::cell_of(l, a),
+                                                super::filesel::width(l, a, z),
+                                            )
+                                        },
+                                    );
                                 div()
                                     .flex()
                                     .px(px(12.))
                                     .whitespace_nowrap()
                                     .cursor_text()
-                                    .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.03)))
-                                    .when(on, |d| d.bg(with_alpha(hsla(t::ACCENT), 0.22)))
-                                    // line-wise selection: press, drag over lines, release; right-click opens the menu
+                                    // press, drag, release select the exact chars; double and triple click a word and a line
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(
                                             move |this, e: &gpui::MouseDownEvent, _, cx| {
-                                                let from = this
-                                                    .ts
-                                                    .sel
-                                                    .filter(|_| e.modifiers.shift)
-                                                    .map_or(i, |s| s.0);
-                                                this.ts.sel = Some((from, i));
-                                                (this.ts.sel_drag, this.ts.menu) = (true, None);
-                                                cx.notify();
+                                                this.file_press(i, e, cx)
                                             },
                                         ),
                                     )
                                     .on_mouse_move(cx.listener(
                                         move |this, e: &gpui::MouseMoveEvent, _, cx| {
-                                            if !this.ts.sel_drag {
-                                                return;
-                                            }
-                                            if e.pressed_button != Some(gpui::MouseButton::Left) {
-                                                this.ts.sel_drag = false;
-                                            } else if let Some(s) = &mut this.ts.sel
-                                                && s.1 != i
-                                            {
-                                                s.1 = i;
-                                                cx.notify();
-                                            }
+                                            this.file_drag(i, e, cx)
                                         },
                                     ))
                                     .on_mouse_up(
@@ -1056,14 +1056,7 @@ impl TuiView {
                                         gpui::MouseButton::Right,
                                         cx.listener(
                                             move |this, e: &gpui::MouseDownEvent, _, cx| {
-                                                if !this.ts.sel.is_some_and(|(a, z)| {
-                                                    (a.min(z)..=a.max(z)).contains(&i)
-                                                }) {
-                                                    this.ts.sel = Some((i, i));
-                                                }
-                                                (this.ts.sel_drag, this.ts.menu) =
-                                                    (false, Some(e.position));
-                                                cx.notify();
+                                                this.file_menu_at(i, e, cx)
                                             },
                                         ),
                                     )
@@ -1078,16 +1071,30 @@ impl TuiView {
                                     )
                                     .child(
                                         div()
+                                            .relative()
                                             .min_w(px(0.))
                                             .flex_1()
                                             .overflow_hidden()
                                             .text_color(text())
+                                            .when_some(mark, |d, (at, n)| {
+                                                d.child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_0()
+                                                        .bottom_0()
+                                                        .left(px(
+                                                            at as f32 * super::filesel::ADVANCE
+                                                        ))
+                                                        .w(px(n as f32 * super::filesel::ADVANCE))
+                                                        .bg(hsla(t::SELECT_BG)),
+                                                )
+                                            })
                                             .child(crate::widgets::syntax::styled(
-                                                if l.is_empty() { " " } else { l },
+                                                if shown.is_empty() { " " } else { &shown },
                                             )),
                                     )
-                            })),
-                    )
+                            }))
+                    })
                     .when(b.cut, |d| {
                         d.child(
                             div()

@@ -931,6 +931,7 @@ impl TuiView {
         if !self.active {
             return false;
         }
+        let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {
             return false;
         };
@@ -1119,10 +1120,21 @@ impl TuiView {
         if key == "c"
             && (ks.modifiers.platform || ctrl)
             && self.ts.tab == super::ChatTab::Files
-            && self.ts.sel.is_some()
+            && file_sel
             && lu.prompt.read(cx).selected_range().is_empty()
         {
             self.copy_selection(cx);
+            return true;
+        }
+        // Cmd/Ctrl+A in the file explorer takes the whole file shown (the input keeps its own while it holds text)
+        if key == "a"
+            && (ks.modifiers.platform || ctrl)
+            && !shift
+            && self.ts.tab == super::ChatTab::Files
+            && file_shown
+            && text_of(&lu.prompt, cx).is_empty()
+        {
+            self.select_all_file(cx);
             return true;
         }
         match (key, ctrl) {
