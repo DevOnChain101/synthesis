@@ -40,7 +40,7 @@ fn plan_layers_follow_the_servers_edges_and_the_servers_order() {
     // the states are the server's, the order of `items` is the server's
     assert_eq!(p.items[0].key, "c");
     assert_eq!(p.items[0].state, "ready");
-    assert_eq!(p.items[0].extra[0].label, "future");
+    assert_eq!(p.items[0].extra[0].label, "server extra: future");
     assert_eq!(uncovered(&plan(), &p.render_text()), Vec::<String>::new());
 }
 
@@ -58,7 +58,11 @@ fn a_cycle_shows_no_layers_and_bad_plans_are_refused() {
     let mut v = plan();
     v["items"][1]["requires"] = json!(["ghost"]);
     let p = PlanView::from_json(&v).unwrap();
-    assert!(!p.cycle && p.unknown_requires == ["a requires ghost"]);
+    assert!(p.items.iter().all(|w| w.layer.is_none()));
+    assert!(
+        p.render_text().contains("a requires ghost") && p.render_text().contains("layer unknown")
+    );
+    assert!(!p.cycle && p.unknown_requires == [(1, "ghost".to_string())]);
     // duplicate id, duplicate key, bad id, missing state, no list, too many
     let mut v = plan();
     v["items"][1]["id"] = json!("wi_c");
@@ -91,7 +95,11 @@ fn hostile_text_is_printable_and_bounded_and_nothing_is_preselected() {
     let w = &p.items[0];
     assert!(!w.state.contains('\u{1b}') && !w.state.contains('\u{202e}'));
     assert!(w.kind.len() < 5000 && w.kind.ends_with("[truncated]"));
-    assert!(w.extra.iter().any(|r| r.label == "recommended"));
+    assert!(
+        w.extra
+            .iter()
+            .any(|r| r.label.contains("ignored") && r.label.contains("recommended"))
+    );
     // no cursor, no selection, no verdict field exists on any view
     let s = format!("{p:?}");
     assert!(!s.contains("selected") && !s.contains("verdict"));
@@ -135,6 +143,7 @@ fn attempt_sandbox_is_unknown_unless_the_server_says() {
         (a.sandbox.backend.as_str(), a.sandbox.guarantee.as_str()),
         ("unknown", "unknown")
     );
+    assert_eq!(a.sandbox.source, SandboxSource::NotProvided);
     assert_eq!(a.state, "finished");
     assert_eq!(
         uncovered(&attempt(), &a.render_text()),
@@ -255,4 +264,114 @@ fn inspector_tabs_carry_content_or_an_explicit_reason() {
             && u.render_text().contains("no items list")
     );
     assert!(InspectorContent::evidence(&vec![json!({}); MAX_ROWS + 1]).is_err());
+}
+
+#[test]
+fn amplification_input_is_bounded() {
+    let mut v = plan();
+    v["items"][0]["key"] = json!("k".repeat(MAX_KEY + 1));
+    assert!(PlanView::from_json(&v).unwrap_err().contains("longer"));
+    let req: Vec<String> = (0..10)
+        .map(|i| format!("{}{i}", "r".repeat(MAX_KEY - 2)))
+        .collect();
+    let items: Vec<Value> = (0..1000)
+        .map(|i| json!({"id": format!("w{i}"), "key": format!("{}{i}", "k".repeat(200)), "state": "ready", "requires": req}))
+        .collect();
+    let t0 = std::time::Instant::now();
+    let p = PlanView::from_json(&json!({"items": items})).unwrap();
+    assert_eq!(
+        (p.unknown_requires.len(), p.unknown_requires_more),
+        (MAX_ROWS, 9000)
+    );
+    let out = p.render_text();
+    assert!(
+        out.contains("9000 more unknown") && out.len() < 5_000_000,
+        "{}",
+        out.len()
+    );
+    assert!(t0.elapsed().as_secs() < 5);
+    let items: Vec<Value> = (0..1000)
+        .map(|i| json!({"id": format!("w{i}"), "key": format!("k{i}"), "state": "x", "requires": vec!["k0"; 11]}))
+        .collect();
+    assert!(
+        PlanView::from_json(&json!({"items": items}))
+            .unwrap_err()
+            .contains("more than")
+    );
+}
+
+#[test]
+fn a_long_chain_lays_out_right() {
+    let items: Vec<Value> = (0..1000)
+        .map(|i| {
+            json!({"id": format!("w{i}"), "key": format!("k{i}"), "state": "x",
+            "requires": if i == 0 { vec![] } else { vec![format!("k{}", i - 1)] }})
+        })
+        .collect();
+    let p = PlanView::from_json(&json!({"items": items})).unwrap();
+    assert!(!p.cycle && p.items[999].layer == Some(999) && p.layers().len() == 1000);
+}
+
+#[test]
+fn extra_rows_are_capped_and_have_no_heading_authority() {
+    let mut o = serde_json::Map::new();
+    for i in 0..300 {
+        o.insert(format!("f{i}"), json!("v".repeat(100_000)));
+    }
+    let rows = extra(&Value::Object(o), &[]);
+    assert_eq!(rows.len(), MAX_EXTRA + 1);
+    assert!(rows.iter().all(|r| r.text.len() < MAX_TEXT + 20));
+    assert!(rows.last().unwrap().text.contains("more fields"));
+    let rows = extra(
+        &json!({"safe_default": "HOLD", "evidence": "e", "why": "w"}),
+        &[],
+    );
+    let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "server extra: safe_default",
+            "server extra: evidence",
+            "server extra: why"
+        ]
+    );
+}
+
+#[test]
+fn sandbox_is_marked_server_reported_and_a_bad_one_is_unreadable() {
+    let mut v = attempt();
+    v["sandbox"] = json!({"backend": "seatbelt", "guarantee": "enforcing", "profile": "p1"});
+    let a = AttemptView::from_json(&v, "wi_a").unwrap();
+    assert_eq!(a.sandbox.source, SandboxSource::ServerReported);
+    let shown = a.render_text();
+    assert!(
+        shown.contains("server-reported, not verified by this surface") && shown.contains("p1"),
+        "{shown}"
+    );
+    v["sandbox"] = json!("enforcing");
+    let a = AttemptView::from_json(&v, "wi_a").unwrap();
+    assert_eq!(a.sandbox.source, SandboxSource::Unreadable);
+    assert!(a.render_text().contains("unreadable"));
+    let mut v = attempt();
+    v["work_item_id"] = json!("wi_other");
+    assert!(AttemptView::from_json(&v, "wi_a").is_err());
+}
+
+#[test]
+fn goal_attempts_and_inconsistent_remaining_are_shown() {
+    let c = CriteriaView::from_json(&contract()).unwrap();
+    assert_eq!(c.goal, "g");
+    assert!(c.render_text().contains("Goal: g"));
+    let mut v = plan();
+    v["items"][1]["attempts"] = json!([{"id": "at_1"}, {"id": "at_2"}]);
+    let p = PlanView::from_json(&v).unwrap();
+    assert_eq!(p.items[1].attempts_listed, Some(2));
+    assert!(p.render_text().contains("attempts 2"));
+    let b =
+        BudgetView::from_json(&json!({"cost_usd": {"spent": 1.0, "limit": 5.0, "remaining": 9.0}}));
+    assert_eq!(b.cost_usd.remaining, Some(9.0));
+    assert!(b.cost_usd.remaining_disagrees() && b.render_text().contains("does not match"));
+    let b =
+        BudgetView::from_json(&json!({"cost_usd": {"spent": 1.0, "limit": 5.0, "remaining": 4.0}}));
+    assert!(!b.cost_usd.remaining_disagrees());
 }
