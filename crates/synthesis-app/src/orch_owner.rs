@@ -91,6 +91,17 @@ fn word<T: Serialize>(v: &T) -> String {
         .unwrap_or_default()
 }
 
+/// Test-only switches of the owner process, set from `SYNT_TEST_ORCH_*` (feature `test-provider`:
+/// debug builds only, see the `compile_error` in `lib.rs`). They are not settings.
+#[cfg(feature = "test-provider")]
+#[derive(Default)]
+pub struct TestHooks {
+    /// Worker options (`--provider fake:<script>`) every worker is started with.
+    pub worker_args: Vec<String>,
+    /// While this file exists no scheduler ticks (kills at a lifecycle point).
+    pub hold: Option<PathBuf>,
+}
+
 type Sched<'a> = Scheduler<ProcessHost<'a>, IndependentVerifier>;
 
 struct Owned<'a> {
@@ -112,6 +123,8 @@ pub struct Owner<'a> {
     notifier: Option<Arc<Notifier>>,
     /// `(idempotency key, request fingerprint, reply)` of the latest creates, oldest first.
     created: VecDeque<(String, String, Value)>,
+    #[cfg(feature = "test-provider")]
+    pub test: TestHooks,
 }
 
 fn has_work(r: &Reader, id: &OutcomeId) -> Result<bool, StoreError> {
@@ -139,6 +152,8 @@ impl<'a> Owner<'a> {
             sent: BTreeSet::new(),
             notifier,
             created: VecDeque::new(),
+            #[cfg(feature = "test-provider")]
+            test: TestHooks::default(),
         }
     }
 
@@ -250,6 +265,10 @@ impl<'a> Owner<'a> {
         let Ok(o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
+        #[cfg(feature = "test-provider")]
+        if o.state == OutcomeState::Running && self.test.hold.as_ref().is_some_and(|f| f.exists()) {
+            return true;
+        }
         match o.state {
             OutcomeState::Running => {
                 if ow.sched.is_none() && ow.refused.is_none() {
@@ -370,6 +389,11 @@ impl<'a> Owner<'a> {
             source: PathBuf::from(&o.repo_root),
             base_commit: o.base_commit.clone(),
             worker_kind: "local-engine",
+        };
+        #[cfg(feature = "test-provider")]
+        let host = ProcessHost {
+            extra: self.test.worker_args.clone(),
+            ..host
         };
         Ok(Scheduler::new(host, verifier, cfg))
     }
@@ -743,6 +767,13 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
         None => std::env::current_exe().map_err(s)?,
     };
     let mut owner = Owner::new(&home, &store, &wm, &spawn, program, notifier(&env, &h));
+    #[cfg(feature = "test-provider")]
+    {
+        if let Some(script) = env.get_nonempty("SYNT_TEST_ORCH_SCRIPT") {
+            owner.test.worker_args = vec!["--provider".into(), format!("fake:{script}")];
+        }
+        owner.test.hold = env.get_nonempty("SYNT_TEST_ORCH_HOLD").map(PathBuf::from);
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
