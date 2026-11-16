@@ -24,12 +24,21 @@ pub fn apply_queued(
     DecisionDriver::default().drive(w, now)?;
     let mut done = vec![];
     for c in w.queued_commands(w.id())? {
-        let rec = match c.kind.as_str() {
-            "decision.resolve" => resolve(w, &c)?,
-            "outcome.contract.approve" => approve(w, &c)?,
+        let run = match c.kind.as_str() {
+            "decision.resolve" => resolve(w, &c),
+            "outcome.contract.approve" => approve(w, &c),
             _ => continue,
         };
-        done.push(rec);
+        done.push(match run {
+            Ok(rec) => rec,
+            // the database or the disk failed: stop, the commands stay queued
+            Err(e @ (StoreError::Sqlite(_) | StoreError::Io(_) | StoreError::Locked(_))) => {
+                return Err(e.into());
+            }
+            // anything else is about this command: refuse it with a generic reason (no row text
+            // or path reaches a surface) and go on with the others
+            Err(_) => deny(w, &c, "the command could not be applied")?,
+        });
     }
     Ok(done)
 }

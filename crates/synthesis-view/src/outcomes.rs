@@ -228,14 +228,14 @@ impl DecisionCard {
             .get("brief")
             .filter(|b| b.is_object())
             .ok_or_else(|| bad("no brief"))?;
-        if let Some(k) = PRESELECT.iter().find(|k| brief.get(**k).is_some()) {
+        let alts = brief.get("alternatives").and_then(Value::as_array);
+        let preselected = |o: &Value| PRESELECT.iter().find(|k| o.get(**k).is_some());
+        if let Some(k) = preselected(brief).or_else(|| alts?.iter().find_map(preselected)) {
             return Err(format!(
                 "the decision brief carries a {k:?} field: refused, the choice is the person's"
             ));
         }
-        let alternatives = brief
-            .get("alternatives")
-            .and_then(Value::as_array)
+        let alternatives: Vec<Alternative> = alts
             .map(|a| {
                 a.iter()
                     .filter_map(|x| {
@@ -249,6 +249,16 @@ impl DecisionCard {
                     .collect()
             })
             .unwrap_or_default();
+        // an alternative named like a fixed answer would let the brief stand in for it
+        if let Some(a) = alternatives
+            .iter()
+            .find(|a| FIXED.iter().any(|(id, _)| *id == a.id))
+        {
+            return Err(format!(
+                "the brief offers {:?}, which is a fixed answer",
+                a.id
+            ));
+        }
         Ok(Self {
             id: text(v, "id").ok_or_else(|| bad("no id"))?,
             kind: text(v, "kind").ok_or_else(|| bad("no kind"))?,
@@ -416,6 +426,16 @@ mod tests {
             let err = DecisionCard::from_json(&decision(b)).unwrap_err();
             assert!(err.contains(k), "{err}");
         }
+    }
+
+    #[test]
+    fn a_preselect_key_inside_an_alternative_or_a_fixed_id_is_refused() {
+        let mut b = full_brief();
+        b["alternatives"][1]["recommended"] = json!(true);
+        assert!(DecisionCard::from_json(&decision(b)).is_err());
+        let mut b = full_brief();
+        b["alternatives"][0]["id"] = json!("reject");
+        assert!(DecisionCard::from_json(&decision(b)).is_err());
     }
 
     #[test]

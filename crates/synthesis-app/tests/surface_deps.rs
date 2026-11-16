@@ -56,10 +56,11 @@ fn surfaces() -> Vec<PathBuf> {
 #[test]
 fn deps_surfaces_do_not_import_orchestrator() {
     let list = surfaces();
-    // the scan reaches every surface it is meant to guard
+    // the scan reaches every surface it is meant to guard (separators differ per OS)
     for want in ["apps/cli", "synthesis-view", "synthesis-cli-ui-render"] {
         assert!(
-            list.iter().any(|p| p.to_string_lossy().contains(want)),
+            list.iter()
+                .any(|p| p.to_string_lossy().replace('\\', "/").contains(want)),
             "{want}: {list:?}"
         );
     }
