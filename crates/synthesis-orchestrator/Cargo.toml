@@ -10,7 +10,7 @@ workspace = true
 
 # Dependencies point inward: this crate uses the domain (core), the store (session) and the
 # worktree manager (workspace). Nothing in `apps/*`, the CLI UI crates or `synthesis-view` may
-# depend on it (plan PR-11 adds the test); `synthesis-app` will.
+# depend on it (`synthesis-app/tests/surface_deps.rs` checks it); only `synthesis-app` does.
 [dependencies]
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }

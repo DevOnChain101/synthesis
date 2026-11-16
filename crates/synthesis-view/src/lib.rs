@@ -9,6 +9,7 @@ pub mod agent;
 pub mod convo;
 pub mod lifecycle;
 pub mod model;
+pub mod outcomes;
 pub mod project;
 pub mod pulse;
 pub mod running;

@@ -11,12 +11,13 @@ use serde_json::{Value, json};
 use synthesis_events::Envelope;
 use synthesis_harness::UserReply;
 use synthesis_permissions::{Decision, Mode, RuleSpec, Suggestion};
+use synthesis_session::outcome::Surface;
 use synthesis_tools::NeedsUser;
 
 use crate::asks::{Ask, AskApproval, Choice};
 
 /// Bumped when a message changes shape. The version handshake is exact: both numbers must match.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
@@ -232,6 +233,96 @@ pub enum Call {
     McpRemove {
         name: String,
     },
+    /// `{enabled, protocol, schema}`: the one outcome method that answers while the feature is off.
+    #[serde(rename = "orchestrator.status")]
+    OrchestratorStatus,
+    #[serde(rename = "outcome.list")]
+    OutcomeList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
+    #[serde(rename = "outcome.get")]
+    OutcomeGet {
+        id: String,
+    },
+    /// The stored contract (`version` default: the outcome's current one) and whether its approval verifies.
+    #[serde(rename = "outcome.contract.get")]
+    OutcomeContractGet {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u32>,
+    },
+    #[serde(rename = "outcome.contract.approve")]
+    OutcomeContractApprove {
+        id: String,
+        version: u32,
+        hash: String,
+        #[serde(flatten)]
+        cmd: CommandArgs,
+    },
+    #[serde(rename = "outcome.start")]
+    OutcomeStart(OutcomeCommand),
+    #[serde(rename = "outcome.pause")]
+    OutcomePause(OutcomeCommand),
+    #[serde(rename = "outcome.resume")]
+    OutcomeResume(OutcomeCommand),
+    #[serde(rename = "outcome.cancel")]
+    OutcomeCancel(OutcomeCommand),
+    #[serde(rename = "outcome.ack")]
+    OutcomeAck(OutcomeCommand),
+    #[serde(rename = "plan.get")]
+    PlanGet {
+        id: String,
+    },
+    #[serde(rename = "work_item.get")]
+    WorkItemGet {
+        outcome: String,
+        id: String,
+    },
+    #[serde(rename = "attempt.inspect")]
+    AttemptInspect {
+        outcome: String,
+        id: String,
+    },
+    #[serde(rename = "decision.list")]
+    DecisionList {
+        outcome: String,
+    },
+    #[serde(rename = "decision.get")]
+    DecisionGet {
+        outcome: String,
+        id: String,
+    },
+    /// A person's answer. `expected_revision` and `brief_sha256` are what the person was shown; the
+    /// server never fills either in, and there is no default `choice`.
+    #[serde(rename = "decision.resolve")]
+    DecisionResolve {
+        outcome: String,
+        id: String,
+        expected_revision: i64,
+        choice: String,
+        brief_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(flatten)]
+        cmd: CommandArgs,
+    },
+    #[serde(rename = "evidence.get")]
+    EvidenceGet {
+        outcome: String,
+    },
+    #[serde(rename = "command.status")]
+    CommandStatus {
+        outcome: String,
+        idempotency_key: String,
+    },
+    /// Events of the outcome's control session after a cursor (a page; reconnect resumes from the last `seq`).
+    #[serde(rename = "events.subscribe")]
+    EventsSubscribe {
+        outcome: String,
+        #[serde(default)]
+        after_event_id: u64,
+    },
     /// `{started}`: false when it ran between tasks (`{msg:"compacted"}` follows).
     Compact {
         instructions: Option<String>,
@@ -242,7 +333,51 @@ pub enum Call {
     Close,
 }
 
+/// What every mutating outcome call carries: the retry key (same key, same stored result, one effect)
+/// and the surface it comes from (self-asserted until the orchestrator endpoint authenticates clients).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandArgs {
+    pub idempotency_key: String,
+    pub surface: Surface,
+}
+
+/// A mutating call on a whole outcome; `expected_revision` is the outcome revision the person saw.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeCommand {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<i64>,
+    #[serde(flatten)]
+    pub cmd: CommandArgs,
+}
+
 impl Call {
+    /// The outcome methods (protocol v4), served by [`crate::outcome_service`] and never by a session.
+    pub fn is_outcome(&self) -> bool {
+        matches!(
+            self,
+            Call::OrchestratorStatus
+                | Call::OutcomeList { .. }
+                | Call::OutcomeGet { .. }
+                | Call::OutcomeContractGet { .. }
+                | Call::OutcomeContractApprove { .. }
+                | Call::OutcomeStart(_)
+                | Call::OutcomePause(_)
+                | Call::OutcomeResume(_)
+                | Call::OutcomeCancel(_)
+                | Call::OutcomeAck(_)
+                | Call::PlanGet { .. }
+                | Call::WorkItemGet { .. }
+                | Call::AttemptInspect { .. }
+                | Call::DecisionList { .. }
+                | Call::DecisionGet { .. }
+                | Call::DecisionResolve { .. }
+                | Call::EvidenceGet { .. }
+                | Call::CommandStatus { .. }
+                | Call::EventsSubscribe { .. }
+        )
+    }
+
     /// The calls that end the session and start another in this process.
     pub fn is_restart(&self) -> bool {
         matches!(
@@ -541,6 +676,66 @@ mod tests {
         assert_eq!(s, r#"{"id":1,"method":"start","params":{"cwd":"/w"}}"#);
     }
 
+    /// Golden lines of the v4 outcome methods: what a surface writes is what the engine reads.
+    #[test]
+    fn outcome_requests_are_golden_lines() {
+        let resolve = r#"{"id":9,"method":"decision.resolve","params":{"outcome":"o","id":"d","expected_revision":2,"choice":"REST","brief_sha256":"h","idempotency_key":"k","surface":"cli"}}"#;
+        let r: Request = serde_json::from_str(resolve).unwrap();
+        assert!(r.call.is_outcome() && !r.call.is_restart());
+        assert!(matches!(
+            r.call,
+            Call::DecisionResolve { expected_revision: 2, ref choice, note: None, .. } if choice == "REST"
+        ));
+        assert_eq!(serde_json::to_string(&r).unwrap(), resolve);
+        let start = r#"{"id":1,"method":"outcome.start","params":{"id":"o","expected_revision":3,"idempotency_key":"k","surface":"tui"}}"#;
+        let r: Request = serde_json::from_str(start).unwrap();
+        assert!(matches!(r.call, Call::OutcomeStart(ref c) if c.expected_revision == Some(3)));
+        assert_eq!(serde_json::to_string(&r).unwrap(), start);
+        for line in [
+            r#"{"id":1,"method":"orchestrator.status"}"#,
+            r#"{"id":1,"method":"outcome.list","params":{}}"#,
+            r#"{"id":1,"method":"outcome.get","params":{"id":"o"}}"#,
+            r#"{"id":1,"method":"outcome.contract.get","params":{"id":"o"}}"#,
+            r#"{"id":1,"method":"outcome.contract.approve","params":{"id":"o","version":1,"hash":"h","idempotency_key":"k","surface":"superagent"}}"#,
+            r#"{"id":1,"method":"plan.get","params":{"id":"o"}}"#,
+            r#"{"id":1,"method":"work_item.get","params":{"outcome":"o","id":"w"}}"#,
+            r#"{"id":1,"method":"attempt.inspect","params":{"outcome":"o","id":"a"}}"#,
+            r#"{"id":1,"method":"decision.list","params":{"outcome":"o"}}"#,
+            r#"{"id":1,"method":"decision.get","params":{"outcome":"o","id":"d"}}"#,
+            r#"{"id":1,"method":"evidence.get","params":{"outcome":"o"}}"#,
+            r#"{"id":1,"method":"command.status","params":{"outcome":"o","idempotency_key":"k"}}"#,
+            r#"{"id":1,"method":"events.subscribe","params":{"outcome":"o","after_event_id":7}}"#,
+            r#"{"id":1,"method":"outcome.pause","params":{"id":"o","idempotency_key":"k","surface":"cli"}}"#,
+            r#"{"id":1,"method":"outcome.resume","params":{"id":"o","idempotency_key":"k","surface":"cli"}}"#,
+            r#"{"id":1,"method":"outcome.cancel","params":{"id":"o","idempotency_key":"k","surface":"cli"}}"#,
+            r#"{"id":1,"method":"outcome.ack","params":{"id":"o","idempotency_key":"k","surface":"cli"}}"#,
+        ] {
+            let r: Request = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            assert!(r.call.is_outcome(), "{line}");
+        }
+        assert!(!Call::Cancel.is_outcome());
+    }
+
+    #[test]
+    fn a_resolve_without_what_the_person_was_shown_does_not_parse() {
+        let ok = |p: &str| format!(r#"{{"id":1,"method":"decision.resolve","params":{{{p}}}}}"#);
+        let all = r#""outcome":"o","id":"d","expected_revision":2,"choice":"A","brief_sha256":"h","idempotency_key":"k","surface":"cli""#;
+        assert!(serde_json::from_str::<Request>(&ok(all)).is_ok());
+        // no default choice, no revision, no brief hash, no key, an unknown surface
+        for drop in [
+            "\"choice\":\"A\",",
+            "\"expected_revision\":2,",
+            "\"brief_sha256\":\"h\",",
+            ",\"idempotency_key\":\"k\"",
+        ] {
+            assert!(
+                serde_json::from_str::<Request>(&ok(&all.replace(drop, ""))).is_err(),
+                "{drop}"
+            );
+        }
+        assert!(serde_json::from_str::<Request>(&ok(&all.replace("cli", "root"))).is_err());
+    }
+
     #[test]
     fn malformed_requests_are_errors() {
         for bad in [
@@ -581,7 +776,14 @@ mod tests {
                 .unwrap_err()
                 .contains("protocol 2")
         );
-        assert_eq!(PROTOCOL, 3);
+        // a protocol 3 engine (before outcomes) is refused too: the lock-step rule of ADR-016
+        let v3 = format!(r#"{{"msg":"hello","version":"{VERSION}","protocol":3}}"#);
+        assert!(
+            check_hello(v3.as_bytes())
+                .unwrap_err()
+                .contains("protocol 3")
+        );
+        assert_eq!(PROTOCOL, 4);
         assert!(check_hello(br#"{"msg":"task_done","error":null}"#).is_err());
         assert!(check_hello(b"garbage").is_err());
     }

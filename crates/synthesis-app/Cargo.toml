@@ -12,6 +12,8 @@ workspace = true
 [features]
 # Enables `--provider fake:<script.json>` (scripted model, no network). Debug builds only.
 test-provider = ["synthesis-sandbox/test-backend"]
+# `outcome_client::InProc` (the server in the same process) for tests and headless CI; never a production path (ADR-021, plan D22). Debug builds only.
+inproc-test = []
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
@@ -27,6 +29,7 @@ synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }
 synthesis-hooks = { path = "../synthesis-hooks" }
 synthesis-mcp = { path = "../synthesis-mcp" }
+synthesis-orchestrator = { path = "../synthesis-orchestrator" }
 synthesis-peers = { path = "../synthesis-peers" }
 synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-providers = { path = "../synthesis-providers" }
@@ -60,3 +63,5 @@ libc = "0.2"
 rustix = { version = "1", features = ["termios", "stdio", "fs"] }
 
 [dev-dependencies]
+synthesis-app = { path = ".", features = ["inproc-test"] }
+time = { version = "0.3", features = ["formatting", "macros"] }

@@ -9,6 +9,7 @@
 //! crate holds no switch of its own, the store's `OutcomePolicy` gate does.
 
 mod alloc;
+mod commands;
 mod decision;
 mod envelope;
 mod gitsafe;
@@ -24,6 +25,7 @@ mod sched;
 mod verify;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
+pub use commands::apply_queued;
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
 pub use gitsafe::{

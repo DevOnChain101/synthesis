@@ -517,6 +517,7 @@ impl Srv<'_> {
                 .map(|l| fold_dir(&l.host.workspace.root.to_string_lossy()))
         };
         match call {
+            c if c.is_outcome() => Ok(crate::outcome_service::serve(self.env, &h, c)?),
             Call::WorkspacesList => Ok(self.ctx(&h).workspaces_list(self.cwd.as_deref())?),
             Call::SessionsList { workspace } => Ok(self.ctx(&h).sessions_list(&workspace)?),
             Call::SessionPreview { id } => Ok(self.ctx(&h).preview(&id)?),
