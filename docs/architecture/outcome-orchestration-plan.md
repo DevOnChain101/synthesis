@@ -3,6 +3,7 @@
 Changelog: 2026-11-14 rev 2 (owner): the orchestrator serves CLI, TUI and Super Agent through one core and one protocol; standalone orchestrator process; durable decisions and commands; explicit v5 migration; delivery order core, protocol, CLI, TUI, Super Agent; D4, D5, D6 revised and D17-D21 added. Rev 1 (same day): first version.
 
 Status: Proposed (2026-11-14, rev 2). Nothing here is scheduled until the owner answers the decisions in section 7.
+Remaining backend work after the implemented PRs: [orchestrator remaining backend spec](../specs/orchestrator-remaining-backend.md) (proposed; owner questions O1-O16).
 Inputs: [gap analysis](./outcome-orchestration-gap-analysis.md), [ADRs](./adr/README.md). Test specs: [acceptance](../testing/outcome-orchestration-acceptance.md). Threat model: [threat model](./outcome-orchestration-threat-model.md). First slice: [MVP slice](./outcome-orchestration-mvp-slice.md).
 
 Estimates are rough guesses for one engineer plus review (S <= 2 days, M 3-5, L 6-10), not measurements. The repository rule applies to every PR: `cargo fmt --all --check`, `cargo clippy --workspace --exclude synthesis-desktop --all-targets -- -D warnings`, `cargo test --workspace --exclude synthesis-desktop` (add `-p synthesis-desktop` for desktop PRs), `node scripts/check-no-legacy-name.mjs`, and the CI job set (`ci-ok`). Every PR that touches permissions, sandbox, secrets, input validation or the store goes through the read-only security reviewer before merge (owner rule, `HANDOFF.md` 7k). Work happens in worktrees under `.claude/worktrees/`.
