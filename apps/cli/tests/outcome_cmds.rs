@@ -1,9 +1,10 @@
 //! `synt outcome ...` through the real binary and the real orchestrator process it starts (plan
 //! PR-13). Dispatch, rendering and exit codes only; the lifecycle itself is proven by the protocol
-//! tests. A worker needs a model, which the owner process does not get in a test, so the work an
+//! tests. This file runs in every build, where the owner process has no model, so the work an
 //! attempt does is not driven here: a decision is seeded in the store the way a blocked attempt
-//! leaves it, and everything a person does with it goes through the CLI. Unix only (the Windows
-//! named pipe is unverified).
+//! leaves it, and everything a person does with it goes through the CLI. The same flow with a
+//! real worker and a decision it produced is `outcome_e2e.rs` (feature `test-provider`). Unix
+//! only (the Windows named pipe is unverified).
 #![cfg(unix)]
 
 use std::collections::BTreeMap;

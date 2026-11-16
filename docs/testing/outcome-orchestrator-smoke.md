@@ -100,10 +100,11 @@ cargo test -p synthesis-cli --test outcome_cmds           # synt outcome through
 cargo test -p synthesis-app --lib outcome_cmd             # dispatch, goldens, no-preselection, JSON schema
 cargo test -p synthesis-orchestrator --test lifecycle     # start, pause (durable), resume, cancel, ack, verdict
 cargo test -p synthesis-cli --features test-provider --test engine_stdio
+cargo test -p synthesis-cli --features test-provider --test outcome_e2e    # real worker, verdict, ack, decision, kill -9 matrix (unix, 2 to 3 min)
 ```
 
 ## Not verified
 
 - Windows (named pipe, native or WSL) and Linux with bubblewrap for the process tests: written, not run by the author. CI will compile them; the process and endpoint tests are unix-only.
-- A worker run by the orchestrator end to end with a real model, and the live policy gateway (not built). `outcome_cmds` seeds the decision in the store (a worker needs a model the owner process is not given in tests) and drives everything a person does with it through the CLI.
+- A worker run by the orchestrator with a real model, and the live policy gateway (not built). `outcome_e2e` runs real workers against a scripted model (`SYNT_TEST_ORCH_SCRIPT`, builds with `test-provider` only), so create, verification, verdict, ack, a real decision and the kill matrix are automated; what it does not cover is listed in the acceptance doc (section 3c). `outcome_cmds` still seeds its decision in the store because it also runs in builds without `test-provider`, where no worker can be given a model.
 - The notify command through the confined `Notifier` against a real sandbox: the payload and delivery are unit tested without a sandbox.
