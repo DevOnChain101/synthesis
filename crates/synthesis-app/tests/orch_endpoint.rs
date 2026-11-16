@@ -458,24 +458,29 @@ fn a_full_job_queue_is_refused_as_busy_not_queued_for_ever() {
             })
             .unwrap()
         };
-        // nobody drains the queue: the first call takes its only place and waits
-        let mut first = b.link().await;
-        first.send(&enable(1)).await.unwrap();
-        let mut second = b.link().await;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            second.send(&enable(2)).await.unwrap();
-            let r = tokio::time::timeout(Duration::from_secs(5), second.recv())
-                .await
-                .expect("the busy answer comes at once")
-                .unwrap()
-                .unwrap();
-            if r["error"].as_str().is_some_and(|e| e.contains("busy")) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "never refused as busy: {r}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // nobody drains the queue: fill its only place directly, so the state is certain (a first
+        // call over the wire could still be in flight when the second arrives)
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        b.ctx
+            .jobs
+            .try_send((
+                Call::OrchestratorEnable {
+                    surface: Surface::Cli,
+                },
+                tx,
+            ))
+            .expect("the queue is empty at the start");
+        let mut link = b.link().await;
+        link.send(&enable(2)).await.unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(30), link.recv())
+            .await
+            .expect("the busy answer comes at once, not after the job wait")
+            .unwrap()
+            .unwrap();
+        assert!(
+            r["error"].as_str().is_some_and(|e| e.contains("busy")),
+            "not refused as busy: {r}"
+        );
     });
 }
 
