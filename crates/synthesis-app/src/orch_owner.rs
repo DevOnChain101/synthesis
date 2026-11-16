@@ -28,8 +28,8 @@ use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, Platform, ProcessHost, Runner,
-    SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, apply_lifecycle,
-    apply_queued, conclude, recover_attempts, restore_pause,
+    SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, answered_waiting,
+    apply_lifecycle, apply_queued, conclude, recover_attempts, restore_pause,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -110,6 +110,9 @@ struct Owned<'a> {
     sched: Option<Sched<'a>>,
     /// Why no scheduler could be built, said once.
     refused: Option<String>,
+    /// Answered decisions this owner already moved a blocked outcome for: each one gets one
+    /// unblock, so an answer that changes nothing cannot flip the outcome blocked/running forever.
+    unblocked_for: BTreeSet<String>,
 }
 
 pub struct Owner<'a> {
@@ -181,6 +184,7 @@ impl<'a> Owner<'a> {
                             control,
                             sched: None,
                             refused: None,
+                            unblocked_for: BTreeSet::new(),
                         },
                     );
                 }
@@ -262,9 +266,38 @@ impl<'a> Owner<'a> {
         if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, &StubPlanner) {
             log(&format!("outcome {id}: commands: {e}"));
         }
-        let Ok(o) = ow.w.get_outcome(ow.w.id()) else {
+        let Ok(mut o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
+        // A person's answer to a decision moves a `blocked` outcome by itself: it goes back to
+        // `running` once per answer and the scheduler re-checks everything, so anything else that
+        // still blocks (a cap, another item) blocks it again with its own reason (fail closed). A
+        // paused or cancelled outcome is left alone: only `resume` undoes a person's pause.
+        if o.state == OutcomeState::Blocked
+            && !ow.control.is_paused()
+            && !ow.control.cancel.is_set()
+        {
+            let fresh: Vec<String> = answered_waiting(&mut ow.w)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| ow.unblocked_for.insert(d.clone()))
+                .collect();
+            if !fresh.is_empty() {
+                match ow.w.transition_outcome(
+                    o.revision,
+                    OutcomeState::Running,
+                    Some("a decision was answered"),
+                    &Effects::default(),
+                ) {
+                    Ok(_) => {
+                        if let Ok(n) = ow.w.get_outcome(ow.w.id()) {
+                            o = n;
+                        }
+                    }
+                    Err(e) => log(&format!("outcome {id}: unblock: {e}")),
+                }
+            }
+        }
         #[cfg(feature = "test-provider")]
         if o.state == OutcomeState::Running && self.test.hold.as_ref().is_some_and(|f| f.exists()) {
             return true;

@@ -331,6 +331,11 @@ impl Rig {
 
     /// enable, create (a contract whose frozen check needs the file the worker writes), approve.
     fn approved(&self) -> String {
+        self.approved_with(json!({"max_cost_usd": 5.0}))
+    }
+
+    /// [`Rig::approved`] with these budgets in the envelope.
+    fn approved_with(&self, budgets: Value) -> String {
         self.ok(&["enable", "--yes"]);
         let criteria = self.file(
             "criteria.json",
@@ -343,7 +348,7 @@ impl Rig {
         let envelope = self.file(
             "envelope.json",
             json!({"allowed_paths": ["src/**"], "capabilities": {"repo.read": "allow", "repo.write": "allow"},
-                   "budgets": {"max_cost_usd": 5.0}}),
+                   "budgets": budgets}),
         );
         let made = self.json(&[
             "create",
@@ -409,6 +414,13 @@ fn assert_one_verdict(r: &Rig, id: &str) {
 
 fn go(r: &Rig) -> String {
     let id = r.approved();
+    r.ok(&["start", &id]);
+    id
+}
+
+/// [`go`] with an envelope that caps each attempt, so one attempt does not hold the whole cap.
+fn go_with(r: &Rig, budgets: Value) -> String {
+    let id = r.approved_with(budgets);
     r.ok(&["start", &id]);
     id
 }
@@ -555,9 +567,7 @@ fn a_decision_a_blocked_worker_made_is_answered_only_with_an_explicit_choice() {
         &hash,
     ]);
     assert!(out.starts_with("decision.resolve: done"), "{out}");
-    // the answer does not move a blocked outcome by itself: the person resumes it
-    assert_eq!(r.state(&id), "blocked");
-    r.ok(&["resume", &id]);
+    // the answer moves the blocked outcome by itself (no `resume`): the owner re-checks and runs on
     r.wait_state(&id, "verified", 90);
     let a = r.attempts(&id, "inspect");
     assert_eq!(
@@ -683,8 +693,12 @@ fn kill9_after_start_before_any_worker_spawns_no_attempt_is_lost_or_doubled() {
 
 /// Starts the gated scenario and waits until the first agent worker has had its first turn.
 fn mid_attempt(r: &Rig) -> (String, AttemptRecord) {
+    mid_attempt_with(r, json!({"max_cost_usd": 5.0}))
+}
+
+fn mid_attempt_with(r: &Rig, budgets: Value) -> (String, AttemptRecord) {
     r.set_script(&writes(Some(&r.gate)));
-    let id = go(r);
+    let id = go_with(r, budgets);
     let first = r.wait("a running attempt", 90, || {
         r.attempts(&id, "inspect")
             .into_iter()
@@ -764,26 +778,20 @@ fn kill9_of_the_owner_with_a_live_worker_the_next_owner_leaves_it_alone() {
         alive(first.worker_pid.unwrap()),
         "the worker was not killed by the adoption"
     );
-    // the worker finishes while the new owner watches: still one attempt and one worktree, and no
-    // evidence is made up for an attempt nobody settled. (Known gap, see the acceptance doc: the
-    // outcome does not continue until the next adoption.)
-    std::fs::write(&r.gate, "").unwrap();
-    r.wait("the worker to exit", 60, || {
-        (!alive(first.worker_pid.unwrap())).then_some(())
-    });
+    // while the worker lives the outcome is NOT blocked by its own reservation (it holds the whole
+    // cap, which is its share, not an overrun) and nothing else starts
     std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(r.state(&id), "running");
+    assert!(r.attempts(&id, "implement").is_empty());
+    assert!(r.evidence().is_empty(), "no evidence while it runs");
+    // the worker finishes while the new owner watches: the owner settles it from what the session
+    // recorded (never a made-up result) and the outcome continues to its verdict
+    std::fs::write(&r.gate, "").unwrap();
+    recover_to_verified(&r, &id);
     let a = r.attempts(&id, "inspect");
-    assert_eq!(a.len(), 1, "{a:?}");
-    assert_eq!(a[0].id, first.id);
-    assert!(
-        r.attempts(&id, "implement").is_empty(),
-        "nothing else started"
-    );
-    assert!(
-        r.evidence().is_empty(),
-        "no evidence for an unsettled attempt: {:?}",
-        r.evidence()
-    );
+    assert_eq!(a.len(), 1, "still one attempt, never rerun: {a:?}");
+    assert_eq!((&a[0].id, a[0].state), (&first.id, AttemptState::Finished));
+    assert_eq!(r.attempts(&id, "implement").len(), 1);
     assert_eq!(r.events(&id, "outcome.recovered").len(), 1);
 }
 
@@ -836,6 +844,49 @@ fn kill9_of_the_owner_and_its_worker_mid_attempt_the_lost_attempt_is_not_rerun()
     assert!(r.evidence().is_empty(), "a lost attempt leaves no evidence");
     assert_eq!(r.events(&id, "outcome.recovered").len(), 1, "reported once");
     assert!(r.reader().queued_commands(&r.oid()).unwrap().is_empty());
+    // the reason names the real numbers: the lost attempt's whole reservation counts as spent
+    assert!(
+        why["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("$5.0000 of $5.0000"),
+        "{why}"
+    );
+    // `resume` re-checks and, with no budget left, blocks again: no rerun of the lost attempt
+    r.ok(&["resume", &id]);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(r.state(&id), "blocked");
+    assert_eq!(r.attempts(&id, "inspect").len(), 1);
+    assert!(r.attempts(&id, "implement").is_empty());
+}
+
+#[test]
+fn kill9_of_the_owner_and_its_worker_with_budget_left_a_new_attempt_does_the_work() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    // each attempt may spend at most 0.5 of the 5.0: the lost one's 0.5 counts as spent, 4.5 is left
+    let (id, first) = mid_attempt_with(
+        &r,
+        json!({"max_cost_usd": 5.0, "attempt_max_cost_usd": 0.5}),
+    );
+    r.kill_owner();
+    let _ = Command::new("kill")
+        .args(["-9", &first.worker_pid.unwrap().to_string()])
+        .output();
+    std::fs::write(&r.gate, "").unwrap();
+    r.ok(&["status", &id]);
+    recover_to_verified(&r, &id);
+    let a = r.attempts(&id, "inspect");
+    assert_eq!(a.len(), 2, "the lost attempt and one new one: {a:?}");
+    assert_eq!((&a[0].id, a[0].state), (&first.id, AttemptState::Lost));
+    assert_ne!(
+        a[0].session_id, a[1].session_id,
+        "a new session, not a rerun"
+    );
+    assert_eq!(a[1].state, AttemptState::Finished);
+    assert_eq!(r.events(&id, "outcome.recovered").len(), 1);
 }
 
 #[test]

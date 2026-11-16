@@ -102,3 +102,7 @@ Evidence rows carry a MAC since PR-09 (see the implementation notes): a writer w
 ## Implementation notes (PR-12: the verifier is wired)
 
 - `IndependentVerifier::for_outcome` is now built for every running outcome by the orchestrator process (`orch_owner`), over `SandboxRunner::detect`; it needs the approved current contract and an enforcing sandbox (`fingerprint` fails otherwise, so items stay in `verifying`: fail closed). After all items succeed the outcome is concluded by the store's own verdict (`conclude`). Not exercised against a real repository end to end by an automated test (needs a model worker): the owner's manual smoke covers what can be run today.
+
+## Implementation notes (recovery follow-up)
+
+- Settling an adopted attempt (owner killed, worker finished alone) records only what the session store holds: the task status and git info of the session decide `Finished`/`Cancelled` through the same `Runner::settle`, and the work item goes to `verifying`; evidence is produced afterwards only by the independent runner (`producer = independent_runner`), once, on the attempt's commit. A lost attempt gets no evidence at all. Tests: `kill9_of_the_owner_with_a_live_worker_...` and `..._with_budget_left_...` in `apps/cli/tests/outcome_e2e.rs` assert one verdict row on the commit of the finished attempt.

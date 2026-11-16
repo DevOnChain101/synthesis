@@ -82,6 +82,39 @@ pub fn recover_attempts(
     let mut report = RecoveryReport::default();
     let items: Vec<_> = w.list_work_items(w.id())?;
     for item in items {
+        recover_item(
+            store,
+            worktrees,
+            probe,
+            w,
+            &item,
+            now,
+            lease,
+            max_attempts,
+            &mut report,
+        )?;
+    }
+    let _ = platform;
+    Ok(report)
+}
+
+/// [`recover_attempts`] for one work item: also what an owner runs on every tick for an attempt it
+/// adopted but does not hold a process handle for (so it ends settled or lost, never stuck
+/// `running`). It never starts, kills (unless the lease ran out and the start token matches) or
+/// reruns anything.
+#[allow(clippy::too_many_arguments)]
+pub fn recover_item(
+    store: &Store,
+    worktrees: &WorktreeManager,
+    probe: &dyn ProcessProbe,
+    w: &mut OutcomeWriter,
+    item: &synthesis_session::outcome::WorkItemRecord,
+    now: OffsetDateTime,
+    lease: Duration,
+    max_attempts: u32,
+    report: &mut RecoveryReport,
+) -> Result<(), RunError> {
+    {
         for a in w.list_attempts(&item.id)? {
             if !matches!(a.state, AttemptState::Starting | AttemptState::Running) {
                 continue;
@@ -151,8 +184,7 @@ pub fn recover_attempts(
             report.lost.push(a.id.clone());
         }
     }
-    let _ = platform;
-    Ok(report)
+    Ok(())
 }
 
 struct NoSpawn;

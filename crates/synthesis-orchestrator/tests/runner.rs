@@ -1412,3 +1412,153 @@ fn a_child_the_kernel_reaped_is_never_signalled_by_abandon_or_drop() {
     // the stand-in process is really ours: clean it up by hand
     let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
+
+/// Budget invariants of the ledger (what `outcome_spend` sums), under any order of start,
+/// adoption (`recover_item`), loss without a usage, and settle with a final usage:
+/// (1) the sum of what live or lost-without-usage attempts reserve plus what finished ones used
+/// never exceeds the outcome cap, because a new attempt gets at most `(cap - spent) / share`;
+/// (2) adoption and recovery of a live worker never change the ledger (nothing is counted twice);
+/// (3) a reservation is only ever lowered by a final usage, never forged upwards.
+#[test]
+fn the_ledger_never_exceeds_the_cap_under_any_start_adopt_lose_settle_order() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, two) = r.outcome();
+    let id = w.id().clone();
+    let cap = 5.0;
+    let s = Script("sleep 30".into());
+    let rn = runner(&r, &s);
+    let c = r.contract_for_profile();
+    let mut live: Vec<(WorkItemId, AttemptEnv, Running)> = vec![];
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut rnd = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    for _ in 0..60 {
+        let before = w.outcome_spend(&id).unwrap();
+        match rnd(4) {
+            // start on an item without a live attempt
+            0 => {
+                let it = if rnd(2) == 0 { &one } else { &two };
+                // one live attempt per item, and the contract's attempt budget per item
+                if live.iter().any(|(i, ..)| i == it) || w.list_attempts(it).unwrap().len() >= 2 {
+                    continue;
+                }
+                let ordinal = w.list_attempts(it).unwrap().len() as u32 + 1;
+                let env = r
+                    .allocator()
+                    .allocate(&mut w, &r.spec(it, ordinal), OffsetDateTime::now_utc())
+                    .unwrap();
+                let share = rnd(3) as u32 + 1;
+                match Profile::build_shared(
+                    PathBuf::from("sh"),
+                    &env,
+                    &c,
+                    &policy(),
+                    before,
+                    share,
+                    "p".into(),
+                ) {
+                    Ok(p) => {
+                        assert!(before < cap, "a worker started with nothing left");
+                        let run = rn.start(&mut w, &env, &p).unwrap();
+                        live.push((it.clone(), env, run));
+                    }
+                    // the cap is used up: the walk ends here (nothing more may start)
+                    Err(_) => {
+                        assert!(before >= cap - 1e-9, "refused with {before} spent");
+                        break;
+                    }
+                }
+            }
+            // adoption by a new owner: reads, never changes the ledger
+            1 => {
+                for it in [&one, &two] {
+                    let item = w.get_work_item(it).unwrap();
+                    let mut rep = RecoveryReport::default();
+                    recover_item(
+                        &r.store,
+                        &r.wm,
+                        &OsProbe,
+                        &mut w,
+                        &item,
+                        OffsetDateTime::now_utc(),
+                        Duration::from_secs(120),
+                        3,
+                        &mut rep,
+                    )
+                    .unwrap();
+                    // only an attempt that never got a worker (a refused start) may be lost here
+                    assert!(rep.settled.is_empty() && rep.expired.is_empty(), "{rep:?}");
+                }
+                assert_eq!(w.outcome_spend(&id).unwrap(), before, "adoption moved it");
+            }
+            // lost without a usage: the reservation stays
+            2 if !live.is_empty() => {
+                let k = rnd(live.len() as u64) as usize;
+                let (it, _, mut run) = live.remove(k);
+                rn.abort(&mut w, &mut run, "test");
+                free_item(&mut w, &it);
+                assert_eq!(w.outcome_spend(&id).unwrap(), before, "a loss freed budget");
+            }
+            // settled with a final usage no larger than the reservation: it can only go down
+            3 if !live.is_empty() => {
+                let k = rnd(live.len() as u64) as usize;
+                let (it, env, mut run) = live.remove(k);
+                let reserved = attempt_by_id(&w, &env).reserved_usd.unwrap();
+                rn.abort(&mut w, &mut run, "test");
+                free_item(&mut w, &it);
+                let used = reserved * (rnd(100) as f64 / 100.0);
+                usage_of(
+                    &r,
+                    &env,
+                    "failed",
+                    &format!(
+                        r#"{{"turns":1,"tool_calls":0,"cost_usd":{used},"wall_ms":1,"verify_attempts":0}}"#
+                    ),
+                );
+                assert!(w.outcome_spend(&id).unwrap() <= before + 1e-9);
+            }
+            _ => {}
+        }
+        let spent = w.outcome_spend(&id).unwrap();
+        assert!(spent <= cap + 1e-9, "the cap was exceeded: {spent}");
+        let reserved: f64 = [&one, &two]
+            .iter()
+            .flat_map(|i| w.list_attempts(i).unwrap())
+            .filter_map(|a| a.reserved_usd)
+            .sum();
+        assert!(
+            reserved <= cap + 1e-9 || spent <= cap + 1e-9,
+            "reservations {reserved}"
+        );
+    }
+    for (_, _, mut run) in live {
+        rn.abort(&mut w, &mut run, "end");
+    }
+}
+
+fn free_item(w: &mut OutcomeWriter, it: &WorkItemId) {
+    if !matches!(
+        w.get_work_item(it).unwrap().state,
+        WorkItemState::Leased | WorkItemState::Running
+    ) {
+        return;
+    }
+    for to in [WorkItemState::Recovering, WorkItemState::Ready] {
+        let rev = w.get_work_item(it).unwrap().revision;
+        w.transition_work_item(it, rev, to, &Effects::default())
+            .unwrap();
+    }
+}
+
+fn attempt_by_id(w: &OutcomeWriter, env: &AttemptEnv) -> AttemptRecord {
+    w.list_attempts(&env.attempt.work_item_id)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.id == env.attempt.id)
+        .unwrap()
+}

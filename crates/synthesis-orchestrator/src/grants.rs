@@ -325,3 +325,22 @@ fn binding_matches(
 ) -> Result<bool, StoreError> {
     w.binding_is_current(d, current)
 }
+
+/// Ids of the decisions a person answered (approved) whose work item still waits for them: the
+/// next tick of the walk turns each into a ready item or a grant. The owner uses it to move a
+/// `blocked` outcome back to `running` once, so the answer is acted on without a `resume`.
+pub fn answered_waiting(w: &mut OutcomeWriter) -> Result<Vec<String>, StoreError> {
+    let mut out = vec![];
+    for d in w.list_decisions(w.id())? {
+        let Some((item_id, _)) = current_binding_for(w, &d, None)? else {
+            continue;
+        };
+        if w.decision_state(&d.id)? == DecisionState::Approved
+            && w.get_work_item(&item_id)?.state == WorkItemState::WaitingDecision
+            && w.verified_resolution(&d.id)?.is_some()
+        {
+            out.push(d.id.to_string());
+        }
+    }
+    Ok(out)
+}
