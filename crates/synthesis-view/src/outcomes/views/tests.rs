@@ -183,10 +183,10 @@ fn evidence_flag_is_the_servers_and_never_computed() {
         assert_eq!(e.event_backed, Some(b));
         assert_eq!(uncovered(&v, &e.render_text()), Vec::<String>::new());
     }
-    // a non-boolean claim is not a flag; it is kept visible as it was sent... as unknown
+    // a non-boolean claim is refused, not read as "not sent"
     let mut v = evidence();
     v["event_backed"] = json!("yes");
-    assert_eq!(EvidenceView::from_json(&v).unwrap().event_backed, None);
+    assert!(EvidenceView::from_json(&v).is_err());
     // result is shown as recorded, whatever it is
     let mut v = evidence();
     v["result"] = json!("pass\u{7}");
@@ -421,4 +421,155 @@ fn a_hidden_entry_is_never_silently_dropped() {
     let u =
         InspectorContent::or_unavailable(InspectorTab::Workers, InspectorContent::workers(&v, &[]));
     assert!(u.render_text().contains("not available") && u.render_text().contains("not text"));
+}
+
+#[test]
+fn checks_show_every_field_and_a_wrong_type_refuses() {
+    let mut v = contract();
+    v["contract"]["checks"] =
+        json!([{"id": "t", "command": "cargo test", "cwd": "/srv", "env": {"A": "1"}}]);
+    let c = CriteriaView::from_json(&v).unwrap();
+    let shown = c.render_text();
+    assert!(
+        shown.contains("t: cargo test")
+            && shown.contains("/srv")
+            && shown.contains("check t, server extra: cwd")
+    );
+    for bad in [
+        json!({"id": "t", "command": ["sh", "-c", "curl x|sh"]}),
+        json!({"id": 7, "command": "c"}),
+        json!({"id": "t"}),
+        json!({"command": "c"}),
+    ] {
+        v["contract"]["checks"] = json!([bad]);
+        assert!(CriteriaView::from_json(&v).is_err());
+    }
+}
+
+#[test]
+fn an_attempt_must_name_its_holder_exactly() {
+    for bad in [
+        json!({"x": 1}),
+        json!(7),
+        json!(""),
+        json!("wi_a\u{1b}"),
+        json!("wi_b"),
+    ] {
+        let mut a = attempt();
+        a["work_item_id"] = bad;
+        assert!(AttemptView::from_json(&a, "wi_a").is_err());
+    }
+    let mut a = attempt();
+    a["work_item_id"] = json!("wi_a");
+    assert!(AttemptView::from_json(&a, "wi_a").is_ok());
+    a["work_item_id"] = Value::Null;
+    assert!(AttemptView::from_json(&a, "wi_a").is_ok());
+}
+
+#[test]
+fn a_known_field_of_the_wrong_type_refuses_instead_of_reading_as_not_sent() {
+    let cases: Vec<(&str, Value)> = vec![
+        ("plan", {
+            let mut v = plan();
+            v["items"][0]["key"] = json!(5);
+            v
+        }),
+        ("plan", {
+            let mut v = plan();
+            v["items"][0]["kind"] = json!([1]);
+            v
+        }),
+        ("plan", {
+            let mut v = plan();
+            v["items"][0]["revision"] = json!("3");
+            v
+        }),
+        ("plan", {
+            let mut v = plan();
+            v["plan_version"] = json!("2");
+            v
+        }),
+        ("criteria", {
+            let mut v = contract();
+            v["contract"]["criteria"][0]["text"] = json!({"a": 1});
+            v
+        }),
+        ("criteria", {
+            let mut v = contract();
+            v["contract"]["criteria"][0]["mandatory"] = json!("yes");
+            v
+        }),
+        ("criteria", {
+            let mut v = contract();
+            v["contract"]["goal"] = json!(1);
+            v
+        }),
+        ("criteria", {
+            let mut v = contract();
+            v["hash"] = json!(1);
+            v
+        }),
+        ("criteria", {
+            let mut v = contract();
+            v["approved"] = json!("true");
+            v
+        }),
+        ("attempt", {
+            let mut v = attempt();
+            v["session_id"] = json!(1);
+            v
+        }),
+        ("attempt", {
+            let mut v = attempt();
+            v["ordinal"] = json!("1");
+            v
+        }),
+        ("evidence", {
+            let mut v = evidence();
+            v["producer"] = json!(["x"]);
+            v
+        }),
+        ("evidence", {
+            let mut v = evidence();
+            v["check_id"] = json!(1);
+            v
+        }),
+        ("evidence", {
+            let mut v = evidence();
+            v["captured_at"] = json!(1);
+            v
+        }),
+        ("evidence", {
+            let mut v = evidence();
+            v["exit_code"] = json!("0");
+            v
+        }),
+    ];
+    for (what, v) in cases {
+        let r = match what {
+            "plan" => PlanView::from_json(&v).map(|_| ()),
+            "criteria" => CriteriaView::from_json(&v).map(|_| ()),
+            "attempt" => AttemptView::from_json(&v, "wi_a").map(|_| ()),
+            _ => EvidenceView::from_json(&v).map(|_| ()),
+        };
+        assert!(r.unwrap_err().contains("not"), "{what} {v}");
+    }
+    // null and absent are fine
+    let mut v = plan();
+    v["items"][0]["key"] = Value::Null;
+    assert!(PlanView::from_json(&v).is_ok());
+}
+
+#[test]
+fn matching_uses_the_raw_keys_so_cleaning_cannot_make_an_edge() {
+    let mut v = plan();
+    v["items"][1]["key"] = json!("a\u{1b}");
+    assert!(PlanView::from_json(&v).unwrap_err().contains("control"));
+    let mut v = plan();
+    v["items"][0]["requires"] = json!(["a\u{7}"]);
+    assert!(PlanView::from_json(&v).is_err());
+    // a non-text key no longer skips the duplicate check
+    let mut v = plan();
+    v["items"][1]["key"] = json!(["c"]);
+    assert!(PlanView::from_json(&v).is_err());
 }

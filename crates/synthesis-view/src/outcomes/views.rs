@@ -34,6 +34,28 @@ fn opt(v: &Value, k: &str) -> Option<String> {
     v.get(k)?.as_str().map(t).filter(|s| !s.is_empty())
 }
 
+/// A known field of the wrong type refuses the reply: it is never shown as empty or unknown,
+/// which would read like "not sent". Absent and null are fine.
+fn typed(v: &Value, texts: &[&str], ints: &[&str], bools: &[&str]) -> Result<(), String> {
+    type Check<'a> = (&'a [&'a str], &'a str, fn(&Value) -> bool);
+    let groups: [Check; 3] = [
+        (texts, "text", Value::is_string),
+        (ints, "a whole number", Value::is_i64),
+        (bools, "true or false", Value::is_boolean),
+    ];
+    for (keys, want, ok) in groups {
+        if let Some(k) = keys
+            .iter()
+            .find(|k| v.get(**k).is_some_and(|x| !x.is_null() && !ok(x)))
+        {
+            return Err(format!(
+                "unreadable reply: the server sent {k} that is not {want}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn req(v: &Value, k: &str) -> Result<String, String> {
     opt(v, k).ok_or_else(|| format!("unreadable reply: no {k}"))
 }
@@ -178,7 +200,14 @@ pub struct PlanView {
 impl WorkItemView {
     /// `item_json` of the protocol (also the head of a `work_item.get` reply).
     pub fn from_json(v: &Value) -> Result<Self, String> {
-        // a key is matched whole, so a long one is refused, not cut
+        typed(
+            v,
+            &["id", "key", "kind", "state"],
+            &["revision", "retries_used"],
+            &[],
+        )?;
+        // a key is matched whole: a long or unprintable one is refused, not cut or cleaned
+        // (cleaning could make an edge the server never sent)
         for k in v
             .get("requires")
             .and_then(Value::as_array)
@@ -186,9 +215,9 @@ impl WorkItemView {
             .flatten()
             .chain(v.get("key"))
         {
-            if k.as_str().is_some_and(|k| k.len() > MAX_KEY) {
+            if k.as_str().is_some_and(|k| k.len() > MAX_KEY || t(k) != k) {
                 return Err(format!(
-                    "a key or requirement is longer than {MAX_KEY} bytes"
+                    "a key or requirement is longer than {MAX_KEY} bytes or has control characters"
                 ));
             }
         }
@@ -222,6 +251,7 @@ impl WorkItemView {
 impl PlanView {
     /// `Err` (fail closed) for a reply that is not a list, a bad or duplicate id or key, or too many items.
     pub fn from_json(v: &Value) -> Result<Self, String> {
+        typed(v, &[], &["plan_version"], &[])?;
         let raw = rows_in(v, "items")?;
         let edges: usize = raw
             .iter()
@@ -386,6 +416,12 @@ impl CriteriaView {
         let mut seen = vec![];
         let mut criteria = vec![];
         for x in rows_in(c, "criteria")? {
+            typed(
+                &x,
+                &["id", "text", "required_trust"],
+                &[],
+                &["mandatory", "manual"],
+            )?;
             let cid = id(&x, "id")?;
             if seen.contains(&cid) {
                 return Err(format!("the contract lists criterion {cid} twice"));
@@ -411,24 +447,26 @@ impl CriteriaView {
                 ),
             });
         }
+        let mut check_extra = vec![];
         let checks = match c.get("checks") {
             None | Some(Value::Null) => vec![],
             Some(_) => rows_in(c, "checks")?
                 .iter()
                 .map(|k| {
-                    k.is_object()
-                        .then(|| {
-                            format!(
-                                "{}: {}",
-                                opt(k, "id").unwrap_or_default(),
-                                opt(k, "command").unwrap_or_default()
-                            )
-                        })
-                        .ok_or_else(|| "unreadable reply: a check is not an object".to_string())
+                    typed(k, &["id", "command"], &[], &[])?;
+                    let (cid, cmd) = (req(k, "id")?, req(k, "command")?);
+                    check_extra.extend(extra(k, &["id", "command"]).into_iter().map(|mut r| {
+                        r.label = format!("check {cid}, {}", r.label);
+                        r
+                    }));
+                    Ok(format!("{cid}: {cmd}"))
                 })
-                .collect::<Result<_, _>>()?,
+                .collect::<Result<_, String>>()?,
         };
+        typed(c, &["goal"], &[], &[])?;
+        typed(v, &["hash"], &["version"], &["approved"])?;
         let mut rest = extra(c, &["version", "goal", "criteria", "checks"]);
+        rest.extend(check_extra);
         rest.extend(extra(v, &["version", "hash", "approved", "contract"]));
         Ok(Self {
             goal: opt(c, "goal").unwrap_or_default(),
@@ -500,12 +538,14 @@ impl SandboxView {
                 guarantee: unknown(),
                 extra: vec![],
             },
-            Some(o @ Value::Object(_)) => Self {
-                source: SandboxSource::ServerReported,
-                backend: opt(o, "backend").unwrap_or_else(unknown),
-                guarantee: opt(o, "guarantee").unwrap_or_else(unknown),
-                extra: extra(o, &["backend", "guarantee"]),
-            },
+            Some(o @ Value::Object(_)) if typed(o, &["backend", "guarantee"], &[], &[]).is_ok() => {
+                Self {
+                    source: SandboxSource::ServerReported,
+                    backend: opt(o, "backend").unwrap_or_else(unknown),
+                    guarantee: opt(o, "guarantee").unwrap_or_else(unknown),
+                    extra: extra(o, &["backend", "guarantee"]),
+                }
+            }
             Some(other) => Self {
                 source: SandboxSource::Unreadable,
                 backend: unknown(),
@@ -553,7 +593,24 @@ impl AttemptView {
     /// One attempt object; `work_item_id` is the item that holds it (the reply's own field when it has one).
     pub fn from_json(a: &Value, work_item_id: &str) -> Result<Self, String> {
         // the reply says which item holds the attempt; an attempt that names another is refused
-        if opt(a, "work_item_id").is_some_and(|w| w != t(work_item_id)) {
+        typed(
+            a,
+            &[
+                "id",
+                "session_id",
+                "state",
+                "task_status",
+                "subject_commit",
+                "retained_reason",
+                "started_at",
+                "ended_at",
+            ],
+            &["ordinal"],
+            &[],
+        )?;
+        if a.get("work_item_id")
+            .is_some_and(|w| !w.is_null() && w.as_str() != Some(work_item_id))
+        {
             return Err("the attempt names a work item other than the one that holds it".into());
         }
         let s = |k| opt(a, k).unwrap_or_default();
@@ -647,6 +704,21 @@ pub struct EvidenceView {
 
 impl EvidenceView {
     pub fn from_json(v: &Value) -> Result<Self, String> {
+        typed(
+            v,
+            &[
+                "id",
+                "work_item_id",
+                "trust_class",
+                "producer",
+                "subject_commit",
+                "check_id",
+                "result",
+                "captured_at",
+            ],
+            &["exit_code"],
+            &["event_backed"],
+        )?;
         let s = |k| opt(v, k).unwrap_or_default();
         Ok(Self {
             id: id(v, "id")?,
