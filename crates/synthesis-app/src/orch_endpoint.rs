@@ -31,6 +31,13 @@ pub const LOCK_FILE: &str = "orch.lock";
 const MAX_CLIENTS: usize = 16;
 /// Longest a connected client may take to attach.
 const ATTACH_WAIT: Duration = Duration::from_secs(5);
+/// How long an attached link may stay silent (or not take a reply) before it is dropped, so a hung
+/// client cannot hold a slot and block the idle exit. A surface connects again on its next call.
+pub const LINK_IDLE: Duration = Duration::from_secs(15 * 60);
+/// Longest a call waits for the owner thread to answer a job.
+const JOB_WAIT: Duration = Duration::from_secs(120);
+/// Jobs waiting for the owner thread; more are refused as busy.
+pub const JOB_QUEUE: usize = 8;
 
 /// A call the owner thread must run itself (it takes control-session locks).
 pub type Job = (Call, tokio::sync::oneshot::Sender<Result<Value, String>>);
@@ -38,7 +45,9 @@ pub type Job = (Call, tokio::sync::oneshot::Sender<Result<Value, String>>);
 pub struct Ctx {
     pub env: Env,
     pub home: PathBuf,
-    pub jobs: std::sync::mpsc::Sender<Job>,
+    pub jobs: std::sync::mpsc::SyncSender<Job>,
+    /// [`LINK_IDLE`] (tests use a short one).
+    pub link_idle: Duration,
     pub clients: AtomicUsize,
     /// Seconds since the unix epoch of the last call (idle exit, D20).
     pub last_call: AtomicU64,
@@ -116,7 +125,11 @@ async fn connection(mut c: Conn, key: &Key, ctx: &Ctx) -> std::io::Result<()> {
         .ok_or_else(|| bad("bad attach"))?;
     c.send(&json!({"msg": "hello", "version": VERSION, "protocol": PROTOCOL}))
         .await?;
-    while let Some(v) = c.recv().await? {
+    // a silent link ends (EOF-like) instead of holding its slot for ever
+    while let Ok(Some(v)) = tokio::time::timeout(ctx.link_idle, c.recv())
+        .await
+        .map_err(|_| bad("idle link"))?
+    {
         ctx.last_call.store(now_secs(), Ordering::SeqCst);
         // an unreadable request ends the link: its id cannot be trusted to answer
         let req: Request = serde_json::from_value(v)
@@ -131,7 +144,9 @@ async fn connection(mut c: Conn, key: &Key, ctx: &Ctx) -> std::io::Result<()> {
             error,
         })
         .map_err(std::io::Error::other)?;
-        c.send(&out).await?;
+        tokio::time::timeout(ctx.link_idle, c.send(&out))
+            .await
+            .map_err(|_| bad("the client does not read"))??;
     }
     Ok(())
 }
@@ -150,11 +165,19 @@ pub async fn dispatch(ctx: &Ctx, attached: Surface, call: Call) -> Result<Value,
         Call::OutcomeCreate { .. } | Call::OrchestratorEnable { .. }
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.jobs
-            .send((call, tx))
-            .map_err(|_| "the orchestrator is shutting down".to_string())?;
-        return rx
+        ctx.jobs.try_send((call, tx)).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => {
+                "the orchestrator is busy: try again in a moment".to_string()
+            }
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                "the orchestrator is shutting down".to_string()
+            }
+        })?;
+        return tokio::time::timeout(JOB_WAIT, rx)
             .await
+            .map_err(|_| {
+                "the orchestrator is busy: no answer yet (check before retrying)".to_string()
+            })?
             .map_err(|_| "the orchestrator is shutting down".to_string())?;
     }
     let (env, home) = (ctx.env.clone(), ctx.home.clone());
@@ -285,10 +308,17 @@ impl Transport for LocalSocket {
 pub fn spawn_detached(exe: &Path, home: &Path) -> std::io::Result<()> {
     let run = run_dir(home);
     synthesis_peers::net::prepare_run_dir(&run)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run.join("orch.log"))?;
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let log = o.open(run.join("orch.log"))?;
+    // a log an earlier version made with the umask's mode
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        run.join("orch.log"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
     let mut c = std::process::Command::new(exe);
     // the same home the client resolved, whatever the environment says
     c.args(["orchestrator", "--serve"])

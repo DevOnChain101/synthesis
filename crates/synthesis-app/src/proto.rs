@@ -262,6 +262,10 @@ pub enum Call {
         base_commit: String,
         contract: Box<synthesis_core::outcome::Contract>,
         surface: Surface,
+        /// A retry with the same key (after a lost reply) returns the draft the first call made;
+        /// the same key with another request is refused. Absent: no retry protection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     /// The explicit migration (backup, schema v5) once `synt.orchestrator.enabled` is true. Only the
     /// orchestrator process serves it.

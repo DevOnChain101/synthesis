@@ -258,15 +258,41 @@ fn a_second_orchestrator_for_the_same_home_does_not_start() {
     assert!(p.client(Surface::Cli).status().is_ok());
 }
 
+/// A repository with one commit; returns its root and the commit id.
+fn git_repo(at: &Path) -> (PathBuf, String) {
+    std::fs::create_dir_all(at).unwrap();
+    let at = std::fs::canonicalize(at).unwrap();
+    let g = |args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&at)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{args:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    g(&["init", "-q"]);
+    std::fs::write(at.join("a.txt"), "one\n").unwrap();
+    g(&["add", "."]);
+    g(&["commit", "-qm", "init"]);
+    let head = g(&["rev-parse", "HEAD"]);
+    (at, head)
+}
+
 #[test]
 fn create_approve_and_cancel_go_through_the_owner() {
     let p = start();
     let mut c = p.client(Surface::Cli);
     // not migrated yet: nothing can be created
-    let repo = p._tmp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let repo = std::fs::canonicalize(repo).unwrap();
-    let base = "a".repeat(40);
+    let (repo, base) = git_repo(&p._tmp.path().join("repo"));
     let repo_s = repo.to_string_lossy().to_string();
     assert!(c.create(&repo_s, &base, contract()).is_err());
     // refused inputs never reach the store
@@ -276,6 +302,9 @@ fn create_approve_and_cancel_go_through_the_owner() {
     assert!(e.contains("commit id"), "{e}");
     // the explicit migration, then the creation
     assert_eq!(c.enable().unwrap()["schema"], 5);
+    // a well-formed id that is no commit of this repository
+    let e = err_text(c.create(&repo_s, &"a".repeat(40), contract()));
+    assert!(e.contains("not in the repository"), "{e}");
     let made = c.create(&repo_s, &base, contract()).unwrap();
     let id = made["id"].as_str().unwrap().to_string();
     let hash = made["contract_hash"].as_str().unwrap().to_string();
@@ -288,6 +317,166 @@ fn create_approve_and_cancel_go_through_the_owner() {
     c.command("cancel", &id, None, "cx1").unwrap();
     wait_applied(&mut c, &id, "cx1");
     assert_eq!(c.outcome(&id).unwrap().state, "cancelled");
+}
+
+#[test]
+fn a_create_retried_with_the_same_key_returns_the_same_draft() {
+    let p = start();
+    let mut c = p.client(Surface::Cli);
+    let (repo, base) = git_repo(&p._tmp.path().join("repo"));
+    let repo_s = repo.to_string_lossy().to_string();
+    c.enable().unwrap();
+    let first = c
+        .create_with_key(&repo_s, &base, contract(), "retry-key-1")
+        .unwrap();
+    // the reply was lost: the retry (here on a new link) gets the same draft, not a second one
+    let mut c2 = p.client(Surface::Cli);
+    let again = c2
+        .create_with_key(&repo_s, &base, contract(), "retry-key-1")
+        .unwrap();
+    assert_eq!(first, again);
+    assert_eq!(c.outcomes(None).unwrap().len(), 1);
+    // the same key for another request is refused, and a bad key is too
+    let mut other = contract();
+    other.goal = "another goal".into();
+    let e = err_text(c.create_with_key(&repo_s, &base, other, "retry-key-1"));
+    assert!(e.contains("different request"), "{e}");
+    let e = err_text(c.create_with_key(&repo_s, &base, contract(), "k"));
+    assert!(e.contains("idempotency_key"), "{e}");
+    // another key is another outcome
+    c.create_with_key(&repo_s, &base, contract(), "retry-key-2")
+        .unwrap();
+    assert_eq!(c.outcomes(None).unwrap().len(), 2);
+}
+
+#[test]
+fn the_orchestrator_log_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = short_tmp();
+    let home = tmp.path().join("h");
+    // the first spawn fails (no such binary) but the log is made before it
+    let _ = ep::spawn_detached(Path::new("/no/such/synt"), &home);
+    let log = run_dir(&home).join("orch.log");
+    assert_eq!(
+        std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // one an earlier version left with the umask's mode is tightened
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = ep::spawn_detached(Path::new("/no/such/synt"), &home);
+    assert_eq!(
+        std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+/// A bare endpoint (no owner thread behind it) with its own limits.
+struct Bare {
+    _tmp: tempfile::TempDir,
+    rt: tokio::runtime::Runtime,
+    ctx: Arc<ep::Ctx>,
+    endpoint: String,
+    key: Key,
+    _rx: std::sync::mpsc::Receiver<ep::Job>,
+}
+
+fn bare(idle: Duration, queue: usize) -> Bare {
+    let tmp = short_tmp();
+    let home = std::fs::canonicalize(tmp.path()).unwrap().join("h");
+    settings(&home, true);
+    let key = ep::load_key(&home).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(queue);
+    let ctx = Arc::new(ep::Ctx {
+        env: env_of(&home),
+        home: home.clone(),
+        jobs: tx,
+        link_idle: idle,
+        clients: std::sync::atomic::AtomicUsize::new(0),
+        last_call: std::sync::atomic::AtomicU64::new(ep::now_secs()),
+    });
+    let listener = {
+        let _g = rt.enter();
+        synthesis_peers::net::Listener::bind(&run_dir(&home)).unwrap()
+    };
+    let endpoint = listener.endpoint();
+    rt.spawn(ep::serve(listener, key.clone(), ctx.clone()));
+    Bare {
+        _tmp: tmp,
+        rt,
+        ctx,
+        endpoint,
+        key,
+        _rx: rx,
+    }
+}
+
+impl Bare {
+    /// A link that proved the key and attached as the CLI.
+    async fn link(&self) -> synthesis_peers::net::Conn {
+        let mut c = connect(&self.endpoint).await.unwrap();
+        handshake_client(&mut c, &self.key).await.unwrap();
+        c.send(&json!({"t": "attach", "surface": "cli"}))
+            .await
+            .unwrap();
+        assert_eq!(c.recv().await.unwrap().unwrap()["msg"], "hello");
+        c
+    }
+}
+
+#[test]
+fn a_hung_link_is_dropped_and_frees_its_slot() {
+    let b = bare(Duration::from_millis(300), 4);
+    b.rt.block_on(async {
+        let mut c = b.link().await;
+        assert_eq!(b.ctx.clients.load(Ordering::SeqCst), 1);
+        // it says nothing: the endpoint ends the link (EOF or an error), it does not wait for ever
+        let ended = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
+        assert!(matches!(ended, Ok(Ok(None) | Err(_))), "{ended:?}");
+        let until = Instant::now() + Duration::from_secs(5);
+        while b.ctx.clients.load(Ordering::SeqCst) != 0 {
+            assert!(Instant::now() < until, "the slot was not freed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+}
+
+#[test]
+fn a_full_job_queue_is_refused_as_busy_not_queued_for_ever() {
+    let b = bare(Duration::from_secs(60), 1);
+    b.rt.block_on(async {
+        let enable = |id| {
+            serde_json::to_value(synthesis_app::proto::Request {
+                id,
+                call: Call::OrchestratorEnable {
+                    surface: Surface::Cli,
+                },
+            })
+            .unwrap()
+        };
+        // nobody drains the queue: the first call takes its only place and waits
+        let mut first = b.link().await;
+        first.send(&enable(1)).await.unwrap();
+        let mut second = b.link().await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            second.send(&enable(2)).await.unwrap();
+            let r = tokio::time::timeout(Duration::from_secs(5), second.recv())
+                .await
+                .expect("the busy answer comes at once")
+                .unwrap()
+                .unwrap();
+            if r["error"].as_str().is_some_and(|e| e.contains("busy")) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never refused as busy: {r}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
 }
 
 #[test]
