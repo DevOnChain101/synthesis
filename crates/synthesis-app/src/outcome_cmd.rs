@@ -141,15 +141,24 @@ pub struct Cmd {
 }
 
 impl OutcomeCmd {
-    /// Commands that make attempts run (writable, sandboxed): refused on native Windows.
-    fn runs_attempts(&self) -> bool {
-        matches!(self, Self::Create { .. } | Self::Start(_) | Self::Resume(_))
+    /// Everything that changes state or reaches the owner's command queue: refused on native
+    /// Windows (only the reads stay).
+    fn mutates(&self) -> bool {
+        !matches!(
+            self,
+            Self::Contract { .. }
+                | Self::List
+                | Self::Status { .. }
+                | Self::Decisions { .. }
+                | Self::Inspect { .. }
+                | Self::Events { .. }
+        )
     }
 }
 
 /// The refusal a command meets on this platform, if any.
 pub fn platform_refusal(native_windows: bool, cmd: &OutcomeCmd) -> Option<&'static str> {
-    (native_windows && cmd.runs_attempts()).then_some(WSL2_REFUSAL)
+    (native_windows && cmd.mutates()).then_some(WSL2_REFUSAL)
 }
 
 pub fn off_text() -> String {
@@ -209,6 +218,11 @@ fn text(v: &Value, k: &str) -> String {
 }
 
 fn read_json<T: DeserializeOwned>(path: &std::path::Path, what: &str) -> Result<T, String> {
+    // a plain file only: no symlink, no FIFO or device that would block or surprise
+    let plain = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file());
+    if !plain {
+        return Err(format!("{what}: {} is not a regular file", path.display()));
+    }
     let f = std::fs::File::open(path).map_err(|x| format!("{what}: {}: {x}", path.display()))?;
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut std::io::Read::take(f, MAX_FILE + 1), &mut buf)

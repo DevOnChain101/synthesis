@@ -134,6 +134,14 @@ pub struct DecisionCard {
     pub alternatives: Vec<Alternative>,
 }
 
+/// What an answer id may be: plain ASCII, so it prints as it is sent.
+fn valid_alt_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
 fn empty(v: &Value) -> bool {
     match v {
         Value::Null => true,
@@ -239,20 +247,24 @@ impl DecisionCard {
                 "the decision brief carries a {k:?} field: refused, the choice is the person's"
             ));
         }
-        let alternatives: Vec<Alternative> = alts
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| {
-                        let id = x.get("id")?.as_str()?;
-                        let label = x.get("label").or_else(|| x.get("name"));
-                        Some(Alternative {
-                            id: id.to_string(),
-                            label: clean(label.and_then(Value::as_str).unwrap_or(id)),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // the id is printed and sent back as typed, so it is never cleaned: a bad one refuses the card
+        let mut alternatives: Vec<Alternative> = vec![];
+        for x in alts.into_iter().flatten() {
+            let Some(id) = x.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !valid_alt_id(id) {
+                return Err(format!(
+                    "the brief has an alternative id that is not 1 to 64 of A-Z a-z 0-9 _ . -: {}",
+                    clean(id)
+                ));
+            }
+            let label = x.get("label").or_else(|| x.get("name"));
+            alternatives.push(Alternative {
+                id: id.to_string(),
+                label: clean(label.and_then(Value::as_str).unwrap_or(id)),
+            });
+        }
         // an alternative named like a fixed answer would let the brief stand in for it
         if let Some(a) = alternatives
             .iter()
@@ -440,6 +452,27 @@ mod tests {
         let mut b = full_brief();
         b["alternatives"][0]["id"] = json!("reject");
         assert!(DecisionCard::from_json(&decision(b)).is_err());
+    }
+
+    #[test]
+    fn an_alternative_id_that_is_not_plain_is_refused_not_cleaned() {
+        let long = "a".repeat(65);
+        for bad in [
+            "a\u{1b}[31m",
+            "\u{1b}]52;c;AAAA\u{7}",
+            "a\nb",
+            "a\u{202e}b",
+            "a b",
+            "",
+            long.as_str(),
+        ] {
+            let mut b = full_brief();
+            b["alternatives"][0]["id"] = json!(bad);
+            assert!(DecisionCard::from_json(&decision(b)).is_err(), "{bad:?}");
+        }
+        let mut b = full_brief();
+        b["alternatives"][0]["id"] = json!("opt-1.a_B");
+        assert!(DecisionCard::from_json(&decision(b)).is_ok());
     }
 
     #[test]

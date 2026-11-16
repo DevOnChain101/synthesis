@@ -438,11 +438,32 @@ fn status_json_schema_is_stable() {
 
 #[test]
 fn control_text_from_the_server_is_made_printable() {
+    let dirty = "a\u{1b}[31mred\u{1b}]52;c;AAAA\u{7}";
     let mut o = outcome();
-    o["goal"] = json!("a\u{1b}[31mred");
+    o["goal"] = json!(dirty);
     let (mut c, _) = rig(vec![("outcome.list", json!({"outcomes": [o]}))]);
     let (_, out) = run(&mut c, OutcomeCmd::List, false, "", false);
     assert!(!out.contains('\u{1b}'), "{out:?}");
+    // every field of a decision card, in every command that prints one
+    let mut d = decision("pending");
+    d["kind"] = json!(dirty);
+    d["expires_at"] = json!(dirty);
+    d["brief"]["why"] = json!(dirty);
+    d["brief"]["alternatives"][0]["label"] = json!(dirty);
+    d["brief"]["alternatives"][0]["tradeoffs"] = json!(dirty);
+    d["brief"]["future_field"] = json!({dirty: dirty});
+    let (mut c, _) = rig(vec![("decision.list", json!({"decisions": [d]}))]);
+    for cmd in [
+        OutcomeCmd::Decisions {
+            id: "o1".into(),
+            decision: None,
+        },
+        resolve(None, None, None),
+        resolve(Some("REST"), Some(1), Some("x".into())),
+    ] {
+        let (_, out) = run(&mut c, cmd, false, "\n", true);
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+    }
 }
 
 #[test]
