@@ -5,7 +5,7 @@ onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" h
 
 ## 1. Goals and non-goals
 
-A native GPUI app (not Tauri, no webview) for macOS, Linux and Windows that is the desktop version
+A native GPUI app (no webview) for macOS, Linux and Windows that is the desktop version
 of the TUI design, in this repo, running the Rust engine in process.
 
 - One interface, plus a placeholder and Settings: **TUI** (the terminal-style tab, drawn natively from engine
@@ -14,8 +14,8 @@ of the TUI design, in this repo, running the Rust engine in process.
   palette (`docs/cli-palette.md`), not its blue/green. The first Super Agent view (`agent_view/`, built on `#view2`) was
   removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
   the TUI view's centre panel.
-- Non-goals (owner decisions): no launchpad/landing/Ask page; no embedded terminal emulator and no
-  PTY pane (the TUI view is panels fed by backend events, not alacritty/xterm/vt100); no desktop-control
+- Non-goals (owner decisions): no launchpad/landing/Ask page; the TUI view is panels fed by backend events
+  (an embedded terminal and a live browser are designed in `terminal-browser.md`); no desktop-control
   feature; no keychain or credential storage (ADR-011: API keys via `SYNT_*` env, `{env:}`/`{file:}`).
 
 ## 2. Architecture
@@ -97,7 +97,7 @@ of the TUI design, in this repo, running the Rust engine in process.
 Wired: the input provider (plan and question dialogs, with "Other" free text), stored-session resume and the
 model/resume pickers, every built-in slash command, image paste, and peer polling (`tui_view/driver.rs` `tick`
 calls `Engine::peer_rows` every fifth second into `ViewState::set_peers`). Linux/Windows run in CI but no
-maintainer has used them on a real machine (no ConPTY need any more).
+maintainer has used them on a real machine (ConPTY is needed again for the planned embedded terminal, `terminal-browser.md`).
 
 Chat rows follow the CLI's quiet-chat rules (`tui_view/chat.rs` `visible`, reducer in
 `synthesis-view/src/convo.rs`, wording from `synthesis-cli-ui` `chat.rs`). Always shown: budget exceeded, failed
@@ -144,8 +144,8 @@ topology modes A, B and T), only the colours are the platinum tokens. Panels: to
 Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
 files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
 bar; right Synthesis Topology, Mission (only with a task list) + Context, Usage & Metrics; key hint footer. Shared chrome
-(`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header); the diff, terminal (command history, read-only, no
-PTY) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
+(`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header); the diff, terminal (today: command history, read-only, no PTY; the embedded
+terminal is designed in `terminal-browser.md`) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
 
 `synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
 `activity` = Recent Activity (prompts and agent activity merged), `tokens` = Context, `topology` = Synthesis
@@ -210,7 +210,7 @@ FILE.png`, `--focus chat|input|panel|none` (a bare `--focus` is still the quiet-
 Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
 `synt.tui.motion`) only when it does not fit.
 
-Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the Tauri app's chrome
+Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the design's chrome (`index.html` `#chrome`)
 (`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
 the TUI and Super Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
 Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
@@ -226,9 +226,10 @@ shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scrol
 - diff: the session's changed files (`AgentPanes.files`) with `+N -N`; the newest opens by itself, a click expands a
   file's syntax-coloured diff; `/diff FILE` opens that file.
 - terminal: the command history (`AgentPanes.commands`, from `process.*` and Bash tool events): command, exit code,
-  duration, output tail, running state. Read-only, not a terminal.
+  duration, output tail, running state. Read-only, not a terminal today; the embedded terminal is designed in `terminal-browser.md`.
 - browser: the page, the selected saved screenshot (`browser.frame`; the latest by default, history rows select
   another; a PNG inside the session's artifact folder only, <= 8 MiB) and the browser calls with state and duration.
+  Saved screenshots only today; live frames are designed in `terminal-browser.md`.
 - file explorer (user scope, no trust needed: the agent never reads it): `project::scan` (git's hardened file list and
   status) in a trusted folder, `project::scan_plain` (a plain directory walk, no git, no links, no `.git`) in an untrusted
   one, so nothing a repository's config names can run; the Trust dialog is `/trust ask` (a session trust is kept for
@@ -241,7 +242,7 @@ shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scrol
 Done in `synthesis-view`: workspaces and sessions, running/peers, usage, status, topology, activity,
 tools and skills, conversation. Not done, with where the data would come from:
 
-- Browser screenshots: done as history, not a live stream. `browser.frame` (path, origin, w, h, bytes) feeds
+- Browser screenshots: done as history, not a live stream (live frames are planned, `terminal-browser.md`). `browser.frame` (path, origin, w, h, bytes) feeds
   `AgentPanes.frames` and `.screenshot`; the file is opened only through `viewable_screenshot`.
   `Event::BrowserLoginRequired` is already in the stream and can be shown. Page title changes are not an event.
 - Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
@@ -300,7 +301,7 @@ tools and skills, conversation. Not done, with where the data would come from:
   fifth second (`driver.rs` `tick`, `Engine::peer_rows`).
 - Uncommitted `+N -N` needs the host's trust decision per folder (`LoadOpts::trusted`) and runs git
   with a 5 s limit per call, so load off the UI thread.
-- Interactive PTY: not wanted (owner decision).
+- Interactive PTY: reversed 2026-11-16 (was: not wanted): native embedded terminal, see `terminal-browser.md`.
 
 ### Super Agent view (removed)
 

@@ -1,6 +1,6 @@
 //! The window: a title bar with the view icons (TUI, Super Agent, Settings) over the content of the active view.
 //!
-//! The title bar follows the Tauri app's chrome (`synthesis-cli-ui` `#chrome`): a 30px row above the content,
+//! The title bar follows the design's chrome (`index.html` `#chrome`): a 30px row above the content,
 //! the icon group (`.cb` 26x22, radius 6, hover and pressed backgrounds) at the right, the gear after it. macOS
 //! keeps the native traffic lights over a transparent title bar (the bar reserves 78px for them); Windows and
 //! Linux draw their own minimise / maximise / close buttons (`WindowControlArea`) and the bar is the drag
