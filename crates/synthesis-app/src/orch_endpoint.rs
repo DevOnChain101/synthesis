@@ -310,15 +310,15 @@ pub fn spawn_detached(exe: &Path, home: &Path) -> std::io::Result<()> {
     synthesis_peers::net::prepare_run_dir(&run)?;
     let mut o = std::fs::OpenOptions::new();
     o.create(true).append(true);
+    // never through a symlink planted at the log's name
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let log = o.open(run.join("orch.log"))?;
-    // a log an earlier version made with the umask's mode
     #[cfg(unix)]
-    std::fs::set_permissions(
-        run.join("orch.log"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )?;
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW);
+    let log = o.open(run.join("orch.log"))?;
+    // a log an earlier version made with the umask's mode: on the handle, not on the name
+    #[cfg(unix)]
+    log.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     let mut c = std::process::Command::new(exe);
     // the same home the client resolved, whatever the environment says
     c.args(["orchestrator", "--serve"])

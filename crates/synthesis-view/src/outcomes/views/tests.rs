@@ -235,6 +235,39 @@ fn budget_is_as_given_and_remaining_is_never_computed() {
 }
 
 #[test]
+fn the_diff_tab_shows_the_servers_files_printable_and_says_what_was_withheld() {
+    let reply = json!({"attempt": "at_1", "base_commit": "b", "commit": "c", "total_files": 5, "truncated": true,
+        "files": [
+          {"path": "src/a.rs", "status": "M", "binary": false, "secret": false, "added": 1, "removed": 1,
+           "patch": "@@ -1 +1 @@\n-old\n+new\u{1b}[31m\n", "patch_truncated": true},
+          {"path": "logo.png", "status": "A", "binary": true, "secret": false, "added": null, "removed": null, "patch": null, "patch_truncated": false},
+          {"path": ".env", "status": "A", "binary": false, "secret": true, "added": null, "removed": null, "patch": null, "patch_truncated": false}]});
+    let d = InspectorContent::diff_from(&reply).unwrap();
+    assert_eq!(d.tab(), InspectorTab::Diff);
+    let s = d.render_text();
+    assert!(s.contains("+new") && !s.contains('\u{1b}'), "{s}");
+    assert!(
+        s.contains("5 files (list cut)") && s.contains("[patch cut by the server]"),
+        "{s}"
+    );
+    assert!(
+        s.contains("logo.png +unknown -unknown (binary)")
+            && s.contains(".env +unknown -unknown (secret-shaped path: name only)"),
+        "{s}"
+    );
+    assert!(InspectorContent::diff_from(&json!({"files": [{"status": "M"}]})).is_err());
+    assert!(
+        InspectorContent::diff_from(&json!({"files": [{"path": "a", "binary": "yes"}]})).is_err()
+    );
+    assert!(InspectorContent::diff_from(&json!({})).is_err());
+    let big = json!({"files": [{"path": "a", "patch": "x".repeat(MAX_PATCH * 2)}]});
+    let InspectorContent::Diff(t) = InspectorContent::diff_from(&big).unwrap() else {
+        panic!()
+    };
+    assert_eq!(t.files[0].patch.as_ref().unwrap().len(), MAX_PATCH);
+}
+
+#[test]
 fn inspector_tabs_carry_content_or_an_explicit_reason() {
     let outcome = json!({"id": "o1", "goal": "g", "state": "running", "revision": 4,
         "needs_you": {"decisions_pending": 0, "blocked": false, "verified_awaiting_ack": false}});
@@ -251,7 +284,8 @@ fn inspector_tabs_carry_content_or_an_explicit_reason() {
     let d = InspectorContent::diff();
     assert_eq!(d.tab(), InspectorTab::Diff);
     assert!(
-        d.render_text().contains("not available") && d.render_text().contains("no diff method")
+        d.render_text().contains("not available")
+            && d.render_text().contains("no candidate commit")
     );
     // a failed read is a reason, never an empty page
     let u = InspectorContent::or_unavailable(

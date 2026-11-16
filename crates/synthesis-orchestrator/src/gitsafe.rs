@@ -515,6 +515,141 @@ pub fn inspect_change(
     Ok(r)
 }
 
+/// Most files a [`commit_diff`] lists, most patch bytes of one file, and most patch bytes in all.
+pub const DIFF_MAX_FILES: usize = 200;
+pub const DIFF_MAX_FILE_PATCH: usize = 16 * 1024;
+pub const DIFF_MAX_PATCH: usize = 128 * 1024;
+
+/// One file of a [`DiffReport`], safe to show: control characters are gone from the path and the
+/// patch, a binary file has counts only, a secret-shaped path has its name only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub path: String,
+    pub status: char,
+    pub binary: bool,
+    pub secret: bool,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+    pub patch: Option<String>,
+    pub patch_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffReport {
+    pub files: Vec<DiffFile>,
+    /// Files the commit changed (more than `files.len()` when the list was cut).
+    pub total_files: usize,
+}
+
+/// Control characters (ESC, CR, NUL, ...) become U+FFFD; `\n` and `\t` stay when `keep_ws`.
+fn printable(s: &str, keep_ws: bool) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !(keep_ws && matches!(c, '\n' | '\t')) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `numstat -z` rows (`added\tremoved\tpath\0`), in path order; a binary file counts `-`.
+fn parse_numstat(out: &[u8]) -> Vec<(Option<u64>, Option<u64>)> {
+    out.split(|b| *b == 0)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            let t = String::from_utf8_lossy(r);
+            let mut f = t.splitn(3, '\t');
+            (
+                f.next().and_then(|n| n.parse().ok()),
+                f.next().and_then(|n| n.parse().ok()),
+            )
+        })
+        .collect()
+}
+
+/// The diff of `commit` against `base`, read for display only and bounded: at most
+/// [`DIFF_MAX_FILES`] files, [`DIFF_MAX_FILE_PATCH`] patch bytes per file and [`DIFF_MAX_PATCH`] in
+/// all. Same hardened git as the verification scans (scratch repository, no config, hooks,
+/// attributes, filters, external diff or textconv).
+pub fn commit_diff(
+    repo: &Path,
+    scratch_dir: PathBuf,
+    base: &str,
+    commit: &str,
+    stop: &AtomicBool,
+) -> Result<DiffReport, VerifyError> {
+    let scratch = Scratch::new(repo, scratch_dir, stop)?;
+    let ents = entries(&scratch, base, commit, stop)?;
+    let counts = parse_numstat(&scratch.git(
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            commit,
+        ],
+        stop,
+    )?);
+    let mut report = DiffReport {
+        total_files: ents.len(),
+        ..DiffReport::default()
+    };
+    let mut budget = DIFF_MAX_PATCH;
+    for (i, e) in ents.iter().take(DIFF_MAX_FILES).enumerate() {
+        let (added, removed) = counts.get(i).copied().unwrap_or((None, None));
+        let secret = synthesis_core::secrets::is_secret_shaped(Path::new(&e.path));
+        let binary = !secret && added.is_none() && removed.is_none();
+        let mut f = DiffFile {
+            path: printable(&e.path, false),
+            status: e.status,
+            binary,
+            secret,
+            added: if secret { None } else { added },
+            removed: if secret { None } else { removed },
+            patch: None,
+            patch_truncated: false,
+        };
+        if !secret && !binary && budget > 0 {
+            let out = scratch.git(
+                &[
+                    "diff",
+                    "-a",
+                    "-U3",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    base,
+                    commit,
+                    "--",
+                    &e.path,
+                ],
+                stop,
+            )?;
+            let text = String::from_utf8_lossy(&out);
+            let cap = DIFF_MAX_FILE_PATCH.min(budget);
+            let mut end = text.len().min(cap);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            f.patch_truncated = end < text.len();
+            budget -= end;
+            f.patch = Some(printable(&text[..end], true));
+        } else if !secret && !binary {
+            f.patch_truncated = true;
+        }
+        report.files.push(f);
+    }
+    Ok(report)
+}
+
 /// Where a throwaway scratch repository for `inspect_change` can live.
 pub fn temp_scratch() -> PathBuf {
     std::env::temp_dir().join(format!("synt-scratch-{}", uuid::Uuid::new_v4()))

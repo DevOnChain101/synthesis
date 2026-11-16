@@ -305,6 +305,17 @@ pub enum Call {
         outcome: String,
         id: String,
     },
+    /// What the outcome's attempts used against its contract (read-only; ADR-021 notes).
+    #[serde(rename = "outcome.budget")]
+    OutcomeBudget {
+        id: String,
+    },
+    /// The candidate commit of an attempt against the outcome's base commit (read-only, capped).
+    #[serde(rename = "attempt.diff")]
+    AttemptDiff {
+        outcome: String,
+        id: String,
+    },
     #[serde(rename = "decision.list")]
     DecisionList {
         outcome: String,
@@ -392,6 +403,8 @@ impl Call {
                 | Call::PlanGet { .. }
                 | Call::WorkItemGet { .. }
                 | Call::AttemptInspect { .. }
+                | Call::OutcomeBudget { .. }
+                | Call::AttemptDiff { .. }
                 | Call::DecisionList { .. }
                 | Call::DecisionGet { .. }
                 | Call::DecisionResolve { .. }
@@ -744,6 +757,8 @@ mod tests {
             r#"{"id":1,"method":"decision.list","params":{"outcome":"o"}}"#,
             r#"{"id":1,"method":"decision.get","params":{"outcome":"o","id":"d"}}"#,
             r#"{"id":1,"method":"evidence.get","params":{"outcome":"o"}}"#,
+            r#"{"id":1,"method":"outcome.budget","params":{"id":"o"}}"#,
+            r#"{"id":1,"method":"attempt.diff","params":{"outcome":"o","id":"a"}}"#,
             r#"{"id":1,"method":"command.status","params":{"outcome":"o","idempotency_key":"k"}}"#,
             r#"{"id":1,"method":"events.subscribe","params":{"outcome":"o","after_event_id":7}}"#,
             r#"{"id":1,"method":"outcome.pause","params":{"id":"o","idempotency_key":"k","surface":"cli"}}"#,

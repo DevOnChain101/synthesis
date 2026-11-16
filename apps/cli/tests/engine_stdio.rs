@@ -1810,6 +1810,14 @@ fn outcome_methods_are_off_by_default_and_status_still_answers() {
     for (m, p) in [
         ("outcome.list", json!({})),
         (
+            "outcome.budget",
+            json!({"id": "11111111-1111-4111-8111-111111111111"}),
+        ),
+        (
+            "attempt.diff",
+            json!({"outcome": "11111111-1111-4111-8111-111111111111", "id": "at_1"}),
+        ),
+        (
             "decision.list",
             json!({"outcome": "11111111-1111-4111-8111-111111111111"}),
         ),
