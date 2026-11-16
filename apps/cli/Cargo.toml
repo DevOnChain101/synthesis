@@ -60,4 +60,5 @@ synthesis-session = { path = "../../crates/synthesis-session" }
 synthesis-workspace = { path = "../../crates/synthesis-workspace" }
 synthesis-core = { path = "../../crates/synthesis-core" }
 synthesis-config = { path = "../../crates/synthesis-config" }
+synthesis-view = { path = "../../crates/synthesis-view" }
 time = "0.3"

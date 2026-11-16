@@ -17,7 +17,7 @@ mod info;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use synthesis_app::{CwdArg, login, mcp, memcmd, rewind, run, sessions};
+use synthesis_app::{CwdArg, login, mcp, memcmd, outcome_cmd, rewind, run, sessions};
 use synthesis_config::Env;
 
 #[derive(Parser)]
@@ -75,6 +75,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BrowserCmd,
     },
+    /// Outcome orchestration (needs `synt.orchestrator.enabled`): create, approve, start, status,
+    /// decisions, resolve, pause, resume, cancel, inspect.
+    Outcome(outcome_cmd::OutcomeArgs),
     /// Put the files a run changed back to their state before its first write (dry run unless --apply).
     Rewind(rewind::RewindArgs),
     /// Ask the process running SESSION to stop (graceful cancel, then killed after 15 s).
@@ -168,6 +171,7 @@ fn main() -> ExitCode {
         Some(Cmd::Mcp { cmd }) => mcp::run_cmd(&env, cmd),
         Some(Cmd::Import { cmd }) => import::run_cmd(&env, cmd),
         Some(Cmd::Memory { cmd }) => memcmd::run_cmd(&env, cmd),
+        Some(Cmd::Outcome(a)) => outcome_cmd::run_cmd(&env, a),
         Some(Cmd::Rewind(a)) => rewind::run_cmd(&env, a),
         Some(Cmd::Stop(a)) => sessions::stop_cmd(&env, a),
         Some(Cmd::Sessions { cmd }) => sessions::run_cmd(&env, cmd),
