@@ -190,7 +190,7 @@ impl Engine {
         let h = self.line().unwrap();
         assert_eq!(h["msg"], "hello");
         assert_eq!(h["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(h["protocol"], 3);
+        assert_eq!(h["protocol"], 4);
     }
 
     fn start(&mut self) -> Value {
@@ -1795,6 +1795,35 @@ fn the_new_methods_need_a_session_and_survive_hostile_input() {
         let r = e.ask(m, p.clone());
         assert!(r["error"].is_string(), "{m} {p}: {r}");
     }
-    // a protocol 2 client never gets this far: the engine says protocol 3 and the client compares exactly
+    // a protocol 2 client never gets this far: the engine says protocol 4 and the client compares exactly
     assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
+}
+
+#[test]
+fn outcome_methods_are_off_by_default_and_status_still_answers() {
+    let (mut e, _) = used_engine();
+    let st = e.ok("orchestrator.status", Value::Null);
+    assert_eq!(
+        (st["enabled"].clone(), st["protocol"].clone()),
+        (json!(false), json!(4))
+    );
+    for (m, p) in [
+        ("outcome.list", json!({})),
+        (
+            "decision.list",
+            json!({"outcome": "11111111-1111-4111-8111-111111111111"}),
+        ),
+        (
+            "decision.resolve",
+            json!({"outcome": "11111111-1111-4111-8111-111111111111", "id": "11111111-1111-4111-8111-111111111111",
+                   "expected_revision": 2, "choice": "x", "brief_sha256": "a".repeat(64),
+                   "idempotency_key": "k", "surface": "cli"}),
+        ),
+    ] {
+        let r = e.ask(m, p);
+        assert!(
+            r["error"].as_str().is_some_and(|t| t.contains("off")),
+            "{m}: {r}"
+        );
+    }
 }

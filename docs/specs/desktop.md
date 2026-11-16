@@ -456,7 +456,7 @@ Hidden subcommand, not a public interface: it exists so the desktop app can driv
 **Transport.** stdin/stdout, one JSON object per line, UTF-8, `\n` (a `\r` before it is dropped). stdout carries protocol lines only; diagnostics go to stderr, printable and short. A line over 8 MiB is a broken stream: the engine ends the session, the client kills the child. stdin EOF ends the session like `close` (hooks, stored usage, MCP, worktree; the engine kills its own process groups as in every session).
 
 **Engine to client.**
-- First line `{"msg":"hello","version":"<synt version>","protocol":3}`. The match is exact on both fields; the client refuses and kills the engine on any difference (no negotiation: install the matching version). `pgid` is not sent yet.
+- First line `{"msg":"hello","version":"<synt version>","protocol":4}`. The match is exact on both fields (protocol 4 adds the outcome methods of ADR-021, all refused unless `synt.orchestrator.enabled`; nothing else changed); the client refuses and kills the engine on any difference (no negotiation: install the matching version). `pgid` is not sent yet.
 - Event lines: the ordinary `Envelope` of events.md (`v`, `seq`, `session_id`, ..., `type`, `payload`); they have no `msg` key.
 - `{"msg":"result","id":N,"ok":{...}}` or `{"msg":"result","id":N,"error":"text"}`, the answer to request N.
 - `{"msg":"ask.approval","id","agent_id","tool","input","dialog","prompt","reason","origin","suggestions":[...]}`: a permission ask. `suggestions` are `{"kind":"rules","behavior","rules":[{"tool","content"}]}` or `{"kind":"mode","mode"}`; bypassPermissions is never offered or accepted.

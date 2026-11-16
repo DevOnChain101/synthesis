@@ -4,6 +4,9 @@
 #[cfg(all(feature = "test-provider", not(debug_assertions)))]
 compile_error!("feature `test-provider` must never be enabled in release builds");
 
+#[cfg(all(feature = "inproc-test", not(debug_assertions)))]
+compile_error!("feature `inproc-test` must never be enabled in release builds");
+
 /// `eprintln!` that ignores a dead stderr (the reader closed the pipe) instead of panicking;
 /// shadows std's macro in this crate and, through `#[macro_use]`, in `synt`.
 #[macro_export]
@@ -50,7 +53,9 @@ pub mod memory;
 mod memtools;
 pub mod models;
 pub mod notify;
+pub mod outcome_client;
 pub mod outcome_policy;
+pub mod outcome_service;
 pub mod peers;
 pub mod proto;
 pub mod provider_cfg;

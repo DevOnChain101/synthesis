@@ -143,7 +143,7 @@ User and managed hooks still run on the host, outside the sandbox, in an attempt
 - **Use.** When a new attempt of the item starts, `ProcessHost` consumes every usable grant of the item (once, for that attempt's id and fence; refused when stale, revoked, expired, used, or for another item), and the rules become `--allow` flags of that attempt only (`Profile::with_granted_rules` re-checks shape and deny coverage). A running attempt keeps what it started with: nothing changes a live worker.
 - **The driver** (`DecisionDriver`, on every scheduler tick via `Decisions`): `pending` past expiry -> `expired` (HOLD: the item stays `waiting_decision`, nothing is approved); `pending` with a moved binding -> `invalidated`; an unused grant behind a moved binding is revoked; an approved `grant_once` becomes a grant; an approved alternative of an `ambiguity`/`blocked` decision makes the item ready, and the choice reaches the next prompt as quoted DATA (`decided_choices`, cleaned). Refusals are audited once per process.
 - **Audit.** Every grant creation, use, revocation, expiry, invalidation and refusal writes a chained `policy.decision` event (plus `grant.created|consumed|revoked`); denials are never suppressed. The orchestrator-side `OrchGateway` (a pure authorize table for orchestrator effects) is still not built: PR-10's authorizations are these store operations.
-- **Residuals, stated.** `request_evidence` / `edit_scope` answers leave the decision in `needs_more_info` (re-briefing is PR-11/13); who runs the driver for a real outcome is the orchestrator process (PR-12); the person's identity (`approver`, `from_surface`) is still self-asserted; an unused grant's `consumed_at`/`revoked_at` are protected by triggers, not a MAC.
+- **Residuals, stated.** `request_evidence` / `edit_scope` answers leave the decision in `needs_more_info` (re-briefing is not built; it needs the orchestrator process, PR-12); who runs the driver for a real outcome is the orchestrator process (PR-12); the person's identity (`approver`, `from_surface`) is still self-asserted; an unused grant's `consumed_at`/`revoked_at` are protected by triggers, not a MAC.
 
 ### PR-10 review fixes
 
@@ -153,3 +153,8 @@ User and managed hooks still run on the host, outside the sandbox, in an attempt
 - **Crash window.** If the owner dies between creating a grant and making the item ready, the next tick moves an item that waits with a usable, unused grant to `ready`.
 - **The label is derived.** The store rewrites the `grant_once` alternative's label from the stored `grant_rules` ("allow exactly ... in one new attempt") before the brief is hashed, and refuses a decision that offers `grant_once` without exact grantable rules: the person reads what the grant is.
 
+
+## Implementation notes (PR-11: the commands that reach the decision)
+
+- `decision.resolve` reaches `resolve_decision` only through a queued command applied by the owner (`apply_queued`); the approver is derived from the command's surface, never from params. The race table of section 5 holds at protocol level and is tested: two surfaces (one `applied`, one `already_resolved`, one approval row), resolve vs invalidation (`stale`), resolve vs expiry (`stale`, the decision is `expired`, the item stays `waiting_decision`), the same key twice (one effect, stored result).
+- Still self-asserted: `from_surface` (PR-12 authenticates the endpoint). Still open: `request_evidence` and `edit_scope` leave the decision `needs_more_info` with no re-brief.
