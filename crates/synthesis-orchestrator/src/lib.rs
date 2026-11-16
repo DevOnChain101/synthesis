@@ -34,13 +34,14 @@ pub use gitsafe::{
     temp_scratch,
 };
 pub use grants::{
-    DecisionDriver, GRANT_TTL_HOURS, current_binding_for, decided_choices, decision_binding,
+    DecisionDriver, GRANT_TTL_HOURS, answered_waiting, current_binding_for, decided_choices,
+    decision_binding,
 };
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
-pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError};
-pub use recover::{RecoveryReport, recover_attempts};
+pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};
+pub use recover::{RecoveryReport, recover_attempts, recover_item};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};
 pub use runner::{
     CancelFlag, RunError, Runner, Running, Settled, Spawn, SyntSpawn, WorkerEnd, map_exit,

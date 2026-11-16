@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use synthesis_core::outcome::*;
 use synthesis_orchestrator::*;
-use synthesis_session::OsProbe;
 use synthesis_session::outcome::*;
+use synthesis_session::{OsProbe, ProcessProbe};
 use time::OffsetDateTime;
 
 struct Script(String);
@@ -1914,4 +1914,117 @@ fn a_grant_the_profile_refuses_is_not_burned_by_the_failed_start() {
     assert_eq!(again.len(), 1, "{again:?}");
     assert_eq!(again[0].id, g.id);
     assert!(again[0].consumed_at.is_none());
+}
+
+/// An attempt a dead owner left running with a live worker, as a new owner finds it: item `one`
+/// `running`, attempt `running` with `reserved` usd, a real process with its recorded start token.
+fn adopted_live(
+    r: &Rig,
+    w: &mut OutcomeWriter,
+    items: &[(String, WorkItemId)],
+    reserved: f64,
+) -> (Child, AttemptRecord) {
+    use std::os::unix::process::CommandExt;
+    let one = items.iter().find(|(n, _)| n == "one").unwrap().1.clone();
+    ready(w, &one);
+    let rev = w.get_work_item(&one).unwrap().revision;
+    w.transition_work_item(&one, rev, WorkItemState::Leased, &Effects::default())
+        .unwrap();
+    let env = r
+        .allocator()
+        .allocate(w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    r.wm.mark_started(&env.git).unwrap();
+    let rev = w.list_attempts(&one).unwrap()[0].revision;
+    w.transition_attempt(
+        &env.attempt.id,
+        rev,
+        AttemptState::Running,
+        &AttemptEnd::default(),
+        &Effects::default(),
+    )
+    .unwrap();
+    let rev = w.get_work_item(&one).unwrap().revision;
+    w.transition_work_item(&one, rev, WorkItemState::Running, &Effects::default())
+        .unwrap();
+    w.reserve_budget(&env.attempt.id, env.attempt.fence, reserved)
+        .unwrap();
+    let child = Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let start = OsProbe.start_time(child.id());
+    w.record_worker(
+        &env.attempt.id,
+        env.attempt.fence,
+        child.id(),
+        start.as_deref(),
+    )
+    .unwrap();
+    (child, w.list_attempts(&one).unwrap().remove(0))
+}
+
+#[test]
+fn an_adopted_live_attempt_keeps_its_reservation_without_blocking_and_a_lost_one_is_never_rerun() {
+    need_git!();
+    let r = rig();
+    let s = Script("exit 0".into());
+    // (1) the live attempt holds the WHOLE cap (reservation == cap): that is its own share, not an
+    // overrun, so the outcome is not blocked while its worker lives; nothing else starts
+    let (mut w, items) = r.fresh();
+    let id = w.id().clone();
+    let (mut child, a) = adopted_live(&r, &mut w, &items, 1.0);
+    let mut c = cfg();
+    c.max_cost_usd = Some(1.0);
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), c);
+    for _ in 0..3 {
+        let rep = sched.tick(&mut w, clock()).unwrap();
+        assert!(rep.stop.is_none() && rep.leased.is_empty(), "{rep:?}");
+        assert_eq!(w.get_outcome(&id).unwrap().state, OutcomeState::Running);
+        assert_eq!(
+            w.outcome_spend(&id).unwrap(),
+            1.0,
+            "counted once, not twice"
+        );
+    }
+    // (2) the worker dies without ever recording a final usage (whole-machine loss): the attempt
+    // is `lost`, never rerun in place, its reservation still counts as spent, and with nothing
+    // left the outcome stops Blocked with the real numbers
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    let Some(Stop::Blocked(why)) = &rep.stop else {
+        panic!("{rep:?}")
+    };
+    assert!(
+        why.contains("cost cap") && why.contains("$1.0000 of $1.0000"),
+        "{why}"
+    );
+    let at = w.list_attempts(&a.work_item_id).unwrap();
+    assert_eq!(at.len(), 1, "not rerun in place: {at:?}");
+    assert_eq!(at[0].state, AttemptState::Lost);
+    assert_eq!(w.outcome_spend(&id).unwrap(), 1.0);
+    // (3) with budget left a NEW attempt (new session) does the item after the loss
+    let (mut w, items) = r.fresh();
+    let id = w.id().clone();
+    let (mut child, a) = adopted_live(&r, &mut w, &items, 1.0);
+    let mut c = cfg();
+    c.max_cost_usd = Some(2.0);
+    let mut sched = Scheduler::new(host(&r, &s), EvidenceVerifier::new(&[]), c);
+    let rep = sched.tick(&mut w, clock()).unwrap();
+    assert!(rep.stop.is_none(), "{rep:?}");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let (stop, reports) = sched
+        .run(&mut w, &clock, Duration::from_millis(30))
+        .unwrap();
+    assert_eq!(stop, Stop::Succeeded, "{reports:?}\n{:?}", states(&w));
+    let at = w.list_attempts(&a.work_item_id).unwrap();
+    assert_eq!(
+        at.iter().map(|x| (x.ordinal, x.state)).collect::<Vec<_>>(),
+        [(1, AttemptState::Lost), (2, AttemptState::Finished)]
+    );
+    assert_ne!(at[0].session_id, at[1].session_id);
+    assert!(w.outcome_spend(&id).unwrap() <= 2.0);
 }
