@@ -162,6 +162,64 @@ impl Service {
                 }
                 Err(format!("no attempt {id} in this outcome"))
             }
+            Call::OutcomeBudget { id } => {
+                let r = Reader::open(&self.home).map_err(s)?;
+                let id = outcome_id(&id)?;
+                let o = r.get_outcome(&id).map_err(s)?;
+                let (contract, ..) = r.get_contract(&id, o.contract_version).map_err(s)?;
+                let u = r.outcome_usage(&id).map_err(s)?;
+                // `remaining` is not computed here: with reservations apart it would be a guess
+                Ok(
+                    json!({"cost_usd": {"spent": u.cost_usd, "limit": contract.envelope.budgets.max_cost_usd},
+                          "wall_secs": {"spent": u.wall_ms as f64 / 1000.0},
+                          "reserved_usd": u.reserved_usd}),
+                )
+            }
+            Call::AttemptDiff { outcome, id } => {
+                let r = Reader::open(&self.home).map_err(s)?;
+                let oid = outcome_id(&outcome)?;
+                let o = r.get_outcome(&oid).map_err(s)?;
+                let mut commit = None;
+                for i in r.list_work_items(&oid).map_err(s)? {
+                    if let Some(a) = r
+                        .list_attempts(&i.id)
+                        .map_err(s)?
+                        .into_iter()
+                        .find(|a| a.id.as_str() == id)
+                    {
+                        commit = Some(a.subject_commit);
+                    }
+                }
+                let Some(commit) = commit else {
+                    return Err(format!("no attempt {id} in this outcome"));
+                };
+                let Some(commit) = commit else {
+                    return Err("the attempt has no candidate commit yet".into());
+                };
+                // repository, base and commit are the owner's records, never a worker's or a caller's
+                let d = synthesis_orchestrator::commit_diff(
+                    Path::new(&o.repo_root),
+                    synthesis_orchestrator::temp_scratch(),
+                    &o.base_commit,
+                    &commit,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .map_err(s)?;
+                let files = d
+                    .files
+                    .iter()
+                    .map(|f| {
+                        json!({"path": f.path, "status": f.status.to_string(),
+                    "binary": f.binary, "secret": f.secret, "added": f.added, "removed": f.removed,
+                    "patch": f.patch, "patch_truncated": f.patch_truncated})
+                    })
+                    .collect::<Vec<_>>();
+                Ok(
+                    json!({"attempt": id, "base_commit": o.base_commit, "commit": commit,
+                          "total_files": d.total_files, "truncated": d.total_files > files.len(),
+                          "files": files}),
+                )
+            }
             Call::DecisionList { outcome } => {
                 let r = Reader::open(&self.home).map_err(s)?;
                 let list = r
@@ -192,7 +250,7 @@ impl Service {
                         json!({"id": e.id, "work_item_id": e.work_item_id, "trust_class": e.trust_class,
                            "producer": e.producer, "subject_commit": e.subject_commit, "check_id": e.check_id,
                            "criteria_ids": e.criteria_ids, "result": e.result, "exit_code": e.exit_code,
-                           "flags": e.flags, "captured_at": e.captured_at})
+                           "flags": e.flags, "captured_at": e.captured_at, "event_backed": e.event_backed})
                     })
                     .collect::<Vec<_>>();
                 Ok(json!({ "evidence": rows }))

@@ -138,6 +138,14 @@ pub struct AttemptRecord {
     pub ended_at: Option<String>,
 }
 
+/// See [`Reader::outcome_usage`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutcomeUsage {
+    pub cost_usd: f64,
+    pub wall_ms: u64,
+    pub reserved_usd: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRecord {
     pub id: DecisionId,
@@ -174,6 +182,9 @@ pub struct EvidenceRecord {
     /// Disqualifying flags written with the row (`definitions_changed`, `tests_weakened`,
     /// `outside_envelope`, `mode_changed`).
     pub flags: Vec<String>,
+    /// The control session has a chained `evidence.recorded` event with the same content (necessary
+    /// for the row to count, not sufficient: the MAC is the other half). Computed by the store.
+    pub event_backed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +360,7 @@ fn evidence_row(r: &Row<'_>) -> rusqlite::Result<EvidenceRecord> {
         fence: r.get(11)?,
         captured_at: r.get(12)?,
         flags: serde_json::from_value(json_col(r, 13)?).map_err(bad)?,
+        event_backed: r.get(14)?,
     })
 }
 
@@ -501,6 +513,34 @@ impl Reader {
         )?)
     }
 
+    /// What the outcome's attempts used, as the store has it: the recorded cost and wall time of
+    /// the attempts' sessions, and the reservations not yet replaced by a final usage (the same
+    /// rule as [`Self::outcome_spend`]), reported apart: a reservation is a cap, not a spend. The
+    /// store records no token counts.
+    pub fn outcome_usage(&self, id: &OutcomeId) -> Result<OutcomeUsage> {
+        need_v5(&self.conn)?;
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0), \
+                    COALESCE(SUM(COALESCE(json_extract(s.usage,'$.wall_ms'),0)),0), \
+                    COALESCE(SUM(CASE \
+                      WHEN s.status IN ('completed','unverified','blocked','failed','cancelled') \
+                       AND (COALESCE(json_extract(s.usage,'$.turns'),0) > 0 \
+                         OR COALESCE(json_extract(s.usage,'$.wall_ms'),0) > 0 \
+                         OR COALESCE(json_extract(s.usage,'$.cost_usd'),0) > 0) THEN 0 \
+                      ELSE COALESCE(a.reserved_usd,0) END),0.0) \
+             FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+             JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
+            [id.as_str()],
+            |r| {
+                Ok(OutcomeUsage {
+                    cost_usd: r.get(0)?,
+                    wall_ms: r.get::<_, i64>(1)?.max(0) as u64,
+                    reserved_usd: r.get(2)?,
+                })
+            },
+        )?)
+    }
+
     pub fn list_decisions(&self, id: &OutcomeId) -> Result<Vec<DecisionRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
@@ -550,7 +590,7 @@ impl Reader {
     pub fn list_evidence(&self, id: &OutcomeId) -> Result<Vec<EvidenceRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {EVIDENCE_COLS} FROM evidence WHERE outcome_id=?1 ORDER BY captured_at, id LIMIT {LIST_LIMIT}"
+            "SELECT {EVIDENCE_COLS},{EVENT_BACKED} FROM evidence e WHERE outcome_id=?1 ORDER BY captured_at, id LIMIT {LIST_LIMIT}"
         ))?;
         Ok(st
             .query_map([id.as_str()], evidence_row)?

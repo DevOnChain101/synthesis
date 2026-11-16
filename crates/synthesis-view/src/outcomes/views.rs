@@ -828,16 +828,23 @@ pub struct BudgetView {
     pub tokens: Amount,
     pub cost_usd: Amount,
     pub wall_secs: Amount,
+    /// Cost caps reserved for attempts that have no final usage yet: a cap, not a spend.
+    pub reserved_usd: Option<f64>,
 }
 
 impl BudgetView {
-    /// From `{tokens, cost_usd, wall_secs}`, each `{spent, limit, remaining}` (no protocol read sends
-    /// this yet: ADR-021 notes). Anything absent is unknown.
+    /// From an `outcome.budget` reply: `{tokens, cost_usd, wall_secs}`, each `{spent, limit, remaining}`
+    /// as far as the server has them (it sends no tokens and no `remaining`), and `reserved_usd`.
+    /// Anything absent is unknown.
     pub fn from_json(v: &Value) -> Self {
         Self {
             tokens: Amount::from_json(v.get("tokens")),
             cost_usd: Amount::from_json(v.get("cost_usd")),
             wall_secs: Amount::from_json(v.get("wall_secs")),
+            reserved_usd: v
+                .get("reserved_usd")
+                .and_then(Value::as_f64)
+                .filter(|x| x.is_finite() && *x >= 0.0),
         }
     }
 
@@ -867,6 +874,7 @@ impl BudgetView {
             self.tokens.line("tokens"),
             self.cost_usd.line("cost_usd"),
             self.wall_secs.line("wall_secs"),
+            format!("reserved_usd {}\n", shown(self.reserved_usd)),
         ]
         .concat()
     }
@@ -907,10 +915,36 @@ pub enum InspectorContent {
     Workers(WorkersTab),
     Activity(ActivityTab),
     Evidence(EvidenceTab),
+    Diff(DiffTab),
     Unavailable { tab: InspectorTab, reason: String },
 }
 
-pub const DIFF_UNAVAILABLE: &str = "protocol v4 has no diff method; the attempt's branch and session are inspectable with git and `synt sessions show`";
+/// One file of an `attempt.diff` reply. A binary file has counts only; a secret-shaped path has its
+/// name only (the server withholds the rest); `patch_truncated` says the server cut the patch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffFileView {
+    pub path: String,
+    pub status: String,
+    pub binary: bool,
+    pub secret: bool,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+    pub patch: Option<String>,
+    pub patch_truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffTab {
+    pub base_commit: String,
+    pub commit: String,
+    pub total_files: u64,
+    pub files: Vec<DiffFileView>,
+}
+
+/// A patch is up to this long (the server caps it lower); the generic text cap would cut it short.
+const MAX_PATCH: usize = 256 * 1024;
+
+pub const DIFF_UNAVAILABLE: &str = "no diff to show for this attempt (it has no candidate commit yet, or the server could not read the repository); its branch and session are inspectable with git and `synt sessions show`";
 
 impl InspectorContent {
     pub fn unavailable(tab: InspectorTab, reason: &str) -> Self {
@@ -936,6 +970,7 @@ impl InspectorContent {
             Self::Workers(_) => InspectorTab::Workers,
             Self::Activity(_) => InspectorTab::Activity,
             Self::Evidence(_) => InspectorTab::Evidence,
+            Self::Diff(_) => InspectorTab::Diff,
             Self::Unavailable { tab, .. } => *tab,
         }
     }
@@ -995,6 +1030,58 @@ impl InspectorContent {
         }))
     }
 
+    /// `reply` is an `attempt.diff` reply.
+    pub fn diff_from(reply: &Value) -> Result<Self, String> {
+        typed(reply, &["base_commit", "commit"], &["total_files"], &[])?;
+        let files = reply
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or("unreadable reply: no files")?;
+        if files.len() > MAX_ROWS {
+            return Err(format!("more than {MAX_ROWS} files, not shown"));
+        }
+        let n = |f: &Value, k| f.get(k).and_then(Value::as_u64);
+        let b = |f: &Value, k| f.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let files = files
+            .iter()
+            .map(|f| {
+                typed(
+                    f,
+                    &["path", "status", "patch"],
+                    &[],
+                    &["binary", "secret", "patch_truncated"],
+                )?;
+                let mut patch = f
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .map(|p| p.split('\n').map(clean).collect::<Vec<_>>().join("\n"));
+                if let Some(p) = patch.as_mut().filter(|p| p.len() > MAX_PATCH) {
+                    let cut = (0..=MAX_PATCH)
+                        .rev()
+                        .find(|i| p.is_char_boundary(*i))
+                        .unwrap_or(0);
+                    p.truncate(cut);
+                }
+                Ok(DiffFileView {
+                    path: req(f, "path")?,
+                    status: opt(f, "status").unwrap_or_else(|| UNKNOWN.into()),
+                    binary: b(f, "binary"),
+                    secret: b(f, "secret"),
+                    added: n(f, "added"),
+                    removed: n(f, "removed"),
+                    patch,
+                    patch_truncated: b(f, "patch_truncated"),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self::Diff(DiffTab {
+            base_commit: opt(reply, "base_commit").unwrap_or_default(),
+            commit: opt(reply, "commit").unwrap_or_default(),
+            total_files: n(reply, "total_files").unwrap_or(files.len() as u64),
+            files,
+        }))
+    }
+
     pub fn render_text(&self) -> String {
         let mut out = format!("[{}]\n", self.tab().label());
         match self {
@@ -1016,6 +1103,44 @@ impl InspectorContent {
                 a.lines.iter().for_each(|l| out.push_str(&format!("{l}\n")));
             }
             Self::Evidence(e) => e.rows.iter().for_each(|r| out.push_str(&r.render_text())),
+            Self::Diff(d) => {
+                out.push_str(&format!(
+                    "{} -> {}: {} files{}\n",
+                    d.base_commit,
+                    d.commit,
+                    d.total_files,
+                    if d.total_files > d.files.len() as u64 {
+                        " (list cut)"
+                    } else {
+                        ""
+                    }
+                ));
+                for f in &d.files {
+                    let note = if f.secret {
+                        " (secret-shaped path: name only)"
+                    } else if f.binary {
+                        " (binary)"
+                    } else {
+                        ""
+                    };
+                    out.push_str(&format!(
+                        "{} {} +{} -{}{note}\n",
+                        f.status,
+                        f.path,
+                        shown(f.added),
+                        shown(f.removed)
+                    ));
+                    if let Some(p) = &f.patch {
+                        out.push_str(p);
+                        if !p.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    if f.patch_truncated {
+                        out.push_str("[patch cut by the server]\n");
+                    }
+                }
+            }
             Self::Unavailable { reason, .. } => out.push_str(&format!("not available: {reason}\n")),
         }
         out

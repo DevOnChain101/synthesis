@@ -548,3 +548,73 @@ fn inspect_names_the_tabs_and_the_diff_tab_says_it_is_not_there() {
     );
     assert!(r.unwrap_err().contains("overview, workers"));
 }
+
+#[cfg(unix)]
+#[test]
+fn read_json_opens_a_plain_file_only_and_never_blocks_on_a_fifo() {
+    let d = tempfile::tempdir().unwrap();
+    let ok = d.path().join("ok.json");
+    std::fs::write(&ok, "[1]").unwrap();
+    assert_eq!(read_json::<Vec<u8>>(&ok, "x").unwrap(), [1]);
+    let link = d.path().join("link.json");
+    std::os::unix::fs::symlink(&ok, &link).unwrap();
+    assert!(read_json::<Vec<u8>>(&link, "x").is_err());
+    let fifo = d.path().join("fifo.json");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // O_NONBLOCK: opening a FIFO nobody writes returns at once, and the handle is not a file
+    let e = read_json::<Vec<u8>>(&fifo, "x").unwrap_err();
+    assert!(e.contains("not a regular file"), "{e}");
+}
+
+/// Fails the first call as a lost link, answers the second; records every key it saw.
+struct Lossy {
+    keys: Rc<RefCell<Vec<String>>>,
+    calls: u32,
+}
+
+impl Transport for Lossy {
+    fn call(&mut self, call: Call) -> Result<Value, ClientError> {
+        if let Call::OutcomeCreate {
+            idempotency_key, ..
+        } = call
+        {
+            self.keys.borrow_mut().push(idempotency_key.unwrap());
+        }
+        self.calls += 1;
+        if self.calls == 1 {
+            return Err(ClientError::Io("the orchestrator closed the link".into()));
+        }
+        Ok(
+            json!({"id": "o1", "state": "draft", "contract_version": 1, "contract_hash": "a".repeat(64)}),
+        )
+    }
+}
+
+#[test]
+fn a_create_retried_after_a_lost_link_reuses_its_key_and_a_new_one_gets_a_new_key() {
+    let keys = Rc::new(RefCell::new(vec![]));
+    let mut c = OutcomeClient::new(
+        Lossy {
+            keys: keys.clone(),
+            calls: 0,
+        },
+        synthesis_session::outcome::Surface::Cli,
+    );
+    let contract = || {
+        serde_json::from_value(json!({"version": 1, "goal": "g", "criteria": [],
+        "envelope": {"allowed_paths": [], "denied_paths": [], "capabilities": {}, "budgets": {"max_cost_usd": 1.0}, "quality_gates": []},
+        "checks": []})).unwrap()
+    };
+    assert!(c.create("/w", "abc", contract()).is_err());
+    c.create("/w", "abc", contract()).unwrap();
+    c.create("/w", "abc", contract()).unwrap();
+    let k = keys.borrow();
+    assert_eq!(k[0], k[1], "the retry sends the same key");
+    assert_ne!(k[1], k[2], "an answered create ends the key");
+}

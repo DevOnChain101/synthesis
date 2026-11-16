@@ -29,8 +29,9 @@ pub use commands::{apply_lifecycle, apply_queued, conclude, restore_pause};
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
 pub use gitsafe::{
-    ChangeReport, Entry, Scratch, change_flags, changed_files, file_edits, fresh_checkout,
-    inspect_change,
+    ChangeReport, DIFF_MAX_FILE_PATCH, DIFF_MAX_FILES, DIFF_MAX_PATCH, DiffFile, DiffReport, Entry,
+    Scratch, change_flags, changed_files, commit_diff, file_edits, fresh_checkout, inspect_change,
+    temp_scratch,
 };
 pub use grants::{
     DecisionDriver, GRANT_TTL_HOURS, answered_waiting, current_binding_for, decided_choices,

@@ -218,12 +218,18 @@ fn text(v: &Value, k: &str) -> String {
 }
 
 fn read_json<T: DeserializeOwned>(path: &std::path::Path, what: &str) -> Result<T, String> {
-    // a plain file only: no symlink, no FIFO or device that would block or surprise
-    let plain = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file());
-    if !plain {
+    // a plain file only: no symlink, and no FIFO or device that would block the open or surprise
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let f = o
+        .open(path)
+        .map_err(|x| format!("{what}: {}: {x}", path.display()))?;
+    // the check is on the open handle, so the file cannot be swapped between check and read
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
         return Err(format!("{what}: {} is not a regular file", path.display()));
     }
-    let f = std::fs::File::open(path).map_err(|x| format!("{what}: {}: {x}", path.display()))?;
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut std::io::Read::take(f, MAX_FILE + 1), &mut buf)
         .map_err(|x| format!("{what}: {x}"))?;
@@ -413,6 +419,12 @@ pub fn dispatch<T: Transport>(
             };
             let v = c.create(ws, &base_commit, contract).map_err(e)?;
             let (id, hash) = (text(&v, "id"), text(&v, "contract_hash"));
+            // both are printed in commands to paste: a shape the server does not make is not shown
+            if !synthesis_view::outcomes::valid_alt_id(&id)
+                || !synthesis_view::outcomes::is_hex(&hash, 64)
+            {
+                return Err("the orchestrator sent an outcome id or contract hash of an unexpected shape; nothing is shown".into());
+            }
             if json {
                 p.json(json!({"id": id, "state": text(&v, "state"),
                     "contract_version": v.get("contract_version"), "contract_hash": hash}))?;

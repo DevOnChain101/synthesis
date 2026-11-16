@@ -370,6 +370,27 @@ fn the_orchestrator_log_is_private() {
     );
 }
 
+#[test]
+fn the_orchestrator_log_is_never_opened_through_a_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = short_tmp();
+    let home = tmp.path().join("h");
+    let _ = ep::spawn_detached(Path::new("/no/such/synt"), &home);
+    let log = run_dir(&home).join("orch.log");
+    let target = tmp.path().join("victim");
+    std::fs::write(&target, "keep").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink(&target, &log).unwrap();
+    assert!(ep::spawn_detached(Path::new("/no/such/synt"), &home).is_err());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "the target of the link was changed"
+    );
+}
+
 /// A bare endpoint (no owner thread behind it) with its own limits.
 struct Bare {
     _tmp: tempfile::TempDir,

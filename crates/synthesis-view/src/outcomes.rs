@@ -85,7 +85,7 @@ fn text(v: &Value, k: &str) -> Option<String> {
 impl OutcomeRow {
     pub fn from_json(v: &Value) -> Option<Self> {
         Some(Self {
-            id: text(v, "id")?,
+            id: text(v, "id").filter(|i| valid_alt_id(i))?,
             goal: text(v, "goal")?,
             state: text(v, "state")?,
             revision: v.get("revision")?.as_i64()?,
@@ -138,11 +138,16 @@ pub struct DecisionCard {
 }
 
 /// What an answer id may be: plain ASCII, so it prints as it is sent.
-fn valid_alt_id(id: &str) -> bool {
+pub fn valid_alt_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// Exactly `n` lowercase hex digits: a hash that is printed in a command to paste.
+pub fn is_hex(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn empty(v: &Value) -> bool {
@@ -262,6 +267,9 @@ impl DecisionCard {
                     clean(id)
                 ));
             }
+            if alternatives.iter().any(|a| a.id == id) {
+                return Err(format!("the brief offers the answer id {id:?} twice"));
+            }
             let label = x.get("label").or_else(|| x.get("name"));
             alternatives.push(Alternative {
                 id: id.to_string(),
@@ -279,14 +287,18 @@ impl DecisionCard {
             ));
         }
         Ok(Self {
-            id: text(v, "id").ok_or_else(|| bad("no id"))?,
+            id: text(v, "id")
+                .filter(|i| valid_alt_id(i))
+                .ok_or_else(|| bad("no id, or not 1 to 64 of A-Z a-z 0-9 _ . -"))?,
             kind: text(v, "kind").ok_or_else(|| bad("no kind"))?,
             state: text(v, "state").ok_or_else(|| bad("no state"))?,
             revision: v
                 .get("revision")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| bad("no revision"))?,
-            brief_sha256: text(v, "brief_sha256").ok_or_else(|| bad("no brief hash"))?,
+            brief_sha256: text(v, "brief_sha256")
+                .filter(|h| is_hex(h, 64))
+                .ok_or_else(|| bad("no brief hash, or not 64 hex digits"))?,
             expires_at: text(v, "expires_at").unwrap_or_default(),
             rows: brief_rows(brief),
             alternatives,
@@ -476,6 +488,29 @@ mod tests {
         let mut b = full_brief();
         b["alternatives"][0]["id"] = json!("opt-1.a_B");
         assert!(DecisionCard::from_json(&decision(b)).is_ok());
+    }
+
+    #[test]
+    fn a_repeated_answer_id_a_bad_decision_id_and_a_bad_hash_are_refused() {
+        let mut b = full_brief();
+        b["alternatives"][1]["id"] = json!("REST");
+        let e = DecisionCard::from_json(&decision(b)).unwrap_err();
+        assert!(e.contains("twice"), "{e}");
+        // the id and hash are printed in commands to paste: only their real shapes pass
+        for (k, bad) in [
+            ("id", "d1; rm -rf ~"),
+            ("id", ""),
+            ("brief_sha256", "abc"),
+            ("brief_sha256", "A".repeat(64).as_str()),
+            ("brief_sha256", format!("{}$(x)", "a".repeat(58)).as_str()),
+        ] {
+            let mut d = decision(full_brief());
+            d[k] = json!(bad);
+            assert!(DecisionCard::from_json(&d).is_err(), "{k} {bad:?}");
+        }
+        let row = json!({"id": "o1; x", "goal": "g", "state": "running", "revision": 1,
+            "needs_you": {"decisions_pending": 0, "blocked": false, "verified_awaiting_ack": false}});
+        assert!(OutcomeRow::from_json(&row).is_none());
     }
 
     #[test]

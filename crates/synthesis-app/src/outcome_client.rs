@@ -154,6 +154,9 @@ impl<R: BufRead, W: Write> Transport for Stdio<R, W> {
 pub struct OutcomeClient<T: Transport> {
     t: T,
     surface: Surface,
+    /// The key of a `create` whose result is not known (the link failed): the next `create` of this
+    /// client sends the same key, so the server returns the first draft instead of making a second.
+    create_key: Option<String>,
 }
 
 fn malformed<T>(what: &str) -> Result<T, ClientError> {
@@ -170,7 +173,11 @@ fn object(v: Value, what: &str) -> Result<Value, ClientError> {
 
 impl<T: Transport> OutcomeClient<T> {
     pub fn new(t: T, surface: Surface) -> Self {
-        Self { t, surface }
+        Self {
+            t,
+            surface,
+            create_key: None,
+        }
     }
 
     fn args(&self, key: &str) -> CommandArgs {
@@ -193,8 +200,16 @@ impl<T: Transport> OutcomeClient<T> {
         base_commit: &str,
         contract: synthesis_core::outcome::Contract,
     ) -> Result<Value, ClientError> {
-        let key = format!("create-{}", uuid::Uuid::new_v4());
-        self.create_with_key(workspace, base_commit, contract, &key)
+        let key = self
+            .create_key
+            .get_or_insert_with(|| format!("create-{}", uuid::Uuid::new_v4()))
+            .clone();
+        let r = self.create_with_key(workspace, base_commit, contract, &key);
+        // an answer (created or refused) ends the key; a failed link or reply leaves it for the retry
+        if matches!(r, Ok(_) | Err(ClientError::Refused(_))) {
+            self.create_key = None;
+        }
+        r
     }
 
     /// [`Self::create`] with the caller's key: after a lost reply, the same call with the same key
@@ -268,6 +283,24 @@ impl<T: Transport> OutcomeClient<T> {
         match v.get("evidence").and_then(Value::as_array) {
             Some(a) if a.iter().all(Value::is_object) => Ok(a.clone()),
             _ => malformed("evidence list"),
+        }
+    }
+
+    /// `{cost_usd{spent,limit}, wall_secs{spent}, reserved_usd}`; no `remaining`, no tokens.
+    pub fn budget(&mut self, outcome: &str) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::OutcomeBudget { id: outcome.into() })?;
+        object(v, "budget")
+    }
+
+    /// The attempt's candidate commit against the outcome's base: capped files and patches.
+    pub fn diff(&mut self, outcome: &str, attempt: &str) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::AttemptDiff {
+            outcome: outcome.into(),
+            id: attempt.into(),
+        })?;
+        match v.get("files") {
+            Some(f) if f.is_array() => Ok(v),
+            _ => malformed("diff"),
         }
     }
 

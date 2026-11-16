@@ -48,6 +48,19 @@ fn run(
     args: &[&str],
     stop: &AtomicBool,
 ) -> Result<Vec<u8>, VerifyError> {
+    run_cap(gitdir, index, work_tree, args, stop, GIT_OUTPUT_CAP)
+}
+
+/// [`run`] keeping at most `cap` bytes of stdout in memory; the rest is read and dropped so git
+/// still finishes (a cut-off listing is the caller's to notice).
+fn run_cap(
+    gitdir: Option<&Path>,
+    index: Option<&Path>,
+    work_tree: Option<&Path>,
+    args: &[&str],
+    stop: &AtomicBool,
+    cap: u64,
+) -> Result<Vec<u8>, VerifyError> {
     let null = null_device();
     let mut c = Command::new("git");
     c.env_clear()
@@ -95,11 +108,12 @@ fn run(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = c.spawn().map_err(|e| VerifyError(format!("git: {e}")))?;
-    let reader = |s: Option<Box<dyn Read + Send>>| {
+    let reader = |s: Option<Box<dyn Read + Send>>, cap: u64| {
         std::thread::spawn(move || {
             let mut b = vec![];
-            if let Some(s) = s {
-                let _ = s.take(GIT_OUTPUT_CAP).read_to_end(&mut b);
+            if let Some(mut s) = s {
+                let _ = (&mut s).take(cap).read_to_end(&mut b);
+                let _ = std::io::copy(&mut s, &mut std::io::sink());
             }
             b
         })
@@ -109,12 +123,14 @@ fn run(
             .stdout
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        cap,
     );
     let errs = reader(
         child
             .stderr
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        GIT_OUTPUT_CAP,
     );
     let deadline = Instant::now() + GIT_TIMEOUT;
     let status = loop {
@@ -196,6 +212,10 @@ impl Scratch {
 
     fn git(&self, args: &[&str], stop: &AtomicBool) -> Result<Vec<u8>, VerifyError> {
         run(Some(&self.dir), None, None, args, stop)
+    }
+
+    fn git_cap(&self, args: &[&str], cap: u64, stop: &AtomicBool) -> Result<Vec<u8>, VerifyError> {
+        run_cap(Some(&self.dir), None, None, args, stop, cap)
     }
 
     fn git_index(
@@ -513,6 +533,155 @@ pub fn inspect_change(
         r.flags.push("tests_weakened");
     }
     Ok(r)
+}
+
+/// Most files a [`commit_diff`] lists, most patch bytes of one file, and most patch bytes in all.
+pub const DIFF_MAX_FILES: usize = 200;
+pub const DIFF_MAX_FILE_PATCH: usize = 16 * 1024;
+pub const DIFF_MAX_PATCH: usize = 128 * 1024;
+/// Most bytes of the `--numstat` listing read.
+const DIFF_MAX_LISTING: u64 = 1024 * 1024;
+
+/// One file of a [`DiffReport`], safe to show: control characters are gone from the path and the
+/// patch, a binary file has counts only, a secret-shaped path has its name only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub path: String,
+    pub status: char,
+    pub binary: bool,
+    pub secret: bool,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+    pub patch: Option<String>,
+    pub patch_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffReport {
+    pub files: Vec<DiffFile>,
+    /// Files the commit changed (more than `files.len()` when the list was cut).
+    pub total_files: usize,
+}
+
+/// Format and bidi characters that change how text reads without showing (Unicode Cf subset).
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+}
+
+/// Control and invisible format characters (ESC, CR, NUL, bidi overrides, ...) become U+FFFD; `\n`
+/// and `\t` stay when `keep_ws`.
+fn printable(s: &str, keep_ws: bool) -> String {
+    s.chars()
+        .map(|c| {
+            if (c.is_control() && !(keep_ws && matches!(c, '\n' | '\t'))) || invisible(c) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `numstat -z` rows (`added\tremoved\tpath\0`), in path order; a binary file counts `-`.
+fn parse_numstat(out: &[u8]) -> Vec<(Option<u64>, Option<u64>)> {
+    out.split(|b| *b == 0)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            let t = String::from_utf8_lossy(r);
+            let mut f = t.splitn(3, '\t');
+            (
+                f.next().and_then(|n| n.parse().ok()),
+                f.next().and_then(|n| n.parse().ok()),
+            )
+        })
+        .collect()
+}
+
+/// The diff of `commit` against `base`, read for display only and bounded: at most
+/// [`DIFF_MAX_FILES`] files, [`DIFF_MAX_FILE_PATCH`] patch bytes per file and [`DIFF_MAX_PATCH`] in
+/// all. Same hardened git as the verification scans (scratch repository, no config, hooks,
+/// attributes, filters, external diff or textconv).
+pub fn commit_diff(
+    repo: &Path,
+    scratch_dir: PathBuf,
+    base: &str,
+    commit: &str,
+    stop: &AtomicBool,
+) -> Result<DiffReport, VerifyError> {
+    let scratch = Scratch::new(repo, scratch_dir, stop)?;
+    let ents = entries(&scratch, base, commit, stop)?;
+    // bounded reads: a listing needs ~100 bytes a file, and a patch is cut at its cap anyway
+    let counts = parse_numstat(&scratch.git_cap(
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            commit,
+        ],
+        DIFF_MAX_LISTING,
+        stop,
+    )?);
+    let mut report = DiffReport {
+        total_files: ents.len(),
+        ..DiffReport::default()
+    };
+    let mut budget = DIFF_MAX_PATCH;
+    for (i, e) in ents.iter().take(DIFF_MAX_FILES).enumerate() {
+        let (added, removed) = counts.get(i).copied().unwrap_or((None, None));
+        let secret = synthesis_core::secrets::is_secret_shaped(Path::new(&e.path));
+        // a binary file counts `-`; a listing cut short by its cap says nothing either way
+        let binary = !secret && counts.get(i).is_some_and(|c| *c == (None, None));
+        let mut f = DiffFile {
+            path: printable(&e.path, false),
+            status: e.status,
+            binary,
+            secret,
+            added: if secret { None } else { added },
+            removed: if secret { None } else { removed },
+            patch: None,
+            patch_truncated: false,
+        };
+        if !secret && !binary && budget > 0 {
+            let out = scratch.git_cap(
+                &[
+                    "diff",
+                    "-a",
+                    "-U3",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    base,
+                    commit,
+                    "--",
+                    &e.path,
+                ],
+                // a char boundary is found within 4 bytes of the cap; the rest is never held
+                (DIFF_MAX_FILE_PATCH.min(budget) + 4) as u64,
+                stop,
+            )?;
+            let text = String::from_utf8_lossy(&out);
+            let cap = DIFF_MAX_FILE_PATCH.min(budget);
+            let mut end = text.len().min(cap);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            f.patch_truncated = end < text.len();
+            budget -= end;
+            f.patch = Some(printable(&text[..end], true));
+        } else if !secret && !binary {
+            f.patch_truncated = true;
+        }
+        report.files.push(f);
+    }
+    Ok(report)
 }
 
 /// Where a throwaway scratch repository for `inspect_change` can live.
