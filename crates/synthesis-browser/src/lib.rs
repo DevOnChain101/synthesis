@@ -192,6 +192,13 @@ pub struct BrowserRuntime {
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
         self.events.abort(); // the child itself is killed by KillOnDrop, the profile by TempDir
+        // KillOnDrop signals only the leader: Chrome's helpers (renderers, GPU, crashpad) would live on
+        // until they notice the dead pipe, which on a loaded machine takes tens of seconds. `close` did
+        // not run (it takes the child), so kill the group too.
+        #[cfg(unix)]
+        if self.child.get_mut().is_some() {
+            kill_group(self.pid);
+        }
     }
 }
 
@@ -1524,7 +1531,25 @@ impl BrowserRuntime {
             params["clip"] =
                 json!({"x": 0, "y": 0, "width": w, "height": h.min(16384.0), "scale": 1});
         }
-        let r = self.call(&tab, "Page.captureScreenshot", params).await?;
+        // Right after a navigation Chrome can answer "Unable to capture screenshot" until the new page has
+        // produced its first frame (seen on loaded macOS runners). It is not a refusal: retry briefly,
+        // re-checking the secret guard before every attempt.
+        let mut retries = 0;
+        let r = loop {
+            match self
+                .call(&tab, "Page.captureScreenshot", params.clone())
+                .await
+            {
+                Err(BrowserError::Cdp { message, .. })
+                    if retries < 10 && message.contains("Unable to capture screenshot") =>
+                {
+                    retries += 1;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.guard_capture(&tab, false).await?;
+                }
+                r => break r?,
+            }
+        };
         let png = base64::engine::general_purpose::STANDARD
             .decode(r["data"].as_str().unwrap_or(""))
             .map_err(|e| BrowserError::Page(format!("bad screenshot data: {e}")))?;
@@ -1630,6 +1655,17 @@ impl BrowserRuntime {
             }
         }
         Ok(())
+    }
+}
+
+/// SIGKILL to the whole group `pgid` (the browser is its leader). pid 0 is never a group.
+#[cfg(unix)]
+fn kill_group(pgid: u32) {
+    if let Some(p) = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(p, rustix::process::Signal::KILL);
     }
 }
 

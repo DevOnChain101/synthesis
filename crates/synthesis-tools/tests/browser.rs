@@ -123,16 +123,63 @@ fn ref_of(tree: &str, needle: &str) -> String {
     line[i..line[i..].find(']').unwrap() + i].to_owned()
 }
 
-/// Pids of processes whose command line mentions a Synthesis browser profile.
-fn browser_pids() -> HashSet<String> {
+/// A launcher that adds `--synt-test-tag=<tag>` to the real browser's command line (`exec` keeps the pid), so
+/// a test can find ITS browser among those of the tests running in parallel in this binary.
+fn tagged_launcher(dir: &std::path::Path, tag: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let real = synthesis_browser::discover(
+        &synthesis_config::Env::from_process(),
+        synthesis_browser::Os::current(),
+        &|p| p.is_file(),
+    )
+    .unwrap();
+    let sh = dir.join("tagged-browser");
+    std::fs::write(
+        &sh,
+        format!(
+            "#!/bin/sh\nexec '{}' \"$@\" --synt-test-tag={tag}\n",
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    sh.to_string_lossy().into_owned()
+}
+
+fn pgrep(args: &[&str]) -> Vec<String> {
     let out = std::process::Command::new("pgrep")
-        .args(["-f", "synthesis-browser-"])
+        .args(args)
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .map(Into::into)
         .collect()
+}
+
+/// The tagged browser and every process below it (its helpers re-parent once it exits, so take this while it lives).
+fn tagged_tree(tag: &str) -> HashSet<String> {
+    let mut all: HashSet<String> = pgrep(&["-f", &format!("synt-test-tag={tag}")])
+        .into_iter()
+        .collect();
+    let mut todo: Vec<String> = all.iter().cloned().collect();
+    while let Some(p) = todo.pop() {
+        for c in pgrep(&["-P", &p]) {
+            if all.insert(c.clone()) {
+                todo.push(c);
+            }
+        }
+    }
+    all
+}
+
+fn alive(pid: &str) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    !stat.trim().is_empty() && !stat.trim().starts_with('Z')
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -142,8 +189,13 @@ async fn login_flow_sensitive_fill_policy_screenshot_and_session_close() {
     }
     let base = serve().await;
     let d = tempfile::tempdir().unwrap();
-    let before = browser_pids();
-    let (reg, c) = (registry(false, true), ctx(d.path(), "s1"));
+    let tag = format!("login-{}", std::process::id());
+    let launcher = tagged_launcher(d.path(), &tag);
+    let (reg, mut c) = (registry(false, true), ctx(d.path(), "s1"));
+    c.env = Arc::new(BTreeMap::from([(
+        "SYNT_BROWSER_PATH".to_owned(),
+        launcher.clone(),
+    )]));
     let run = |t: &'static str, i: Value| reg.execute(t, i, &c);
     let mut all = vec![]; // everything the model could see from a sensitive fill
 
@@ -218,13 +270,14 @@ async fn login_flow_sensitive_fill_policy_screenshot_and_session_close() {
     assert!(o.is_error && text(&o).contains("not supported"), "{o:?}");
 
     // Same browser, new registry config would not apply to a live session: use a second session.
-    let live: HashSet<_> = browser_pids().difference(&before).cloned().collect();
+    let live = tagged_tree(&tag);
     assert!(!live.is_empty(), "browser should be running");
     reg.close_session("s1");
     wait_gone(&live).await;
 
     // URL policy block (default policy blocks loopback) surfaces as a tool error.
-    let (reg2, c2) = (registry(true, false), ctx(d.path(), "s2"));
+    let (reg2, mut c2) = (registry(true, false), ctx(d.path(), "s2"));
+    c2.env = c.env.clone();
     let o = reg2
         .execute(
             "browser_navigate",
@@ -247,20 +300,32 @@ async fn login_flow_sensitive_fill_policy_screenshot_and_session_close() {
         panic!("{o:?}")
     };
     assert!(matches!(b[0], synthesis_tools::Block::Image { .. }));
+    let live = tagged_tree(&tag);
+    assert!(!live.is_empty(), "the second browser should be running");
     reg2.close_session("s2");
-    wait_gone(&browser_pids().difference(&before).cloned().collect()).await;
+    wait_gone(&live).await;
 }
 
 async fn wait_gone(pids: &HashSet<String>) {
     for _ in 0..100 {
-        if browser_pids().is_disjoint(pids) {
+        if !pids.iter().any(|p| alive(p)) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let left: Vec<_> = pids.iter().filter(|p| alive(p)).cloned().collect();
+    let ps = std::process::Command::new("ps")
+        .args([
+            "-o",
+            "pid,ppid,pgid,stat,etime,command",
+            "-p",
+            &left.join(","),
+        ])
+        .output()
+        .unwrap();
     panic!(
-        "browser processes still alive after close_session: {:?}",
-        browser_pids()
+        "browser processes still alive after close_session:\n{}",
+        String::from_utf8_lossy(&ps.stdout)
     );
 }
 
