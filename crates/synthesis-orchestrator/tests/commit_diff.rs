@@ -36,7 +36,7 @@ fn the_diff_has_counts_a_patch_and_withholds_secrets_and_binaries() {
     fs::write(repo.join(".env"), "TOKEN=base-secret\n").unwrap();
     fs::write(repo.join("logo.bin"), b"\0old").unwrap();
     let base = commit_all(repo, "base");
-    fs::write(repo.join("a.txt"), "two\n").unwrap();
+    fs::write(repo.join("a.txt"), "two\u{202e}x\n").unwrap();
     fs::write(repo.join(".env"), "TOKEN=hunter2-secret\n").unwrap();
     fs::write(repo.join("logo.bin"), b"\0new").unwrap();
     #[cfg(unix)]
@@ -49,6 +49,10 @@ fn the_diff_has_counts_a_patch_and_withholds_secrets_and_binaries() {
     assert_eq!((a.added, a.removed, a.binary), (Some(1), Some(1), false));
     let patch = a.patch.as_ref().unwrap();
     assert!(patch.contains("-one") && patch.contains("+two"), "{patch}");
+    assert!(
+        !patch.contains('\u{202e}'),
+        "a bidi override reached the patch"
+    );
     let bin = f("logo.bin");
     assert!(bin.binary && bin.patch.is_none() && bin.added.is_none());
     let env = f(".env");
@@ -58,12 +62,9 @@ fn the_diff_has_counts_a_patch_and_withholds_secrets_and_binaries() {
         !all.contains("hunter2") && !all.contains("base-secret"),
         "{all}"
     );
-    let odd = d
-        .files
-        .iter()
-        .find(|f| f.path.contains("name.txt"))
-        .unwrap();
-    assert!(!odd.path.contains('\u{1b}'), "{:?}", odd.path);
+    assert!(d.files.iter().all(|f| !f.path.contains('\u{1b}')));
+    #[cfg(unix)]
+    assert!(d.files.iter().any(|f| f.path.contains("name.txt")));
 }
 
 #[test]
