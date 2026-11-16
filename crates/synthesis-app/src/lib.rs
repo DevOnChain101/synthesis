@@ -56,6 +56,7 @@ pub mod notify;
 pub mod orch_endpoint;
 pub mod orch_owner;
 pub mod outcome_client;
+pub mod outcome_cmd;
 pub mod outcome_policy;
 pub mod outcome_service;
 pub mod peers;

@@ -160,6 +160,14 @@ fn malformed<T>(what: &str) -> Result<T, ClientError> {
     Err(ClientError::Malformed(format!("unreadable {what}")))
 }
 
+fn object(v: Value, what: &str) -> Result<Value, ClientError> {
+    if v.is_object() {
+        Ok(v)
+    } else {
+        malformed(what)
+    }
+}
+
 impl<T: Transport> OutcomeClient<T> {
     pub fn new(t: T, surface: Surface) -> Self {
         Self { t, surface }
@@ -221,6 +229,50 @@ impl<T: Transport> OutcomeClient<T> {
     pub fn outcome(&mut self, id: &str) -> Result<OutcomeRow, ClientError> {
         let v = self.t.call(Call::OutcomeGet { id: id.into() })?;
         OutcomeRow::from_json(&v).map_or_else(|| malformed("outcome"), Ok)
+    }
+
+    /// `{version, hash, approved, contract}` of a stored contract (default: the current one).
+    pub fn contract(&mut self, id: &str, version: Option<u32>) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::OutcomeContractGet {
+            id: id.into(),
+            version,
+        })?;
+        object(v, "contract")
+    }
+
+    /// `{plan_version, items}` of the current plan, as stored.
+    pub fn plan(&mut self, id: &str) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::PlanGet { id: id.into() })?;
+        object(v, "plan")
+    }
+
+    /// The evidence rows of the outcome, as stored.
+    pub fn evidence(&mut self, outcome: &str) -> Result<Vec<Value>, ClientError> {
+        let v = self.t.call(Call::EvidenceGet {
+            outcome: outcome.into(),
+        })?;
+        match v.get("evidence").and_then(Value::as_array) {
+            Some(a) if a.iter().all(Value::is_object) => Ok(a.clone()),
+            _ => malformed("evidence list"),
+        }
+    }
+
+    /// One work item with its `attempts`, as stored.
+    pub fn work_item(&mut self, outcome: &str, id: &str) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::WorkItemGet {
+            outcome: outcome.into(),
+            id: id.into(),
+        })?;
+        object(v, "work item")
+    }
+
+    /// `{work_item_id, attempt}` of one attempt.
+    pub fn attempt(&mut self, outcome: &str, id: &str) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::AttemptInspect {
+            outcome: outcome.into(),
+            id: id.into(),
+        })?;
+        object(v, "attempt")
     }
 
     /// Every decision of the outcome as the server states it (a brief that names a preferred
