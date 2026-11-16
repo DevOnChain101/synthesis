@@ -177,6 +177,33 @@ impl<T: Transport> OutcomeClient<T> {
         self.t.call(Call::OrchestratorStatus)
     }
 
+    /// Creates an outcome (the orchestrator process only; the contract waits for `approve_contract`).
+    /// Returns `{id, state, contract_version, contract_hash}`.
+    pub fn create(
+        &mut self,
+        workspace: &str,
+        base_commit: &str,
+        contract: synthesis_core::outcome::Contract,
+    ) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::OutcomeCreate {
+            workspace: workspace.into(),
+            base_commit: base_commit.into(),
+            contract: Box::new(contract),
+            surface: self.surface,
+        })?;
+        match v.get("id").and_then(Value::as_str) {
+            Some(_) => Ok(v),
+            None => malformed("created outcome"),
+        }
+    }
+
+    /// The explicit migration to schema v5 (a backup first); the setting must already be on.
+    pub fn enable(&mut self) -> Result<Value, ClientError> {
+        self.t.call(Call::OrchestratorEnable {
+            surface: self.surface,
+        })
+    }
+
     pub fn outcomes(&mut self, workspace: Option<&str>) -> Result<Vec<OutcomeRow>, ClientError> {
         let v = self.t.call(Call::OutcomeList {
             workspace: workspace.map(str::to_string),

@@ -41,6 +41,14 @@ enum Cmd {
     /// INTERNAL: the engine of one session over stdin/stdout JSON lines (docs/specs/desktop.md).
     #[command(hide = true)]
     Engine(Box<EngineArgs>),
+    /// INTERNAL: the standalone orchestrator process (plan PR-12). Clients start it on demand; it
+    /// does nothing unless `synt.orchestrator.enabled`.
+    #[command(hide = true)]
+    Orchestrator {
+        /// The only mode.
+        #[arg(long)]
+        serve: bool,
+    },
     /// Run one task headless; events (JSONL) go to stdout.
     Run(Box<run::RunArgs>),
     /// Credential status per provider.
@@ -146,6 +154,10 @@ fn main() -> ExitCode {
                 };
                 synthesis_app::engine_server::run_stdio(&a.common, &limits, a.host.is_none(), &env)
             }
+        }
+        Some(Cmd::Orchestrator { serve: false }) => Err("orchestrator: --serve is required".into()),
+        Some(Cmd::Orchestrator { serve: true }) => {
+            synthesis_app::orch_owner::serve(env).map(|()| 0)
         }
         Some(Cmd::Run(a)) => run::run(*a, env),
         Some(Cmd::Auth {

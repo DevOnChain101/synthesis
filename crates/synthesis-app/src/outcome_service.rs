@@ -2,6 +2,13 @@
 //! and queues commands; it never applies one. The owner of an outcome applies them
 //! (`synthesis_orchestrator::apply_queued`), so a call returns `queued` until an owner has run.
 //!
+//! Who may write: only the orchestrator endpoint, whose clients proved `run/orch.key` and attached
+//! as a surface (`orch_endpoint`), gets a [`Service::new`]. The stdio engine gets
+//! [`Service::read_only`]: an agent shell running `synt engine --stdio` can read what the store
+//! allows but cannot answer a decision, approve a contract or start anything. This is an
+//! ownership and correctness boundary, not a security one (ADR-017): any program of the same OS
+//! user outside the sandbox can read the key.
+//!
 //! Off by default: while `synt.orchestrator.enabled` is false every method but
 //! `orchestrator.status` is refused and nothing is opened, created or written.
 
@@ -24,8 +31,15 @@ const MAX_NOTE: usize = 1024;
 /// One outcome call of the engine process: the switch is `synt.orchestrator.enabled` of the user and
 /// managed settings (a project file can never turn it on), read per call so a change applies at once.
 pub fn serve(env: &synthesis_config::Env, h: &crate::Homes, call: Call) -> Result<Value, String> {
+    let st = settings_of(env, h);
+    let on = crate::outcome_policy::outcome_policy(&st.synthesis.orchestrator).enabled;
+    Service::read_only(&h.synthesis, on).handle(call)
+}
+
+/// `synt.orchestrator.enabled` of the user and managed settings (a project file can never turn it on).
+pub fn settings_of(env: &synthesis_config::Env, h: &crate::Homes) -> synthesis_settings::Settings {
     let none = h.synthesis.join("no-project");
-    let st = synthesis_settings::load_settings(
+    synthesis_settings::load_settings(
         &synthesis_settings::LoadContext {
             cwd: &none,
             synthesis_home: &h.synthesis,
@@ -33,14 +47,14 @@ pub fn serve(env: &synthesis_config::Env, h: &crate::Homes, call: Call) -> Resul
             env,
         },
         synthesis_config::ProjectTrust::Untrusted,
-    );
-    let on = crate::outcome_policy::outcome_policy(&st.synthesis.orchestrator).enabled;
-    Service::new(&h.synthesis, on).handle(call)
+    )
 }
 
 pub struct Service {
     home: PathBuf,
     enabled: bool,
+    /// May queue commands (the orchestrator endpoint's authenticated clients only).
+    may_queue: bool,
 }
 
 fn s<E: ToString>(e: E) -> String {
@@ -52,11 +66,21 @@ fn outcome_id(id: &str) -> Result<OutcomeId, String> {
 }
 
 impl Service {
-    /// `enabled` is `synt.orchestrator.enabled` as the settings resolved it (managed layer first).
+    /// The orchestrator endpoint's service: reads, and queues commands. `enabled` is
+    /// `synt.orchestrator.enabled` as the settings resolved it (managed layer first).
     pub fn new(home: &Path, enabled: bool) -> Self {
         Self {
             home: home.to_path_buf(),
             enabled,
+            may_queue: true,
+        }
+    }
+
+    /// Reads only: every call that would queue a command is refused (the stdio engine's).
+    pub fn read_only(home: &Path, enabled: bool) -> Self {
+        Self {
+            may_queue: false,
+            ..Self::new(home, enabled)
         }
     }
 
@@ -66,6 +90,12 @@ impl Service {
         }
         if !self.enabled {
             return Err("outcomes are off (synt.orchestrator.enabled is false)".into());
+        }
+        if !self.may_queue && call.surface().is_some() {
+            return Err(
+                "commands are accepted only on the orchestrator endpoint (this link is read-only)"
+                    .into(),
+            );
         }
         if !self.home.join("synt.db").is_file() {
             return Err("there is no session store yet".into());
@@ -240,6 +270,9 @@ impl Service {
                     Some(expected_revision),
                     &cmd,
                 )
+            }
+            Call::OutcomeCreate { .. } | Call::OrchestratorEnable { .. } => {
+                Err("this call is served by the orchestrator process only".into())
             }
             _ => Err("not an outcome method".into()),
         }

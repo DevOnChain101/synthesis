@@ -22,6 +22,11 @@ fn write_edit_multiedit_and_notebookedit_are_denied_on_the_trust_store_and_key_i
         state.join("chain.key"),
         state.join("backups/clean-1/synt.db"),
         state.join("run/trust.key"),
+        // the orchestrator's key, endpoint registry, socket and process lock (plan PR-12, T-32)
+        state.join("run/orch.key"),
+        state.join("run/orch.json"),
+        state.join("run/orch.lock"),
+        state.join("run/0123456789abcdef.sock"),
         state.join("run/new-file"),
     ];
     for mode in Mode::ALL {

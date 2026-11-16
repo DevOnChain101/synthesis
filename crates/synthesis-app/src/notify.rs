@@ -206,6 +206,24 @@ pub fn payload(env: &Envelope, seen: &mut HashSet<String>, include_text: bool) -
     Some(v)
 }
 
+/// The payload of an outcome notification (ADR-021 section 4): ids and codes only, never the
+/// brief or any other text. `event` is `decision.created`, `outcome.blocked` or `outcome.verified`.
+pub fn outcome_payload(
+    event: &str,
+    outcome_id: &str,
+    decision: Option<(&str, &str)>,
+    reason_code: &str,
+    ts: &str,
+) -> Value {
+    let mut v =
+        json!({"event": event, "outcome_id": outcome_id, "reason_code": reason_code, "ts": ts});
+    if let Some((id, kind)) = decision {
+        v["decision_id"] = json!(id);
+        v["kind"] = json!(kind);
+    }
+    v
+}
+
 /// A fixed vocabulary for the stop reason, so the default payload never carries free text.
 fn reason_code(reason: &str) -> &'static str {
     const CODES: [(&str, &str); 9] = [
@@ -251,7 +269,26 @@ impl Notifier {
         sink: &EventSink,
     ) -> Result<Arc<Self>, String> {
         confined(rt.mode(), policy.is_some())?;
-        Self::start_unchecked(cfg, rt, run_sid, ws, run_env, policy, sink)
+        Self::start_unchecked(cfg, rt, run_sid, ws, run_env, policy, Some(sink))
+    }
+
+    /// The orchestrator process's notifier (ADR-021 section 4): the same confined command, fed by
+    /// [`Self::send_outcome`] instead of a run's event stream.
+    pub fn start_for_outcomes(
+        cfg: &NotifyConfig,
+        rt: Arc<TerminalRuntime>,
+        run_sid: &str,
+        ws: Arc<WorkspaceContext>,
+        run_env: &BTreeMap<String, String>,
+        policy: Option<SandboxPolicy>,
+    ) -> Result<Arc<Self>, String> {
+        confined(rt.mode(), policy.is_some())?;
+        Self::start_unchecked(cfg, rt, run_sid, ws, run_env, policy, None)
+    }
+
+    /// Sends a payload built by [`outcome_payload`] (same caps and slots as every notification).
+    pub fn send_outcome(self: &Arc<Self>, payload: Value) {
+        self.send(payload);
     }
 
     fn start_unchecked(
@@ -261,7 +298,7 @@ impl Notifier {
         ws: Arc<WorkspaceContext>,
         run_env: &BTreeMap<String, String>,
         policy: Option<SandboxPolicy>,
-        sink: &EventSink,
+        sink: Option<&EventSink>,
     ) -> Result<Arc<Self>, String> {
         let Kind::Command(argv) = &cfg.kind else {
             return Err(
@@ -305,6 +342,7 @@ impl Notifier {
             slots: (Mutex::new(0), std::sync::Condvar::new()),
         });
         let me = n.clone();
+        let Some(sink) = sink else { return Ok(n) };
         sink.observe(Arc::new(move |env| {
             let p = payload(
                 env,
@@ -580,7 +618,7 @@ mod tests {
             ws,
             &run_env,
             None,
-            &sink,
+            Some(&sink),
         )
         .unwrap();
         sink.emit(
@@ -596,6 +634,76 @@ mod tests {
         );
         assert!(
             !got.contains("hunter2") && !got.contains("SYNT_API_KEY"),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn an_outcome_payload_holds_ids_and_codes_only() {
+        let p = outcome_payload(
+            "decision.created",
+            "o1",
+            Some(("d1", "unplanned_write")),
+            "decision_pending",
+            "2026-01-01T00:00:00Z",
+        );
+        assert_eq!(
+            p,
+            json!({"event": "decision.created", "outcome_id": "o1", "decision_id": "d1",
+                   "kind": "unplanned_write", "reason_code": "decision_pending", "ts": "2026-01-01T00:00:00Z"})
+        );
+        assert!(
+            outcome_payload("outcome.blocked", "o1", None, "blocked", "t")["decision_id"].is_null()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_outcome_notice_is_delivered_with_no_client_attached() {
+        let d = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("w")).unwrap();
+        let out = base.join("w/got.json");
+        let ws = Arc::new(
+            WorkspaceContext::open(
+                "w",
+                &base.join("w"),
+                &base.join("w"),
+                &[],
+                base.join("art"),
+                "pg",
+            )
+            .unwrap(),
+        );
+        let rt = Arc::new(TerminalRuntime::new(SandboxMode::Off));
+        let run_env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let script = format!("cat > {}", out.display());
+        let n = Notifier::start_unchecked(
+            &NotifyConfig {
+                kind: Kind::Command(vec!["/bin/sh".into(), "-c".into(), script]),
+                timeout: Duration::from_secs(10),
+                network: false,
+                include_text: false,
+            },
+            rt,
+            "o-notify",
+            ws,
+            &run_env,
+            None,
+            None,
+        )
+        .unwrap();
+        n.send_outcome(outcome_payload(
+            "outcome.verified",
+            "o1",
+            None,
+            "verified",
+            "t",
+        ));
+        n.flush();
+        n.close();
+        let got = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            got.contains(r#""event":"outcome.verified""#) && got.contains("o1"),
             "{got}"
         );
     }

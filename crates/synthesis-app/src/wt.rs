@@ -138,6 +138,11 @@ fn options(synthesis_home: &Path) -> Result<WorktreeOptions, String> {
     Ok(opts)
 }
 
+/// The worktree manager of `<synthesis_home>/worktrees` with the configured git (the orchestrator's).
+pub fn manager(env: &Env, synthesis_home: &Path) -> Result<WorktreeManager, String> {
+    WorktreeManager::new(env, options(synthesis_home)?).map_err(|e| e.to_string())
+}
+
 /// `synt.worktree.submodules` (bool) from the USER file, then the MANAGED one (managed wins). A
 /// repository's own settings never enable it: its `.gitmodules` URLs are untrusted.
 pub fn submodules_enabled(home: &Path, managed: &Path) -> Result<bool, String> {

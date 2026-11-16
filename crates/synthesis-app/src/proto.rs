@@ -252,6 +252,23 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u32>,
     },
+    /// Creates an outcome (draft, contract v1, waiting for its approval). Only the orchestrator
+    /// process serves it: creating takes the control-session lock, which is the owner's (ADR-017).
+    #[serde(rename = "outcome.create")]
+    OutcomeCreate {
+        /// The repository root (an absolute path on the orchestrator's machine).
+        workspace: String,
+        /// The commit the attempts start from (full lowercase hex id).
+        base_commit: String,
+        contract: Box<synthesis_core::outcome::Contract>,
+        surface: Surface,
+    },
+    /// The explicit migration (backup, schema v5) once `synt.orchestrator.enabled` is true. Only the
+    /// orchestrator process serves it.
+    #[serde(rename = "orchestrator.enable")]
+    OrchestratorEnable {
+        surface: Surface,
+    },
     #[serde(rename = "outcome.contract.approve")]
     OutcomeContractApprove {
         id: String,
@@ -357,6 +374,8 @@ impl Call {
         matches!(
             self,
             Call::OrchestratorStatus
+                | Call::OutcomeCreate { .. }
+                | Call::OrchestratorEnable { .. }
                 | Call::OutcomeList { .. }
                 | Call::OutcomeGet { .. }
                 | Call::OutcomeContractGet { .. }
@@ -376,6 +395,24 @@ impl Call {
                 | Call::CommandStatus { .. }
                 | Call::EventsSubscribe { .. }
         )
+    }
+
+    /// The surface a mutating outcome call says it comes from (`None`: a read).
+    pub fn surface(&self) -> Option<Surface> {
+        match self {
+            Call::OutcomeCreate { surface, .. } | Call::OrchestratorEnable { surface } => {
+                Some(*surface)
+            }
+            Call::OutcomeContractApprove { cmd, .. } | Call::DecisionResolve { cmd, .. } => {
+                Some(cmd.surface)
+            }
+            Call::OutcomeStart(c)
+            | Call::OutcomePause(c)
+            | Call::OutcomeResume(c)
+            | Call::OutcomeCancel(c)
+            | Call::OutcomeAck(c) => Some(c.cmd.surface),
+            _ => None,
+        }
     }
 
     /// The calls that end the session and start another in this process.
