@@ -30,6 +30,8 @@ use crate::{homes, launch_dir};
 const MAX_FILE: u64 = 256 * 1024;
 /// How long a mutating command is followed while the owner has not applied it yet.
 const WAIT: Duration = Duration::from_secs(10);
+/// Longest `decisions --watch` waits for a hint before it refetches anyway.
+const WATCH_POLL: Duration = Duration::from_secs(60);
 /// `schema` of every `--json` object: bumped only with an incompatible change.
 const JSON_SCHEMA: u32 = 1;
 
@@ -95,6 +97,9 @@ pub enum OutcomeCmd {
     Decisions {
         id: String,
         decision: Option<String>,
+        /// Keep running and show a decision again whenever it changes (push hints, refetched).
+        #[arg(long)]
+        watch: bool,
     },
     /// Answer a pending decision. There is no default: name `--choice` with the `--revision` and
     /// `--brief-hash` of the decision as `decisions` shows it, or pick on a terminal.
@@ -166,7 +171,7 @@ pub fn off_text() -> String {
 }
 
 /// What `enable` shows before it migrates anything (plan 3b item 6).
-pub const ENABLE_NOTICE: &str = "Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. User and managed hooks still run on the host, outside the sandbox.\nEnabling migrates the session store to schema v5 after an automatic backup (backups/pre-v5-*). Releases without outcomes refuse a migrated store.";
+pub const ENABLE_NOTICE: &str = "Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. User and managed hooks still run on the host, outside the sandbox. There is no person-present signature yet: a program running as you outside the sandbox can read the key and forge an approval, an event or evidence.\nEnabling migrates the session store to schema v5 after an automatic backup (backups/pre-v5-*). Releases without outcomes refuse a migrated store.";
 
 pub struct Io<'a> {
     pub out: &'a mut dyn Write,
@@ -185,9 +190,14 @@ pub fn run_cmd(env: &Env, a: OutcomeArgs) -> Result<u8, String> {
         return Err(off_text());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let link =
-        crate::orch_endpoint::LocalSocket::connect_or_start(&h.synthesis, Surface::Cli, &exe)
-            .map_err(|e| e.to_string())?;
+    let watching = matches!(a.cmd, OutcomeCmd::Decisions { watch: true, .. });
+    let link = crate::orch_endpoint::LocalSocket::connect_or_start_with(
+        &h.synthesis,
+        Surface::Cli,
+        &exe,
+        watching,
+    )
+    .map_err(|e| e.to_string())?;
     let mut client = OutcomeClient::new(link, Surface::Cli);
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal() && !a.json;
@@ -546,22 +556,50 @@ pub fn dispatch<T: Transport>(
             }
             Ok(0)
         }
-        OutcomeCmd::Decisions { id, decision } => {
-            let ds: Vec<_> = c
-                .decisions(&id)
-                .map_err(e)?
-                .into_iter()
-                .filter(|d| decision.as_ref().is_none_or(|w| *w == d.id))
-                .collect();
-            if json {
-                p.json(json!({"decisions": ds.iter().map(card_json).collect::<Vec<_>>()}))?;
-            } else {
-                for d in &ds {
-                    p.line(&render_card(d))?;
+        OutcomeCmd::Decisions {
+            id,
+            decision,
+            watch,
+        } => {
+            // what was shown, as `(revision, state)` per decision: a watch shows only what changed
+            let mut shown = std::collections::BTreeMap::new();
+            loop {
+                let ds: Vec<_> = c
+                    .decisions(&id)
+                    .map_err(e)?
+                    .into_iter()
+                    .filter(|d| decision.as_ref().is_none_or(|w| *w == d.id))
+                    .filter(|d| {
+                        shown.insert(d.id.clone(), (d.revision, d.state.clone()))
+                            != Some((d.revision, d.state.clone()))
+                    })
+                    .collect();
+                if json {
+                    if !watch || !ds.is_empty() {
+                        p.json(json!({"decisions": ds.iter().map(card_json).collect::<Vec<_>>()}))?;
+                    }
+                } else {
+                    for d in &ds {
+                        p.line(&render_card(d))?;
+                    }
+                    if !watch {
+                        p.line(&format!("{} decision(s)", ds.len()))?;
+                    }
                 }
-                p.line(&format!("{} decision(s)", ds.len()))?;
+                if !watch {
+                    return Ok(0);
+                }
+                p.0.out.flush().map_err(e)?;
+                // A hint only wakes us: the cards come from the server on the next turn. Without a
+                // hint for a minute we refetch anyway (it keeps the link open and covers a lost hint).
+                let until = Instant::now() + WATCH_POLL;
+                while let Some(left) = until.checked_duration_since(Instant::now()) {
+                    match c.next_hint(left).map_err(e)? {
+                        Some(h) if h.outcome == id => break,
+                        _ => {}
+                    }
+                }
             }
-            Ok(0)
         }
         OutcomeCmd::Resolve {
             outcome,
@@ -653,7 +691,13 @@ pub fn dispatch<T: Transport>(
             json_or(
                 &mut p,
                 v.clone(),
-                &format!("Outcomes enabled for this store: {}", clean(&v.to_string())),
+                &format!(
+                    "Outcomes enabled for this store (schema {}, backup {}).\n{}",
+                    text(&v, "schema"),
+                    text(&v, "backups"),
+                    // the server's own text (it must be shown, ADR-021)
+                    text(&v["disclosure"], "text")
+                ),
             )?;
             Ok(0)
         }

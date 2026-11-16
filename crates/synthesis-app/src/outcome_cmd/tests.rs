@@ -17,9 +17,21 @@ type Seen = Rc<RefCell<Vec<Value>>>;
 struct Fake {
     seen: Seen,
     answers: Vec<(&'static str, Value)>,
+    /// Hints `next_hint` hands out, then the link "closes".
+    hints: Vec<crate::proto::DecisionHint>,
 }
 
 impl Transport for Fake {
+    fn next_hint(
+        &mut self,
+        _wait: Duration,
+    ) -> Result<Option<crate::proto::DecisionHint>, ClientError> {
+        if self.hints.is_empty() {
+            return Err(ClientError::Io("the orchestrator closed the link".into()));
+        }
+        Ok(Some(self.hints.remove(0)))
+    }
+
     fn call(&mut self, call: Call) -> Result<Value, ClientError> {
         let v = serde_json::to_value(&call).unwrap();
         let m = v["method"].as_str().unwrap().to_string();
@@ -64,6 +76,7 @@ fn rig(answers: Vec<(&'static str, Value)>) -> (OutcomeClient<Fake>, Seen) {
     let t = Fake {
         seen: seen.clone(),
         answers,
+        hints: vec![],
     };
     (OutcomeClient::new(t, Surface::Cli), seen)
 }
@@ -125,6 +138,7 @@ fn every_non_empty_brief_field_is_printed_in_server_order_with_the_revision_and_
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         false,
         "",
@@ -155,6 +169,7 @@ fn nothing_is_preselected_and_the_answers_are_numbered_without_a_marker() {
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         false,
         "",
@@ -180,6 +195,7 @@ fn nothing_is_preselected_and_the_answers_are_numbered_without_a_marker() {
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         true,
         "",
@@ -197,6 +213,7 @@ fn nothing_is_preselected_and_the_answers_are_numbered_without_a_marker() {
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         false,
         "",
@@ -309,6 +326,7 @@ fn a_decision_that_is_not_pending_cannot_be_answered() {
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         false,
         "",
@@ -457,6 +475,7 @@ fn control_text_from_the_server_is_made_printable() {
         OutcomeCmd::Decisions {
             id: "o1".into(),
             decision: None,
+            watch: false,
         },
         resolve(None, None, None),
         resolve(Some("REST"), Some(1), Some("x".into())),
@@ -504,6 +523,7 @@ fn platform_refusal_is_the_wsl2_text_for_commands_that_run_attempts_only() {
         OutcomeCmd::Decisions {
             id: "o".into(),
             decision: None,
+            watch: false,
         },
     ] {
         assert_eq!(platform_refusal(true, &cmd), None);
@@ -617,4 +637,54 @@ fn a_create_retried_after_a_lost_link_reuses_its_key_and_a_new_one_gets_a_new_ke
     let k = keys.borrow();
     assert_eq!(k[0], k[1], "the retry sends the same key");
     assert_ne!(k[1], k[2], "an answered create ends the key");
+}
+
+fn hint(outcome: &str) -> crate::proto::DecisionHint {
+    crate::proto::DecisionHint {
+        outcome: outcome.into(),
+        id: "d1".into(),
+        revision: 2,
+        state: "pending".into(),
+    }
+}
+
+#[test]
+fn watch_refetches_on_a_hint_for_its_outcome_and_shows_a_card_only_when_it_changed() {
+    let seen = Seen::default();
+    let mut c = OutcomeClient::new(
+        Fake {
+            seen: seen.clone(),
+            answers: vec![("decision.list", json!({"decisions": [decision("pending")]}))],
+            hints: vec![hint("other"), hint("o1")],
+        },
+        Surface::Cli,
+    );
+    let (r, out) = run(
+        &mut c,
+        OutcomeCmd::Decisions {
+            id: "o1".into(),
+            decision: None,
+            watch: true,
+        },
+        false,
+        "",
+        false,
+    );
+    // the link closing ends the watch
+    assert!(r.unwrap_err().contains("closed"), "{out}");
+    // one fetch at the start, one for the hint of o1, none for the hint of another outcome
+    assert_eq!(
+        methods(&seen)
+            .iter()
+            .filter(|m| *m == "decision.list")
+            .count(),
+        2
+    );
+    // the unchanged card was shown once, from the server's answer
+    assert_eq!(out.matches("Revision: 2").count(), 1, "{out}");
+}
+
+#[test]
+fn the_enable_notice_starts_with_the_integrity_disclosure() {
+    assert!(ENABLE_NOTICE.starts_with(crate::outcome_policy::INTEGRITY_DISCLOSURE));
 }

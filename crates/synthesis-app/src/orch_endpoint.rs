@@ -2,7 +2,8 @@
 //! Windows named pipe under `$SYNT_HOME/run/`, NDJSON frames and the mutual HMAC handshake of
 //! peers, keyed by `run/orch.key`. No TCP, no HTTP.
 //!
-//! A client that proved the key sends `{"t":"attach","surface":"cli"}`; every mutating call on the
+//! A client that proved the key sends `{"t":"attach","surface":"cli"}` (optionally with
+//! `"push":["decision"]` to also receive [`DecisionHint`] lines, ids and codes only); every mutating call on the
 //! connection must then name that same surface. That is what makes `surface` more than a
 //! self-asserted field: the stdio engine is read-only ([`crate::outcome_service::Service::read_only`])
 //! and only a process that holds the key can queue a command. Ownership and correctness boundary,
@@ -22,7 +23,7 @@ use synthesis_session::outcome::Surface;
 
 use crate::outcome_client::{ClientError, Transport};
 use crate::outcome_service::{Service, settings_of};
-use crate::proto::{Call, Out, PROTOCOL, Request, VERSION};
+use crate::proto::{Call, DecisionHint, Out, PROTOCOL, Request, VERSION};
 
 pub const KEY_FILE: &str = "orch.key";
 pub const REGISTRY_FILE: &str = "orch.json";
@@ -38,6 +39,9 @@ pub const LINK_IDLE: Duration = Duration::from_secs(15 * 60);
 const JOB_WAIT: Duration = Duration::from_secs(120);
 /// Jobs waiting for the owner thread; more are refused as busy.
 pub const JOB_QUEUE: usize = 8;
+/// Hints queued per push link; a link that reads slower loses the oldest ones (it reconciles by
+/// refetching, ADR-021 section 3).
+pub const PUSH_QUEUE: usize = 64;
 
 /// A call the owner thread must run itself (it takes control-session locks).
 pub type Job = (Call, tokio::sync::oneshot::Sender<Result<Value, String>>);
@@ -49,6 +53,8 @@ pub struct Ctx {
     /// [`LINK_IDLE`] (tests use a short one).
     pub link_idle: Duration,
     pub clients: AtomicUsize,
+    /// Where the owner publishes decision changes; only links that attached with `push` listen.
+    pub push: tokio::sync::broadcast::Sender<DecisionHint>,
     /// Seconds since the unix epoch of the last call (idle exit, D20).
     pub last_call: AtomicU64,
 }
@@ -123,14 +129,31 @@ async fn connection(mut c: Conn, key: &Key, ctx: &Ctx) -> std::io::Result<()> {
         .then(|| serde_json::from_value::<Surface>(attach.get("surface")?.clone()).ok())
         .flatten()
         .ok_or_else(|| bad("bad attach"))?;
+    // opt-in and additive: absent means no push; anything but the one known topic is refused
+    let mut hints = match attach.get("push") {
+        None => None,
+        Some(v) if *v == json!(["decision"]) => Some(ctx.push.subscribe()),
+        Some(_) => return Err(bad("bad attach")),
+    };
     c.send(&json!({"msg": "hello", "version": VERSION, "protocol": PROTOCOL}))
         .await?;
-    // a silent link ends (EOF-like) instead of holding its slot for ever
-    while let Ok(Some(v)) = tokio::time::timeout(ctx.link_idle, c.recv())
-        .await
-        .map_err(|_| bad("idle link"))?
-    {
+    // a silent link ends (EOF-like) instead of holding its slot for ever; hints do not keep it alive
+    let mut idle = tokio::time::Instant::now() + ctx.link_idle;
+    loop {
+        let v = tokio::select! {
+            r = tokio::time::timeout_at(idle, c.recv()) => match r.map_err(|_| bad("idle link"))? {
+                Ok(Some(v)) => v,
+                _ => break,
+            },
+            h = next_hint(&mut hints) => {
+                tokio::time::timeout(ctx.link_idle, c.send(&h.to_line()))
+                    .await
+                    .map_err(|_| bad("the client does not read"))??;
+                continue;
+            }
+        };
         ctx.last_call.store(now_secs(), Ordering::SeqCst);
+        idle = tokio::time::Instant::now() + ctx.link_idle;
         // an unreadable request ends the link: its id cannot be trusted to answer
         let req: Request = serde_json::from_value(v)
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad request"))?;
@@ -149,6 +172,24 @@ async fn connection(mut c: Conn, key: &Key, ctx: &Ctx) -> std::io::Result<()> {
             .map_err(|_| bad("the client does not read"))??;
     }
     Ok(())
+}
+
+/// The next hint for a push link; never ready on a link that did not opt in. Hints a slow reader
+/// missed are skipped (it refetches), and a closed channel leaves the link without push.
+async fn next_hint(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<DecisionHint>>,
+) -> DecisionHint {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match rx.as_mut() {
+            Some(r) => match r.recv().await {
+                Ok(h) => return h,
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => *rx = None,
+            },
+            None => std::future::pending::<()>().await,
+        }
+    }
 }
 
 /// One call of an attached client. Only outcome methods are served, and a mutating one must name
@@ -200,6 +241,9 @@ pub struct LocalSocket {
     conn: Conn,
     next: u64,
     dead: Option<String>,
+    /// Attached with `push`: hint lines are expected and queued (at most [`PUSH_QUEUE`]).
+    push: bool,
+    hints: std::collections::VecDeque<DecisionHint>,
 }
 
 fn io<E: ToString>(e: E) -> ClientError {
@@ -210,6 +254,12 @@ impl LocalSocket {
     /// Connects to the running orchestrator, proves the key and attaches as `surface`. Fails (the
     /// text says to start it) when none is running or the entry is stale.
     pub fn connect(home: &Path, surface: Surface) -> Result<Self, ClientError> {
+        Self::connect_with(home, surface, false)
+    }
+
+    /// [`Self::connect`], and with `push` the link also receives [`DecisionHint`]s (see
+    /// [`Self::next_hint`]).
+    pub fn connect_with(home: &Path, surface: Surface, push: bool) -> Result<Self, ClientError> {
         let endpoint = read_registry(home)
             .ok_or_else(|| io("the orchestrator is not running (no endpoint published)"))?;
         let key = load_key(home).map_err(io)?;
@@ -220,7 +270,11 @@ impl LocalSocket {
         let conn = rt.block_on(async {
             let mut c = connect(&endpoint).await?;
             handshake_client(&mut c, &key).await?;
-            c.send(&json!({"t": "attach", "surface": surface})).await?;
+            let mut attach = json!({"t": "attach", "surface": surface});
+            if push {
+                attach["push"] = json!(["decision"]);
+            }
+            c.send(&attach).await?;
             let hello = c.recv().await?.ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed before hello")
             })?;
@@ -241,6 +295,8 @@ impl LocalSocket {
             conn,
             next: 0,
             dead: None,
+            push,
+            hints: Default::default(),
         })
     }
 
@@ -251,19 +307,33 @@ impl LocalSocket {
         surface: Surface,
         exe: &Path,
     ) -> Result<Self, ClientError> {
-        if let Ok(s) = Self::connect(home, surface) {
+        Self::connect_or_start_with(home, surface, exe, false)
+    }
+
+    pub fn connect_or_start_with(
+        home: &Path,
+        surface: Surface,
+        exe: &Path,
+        push: bool,
+    ) -> Result<Self, ClientError> {
+        if let Ok(s) = Self::connect_with(home, surface, push) {
             return Ok(s);
         }
         spawn_detached(exe, home).map_err(io)?;
         let mut last = io("the orchestrator did not start");
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(100));
-            match Self::connect(home, surface) {
+            match Self::connect_with(home, surface, push) {
                 Ok(s) => return Ok(s),
                 Err(e) => last = e,
             }
         }
         Err(last)
+    }
+
+    /// A well-formed hint, and only on a link that asked for them.
+    fn hint_of(&self, v: &Value) -> Option<DecisionHint> {
+        self.push.then(|| DecisionHint::parse(v)).flatten()
     }
 
     fn poison(&mut self, why: &str) -> ClientError {
@@ -273,6 +343,27 @@ impl LocalSocket {
 }
 
 impl Transport for LocalSocket {
+    fn next_hint(&mut self, wait: Duration) -> Result<Option<DecisionHint>, ClientError> {
+        if let Some(why) = &self.dead {
+            return Err(ClientError::Hostile(why.clone()));
+        }
+        if let Some(h) = self.hints.pop_front() {
+            return Ok(Some(h));
+        }
+        let got = self
+            .rt
+            .block_on(async { tokio::time::timeout(wait, self.conn.recv()).await });
+        match got {
+            Err(_) => Ok(None),
+            Ok(Ok(Some(v))) => match self.hint_of(&v) {
+                Some(h) => Ok(Some(h)),
+                None => Err(self.poison("a message that is not a decision hint")),
+            },
+            Ok(Ok(None)) => Err(io("the orchestrator closed the link")),
+            Ok(Err(e)) => Err(self.poison(&e.to_string())),
+        }
+    }
+
     fn call(&mut self, call: Call) -> Result<Value, ClientError> {
         if let Some(why) = &self.dead {
             return Err(ClientError::Hostile(why.clone()));
@@ -280,14 +371,30 @@ impl Transport for LocalSocket {
         self.next += 1;
         let id = self.next;
         let req = serde_json::to_value(Request { id, call }).map_err(io)?;
-        let got = self.rt.block_on(async {
-            self.conn.send(&req).await?;
-            self.conn.recv().await
-        });
-        let v = match got {
-            Ok(Some(v)) => v,
-            Ok(None) => return Err(io("the orchestrator closed the link")),
-            Err(e) => return Err(self.poison(&e.to_string())),
+        let sent = self.rt.block_on(self.conn.send(&req));
+        if let Err(e) = sent {
+            return Err(self.poison(&e.to_string()));
+        }
+        // hints that arrive before the result are queued (the oldest are dropped past the cap)
+        let v = loop {
+            let v = match self.rt.block_on(self.conn.recv()) {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(io("the orchestrator closed the link")),
+                Err(e) => return Err(self.poison(&e.to_string())),
+            };
+            if v.get("msg") == Some(&json!("decision")) {
+                match self.hint_of(&v) {
+                    Some(h) => {
+                        if self.hints.len() >= PUSH_QUEUE {
+                            self.hints.pop_front();
+                        }
+                        self.hints.push_back(h);
+                        continue;
+                    }
+                    None => return Err(self.poison("a message that is not the result asked for")),
+                }
+            }
+            break v;
         };
         match serde_json::from_value::<Out>(v) {
             Ok(Out::Result { id: rid, ok, error }) if rid == id => match (ok, error) {

@@ -233,6 +233,10 @@ pub enum OutboxKind {
     WorktreeCleanup,
     #[serde(rename = "verifier.run")]
     VerifierRun,
+    /// A told-once record of an owner notification (ids and codes): written and marked `done`
+    /// before the hook runs, so a restart never tells twice (at-most-once, ADR-021 section 4).
+    #[serde(rename = "notify")]
+    Notify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -34,7 +34,8 @@ use synthesis_orchestrator::{
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
 use synthesis_session::outcome::{
-    Effects, NewOutcome, OutcomePolicy, OutcomeRecord, OutcomeWriter,
+    Effects, NewOutbox, NewOutcome, OutboxFilter, OutboxKind, OutcomePolicy, OutcomeRecord,
+    OutcomeWriter,
 };
 use synthesis_session::{
     Error as StoreError, OsProbe, Reader, SCHEMA_VERSION_OUTCOMES, Store, StoreOptions,
@@ -45,9 +46,9 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::notify::{Notifier, outcome_payload};
 use crate::orch_endpoint::{self as ep, Ctx, Job};
-use crate::outcome_policy::outcome_policy;
+use crate::outcome_policy::{DISCLOSURE_ID, INTEGRITY_DISCLOSURE, outcome_policy};
 use crate::outcome_service::settings_of;
-use crate::proto::Call;
+use crate::proto::{Call, DecisionHint};
 
 /// Pause between cycles of the owner loop (a job wakes it earlier).
 const TICK: Duration = Duration::from_millis(500);
@@ -113,6 +114,8 @@ struct Owned<'a> {
     /// Answered decisions this owner already moved a blocked outcome for: each one gets one
     /// unblock, so an answer that changes nothing cannot flip the outcome blocked/running forever.
     unblocked_for: BTreeSet<String>,
+    /// `decision id -> (revision, state)` as last published to push links.
+    pushed: BTreeMap<String, (i64, String)>,
 }
 
 pub struct Owner<'a> {
@@ -124,10 +127,25 @@ pub struct Owner<'a> {
     owned: BTreeMap<String, Owned<'a>>,
     sent: BTreeSet<String>,
     notifier: Option<Arc<Notifier>>,
+    /// Push links of the endpoint (decision hints), when it serves any.
+    push: Option<tokio::sync::broadcast::Sender<DecisionHint>>,
     /// `(idempotency key, request fingerprint, reply)` of the latest creates, oldest first.
     created: VecDeque<(String, String, Value)>,
     #[cfg(feature = "test-provider")]
     pub test: TestHooks,
+}
+
+/// `decision id -> (revision, verified state word)`; a row whose state cannot be verified is left
+/// out (nothing is hinted about it).
+fn decision_rows(w: &OutcomeWriter) -> BTreeMap<String, (i64, String)> {
+    w.list_decisions(w.id())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|d| {
+            let st = w.decision_state(&d.id).ok()?;
+            Some((d.id.to_string(), (d.revision, word(&st))))
+        })
+        .collect()
 }
 
 fn has_work(r: &Reader, id: &OutcomeId) -> Result<bool, StoreError> {
@@ -154,10 +172,16 @@ impl<'a> Owner<'a> {
             owned: BTreeMap::new(),
             sent: BTreeSet::new(),
             notifier,
+            push: None,
             created: VecDeque::new(),
             #[cfg(feature = "test-provider")]
             test: TestHooks::default(),
         }
+    }
+
+    /// Publishes decision changes of the outcomes this owner drives to the endpoint's push links.
+    pub fn set_push(&mut self, tx: tokio::sync::broadcast::Sender<DecisionHint>) {
+        self.push = Some(tx);
     }
 
     pub fn owned_count(&self) -> usize {
@@ -177,6 +201,8 @@ impl<'a> Owner<'a> {
                 Ok(mut w) => {
                     let control = Control::default();
                     self.adopt(&mut w, &control, &o, pol);
+                    // what exists now is not news: only later changes are pushed
+                    let pushed = decision_rows(&w);
                     self.owned.insert(
                         id,
                         Owned {
@@ -185,6 +211,7 @@ impl<'a> Owner<'a> {
                             sched: None,
                             refused: None,
                             unblocked_for: BTreeSet::new(),
+                            pushed,
                         },
                     );
                 }
@@ -358,7 +385,8 @@ impl<'a> Owner<'a> {
         let Ok(o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
-        self.notices(&ow.w, &o);
+        self.notices(&mut ow.w, &o);
+        self.publish(ow);
         let keep = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying)
             || has_work(&ow.w, ow.w.id()).unwrap_or(true);
         if !keep {
@@ -450,13 +478,32 @@ impl<'a> Owner<'a> {
     }
 
     /// Tells the person's notify hook that a decision, a block or a verified outcome waits.
-    fn notices(&mut self, w: &OutcomeWriter, o: &OutcomeRecord) {
+    fn notices(&mut self, w: &mut OutcomeWriter, o: &OutcomeRecord) {
         let Some(n) = self.notifier.clone() else {
             return;
         };
         for p in due_notices(w, o, &mut self.sent) {
             n.send_outcome(p);
         }
+    }
+
+    /// Hints the endpoint's push links about every decision that is new or changed since the last
+    /// look: ids and the state word, never text. A hint nobody listens to is dropped.
+    fn publish(&self, ow: &mut Owned<'a>) {
+        let now = decision_rows(&ow.w);
+        if let Some(tx) = &self.push {
+            for (id, (revision, state)) in &now {
+                if ow.pushed.get(id) != Some(&(*revision, state.clone())) {
+                    let _ = tx.send(DecisionHint {
+                        outcome: ow.w.id().to_string(),
+                        id: id.clone(),
+                        revision: *revision,
+                        state: state.clone(),
+                    });
+                }
+            }
+        }
+        ow.pushed = now;
     }
 
     /// Stops every worker and lets go of every outcome (the locks are released with the writers).
@@ -588,15 +635,22 @@ impl<'a> Owner<'a> {
             },
         )
         .map_err(s)?;
-        Ok(json!({"schema": SCHEMA_VERSION_OUTCOMES, "backups": "backups/pre-v5-*"}))
+        // surfaces show this text before they say "enabled" and never word it themselves
+        Ok(
+            json!({"schema": SCHEMA_VERSION_OUTCOMES, "backups": "backups/pre-v5-*",
+                  "disclosure": {"id": DISCLOSURE_ID, "text": INTEGRITY_DISCLOSURE}}),
+        )
     }
 }
 
 /// The notifications an outcome owes the person now (ADR-021 section 4): ids and codes only, once
-/// per `(decision, revision)` and per `(outcome, state, revision)` in `sent`. Dedupe is in memory:
-/// a restarted orchestrator may tell again.
+/// per `(decision, revision)` and per `(outcome, state, revision)`. `sent` is the in-memory first
+/// filter; the durable one is an `outbox` row of kind `notify` keyed by the same facts, written
+/// and marked `done` BEFORE the notice is returned, so a restart (or a crash after the mark and
+/// before the hook ran) loses at most that one notice and never tells twice. `needs_you` is
+/// derived from rows, so a lost notice does not hide the decision.
 pub fn due_notices(
-    w: &OutcomeWriter,
+    w: &mut OutcomeWriter,
     o: &OutcomeRecord,
     sent: &mut BTreeSet<String>,
 ) -> Vec<Value> {
@@ -605,18 +659,23 @@ pub fn due_notices(
         .unwrap_or_default();
     let oid = o.id.to_string();
     let mut out = vec![];
+    let mut tell = |w: &mut OutcomeWriter, key: String, mut p: Value| {
+        if sent.insert(key.clone()) && told_once(w, &key, &p) {
+            p["ts"] = json!(ts);
+            out.push(p);
+        }
+    };
     for d in w.list_decisions(w.id()).unwrap_or_default() {
-        if w.decision_state(&d.id).ok() == Some(DecisionState::Pending)
-            && sent.insert(format!("{}:{}", d.id, d.revision))
-        {
+        if w.decision_state(&d.id).ok() == Some(DecisionState::Pending) {
             let did = d.id.to_string();
-            out.push(outcome_payload(
+            let p = outcome_payload(
                 "decision.created",
                 &oid,
                 Some((&did, &word(&d.kind))),
                 "decision_pending",
-                &ts,
-            ));
+                "",
+            );
+            tell(w, format!("decision.created:{did}:{}", d.revision), p);
         }
     }
     let (event, code) = match o.state {
@@ -624,10 +683,27 @@ pub fn due_notices(
         OutcomeState::Verified => ("outcome.verified", "verified"),
         _ => return out,
     };
-    if sent.insert(format!("{oid}:{code}:{}", o.revision)) {
-        out.push(outcome_payload(event, &oid, None, code, &ts));
-    }
+    tell(
+        w,
+        format!("{event}:{oid}:{}", o.revision),
+        outcome_payload(event, &oid, None, code, ""),
+    );
     out
+}
+
+/// Records that the notice `key` is being told, as a `done` outbox row: `true` only for the call
+/// that created it. Any failure answers `false` (the notice is not told: fail toward silence).
+fn told_once(w: &mut OutcomeWriter, key: &str, payload: &Value) -> bool {
+    let row = NewOutbox {
+        idempotency_key: format!("notify:{key}"),
+        kind: OutboxKind::Notify,
+        payload: payload.clone(),
+    };
+    let first = w.atomically(|tx| tx.enqueue(&row)).unwrap_or(false);
+    let only = OutboxFilter::one(&[OutboxKind::Notify], &row.idempotency_key);
+    first
+        && matches!(w.claim_outbox(OffsetDateTime::now_utc(), &only), Ok(Some(r))
+            if w.complete_outbox(&r.id, "told").is_ok())
 }
 
 // ------------------------------------------------------------------ process
@@ -831,8 +907,11 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
         .build()
         .map_err(s)?;
     let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(ep::JOB_QUEUE);
+    let (push, _) = tokio::sync::broadcast::channel(ep::PUSH_QUEUE);
+    owner.set_push(push.clone());
     let ctx = Arc::new(Ctx {
         env: env.clone(),
+        push,
         home: home.clone(),
         jobs: tx,
         link_idle: ep::LINK_IDLE,

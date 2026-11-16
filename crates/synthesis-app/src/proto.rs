@@ -480,6 +480,54 @@ impl Reply {
     }
 }
 
+/// The opt-in push of an orchestrator link (`attach {push: ["decision"]}`, ADR-021 section 3): a
+/// hint that decision `id` of `outcome` changed. Ids and codes only, never brief text: the client
+/// refetches with `decision.get` and renders what the server answers, never the line. It is not an
+/// [`Out`] variant on purpose: the stdio engine never sends it, so there it stays a protocol error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionHint {
+    pub outcome: String,
+    pub id: String,
+    pub revision: i64,
+    pub state: String,
+}
+
+/// The `DecisionState` words a hint may carry.
+const HINT_STATES: [&str; 7] = [
+    "preparing",
+    "pending",
+    "needs_more_info",
+    "approved",
+    "rejected",
+    "expired",
+    "invalidated",
+];
+
+impl DecisionHint {
+    pub fn to_line(&self) -> Value {
+        json!({"msg": "decision", "outcome": self.outcome, "id": self.id,
+               "revision": self.revision, "state": self.state})
+    }
+
+    /// Strict: exactly these five keys, id shapes and a known state; anything else is not a hint.
+    pub fn parse(v: &Value) -> Option<Self> {
+        let o = v.as_object().filter(|o| o.len() == 5)?;
+        let word = |k: &str| o.get(k)?.as_str().map(str::to_string);
+        let (outcome, id, state) = (word("outcome")?, word("id")?, word("state")?);
+        let ids = [&outcome, &id]
+            .iter()
+            .all(|i| synthesis_view::outcomes::valid_alt_id(i));
+        (o.get("msg")? == "decision" && ids && HINT_STATES.contains(&state.as_str())).then_some(
+            Self {
+                outcome,
+                id,
+                revision: o.get("revision")?.as_i64().filter(|r| *r >= 0)?,
+                state,
+            },
+        )
+    }
+}
+
 /// What the engine writes besides event envelopes.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "msg")]
@@ -930,5 +978,32 @@ mod tests {
                 .len(),
             MAX_LINE
         );
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn a_hint_round_trips_and_anything_looser_is_not_one() {
+        let h = DecisionHint {
+            outcome: "o1".into(),
+            id: "d-1".into(),
+            revision: 3,
+            state: "pending".into(),
+        };
+        assert_eq!(DecisionHint::parse(&h.to_line()), Some(h.clone()));
+        let mut extra = h.to_line();
+        extra["brief"] = json!("approve me");
+        let mut bad_state = h.to_line();
+        bad_state["state"] = json!("approved; rm -rf");
+        let mut bad_id = h.to_line();
+        bad_id["id"] = json!("a b");
+        let mut neg = h.to_line();
+        neg["revision"] = json!(-1);
+        for bad in [extra, bad_state, bad_id, neg, json!({"msg": "decision"})] {
+            assert_eq!(DecisionHint::parse(&bad), None, "{bad}");
+        }
     }
 }

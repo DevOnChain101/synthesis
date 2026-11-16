@@ -2864,6 +2864,44 @@ fn a_forged_row_and_event_without_the_mac_do_not_verify() {
         .unwrap();
 }
 
+/// Plan 3b item 4: a passing `independent_check` row written by plain SQL, with no chained event
+/// and no MAC from the store, never counts toward a verdict (the weaker case of the one above: the
+/// writer does not even forge the event). Positive control: the same facts through the store pass.
+#[test]
+fn sql_inserted_evidence_never_passes() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+        criteria_ids: vec![],
+        ..ev
+    });
+    let test = item(&items, "test").clone();
+    e.db()
+        .execute(
+            "INSERT INTO evidence(id,outcome_id,work_item_id,trust_class,producer,subject_commit,check_id,\
+               criteria_ids,result,exit_code,env_fingerprint,fence,captured_at,mac) \
+             VALUES (?1,?2,?3,'independent_check','independent_runner','cafe01','sql-only',\
+               '[\"c1\",\"c2\"]','passed',0,'x',0,'2026-01-01T00:00:00.000Z',?4)",
+            rusqlite::params![FORGED_ID, w.id().as_str(), test.as_str(), "cd".repeat(32)],
+        )
+        .unwrap();
+    let rows = w.list_evidence(w.id()).unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.check_id == "sql-only" && !r.event_backed),
+        "the row is visible but not event backed"
+    );
+    assert!(try_verify(&mut w).unwrap_err().contains("verdict"));
+    w.record_evidence(&NewEvidence {
+        check_id: "unit-real".into(),
+        ..evidence(&test, None, "cafe01", &["c1", "c2"])
+    })
+    .unwrap();
+    w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+        .unwrap();
+}
+
 /// A genuine row altered afterwards (the trigger dropped by a writer with file access) fails its
 /// MAC: rewritten `criteria_ids` (the event rewritten too) and a removed flag both count for nothing.
 #[test]

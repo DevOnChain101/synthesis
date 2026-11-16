@@ -167,7 +167,22 @@ fn create_approve_start_status_cancel_through_the_owner_process() {
         out.contains("schema v5") && err.contains("--yes"),
         "{out} {err}"
     );
-    assert_eq!(r.synt(&["enable", "--yes"]).0, 0);
+    // the notice is the plan's disclosure; the owner's reply carries the same text and the CLI prints it
+    assert!(
+        out.contains(synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE),
+        "{out}"
+    );
+    let (code, out, err) = r.synt(&["enable", "--yes"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains(synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE),
+        "{out}"
+    );
+    let j = r.json(&["enable", "--yes"]);
+    assert_eq!(
+        j["disclosure"]["id"],
+        synthesis_app::outcome_policy::DISCLOSURE_ID
+    );
     // the contract: criteria, a frozen check, and an envelope that touches src only
     let criteria = r.file(
         "criteria.json",
