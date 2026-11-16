@@ -82,7 +82,7 @@ pub fn endpoint_ok(run_dir: &Path, endpoint: &str) -> bool {
 }
 
 /// Write `bytes` 0600 (unix) via temp + rename.
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", net::hex(&net::random::<4>()?)));
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
@@ -101,8 +101,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// hard-linked into place, so a reader never sees a partial key and two creators cannot clobber
 /// each other. The key must be a regular file of ours (not a link), mode 0600 on unix.
 pub fn load_or_create_key(run_dir: &Path) -> io::Result<Key> {
+    load_or_create_named_key(run_dir, "peer.key")
+}
+
+/// [`load_or_create_key`] for another key file of the run directory (`orch.key`, plan PR-12).
+pub fn load_or_create_named_key(run_dir: &Path, file: &str) -> io::Result<Key> {
     net::prepare_run_dir(run_dir)?;
-    let path = run_dir.join("peer.key");
+    let path = run_dir.join(file);
     if std::fs::symlink_metadata(&path).is_err() {
         let tmp = run_dir.join(format!(".key{}", net::hex(&net::random::<8>()?)));
         write_private(&tmp, &net::random::<32>()?)?;
@@ -117,26 +122,26 @@ pub fn load_or_create_key(run_dir: &Path) -> io::Result<Key> {
     let bad = |m: &'static str| io::Error::new(io::ErrorKind::InvalidData, m);
     let meta = std::fs::symlink_metadata(&path)?;
     if !meta.is_file() {
-        return Err(bad("peer.key is not a regular file"));
+        return Err(bad("the key file is not a regular file"));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if meta.permissions().mode() & 0o077 != 0 {
             return Err(bad(
-                "peer.key is accessible to other users (expected mode 0600)",
+                "the key file is accessible to other users (expected mode 0600)",
             ));
         }
         if meta.uid() != std::fs::metadata(run_dir)?.uid() {
             return Err(bad(
-                "peer.key is not owned by the owner of the run directory",
+                "the key file is not owned by the owner of the run directory",
             ));
         }
     }
     std::fs::read(&path)?
         .try_into()
         .map(Key)
-        .map_err(|_| bad("peer.key is not 32 bytes"))
+        .map_err(|_| bad("the key file is not 32 bytes"))
 }
 
 /// Case/separator folding used by workspace rules (messaging.md section 1).

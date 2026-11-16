@@ -415,6 +415,9 @@ fn synthesis_state_db_and_memory_are_unreadable() {
     std::fs::write(home.join("backups/clean-1/synt.db"), "BACKUPDB").unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     std::fs::write(home.join("run/trust.key"), "TRUSTKEY").unwrap();
+    // the orchestrator endpoint's key and registry (plan PR-12, threat T-32)
+    std::fs::write(home.join("run/orch.key"), "ORCHKEY").unwrap();
+    std::fs::write(home.join("run/orch.json"), "ORCHENDPOINT").unwrap();
     std::fs::write(home.join("memory/memory.db"), "MEMORIES").unwrap();
     std::fs::write(home.join("other.txt"), "fine").unwrap();
     let mut p = pol(a.path());
@@ -423,6 +426,8 @@ fn synthesis_state_db_and_memory_are_unreadable() {
         "synt.db",
         "chain.key",
         "run/trust.key",
+        "run/orch.key",
+        "run/orch.json",
         "backups/clean-1/synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
@@ -441,6 +446,8 @@ fn synthesis_state_db_and_memory_are_unreadable() {
         "synt.db",
         "chain.key",
         "run/trust.key",
+        "run/orch.key",
+        "run/orch.json",
         "backups/clean-1/synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
@@ -454,6 +461,8 @@ fn synthesis_state_db_and_memory_are_unreadable() {
                 && !out.contains("SESSIONS")
                 && !out.contains("CHAINKEY")
                 && !out.contains("TRUSTKEY")
+                && !out.contains("ORCHKEY")
+                && !out.contains("ORCHENDPOINT")
                 && !out.contains("BACKUPDB")
                 && !out.contains("MEMORIES")
                 && !out.contains("TRANSCRIPT"),

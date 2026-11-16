@@ -3,17 +3,18 @@
 //! A surface only inserts a command row; the one writer of the outcome applies it here, exactly
 //! once. Before the commands, the decision driver settles expiry and invalidation, so a resolve
 //! that races either one finds the decision already `expired` or `invalidated` and is `stale`:
-//! an expired decision is never approved. Kinds this build does not apply (`outcome.start`,
-//! `pause`, `resume`, `cancel`, `ack`) stay `queued`; the orchestrator process (plan PR-12)
-//! applies them.
+//! an expired decision is never approved. [`apply_lifecycle`] applies `outcome.start|pause|resume|
+//! cancel|ack` the same way; a kind nobody here knows stays `queued`.
 
 use serde_json::{Value, json};
-use synthesis_core::outcome::DecisionState;
+use synthesis_core::outcome::{DecisionState, OutcomeState};
+use synthesis_events::Record;
 use synthesis_session::Error as StoreError;
-use synthesis_session::outcome::{CommandRecord, CommandState, OutcomeWriter, Resolution};
+use synthesis_session::outcome::{CommandRecord, CommandState, Effects, OutcomeWriter, Resolution};
 use time::OffsetDateTime;
 
-use crate::sched::{Decisions, SchedError};
+use crate::planner::{Planner, make_plan};
+use crate::sched::{Control, Decisions, SchedError};
 use crate::{DecisionDriver, current_binding_for};
 
 /// Applies every queued command this build knows; returns the ones finished now, oldest first.
@@ -134,4 +135,215 @@ fn approve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
         Err(e) if refused(&e) => deny(w, c, e),
         other => other,
     }
+}
+
+/// What one lifecycle command came to.
+enum Step {
+    Done(Value),
+    Denied(String),
+    /// Not finished: the command stays `queued` and is looked at again (a cancel of a running
+    /// outcome ends with the scheduler's tick, so a crash in between cannot lose it).
+    Waiting,
+}
+
+fn name(s: OutcomeState) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
+fn go(w: &mut OutcomeWriter, to: OutcomeState) -> Result<(), StoreError> {
+    let rev = w.get_outcome(w.id())?.revision;
+    w.transition_outcome(rev, to, None, &Effects::default())?;
+    Ok(())
+}
+
+/// Applies `outcome.start|pause|resume|cancel|ack` that surfaces queued. `control` is the pause
+/// flag and cancel flag of the outcome's scheduler. A pause is also written as an event, so an
+/// owner that starts later ([`restore_pause`]) does not run what a person paused.
+pub fn apply_lifecycle(
+    w: &mut OutcomeWriter,
+    control: &Control,
+    planner: &dyn Planner,
+) -> Result<Vec<CommandRecord>, SchedError> {
+    let mut done = vec![];
+    for c in w.queued_commands(w.id())? {
+        let kind = c.kind.as_str();
+        if !matches!(
+            kind,
+            "outcome.start" | "outcome.pause" | "outcome.resume" | "outcome.cancel" | "outcome.ack"
+        ) {
+            continue;
+        }
+        let o = w.get_outcome(w.id())?;
+        // a cancel that was waiting for the scheduler is finished by the state it caused
+        let cancelled = kind == "outcome.cancel" && o.state == OutcomeState::Cancelled;
+        let run = if cancelled {
+            Ok(Step::Done(json!({"state": "cancelled"})))
+        } else if c.expected_revision.is_some_and(|r| r != o.revision) {
+            let body = json!({"expected": c.expected_revision, "actual": o.revision});
+            done.push(finish(w, &c, CommandState::Stale, body)?);
+            continue;
+        } else {
+            match kind {
+                "outcome.start" => start(w, planner),
+                "outcome.pause" => pause(w, control, &c),
+                "outcome.resume" => resume(w, control, &c),
+                "outcome.cancel" => cancel(w, control),
+                _ => ack(w),
+            }
+        };
+        match run {
+            Ok(Step::Done(body)) => done.push(finish(w, &c, CommandState::Applied, body)?),
+            Ok(Step::Denied(why)) => done.push(deny(w, &c, why)?),
+            Ok(Step::Waiting) => {}
+            Err(e @ (StoreError::Sqlite(_) | StoreError::Io(_) | StoreError::Locked(_))) => {
+                return Err(e.into());
+            }
+            Err(_) => done.push(deny(w, &c, "the command could not be applied")?),
+        }
+    }
+    Ok(done)
+}
+
+fn start(w: &mut OutcomeWriter, planner: &dyn Planner) -> Result<Step, StoreError> {
+    let o = w.get_outcome(w.id())?;
+    match o.state {
+        OutcomeState::Running => return Ok(Step::Done(json!({"state": "running"}))),
+        OutcomeState::ContractPending | OutcomeState::Ready => {}
+        s => {
+            return Ok(Step::Denied(format!(
+                "the outcome is {}, it cannot be started",
+                name(s)
+            )));
+        }
+    }
+    if !w.contract_is_approved(w.id(), o.contract_version)? {
+        return Ok(Step::Denied("approve the contract first".into()));
+    }
+    // each step below is skipped when it already happened, so a crash between them is finished
+    // by the next try (the command stays queued until the outcome runs)
+    if o.plan_version.is_none() {
+        let (contract, _, _) = w.get_contract(w.id(), o.contract_version)?;
+        let (plan, _) = make_plan(planner, &contract, 1)
+            .map_err(|e| StoreError::Invalid(format!("no plan: {e}")))?;
+        w.insert_plan(&plan)?;
+    }
+    if w.get_outcome(w.id())?.state == OutcomeState::ContractPending {
+        go(w, OutcomeState::Ready)?;
+    }
+    go(w, OutcomeState::Running)?;
+    Ok(Step::Done(json!({"state": "running"})))
+}
+
+fn marker(
+    w: &mut OutcomeWriter,
+    c: &CommandRecord,
+    kind: &'static str,
+    body: Value,
+) -> Result<Step, StoreError> {
+    // the command and the marker event are one transaction
+    w.apply_command(&c.idempotency_key, |tx, _| {
+        tx.emit(kind, json!({}))?;
+        Ok((CommandState::Applied, body.clone()))
+    })?;
+    // already finished here: nothing more for the caller to write
+    Ok(Step::Waiting)
+}
+
+fn pause(w: &mut OutcomeWriter, control: &Control, c: &CommandRecord) -> Result<Step, StoreError> {
+    let s = w.get_outcome(w.id())?.state;
+    if s.is_terminal() {
+        return Ok(Step::Denied(format!("the outcome is {}", name(s))));
+    }
+    control.pause();
+    marker(w, c, "outcome.paused", json!({"paused": true}))
+}
+
+fn resume(w: &mut OutcomeWriter, control: &Control, c: &CommandRecord) -> Result<Step, StoreError> {
+    let s = w.get_outcome(w.id())?.state;
+    if s.is_terminal() {
+        return Ok(Step::Denied(format!("the outcome is {}", name(s))));
+    }
+    control.resume();
+    if s == OutcomeState::Blocked {
+        go(w, OutcomeState::Running)?;
+    }
+    marker(w, c, "outcome.resumed", json!({"paused": false}))
+}
+
+fn cancel(w: &mut OutcomeWriter, control: &Control) -> Result<Step, StoreError> {
+    match w.get_outcome(w.id())?.state {
+        OutcomeState::Cancelled => Ok(Step::Done(json!({"state": "cancelled"}))),
+        s if s.is_terminal() => Ok(Step::Denied(format!("the outcome is {}", name(s)))),
+        OutcomeState::Running => {
+            control.cancel.cancel();
+            Ok(Step::Waiting)
+        }
+        _ => {
+            go(w, OutcomeState::Cancelled)?;
+            Ok(Step::Done(json!({"state": "cancelled"})))
+        }
+    }
+}
+
+fn ack(w: &mut OutcomeWriter) -> Result<Step, StoreError> {
+    match w.get_outcome(w.id())?.state {
+        OutcomeState::Completed => Ok(Step::Done(json!({"state": "completed"}))),
+        OutcomeState::Verified => {
+            go(w, OutcomeState::Completed)?;
+            Ok(Step::Done(json!({"state": "completed"})))
+        }
+        s => Ok(Step::Denied(format!(
+            "the outcome is {}, only a verified one is acknowledged",
+            name(s)
+        ))),
+    }
+}
+
+/// Sets the pause flag when the last `outcome.paused` / `outcome.resumed` event of the control
+/// session says paused. Called when an owner adopts an outcome.
+pub fn restore_pause(w: &OutcomeWriter, control: &Control) -> Result<(), StoreError> {
+    let (mut after, mut paused) = (0, false);
+    loop {
+        let page = w.read_events(w.control_session_id(), after, 500)?;
+        if page.is_empty() {
+            break;
+        }
+        for rec in page {
+            match rec {
+                Record::Known(e) => after = e.seq,
+                Record::Unknown(e) => {
+                    after = e.seq;
+                    match e.kind.as_str() {
+                        "outcome.paused" => paused = true,
+                        "outcome.resumed" => paused = false,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if paused {
+        control.pause();
+    }
+    Ok(())
+}
+
+/// Every work item succeeded: `running` -> `verifying` -> `verified`, or `rework_required` when the
+/// store's own verdict says the evidence does not support it (nothing here decides that).
+/// Safe to call again after a crash between the steps.
+pub fn conclude(w: &mut OutcomeWriter) -> Result<OutcomeState, StoreError> {
+    if w.get_outcome(w.id())?.state == OutcomeState::Running {
+        go(w, OutcomeState::Verifying)?;
+    }
+    if w.get_outcome(w.id())?.state == OutcomeState::Verifying {
+        match go(w, OutcomeState::Verified) {
+            Ok(()) => {}
+            Err(e) if refused(&e) => go(w, OutcomeState::ReworkRequired)?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(w.get_outcome(w.id())?.state)
 }

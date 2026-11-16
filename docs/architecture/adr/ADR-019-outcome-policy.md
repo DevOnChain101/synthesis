@@ -158,3 +158,7 @@ User and managed hooks still run on the host, outside the sandbox, in an attempt
 
 - `decision.resolve` reaches `resolve_decision` only through a queued command applied by the owner (`apply_queued`); the approver is derived from the command's surface, never from params. The race table of section 5 holds at protocol level and is tested: two surfaces (one `applied`, one `already_resolved`, one approval row), resolve vs invalidation (`stale`), resolve vs expiry (`stale`, the decision is `expired`, the item stays `waiting_decision`), the same key twice (one effect, stored result).
 - Still self-asserted: `from_surface` (PR-12 authenticates the endpoint). Still open: `request_evidence` and `edit_scope` leave the decision `needs_more_info` with no re-brief.
+
+## Implementation notes (PR-12)
+
+- The decision driver now runs inside the orchestrator process (`DecisionDriver` on every scheduler tick and before every command pass), and `decision.resolve` is accepted only on the authenticated orchestrator endpoint (ADR-021 PR-12 notes). A live `OrchGateway` is still not built.
