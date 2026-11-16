@@ -396,6 +396,12 @@ impl WorktreeManager {
         Ok(full)
     }
 
+    /// Refuses unless `base` is a full lowercase id of a commit that exists in the repository
+    /// containing `repo_root` (a check before anything is recorded against it).
+    pub fn verify_base(&self, repo_root: &Path, base: &str) -> Result<()> {
+        self.resolve_base(repo_root, base).map(drop)
+    }
+
     /// Where session `session_id`'s worktree lives for the repository at `repo_root`.
     fn worktree_path(&self, repo_root: &Path, session_id: &str) -> Result<PathBuf> {
         let dir = match &self.opts.worktrees_dir {

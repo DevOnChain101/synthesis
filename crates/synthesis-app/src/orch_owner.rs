@@ -13,7 +13,8 @@
 //! included) when the setting is turned off. Ownership and correctness boundary, not a security
 //! boundary (ADR-017).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
@@ -30,7 +32,7 @@ use synthesis_orchestrator::{
     apply_queued, conclude, recover_attempts, restore_pause,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
-use synthesis_peers::run_dir;
+use synthesis_peers::{platform_ok, run_dir};
 use synthesis_session::outcome::{
     Effects, NewOutcome, OutcomePolicy, OutcomeRecord, OutcomeWriter,
 };
@@ -53,6 +55,8 @@ const TICK: Duration = Duration::from_millis(500);
 const LEASE: Duration = Duration::from_secs(120);
 /// Longest one independent check may run.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(600);
+/// Most `outcome.create` replies kept for a retry with the same key (in memory).
+const KEPT_CREATES: usize = 256;
 /// The command kinds an owner applies; anything else does not make an outcome worth owning.
 const KINDS: [&str; 7] = [
     "decision.resolve",
@@ -106,6 +110,8 @@ pub struct Owner<'a> {
     owned: BTreeMap<String, Owned<'a>>,
     sent: BTreeSet<String>,
     notifier: Option<Arc<Notifier>>,
+    /// `(idempotency key, request fingerprint, reply)` of the latest creates, oldest first.
+    created: VecDeque<(String, String, Value)>,
 }
 
 fn has_work(r: &Reader, id: &OutcomeId) -> Result<bool, StoreError> {
@@ -132,6 +138,7 @@ impl<'a> Owner<'a> {
             owned: BTreeMap::new(),
             sent: BTreeSet::new(),
             notifier,
+            created: VecDeque::new(),
         }
     }
 
@@ -393,14 +400,57 @@ impl<'a> Owner<'a> {
                 workspace,
                 base_commit,
                 contract,
+                idempotency_key,
                 ..
-            } => self.create(&workspace, base_commit, &contract, pol),
+            } => self.create(&workspace, base_commit, &contract, idempotency_key, pol),
             Call::OrchestratorEnable { .. } => self.enable(pol),
             _ => Err("not an owner call".into()),
         }
     }
 
+    /// A retry of a create (same key, same request) returns the first reply instead of a second
+    /// draft. The record is in memory: an owner that restarted in between forgets it, and the retry
+    /// makes another draft that only waits for its approval (documented residual).
     fn create(
+        &mut self,
+        workspace: &str,
+        base_commit: String,
+        contract: &Contract,
+        key: Option<String>,
+        pol: &OutcomePolicy,
+    ) -> Result<Value, String> {
+        let Some(key) = key else {
+            return self.make(workspace, base_commit, contract, pol);
+        };
+        if !(8..=128).contains(&key.len())
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        {
+            return Err(
+                "idempotency_key must be 8 to 128 characters of A-Z a-z 0-9 - _ . :".into(),
+            );
+        }
+        let fp = format!(
+            "{:x}",
+            Sha256::digest(json!([workspace, base_commit, contract]).to_string())
+        );
+        if let Some((_, f, reply)) = self.created.iter().find(|c| c.0 == key) {
+            return if *f == fp {
+                Ok(reply.clone())
+            } else {
+                Err("the idempotency key was already used by a different request".into())
+            };
+        }
+        let reply = self.make(workspace, base_commit, contract, pol)?;
+        if self.created.len() >= KEPT_CREATES {
+            self.created.pop_front();
+        }
+        self.created.push_back((key, fp, reply.clone()));
+        Ok(reply)
+    }
+
+    fn make(
         &mut self,
         workspace: &str,
         base_commit: String,
@@ -414,6 +464,7 @@ impl<'a> Owner<'a> {
         if !root.is_absolute() || !root.is_dir() {
             return Err("workspace must be an existing absolute directory".into());
         }
+        self.wm.verify_base(root, &base_commit).map_err(s)?;
         let art = self.home.join("artifacts");
         let open = |id: String| {
             WorkspaceContext::open(id, root, root, &[], art.join("outcome"), "orchestrator")
@@ -506,6 +557,85 @@ pub fn due_notices(
 
 // ------------------------------------------------------------------ process
 
+/// The environment of a worker: `child_env` (allowlist) plus only what its provider needs, the
+/// `SYNT_API_KEY` / `SYNT_AUTH_TOKEN` pair (ADR-011) and the variables the user's own provider
+/// entries name as `{env:NAME}`. The rest of the environment of whichever surface started the
+/// orchestrator (cloud tokens, ...) never reaches a worker.
+pub fn worker_env(env: &Env, home: &Path) -> Vec<(OsString, OsString)> {
+    let mut out: BTreeMap<String, String> = env
+        .child_env()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let named = ["SYNT_API_KEY".to_string(), "SYNT_AUTH_TOKEN".to_string()]
+        .into_iter()
+        .chain(provider_env_names(home));
+    for n in named {
+        if let Some(v) = env.get(&n) {
+            out.insert(n, v.to_string());
+        }
+    }
+    out.into_iter().map(|(k, v)| (k.into(), v.into())).collect()
+}
+
+/// The `NAME`s of every whole-string `{env:NAME}` in the `providers` of the user's `synt.json`.
+fn provider_env_names(home: &Path) -> Vec<String> {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => {
+                if let Some(n) = s.strip_prefix("{env:").and_then(|r| r.strip_suffix('}'))
+                    && !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    out.push(n.to_string());
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    let doc = std::fs::read(home.join("synt.json"))
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    if let Some(p) = doc.as_ref().and_then(|d| d.get("providers")) {
+        walk(p, &mut out);
+    }
+    out
+}
+
+/// Removes the socket a dead orchestrator left, and only that: a direct child of `run/` named
+/// like the listener names its sockets (16 hex digits + `.sock`), a socket (not a link or a file),
+/// owned by this user with mode 0600, that nobody listens on. A registry entry that names anything
+/// else is left alone. (A Windows pipe goes away with its owner.)
+#[cfg(unix)]
+fn remove_stale_socket(run: &Path, old: &str) {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let p = Path::new(old);
+    let hex16 = |n: &str| {
+        n.strip_suffix(".sock").is_some_and(|h| {
+            h.len() == 16 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    };
+    let (Ok(m), Ok(dir)) = (std::fs::symlink_metadata(p), std::fs::metadata(run)) else {
+        return;
+    };
+    if p.parent() == Some(run)
+        && p.file_name().and_then(|n| n.to_str()).is_some_and(hex16)
+        && m.file_type().is_socket()
+        && m.uid() == dir.uid()
+        && m.permissions().mode() & 0o777 == 0o600
+        && std::os::unix::net::UnixStream::connect(p).is_err()
+    {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_stale_socket(_run: &Path, _old: &str) {}
+
 /// The notify hook, when the person configured one and a confining sandbox exists; otherwise
 /// notifications are off (said once), never run unconfined.
 fn notifier(env: &Env, h: &crate::Homes) -> Option<Arc<Notifier>> {
@@ -568,6 +698,11 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
     if !outcome_policy(&st.synthesis.orchestrator).enabled {
         return Err("outcomes are off (synt.orchestrator.enabled is false): not starting".into());
     }
+    // Windows: run/ and orch.key are protected by the ACL they inherit from the user profile
+    let profile = env.get_nonempty("USERPROFILE").map(PathBuf::from);
+    if !platform_ok(&home, profile.as_deref()) {
+        return Err("SYNT_HOME must be under your user profile on Windows".into());
+    }
     let run = run_dir(&home);
     prepare_run_dir(&run).map_err(s)?;
     let lock = std::fs::OpenOptions::new()
@@ -587,7 +722,7 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
     let key = ep::load_key(&home).map_err(s)?;
     // the lock is ours, so a socket the registry still names belongs to a dead owner
     if let Some(old) = ep::read_registry(&home) {
-        let _ = std::fs::remove_file(old);
+        remove_stale_socket(&run, &old);
     }
     // everything that can fail is built before the endpoint is published
     let store = Store::open(
@@ -601,7 +736,7 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
     let wm = crate::wt::manager(&env, &home)?;
     let spawn = SyntSpawn {
         log: run.join("orch-worker.log"),
-        env: None,
+        env: Some(worker_env(&env, &home)),
     };
     let program = match program {
         Some(p) => p,
@@ -613,11 +748,12 @@ pub fn serve_with(env: Env, stop: Arc<AtomicBool>, program: Option<PathBuf>) -> 
         .enable_all()
         .build()
         .map_err(s)?;
-    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(ep::JOB_QUEUE);
     let ctx = Arc::new(Ctx {
         env: env.clone(),
         home: home.clone(),
         jobs: tx,
+        link_idle: ep::LINK_IDLE,
         clients: AtomicUsize::new(0),
         last_call: std::sync::atomic::AtomicU64::new(ep::now_secs()),
     });
@@ -667,6 +803,10 @@ fn run_loop(
         match rx.recv_timeout(TICK) {
             Ok((call, reply)) => {
                 let _ = reply.send(owner.job(call, &pol));
+                // the rest of the queue too: one job per cycle would delay the later ones
+                while let Ok((call, reply)) = rx.try_recv() {
+                    let _ = reply.send(owner.job(call, &pol));
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
@@ -745,5 +885,87 @@ mod tests {
         for bad in ["", "abc", &"A".repeat(40), &"g".repeat(40), &"a".repeat(41)] {
             assert!(!commit_id(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_worker_gets_the_filtered_env_and_only_the_provider_keys() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("synt.json"),
+            r#"{"providers":{"gw":{"apiKey":"{env:GW_KEY}","headers":{"x":"{env:GW_HDR}"}}},"other":"{env:NOT_A_PROVIDER}"}"#,
+        )
+        .unwrap();
+        let env = Env::from_pairs([
+            ("PATH", "/usr/bin"),
+            ("FAKE_CLOUD_TOKEN", "cloud"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("NOT_A_PROVIDER", "x"),
+            ("SYNT_API_KEY", "key1"),
+            ("SYNT_PROVIDER", "gw"),
+            ("GW_KEY", "key2"),
+            ("GW_HDR", "hdr"),
+        ]);
+        let got: BTreeMap<_, _> = worker_env(&env, home.path())
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        for gone in [
+            "FAKE_CLOUD_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "NOT_A_PROVIDER",
+        ] {
+            assert!(!got.contains_key(gone), "{gone} reached the worker");
+        }
+        for (k, v) in [
+            ("PATH", "/usr/bin"),
+            ("SYNT_API_KEY", "key1"),
+            ("SYNT_PROVIDER", "gw"),
+            ("GW_KEY", "key2"),
+            ("GW_HDR", "hdr"),
+        ] {
+            assert_eq!(got.get(k).map(String::as_str), Some(v), "{k}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_orchestrators_own_stale_socket_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let d = tempfile::Builder::new()
+            .prefix("o")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let run = d.path().join("run");
+        std::fs::create_dir_all(run.join("sub")).unwrap();
+        let sock = |p: &Path, mode: u32| {
+            drop(UnixListener::bind(p).unwrap()); // the file stays, nobody listens
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let ours = run.join("0123456789abcdef.sock");
+        sock(&ours, 0o600);
+        let odd_name = run.join("peer.sock");
+        sock(&odd_name, 0o600);
+        let wide = run.join("fedcba9876543210.sock");
+        sock(&wide, 0o666);
+        let nested = run.join("sub/0123456789abcdef.sock");
+        sock(&nested, 0o600);
+        let file = run.join("aaaaaaaaaaaaaaaa.sock");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let live = run.join("bbbbbbbbbbbbbbbb.sock");
+        let _listening = UnixListener::bind(&live).unwrap();
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for kept in [&odd_name, &wide, &nested, &file, &live] {
+            remove_stale_socket(&run, &kept.to_string_lossy());
+            assert!(kept.exists(), "{kept:?} must stay");
+        }
+        remove_stale_socket(&run, &ours.to_string_lossy());
+        assert!(!ours.exists());
     }
 }

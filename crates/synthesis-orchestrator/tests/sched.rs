@@ -1747,6 +1747,14 @@ fn cancelling_stops_a_running_verification_promptly() {
         sched.tick(&mut w, clock()).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
+    // a tick does not wait for the check (it runs on its own thread): the owner loop that calls it
+    // keeps applying pause, cancel and decisions while a check runs for minutes
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        sched.tick(&mut w, clock()).unwrap();
+        assert!(sched.verifier.busy());
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
     let t0 = std::time::Instant::now();
     sched.control.cancel.cancel();
     let rep = sched.tick(&mut w, clock()).unwrap();

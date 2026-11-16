@@ -211,6 +211,15 @@ fn a_check_runs_sandboxed_with_a_read_only_source_and_a_private_tmp() {
         String::from_utf8_lossy(&ok.output)
     );
     assert_eq!(ok.command_hash.len(), 64);
+    // the check does not see the environment of the process that runs it (cargo sets
+    // CARGO_MANIFEST_DIR in this one; a cloud token would be there in real life)
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let env = run(
+        "env",
+        "test -z \"$CARGO_MANIFEST_DIR\" && test -z \"$USER$LOGNAME\"",
+        20,
+    );
+    assert_eq!(env.result(), "passed", "{:?}", env.problem);
     // the source is read-only: the same shape of command, writing into it, fails
     let ro = run("ro", "echo x > a.txt", 20);
     assert_eq!(ro.result(), "failed");

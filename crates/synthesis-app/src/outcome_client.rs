@@ -185,11 +185,25 @@ impl<T: Transport> OutcomeClient<T> {
         base_commit: &str,
         contract: synthesis_core::outcome::Contract,
     ) -> Result<Value, ClientError> {
+        let key = format!("create-{}", uuid::Uuid::new_v4());
+        self.create_with_key(workspace, base_commit, contract, &key)
+    }
+
+    /// [`Self::create`] with the caller's key: after a lost reply, the same call with the same key
+    /// returns the draft the first one made instead of a second one.
+    pub fn create_with_key(
+        &mut self,
+        workspace: &str,
+        base_commit: &str,
+        contract: synthesis_core::outcome::Contract,
+        key: &str,
+    ) -> Result<Value, ClientError> {
         let v = self.t.call(Call::OutcomeCreate {
             workspace: workspace.into(),
             base_commit: base_commit.into(),
             contract: Box::new(contract),
             surface: self.surface,
+            idempotency_key: Some(key.into()),
         })?;
         match v.get("id").and_then(Value::as_str) {
             Some(_) => Ok(v),

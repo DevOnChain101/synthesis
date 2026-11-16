@@ -61,7 +61,7 @@ synt orchestrator --serve &
 sleep 1; cat $SYNT_HOME/run/orch.json
 ```
 
-Expect: the second start succeeds (the kernel released the lock), `orch.json` names a new socket and pid, and the dead process's socket file is gone.
+Expect: the second start succeeds (the kernel released the lock), `orch.json` names a new socket and pid, and the dead process's socket file is gone (it is removed only when it is the orchestrator's own: `<16 hex>.sock`, mode 0600, owned by you, nobody listening). When a client started the process, `run/orch.log` is mode 0600.
 
 ## 6. Turn it off
 
