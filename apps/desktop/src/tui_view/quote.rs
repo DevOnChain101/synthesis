@@ -9,8 +9,8 @@ use gpui::{
 };
 use synthesis_cli_ui_render::theme as t;
 
-use super::TuiView;
 use super::panels::{dim, strong, text, with_alpha};
+use super::{TuiView, filesel};
 use crate::theme::hsla;
 use crate::widgets::seltext::SelText;
 
@@ -38,20 +38,31 @@ impl Quote {
     }
 }
 
-/// The lines between two 0-based line indices (either order) of the file shown, capped. Refuses a secret path
-/// again here, so a quote never carries what the explorer would not show.
+/// The lines between two 0-based line indices (either order) of the file shown, capped (the shot harness's
+/// `--select`; the pointer quotes exact text through [`from_picked`]).
+#[cfg(any(test, feature = "shot"))]
 pub fn from_range(path: &str, lines: &[String], a: usize, b: usize) -> Result<Quote, String> {
+    let (lo, hi) = (a.min(b), a.max(b).min(lines.len().saturating_sub(1)));
+    if lo >= lines.len() {
+        return Err("nothing to quote: select some lines".into());
+    }
+    from_picked(path, lo, &lines[lo..=hi])
+}
+
+/// `picked` (the exact selected text, one entry per line) starting at 0-based line `lo`, capped. Refuses a
+/// secret path again here, so a quote never carries what the explorer would not show.
+fn from_picked(path: &str, lo: usize, picked: &[String]) -> Result<Quote, String> {
     if path.chars().any(char::is_control)
         || synthesis_core::secrets::is_secret_path(std::path::Path::new(path))
     {
         return Err("this file cannot be quoted".into());
     }
-    let (lo, hi) = (a.min(b), a.max(b).min(lines.len().saturating_sub(1)));
-    if lo >= lines.len() || lines[lo..=hi].iter().all(|l| l.trim().is_empty()) {
+    if picked.iter().all(|l| l.trim().is_empty()) {
         return Err("nothing to quote: select some lines".into());
     }
+    let hi = lo + picked.len() - 1;
     let (mut out, mut bytes) = (Vec::new(), 0);
-    for l in &lines[lo..=hi] {
+    for l in picked {
         if out.len() == MAX_QUOTE_LINES || bytes + l.len() + 1 > MAX_QUOTE_BYTES {
             break;
         }
@@ -62,12 +73,12 @@ pub fn from_range(path: &str, lines: &[String], a: usize, b: usize) -> Result<Qu
         // a single line over the cap: its start
         let cut = (0..=MAX_QUOTE_BYTES)
             .rev()
-            .find(|i| lines[lo].is_char_boundary(*i))
+            .find(|i| picked[0].is_char_boundary(*i))
             .unwrap_or(0);
-        out.push(lines[lo][..cut].to_string());
+        out.push(picked[0][..cut].to_string());
     }
     let n = out.len();
-    if lo + n <= hi || out[0].len() < lines[lo].len() {
+    if lo + n <= hi || out[0].len() < picked[0].len() {
         out.push("\u{2026}".into());
     }
     Ok(Quote {
@@ -326,15 +337,116 @@ impl TuiView {
             .flatten()
     }
 
-    /// The selected lines, or the whole file shown when none is selected.
+    /// The lines of the file shown.
+    pub(super) fn shown_lines(&self) -> Option<&[String]> {
+        self.shown_file().map(|(_, l)| l)
+    }
+
+    /// Whether some text (not just a caret) is selected in the preview.
+    pub(super) fn has_file_sel(&self) -> bool {
+        self.ts.sel.is_some_and(|s| !s.is_empty())
+    }
+
+    /// The selected text, or the whole file shown when none is selected.
     pub(super) fn copy_text(&self) -> Option<String> {
         let (_, lines) = self.shown_file()?;
-        Some(match self.ts.sel {
-            Some((a, b)) => {
-                lines[a.min(b).min(lines.len() - 1)..=a.max(b).min(lines.len() - 1)].join("\n")
-            }
+        Some(match self.ts.sel.filter(|s| !s.is_empty()) {
+            Some(s) => filesel::extract(lines, &s),
             None => lines.join("\n"),
         })
+    }
+
+    /// Cmd/Ctrl+A: the whole file shown.
+    pub(super) fn select_all_file(&mut self, cx: &mut Context<Self>) {
+        self.ts.sel = self.shown_lines().map(filesel::Sel::all);
+        cx.notify();
+    }
+
+    /// The point under the pointer: line `i`, the char at window x `x` (the nearest boundary, or the char itself).
+    fn file_pos(&self, i: usize, x: gpui::Pixels, nearest: bool) -> Option<filesel::Pos> {
+        let line = self.shown_lines()?.get(i)?;
+        // the row's padding and the gutter come before the text; the gutter is as `preview_view` sizes it
+        let gutter = (self.shown_lines()?.len().to_string().len().max(3)) as f32 * 7.5 + 12.;
+        let px_in = f32::from(x) - self.ts.lines_x.get() - 12. - gutter;
+        Some(filesel::Pos {
+            line: i,
+            col: filesel::col_at(line, px_in, nearest),
+        })
+    }
+
+    /// Left press on line `i`: a caret (shift extends), a word (double) or a line (triple).
+    pub(super) fn file_press(
+        &mut self,
+        i: usize,
+        e: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = self.file_pos(i, e.position.x, true) else {
+            return;
+        };
+        let Some(line) = self.shown_lines().map(|l| l[i].as_str()) else {
+            return;
+        };
+        let len = line.chars().count();
+        self.ts.sel = Some(match e.click_count {
+            2 => {
+                let (a, b) = filesel::word_at(
+                    line,
+                    self.file_pos(i, e.position.x, false).map_or(0, |p| p.col),
+                );
+                filesel::Sel {
+                    anchor: filesel::Pos { line: i, col: a },
+                    head: filesel::Pos { line: i, col: b },
+                }
+            }
+            n if n >= 3 => filesel::Sel {
+                anchor: filesel::Pos { line: i, col: 0 },
+                head: filesel::Pos { line: i, col: len },
+            },
+            _ => filesel::Sel {
+                anchor: self
+                    .ts
+                    .sel
+                    .filter(|_| e.modifiers.shift)
+                    .map_or(p, |s| s.anchor),
+                head: p,
+            },
+        });
+        (self.ts.sel_drag, self.ts.menu) = (e.click_count == 1, None);
+        cx.notify();
+    }
+
+    /// The pointer moves over line `i`: while the button is down the head follows it.
+    pub(super) fn file_drag(&mut self, i: usize, e: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.ts.sel_drag {
+            return;
+        }
+        if e.pressed_button != Some(gpui::MouseButton::Left) {
+            self.ts.sel_drag = false;
+        } else if let Some(p) = self.file_pos(i, e.position.x, true)
+            && let Some(s) = &mut self.ts.sel
+            && s.head != p
+        {
+            s.head = p;
+            cx.notify();
+        }
+    }
+
+    /// Right press on line `i`: the menu; outside the selection it first selects that line.
+    pub(super) fn file_menu_at(
+        &mut self,
+        i: usize,
+        e: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = self
+            .file_pos(i, e.position.x, false)
+            .is_some_and(|p| self.ts.sel.is_some_and(|s| s.contains(p)));
+        if !inside && let Some(l) = self.shown_lines() {
+            self.ts.sel = Some(filesel::Sel::lines(l, i, i));
+        }
+        (self.ts.sel_drag, self.ts.menu) = (false, Some(e.position));
+        cx.notify();
     }
 
     pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
@@ -347,12 +459,12 @@ impl TuiView {
 
     pub(super) fn quote_selection(&mut self, cx: &mut Context<Self>) {
         self.ts.menu = None;
-        let made = self.ts.sel.and_then(|(a, b)| {
+        let made = self.ts.sel.filter(|s| !s.is_empty()).and_then(|s| {
             self.shown_file()
-                .map(|(p, lines)| from_range(p, lines, a, b))
+                .map(|(p, lines)| from_picked(p, s.range().0.line, &filesel::pieces(lines, &s)))
         });
         let res = made
-            .unwrap_or_else(|| Err("nothing to quote: select some lines".into()))
+            .unwrap_or_else(|| Err("nothing to quote: select some text".into()))
             .and_then(|q| add(&mut self.ts.quotes, q));
         if let (Err(why), Some(lu)) = (res, &mut self.live) {
             lu.live.note(why, true);
@@ -429,6 +541,23 @@ mod tests {
         assert_eq!(chip(&q), "src/a.rs:12-18 \u{2014} let x12 = 12;\u{2026}");
         let one = from_range("a.rs", &file(3), 1, 1).unwrap();
         assert_eq!(chip(&one), "a.rs:2 \u{2014} let x2 = 2;");
+    }
+
+    #[test]
+    fn a_quote_of_exact_text_keeps_the_partial_first_and_last_line() {
+        let f = file(5);
+        let picked = filesel::pieces(
+            &f,
+            &filesel::Sel {
+                anchor: filesel::Pos { line: 3, col: 4 },
+                head: filesel::Pos { line: 1, col: 6 },
+            },
+        );
+        let q = from_picked("a.rs", 1, &picked).unwrap();
+        assert_eq!((q.from, q.to), (2, 4));
+        assert_eq!(q.lines, [" = 2;", "let x3 = 3;", "let "]);
+        assert!(from_picked("a.rs", 0, &["  ".into()]).is_err());
+        assert!(from_picked(".env", 0, &["x".into()]).is_err());
     }
 
     #[test]
