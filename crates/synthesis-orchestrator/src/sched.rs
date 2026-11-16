@@ -92,6 +92,18 @@ pub trait WorkerHost {
         cancel: &CancelFlag,
     ) -> Result<Option<Settled>, SchedError>;
 
+    /// The work item has a live attempt this scheduler holds no handle for (its owner died and
+    /// this one adopted it). Brings the attempt to an end the store can trust: still alive and
+    /// supervised, settled from what its session recorded, or `lost`. Never reruns or invents
+    /// anything. Default: nothing (a fake host has no such attempts).
+    fn reconcile_adopted(
+        &mut self,
+        _w: &mut OutcomeWriter,
+        _item: &WorkItemRecord,
+    ) -> Result<(), SchedError> {
+        Ok(())
+    }
+
     /// Stops a worker the scheduler gives up on (its tree is killed and reaped, its attempt is
     /// marked lost). A handle that is only dropped is stopped too; this records why.
     fn abort(&mut self, _w: &mut OutcomeWriter, _handle: &mut Self::Handle, _why: &str) {}
@@ -340,6 +352,19 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         }
 
         let items = Self::plan_items(w)?;
+
+        // 1c. attempts of a dead owner that this one adopted: settle them once their worker ended
+        // (or mark them lost), so they neither hold the item nor their reservation forever
+        for it in &items {
+            if matches!(it.state, WorkItemState::Leased | WorkItemState::Running)
+                && !self.running.iter().any(|(i, _)| *i == it.id)
+                && self.has_live_attempt(w, it)?
+                && let Err(e) = self.host.reconcile_adopted(w, it)
+            {
+                rep.errors.push(format!("{}: {e}", it.key));
+            }
+        }
+        let items = Self::plan_items(w)?;
         let running_ids: BTreeSet<WorkItemId> =
             self.running.iter().map(|(i, _)| i.clone()).collect();
 
@@ -497,7 +522,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         let items = Self::plan_items(w)?;
         // items that just succeeded may have made others ready: that is progress, not a dead end
         let moved = waiting(&items) < before;
-        rep.stop = self.stop_of(w, &items, over_budget, &rep.errors, moved)?;
+        rep.stop = self.stop_of(w, &items, over_budget, live_unheld > 0, &rep.errors, moved)?;
         Ok(rep)
     }
 
@@ -623,6 +648,7 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
         w: &mut OutcomeWriter,
         items: &[WorkItemRecord],
         over_budget: bool,
+        live_unheld: bool,
         errors: &[String],
         moved: bool,
     ) -> Result<Option<Stop>, SchedError> {
@@ -647,8 +673,23 @@ impl<H: WorkerHost, V: Verifier> Scheduler<H, V> {
                 return Ok(Some(Stop::Paused));
             }
             if over_budget {
+                // Budget invariant: a live attempt's reservation is part of the spend it is
+                // judged against, so a cap held by an adopted worker is not "used up": that
+                // worker settles (freeing or fixing its reservation) before anything is decided.
+                // Only with no live attempt left is the cap really gone.
+                if live_unheld {
+                    return Ok(None);
+                }
+                let (spent, cap) = (w.outcome_spend(w.id())?, self.cfg.max_cost_usd);
                 return self
-                    .block_outcome(w, why("the outcome's cost cap is used up".into()))
+                    .block_outcome(
+                        w,
+                        why(format!(
+                            "the outcome's cost cap is used up (spent or reserved ${spent:.4} of {}; \
+                             an attempt whose worker died without a final usage counts its whole reservation)",
+                            cap.map_or("an unknown cap".into(), |c| format!("${c:.4}"))
+                        )),
+                    )
                     .map(Some);
             }
             return Ok(None);

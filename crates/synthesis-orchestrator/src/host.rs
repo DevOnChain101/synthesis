@@ -2,13 +2,21 @@
 //! (with the outcome's remaining budget), and starts the worker process.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use synthesis_core::outcome::Contract;
 use synthesis_session::outcome::{OutcomePolicy, OutcomeWriter, WorkItemRecord};
 use time::OffsetDateTime;
 
 use crate::sched::{SchedError, WorkerHost};
-use crate::{AllocSpec, Allocator, CancelFlag, Profile, Runner, Running, Settled};
+use crate::{
+    AllocSpec, Allocator, CancelFlag, Profile, RecoveryReport, Runner, Running, Settled,
+    recover_item,
+};
+
+/// How long an adopted worker may stay silent before it is treated as gone (see
+/// [`crate::recover_attempts`]).
+const ADOPTED_LEASE: Duration = Duration::from_secs(120);
 
 pub struct ProcessHost<'a> {
     pub allocator: Allocator<'a>,
@@ -115,6 +123,47 @@ impl WorkerHost for ProcessHost<'_> {
         cancel: &CancelFlag,
     ) -> Result<Option<Settled>, SchedError> {
         Ok(self.runner.poll(w, handle, cancel)?)
+    }
+
+    fn reconcile_adopted(
+        &mut self,
+        w: &mut OutcomeWriter,
+        item: &WorkItemRecord,
+    ) -> Result<(), SchedError> {
+        let now = OffsetDateTime::now_utc();
+        let max_attempts = self
+            .contract
+            .envelope
+            .budgets
+            .max_attempts_per_work_item
+            .min(self.policy.max_attempts_per_work_item);
+        let wall = Duration::from_secs(crate::wall_secs(&self.contract, &self.policy));
+        let mut rep = RecoveryReport::default();
+        recover_item(
+            self.runner.store,
+            self.runner.worktrees,
+            self.runner.probe,
+            w,
+            item,
+            now,
+            ADOPTED_LEASE,
+            max_attempts,
+            &mut rep,
+        )?;
+        // An alive worker is supervised by this owner now: its lease is renewed, but only within
+        // its own wall cap (it stops itself then); past that, silence lets the lease run out and
+        // the next pass kills it by its verified start token.
+        for id in &rep.alive {
+            let Some(a) = w.list_attempts(&item.id)?.into_iter().find(|a| a.id == *id) else {
+                continue;
+            };
+            let within = crate::retention::parse_store_time(&a.started_at)
+                .is_some_and(|t| (now - t) <= wall + self.runner.grace);
+            if within {
+                w.heartbeat(&a.id, a.fence)?;
+            }
+        }
+        Ok(())
     }
 
     fn abort(&mut self, w: &mut OutcomeWriter, handle: &mut Running, why: &str) {

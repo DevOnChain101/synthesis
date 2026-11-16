@@ -18,6 +18,16 @@ use crate::{AttemptEnv, CompileError, CompiledEnvelope, compile_envelope};
 /// Default wall cap of an attempt when neither the contract nor the settings name one.
 pub const DEFAULT_WALL_SECS: u64 = 1800;
 
+/// The wall cap of an attempt: the smaller of the contract's and the settings'.
+pub fn wall_secs(contract: &Contract, policy: &OutcomePolicy) -> u64 {
+    let b = &contract.envelope.budgets;
+    [b.attempt_max_wall_secs, policy.attempt_max_wall_secs]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(DEFAULT_WALL_SECS)
+}
+
 #[derive(Debug)]
 pub enum ProfileError {
     /// No usable cost cap (the contract always names one; this guards a hand-built value).
@@ -123,11 +133,7 @@ impl Profile {
         if !cap.is_finite() || cap <= 0.0 {
             return Err(ProfileError::NoCostCap);
         }
-        let wall = [b.attempt_max_wall_secs, policy.attempt_max_wall_secs]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(DEFAULT_WALL_SECS);
+        let wall = wall_secs(contract, policy);
         let compiled = compile_envelope(&contract.envelope, &[]).map_err(ProfileError::Envelope)?;
         Ok(Self {
             program,
