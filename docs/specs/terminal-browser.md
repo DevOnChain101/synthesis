@@ -222,7 +222,13 @@ replaced by this bounded allow-list:
   drained by one writer thread per PTY. Typed input and agent input share that queue and fail with a timeout after 2 s when
   it is full. A child that never reads its input therefore stalls only the writer thread; the reader, the screen lock,
   `screen_text` and `close` never wait on a write. The writer thread ends when the PTY is killed or closed.
-- A `Term` that draws a shared PTY on the desktop (T4) must NOT reply (the program would get two answers); only the engine
+- A command line must be sent in ONE `write_input` call (and `pty_send` in T3 must do so): a reply can land between two
+  calls as stray text in the middle of the line.
+- A straggler that keeps the slave open (a `setsid` daemon, a background job outside the groups we kill) leaves that PTY's
+  writer thread blocked in a write until the straggler dies; it is one idle thread, nothing else waits on it.
+- T4 requirement: a `Term` that draws a shared PTY on the desktop must NOT reply. Add a type-level guard when T4 builds it
+  (the drawing `Term` takes a listener type that cannot write, for example `VoidListener`, and only the engine constructor
+  takes `Reply`); until then this is documentation only. A `Term` that draws a shared PTY on the desktop (T4) must NOT reply (the program would get two answers); only the engine
   `Term` is built with the replying listener, and its allow-list is unit tested (`only_cpr_and_fixed_da1_are_answered`).
   T4 must keep that rule when it adds the drawing `Term`.
 

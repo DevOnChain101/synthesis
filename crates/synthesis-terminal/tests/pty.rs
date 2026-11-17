@@ -292,17 +292,21 @@ mod unix {
         assert!(rt.open_pty(SID, PtySpec::new(80, 24)).is_ok());
     }
 
-    /// A child that never reads stdin while its output asks for cursor reports: the replies fill
-    /// the tty input queue, which must stall only the writer thread, not input, the screen, the
-    /// reader or close.
+    /// Smoke test only (the rate cap means the tty input queue may not really fill; the
+    /// deterministic proof is the unit test `a_blocked_writer_stalls_neither_the_parser_nor_input`):
+    /// a child that never reads stdin while its output asks for cursor reports must not stall
+    /// input, the screen, the reader or close.
     #[test]
     fn query_flood_with_a_deaf_child_blocks_nothing() {
         let rt = rt_off();
         let _fx = open(&rt);
         let p = rt.open_pty(SID, PtySpec::new(80, 24)).unwrap();
         // `sleep` never reads stdin; the shell is busy in the foreground job and does not read
-        p.write_input(b"yes $'\\e[6n' | head -c 1000000 >&2; sleep 600 </dev/null\r")
-            .unwrap();
+        // printf, not $'..': dash (Linux /bin/sh) has no $'' quoting
+        p.write_input(
+            b"yes \"$(printf '\\033[6n')\" | head -c 1000000 >&2; sleep 600 </dev/null\r",
+        )
+        .unwrap();
         let bytes = Instant::now() + Duration::from_secs(20);
         while p.log_bytes() < 900_000 && Instant::now() < bytes {
             std::thread::sleep(Duration::from_millis(25));

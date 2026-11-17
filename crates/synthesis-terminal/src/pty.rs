@@ -258,6 +258,24 @@ impl EventListener for Reply {
     }
 }
 
+/// Queues `data` for the writer thread, waiting up to `within` for room.
+fn enqueue(tx: &Writer, mut data: Vec<u8>, closed: &AtomicBool, within: Duration) -> Result<()> {
+    let end = Instant::now() + within;
+    loop {
+        match tx.try_send(data) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(_)) => return Err(io_err("pty closed")),
+            Err(TrySendError::Full(d)) => {
+                if Instant::now() >= end || closed.load(Ordering::Relaxed) {
+                    return Err(Error::Io(std::io::ErrorKind::TimedOut.into()));
+                }
+                data = d;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 /// The writer thread: ends when the PTY is killed or closed (a blocked write fails once the
 /// child is gone) or when every sender is dropped.
 fn write_loop(mut w: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>, inner: Arc<Inner>) {
@@ -389,21 +407,12 @@ impl Pty {
                 data.len()
             )));
         }
-        let end = Instant::now() + Duration::from_secs(2);
-        let mut data = data.to_vec();
-        loop {
-            match self.writer.try_send(data) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Disconnected(_)) => return Err(io_err("pty closed")),
-                Err(TrySendError::Full(d)) => {
-                    if Instant::now() >= end || self.inner.closed.load(Ordering::Relaxed) {
-                        return Err(Error::Io(std::io::ErrorKind::TimedOut.into()));
-                    }
-                    data = d;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
+        enqueue(
+            &self.writer,
+            data.to_vec(),
+            &self.inner.closed,
+            Duration::from_secs(2),
+        )
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -888,6 +897,62 @@ mod tests {
         );
         assert_eq!(env["TERM"], "xterm-256color");
         assert_eq!(env["HISTFILE"], "/dev/null");
+    }
+
+    /// No tty, no shell: a writer that blocks forever (a child that never reads its input).
+    /// Neither the parser nor input may wait for it, on any OS.
+    #[test]
+    fn a_blocked_writer_stalls_neither_the_parser_nor_input() {
+        struct Stuck(Receiver<()>);
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv(); // returns (Err) only when the test drops `gate`
+                Err(std::io::Error::other("released"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        let (gate, gate_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let mut w = Stuck(gate_rx);
+            while let Ok(d) = rx.recv() {
+                if w.write_all(&d).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut term = Term::new(
+            Config::default(),
+            &Dims { cols: 80, rows: 24 },
+            Reply {
+                tx: tx.clone(),
+                window: Mutex::new((Instant::now(), 0)),
+            },
+        );
+        let mut parser: Processor = Processor::default();
+        let t = Instant::now();
+        parser.advance(&mut term, &b"\x1b[6n".repeat(10_000));
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        // the queue is full now (replies were accepted until it was): input times out, not hangs
+        let t = Instant::now();
+        let e = enqueue(
+            &tx,
+            b"x".to_vec(),
+            &AtomicBool::new(false),
+            Duration::from_secs(2),
+        );
+        assert!(matches!(e, Err(Error::Io(ref io)) if io.kind() == std::io::ErrorKind::TimedOut));
+        assert!(
+            t.elapsed() < Duration::from_millis(2200),
+            "{:?}",
+            t.elapsed()
+        );
+        drop(gate);
+        drop(tx);
+        drop(term); // the Reply inside holds the last sender
+        writer.join().unwrap();
     }
 
     #[test]
