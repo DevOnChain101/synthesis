@@ -523,7 +523,13 @@ fn a_decision_a_blocked_worker_made_is_answered_only_with_an_explicit_choice() {
     let id = go(&r);
     let card = r.wait("a pending decision", 90, || {
         let v = r.json(&["decisions", &id]);
-        v["decisions"].as_array()?.first().cloned()
+        // a decision is stored `preparing` (revision 1) and made `pending` a moment later: only a pending card has the
+        // revision and hash to answer with
+        v["decisions"]
+            .as_array()?
+            .iter()
+            .find(|d| d["state"] == "pending")
+            .cloned()
     });
     let did = card["id"].as_str().unwrap().to_string();
     let (rev, hash) = (
@@ -621,7 +627,8 @@ fn request_evidence_gets_a_new_card_that_names_the_old_one_and_only_it_can_be_an
     let old = r.wait("a pending decision", 90, || {
         r.json(&["decisions", &id])["decisions"]
             .as_array()?
-            .first()
+            .iter()
+            .find(|d| d["state"] == "pending")
             .cloned()
     });
     let (did, rev, hash) = (
@@ -715,7 +722,8 @@ fn edit_scope_then_a_revised_contract_approved_again_replans_and_the_old_card_is
     let old = r.wait("a pending decision", 90, || {
         r.json(&["decisions", &id])["decisions"]
             .as_array()?
-            .first()
+            .iter()
+            .find(|d| d["state"] == "pending")
             .cloned()
     });
     let (did, rev, hash) = (
