@@ -607,6 +607,19 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The newest `limit` evidence rows of the outcome, newest first (`list_evidence` is the oldest
+    /// rows first and stops at its own limit).
+    pub fn recent_evidence(&self, id: &OutcomeId, limit: usize) -> Result<Vec<EvidenceRecord>> {
+        need_v5(&self.conn)?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {EVIDENCE_COLS},{EVENT_BACKED} FROM evidence e WHERE outcome_id=?1 ORDER BY captured_at DESC, id DESC LIMIT {}",
+            limit.min(LIST_LIMIT)
+        ))?;
+        Ok(st
+            .query_map([id.as_str()], evidence_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn list_outbox(&self, id: &OutcomeId) -> Result<Vec<OutboxRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(

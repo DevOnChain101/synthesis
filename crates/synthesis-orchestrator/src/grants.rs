@@ -364,24 +364,25 @@ fn evidence_summary(
     item: &WorkItemId,
 ) -> Result<Value, StoreError> {
     let commit = d.binding.get("subject_commit").and_then(Value::as_str);
+    // newest first, a bounded number of short strings per row: the summary always fits the store's cap
+    let short = |t: &str| clean(t).chars().take(48).collect::<String>();
     let rows: Vec<_> = w
-        .list_evidence(w.id())?
+        .recent_evidence(w.id(), 200)?
         .into_iter()
         .filter(|e| e.work_item_id == *item)
         .collect();
     let shown: Vec<Value> = rows
         .iter()
         .filter(|e| e.event_backed)
-        .rev()
         .take(20)
         .map(|e| {
             serde_json::json!({
-                "check": clean(&e.check_id), "result": clean(&e.result),
-                "trust_class": e.trust_class, "producer": clean(&e.producer),
-                "commit": clean(&e.subject_commit),
+                "check": short(&e.check_id), "result": short(&e.result),
+                "trust_class": e.trust_class, "producer": short(&e.producer),
+                "commit": short(&e.subject_commit),
                 "for_blocked_commit": commit == Some(e.subject_commit.as_str()),
-                "flags": e.flags.iter().map(|f| clean(f)).collect::<Vec<_>>(),
-                "captured_at": clean(&e.captured_at),
+                "flags": e.flags.iter().take(4).map(|f| short(f)).collect::<Vec<_>>(),
+                "captured_at": short(&e.captured_at),
             })
         })
         .collect();
@@ -389,6 +390,7 @@ fn evidence_summary(
         "source": "stored evidence rows of this work item; no model ran and no check was run for this",
         "rows": shown,
         "rows_without_chained_event": rows.iter().filter(|e| !e.event_backed).count(),
+        "rows_considered": "the newest 200 of the outcome",
         "attempt_diff": "read it with the attempt.diff of the attempt named in the evidence field",
     }))
 }

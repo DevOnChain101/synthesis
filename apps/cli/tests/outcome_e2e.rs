@@ -627,6 +627,8 @@ fn request_evidence_gets_a_new_card_that_names_the_old_one_and_only_it_can_be_an
         old["revision"].as_i64().unwrap().to_string(),
         old["brief_sha256"].as_str().unwrap().to_string(),
     );
+    // the outcome is blocked while it waits: the owner still re-briefs (its command pass drives the decisions)
+    r.wait_state(&id, "blocked", 60);
     let out = r.ok(&[
         "resolve",
         &id,

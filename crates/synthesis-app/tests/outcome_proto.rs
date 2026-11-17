@@ -513,6 +513,53 @@ fn proto_request_evidence_vs_expiry_makes_no_new_card() {
     assert_eq!((all.len(), all[0].state.as_str()), (1, "expired"));
 }
 
+// the outcome is `blocked` (nothing ticks its scheduler) before the answer: the owner's command pass still
+// drives the decisions, and lets the outcome go once the re-brief or the expiry is done
+#[test]
+fn proto_request_evidence_on_a_blocked_outcome_is_rebriefed_or_expires_and_the_owner_releases() {
+    for expire in [false, true] {
+        let mut r = rig();
+        r.decide("d", if expire { 1 } else { 2 }, |_| {});
+        let w = r.wm();
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(
+            rev,
+            OutcomeState::Blocked,
+            Some("waiting"),
+            &Effects::default(),
+        )
+        .unwrap();
+        let mut c = r.client(Surface::Cli);
+        let card = open_card(&r, &mut c).unwrap();
+        c.resolve(&r.outcome, &card, "request_evidence", "k", None)
+            .unwrap();
+        r.owner();
+        assert!(
+            synthesis_orchestrator::awaiting_rebrief(r.w()).unwrap(),
+            "the owner stays"
+        );
+        if expire {
+            r.set_clock(later);
+            apply_queued(r.wm(), later()).unwrap();
+            let all = c.decisions(&r.outcome).unwrap();
+            assert_eq!((all.len(), all[0].state.as_str()), (1, "expired"));
+        } else {
+            r.owner();
+            let all = c.decisions(&r.outcome).unwrap();
+            assert_eq!(
+                (all[0].state.as_str(), all[1].state.as_str()),
+                ("invalidated", "pending")
+            );
+        }
+        assert_eq!(
+            r.w().get_outcome(r.w().id()).unwrap().state,
+            OutcomeState::Blocked
+        );
+        let still = synthesis_orchestrator::awaiting_rebrief(r.w()).unwrap();
+        assert!(!still, "the owner is released");
+    }
+}
+
 #[test]
 fn proto_edit_scope_says_plainly_that_nothing_follows() {
     let mut r = rig();

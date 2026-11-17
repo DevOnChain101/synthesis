@@ -823,3 +823,57 @@ fn rebrief_loses_to_expiry_and_to_invalidation_and_to_a_lost_revision_race() {
     );
     assert_eq!(w.list_decisions(w.id()).unwrap().len(), 1);
 }
+
+#[test]
+fn the_rebrief_summary_shows_the_newest_twenty_rows_and_always_fits() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    for i in 0..25 {
+        w.record_evidence(&NewEvidence {
+            work_item_id: it.clone(),
+            attempt_id: None,
+            trust_class: TrustClass::IndependentCheck,
+            producer: "independent_runner".into(),
+            subject_commit: "abc".into(),
+            check_id: format!("check-{i:02}-{}", "x".repeat(100)),
+            command_hash: None,
+            criteria_ids: vec![],
+            result: "failed".into(),
+            exit_code: Some(1),
+            env_fingerprint: "e".into(),
+            artifact: None,
+            fence: 1,
+            flags: vec![
+                "definitions_changed".into(),
+                "tests_weakened".into(),
+                "outside_envelope".into(),
+                "mode_changed".into(),
+            ],
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+    let d = decide(
+        &mut w,
+        &it,
+        "b",
+        "blocked",
+        binding(&ctx, &it, |_| {}),
+        action(&[]),
+        2,
+    );
+    answer(&mut w, &d, "request_evidence");
+    DecisionDriver::default()
+        .drive(&mut w, OffsetDateTime::now_utc())
+        .unwrap();
+    let rows = open_of(&w).unwrap().brief["evidence_summary"]["rows"].clone();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 20);
+    assert!(
+        rows[0]["check"].as_str().unwrap().starts_with("check-24"),
+        "newest first"
+    );
+    assert!(rows[19]["check"].as_str().unwrap().starts_with("check-05"));
+}

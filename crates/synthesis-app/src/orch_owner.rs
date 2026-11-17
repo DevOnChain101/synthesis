@@ -390,8 +390,8 @@ impl<'a> Owner<'a> {
         self.publish(ow);
         let keep = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying)
             || has_work(&ow.w, ow.w.id()).unwrap_or(true)
-            // evidence was requested: the next step re-briefs (or the decision expires)
-            || awaiting_rebrief(&ow.w).unwrap_or(true);
+            // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
+            || awaiting_rebrief(&ow.w).unwrap_or(false);
         if !keep {
             if let Some(sc) = ow.sched.as_mut() {
                 sc.shutdown(&mut ow.w, "the outcome is no longer running");
