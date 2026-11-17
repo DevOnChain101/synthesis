@@ -7406,6 +7406,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]

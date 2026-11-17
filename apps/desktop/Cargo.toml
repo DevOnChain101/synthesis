@@ -78,6 +78,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
 tokio-util = { version = "0.7.20", default-features = false }
+# idempotency keys of the commands the Outcomes tab sends (as the CLI)
+uuid = { version = "1", features = ["v4"] }
 
 # Command Line Tools only (no Xcode): compile Metal shaders at runtime instead of `xcrun metal`.
 [target.'cfg(unix)'.dependencies]

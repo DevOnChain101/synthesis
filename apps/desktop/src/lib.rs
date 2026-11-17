@@ -12,6 +12,7 @@ pub mod live;
 pub mod memory_ui;
 pub mod menu;
 pub mod models;
+pub mod outcomes_view;
 pub mod perf;
 pub mod remote;
 pub mod reveal;
