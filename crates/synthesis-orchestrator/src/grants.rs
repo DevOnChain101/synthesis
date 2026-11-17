@@ -27,6 +27,7 @@ use time::OffsetDateTime;
 
 use crate::compile_envelope;
 use crate::decision::{clean, rule_denied};
+use crate::model_plan::install_approved_plan;
 use crate::sched::{Decisions, SchedError};
 
 /// How long an unused grant lives (the settings' `decision_expiry_hours` caps it).
@@ -53,6 +54,33 @@ pub fn decision_binding(
         "attempt_ordinal": attempt_ordinal,
         "work_item_id": item,
     })
+}
+
+/// The binding of a `plan_approval` decision NOW: the outcome's contract version, current plan
+/// version (or none), the policy hash of the current contract, and the action hash (`""` while the
+/// decision is being created: the store fills in its own).
+pub(crate) fn plan_binding(w: &OutcomeWriter, action_hash: &str) -> Result<Value, StoreError> {
+    let outcome = w.get_outcome(w.id())?;
+    let (contract, ..) = w.get_contract(w.id(), outcome.contract_version)?;
+    let policy = compile_envelope(&contract.envelope, &[])
+        .map_or_else(|_| "uncompiled".to_owned(), |c| c.policy_hash());
+    Ok(serde_json::json!({
+        "contract_version": outcome.contract_version,
+        "plan_version": outcome.plan_version,
+        "policy_hash": policy,
+        "action_hash": action_hash,
+    }))
+}
+
+/// [`plan_binding`] with the action hash the decision stores.
+pub fn plan_binding_for(w: &OutcomeWriter, d: &DecisionRecord) -> Result<Value, StoreError> {
+    plan_binding(
+        w,
+        d.binding
+            .get("action_hash")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 /// The binding the decision would get NOW: the outcome's current contract and plan, the policy hash
@@ -160,6 +188,67 @@ fn go(w: &mut OutcomeWriter, id: &WorkItemId, to: WorkItemState) -> Result<(), S
 }
 
 impl DecisionDriver {
+    /// A `plan_approval` decision has no work item: it expires (HOLD), is invalidated when the
+    /// contract version, the plan version or the policy moved, and once approved installs the plan
+    /// of its stored action, exactly once (the install moves the plan version, so the binding no
+    /// longer matches). A failed install is audited once and the decision stays as it is.
+    fn drive_plan_approval(
+        &mut self,
+        w: &mut OutcomeWriter,
+        d: &DecisionRecord,
+        notes: &mut Vec<String>,
+    ) -> Result<(), SchedError> {
+        let current = plan_binding_for(w, d)?;
+        let none = Effects::default();
+        let (id, detail) = (d.id.to_string(), serde_json::json!({"decision_id": d.id}));
+        match w.decision_state(&d.id)? {
+            DecisionState::Preparing | DecisionState::Pending => {
+                if w.transition_decision(&d.id, d.revision, DecisionState::Expired, &current, &none)
+                    .is_ok()
+                {
+                    notes.push(format!("plan decision {id} expired: no plan is installed"));
+                    w.audit_policy("decision.expire", "hold", detail)?;
+                } else if w
+                    .transition_decision(
+                        &d.id,
+                        d.revision,
+                        DecisionState::Invalidated,
+                        &current,
+                        &none,
+                    )
+                    .is_ok()
+                {
+                    notes.push(format!(
+                        "plan decision {id} invalidated: the contract, plan or policy changed"
+                    ));
+                    w.audit_policy("decision.invalidate", "deny", detail)?;
+                }
+            }
+            DecisionState::Approved if w.binding_is_current(d, &current)? => {
+                match install_approved_plan(w, d, &current) {
+                    Ok(v) => notes.push(format!("plan v{v} installed from decision {id}")),
+                    Err(
+                        e @ (StoreError::Sqlite(_) | StoreError::Io(_) | StoreError::Locked(_)),
+                    ) => {
+                        return Err(e.into());
+                    }
+                    Err(e) => {
+                        if self.refused.insert(id.clone()) {
+                            w.audit_policy(
+                                "plan.install",
+                                "deny",
+                                serde_json::json!({"decision_id": d.id, "reason": e.to_string()}),
+                            )?;
+                            notes.push(format!("plan decision {id}: not installed ({e})"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn item(w: &OutcomeWriter, id: &WorkItemId) -> Result<WorkItemRecord, StoreError> {
         w.get_work_item(id)
     }
@@ -174,6 +263,10 @@ impl Decisions for DecisionDriver {
         let mut notes = vec![];
         let none = Effects::default();
         for d in w.list_decisions(w.id())? {
+            if d.kind == "plan_approval" {
+                self.drive_plan_approval(w, &d, &mut notes)?;
+                continue;
+            }
             let Some((item_id, current)) = current_binding_for(w, &d, None)? else {
                 continue;
             };

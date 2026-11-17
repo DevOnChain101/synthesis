@@ -275,6 +275,27 @@ fn id_col<T: TryFrom<String, Error = synthesis_core::outcome::InvalidId>>(
     T::try_from(r.get::<_, String>(i)?).map_err(bad)
 }
 
+/// The outcome's spend, attempts and planning runs together (see [`Reader::outcome_spend`]). A
+/// planning run counts its settled cost, or its reservation until it is settled (a lost run keeps
+/// it).
+fn spend(conn: &Connection, id: &OutcomeId) -> Result<f64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(CASE \
+           WHEN s.status IN ('completed','unverified','blocked','failed','cancelled') \
+            AND (COALESCE(json_extract(s.usage,'$.turns'),0) > 0 \
+              OR COALESCE(json_extract(s.usage,'$.wall_ms'),0) > 0 \
+              OR COALESCE(json_extract(s.usage,'$.cost_usd'),0) > 0) \
+             THEN COALESCE(json_extract(s.usage,'$.cost_usd'),0) \
+           ELSE MAX(COALESCE(a.reserved_usd,0), COALESCE(json_extract(s.usage,'$.cost_usd'),0)) \
+         END),0.0) \
+         + (SELECT COALESCE(SUM(COALESCE(cost_usd, reserved_usd)),0.0) FROM plan_runs WHERE outcome_id=?1) \
+         FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+         JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
+        [id.as_str()],
+        |r| r.get(0),
+    )?)
+}
+
 const OUTCOME_COLS: &str = "id,workspace_id,repo_root,base_commit,control_session_id,goal,state,revision,contract_version,plan_version,created_at,updated_at";
 fn outcome_row(r: &Row<'_>) -> rusqlite::Result<OutcomeRecord> {
     Ok(OutcomeRecord {
@@ -525,20 +546,7 @@ impl Reader {
     /// must not spend N times the outcome cap, and parallel starts must not over-commit it.
     pub fn outcome_spend(&self, id: &OutcomeId) -> Result<f64> {
         need_v5(&self.conn)?;
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(CASE \
-               WHEN s.status IN ('completed','unverified','blocked','failed','cancelled') \
-                AND (COALESCE(json_extract(s.usage,'$.turns'),0) > 0 \
-                  OR COALESCE(json_extract(s.usage,'$.wall_ms'),0) > 0 \
-                  OR COALESCE(json_extract(s.usage,'$.cost_usd'),0) > 0) \
-                 THEN COALESCE(json_extract(s.usage,'$.cost_usd'),0) \
-               ELSE MAX(COALESCE(a.reserved_usd,0), COALESCE(json_extract(s.usage,'$.cost_usd'),0)) \
-             END),0.0) \
-             FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
-             JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
-            [id.as_str()],
-            |r| r.get(0),
-        )?)
+        spend(&self.conn, id)
     }
 
     /// What the outcome's attempts used, as the store has it: the recorded cost and wall time of
@@ -548,7 +556,8 @@ impl Reader {
     pub fn outcome_usage(&self, id: &OutcomeId) -> Result<OutcomeUsage> {
         need_v5(&self.conn)?;
         Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0), \
+            "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0) \
+                      + (SELECT COALESCE(SUM(cost_usd),0.0) FROM plan_runs WHERE outcome_id=?1), \
                     COALESCE(SUM(COALESCE(json_extract(s.usage,'$.wall_ms'),0)),0), \
                     COALESCE(SUM(CASE \
                       WHEN s.status IN ('completed','unverified','blocked','failed','cancelled') \
@@ -556,6 +565,7 @@ impl Reader {
                          OR COALESCE(json_extract(s.usage,'$.wall_ms'),0) > 0 \
                          OR COALESCE(json_extract(s.usage,'$.cost_usd'),0) > 0) THEN 0 \
                       ELSE COALESCE(a.reserved_usd,0) END),0.0) \
+                      + (SELECT COALESCE(SUM(reserved_usd),0.0) FROM plan_runs WHERE outcome_id=?1 AND cost_usd IS NULL) \
              FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
              JOIN sessions s ON s.id=a.session_id WHERE w.outcome_id=?1",
             [id.as_str()],
@@ -3657,6 +3667,9 @@ impl OutcomeTx<'_, '_> {
                 }
             }
         }
+        if d.kind == "plan_approval" {
+            self.check_plan_approval(d, &mut brief)?;
+        }
         self.et.redact_value(&mut brief);
         self.et.redact_value(&mut binding);
         // the action's hash is the store's own: nobody can bind a decision to an action it does not hold
@@ -3931,6 +3944,14 @@ impl OutcomeTx<'_, '_> {
         if !valid_command_text(&r.approver, 128) {
             return Err(Error::Invalid(
                 "approver must be 1 to 128 printable characters".into(),
+            ));
+        }
+        // a plan has no work item to re-brief or scope to edit: its answers are the plans offered and `reject`
+        if d.kind == "plan_approval"
+            && matches!(r.choice.as_str(), "request_evidence" | "edit_scope")
+        {
+            return Err(Error::Invalid(
+                "the choice is not offered by the brief".into(),
             ));
         }
         let to = match r.choice.as_str() {
@@ -4340,5 +4361,408 @@ impl OutcomeTx<'_, '_> {
             )?;
         }
         self.command(&cmd.idempotency_key)
+    }
+}
+
+// ------------------------------------------------------------------- model planning runs
+
+/// Planning runs of one outcome (each is a session that costs money; the spend cap bounds them too).
+pub const MAX_PLAN_RUNS: usize = 32;
+/// The least a planning run may be given: below it the outcome has nothing left for planning.
+pub const MIN_PLAN_RESERVE_USD: f64 = 0.01;
+/// The only choices a `plan_approval` decision offers besides `reject`; each installs exactly one
+/// plan of the decision's stored action.
+pub const PLAN_CHOICES: [(&str, &str); 2] = [
+    ("approve_model_plan", "plan"),
+    ("use_stub_plan", "stub_plan"),
+];
+
+/// One planning run (ADR-017 P-B). `cost_usd` is `None` until settled; until then, and for a run
+/// settled without a cost (a lost one), the reservation counts as spent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanRunRecord {
+    pub id: String,
+    pub contract_version: u32,
+    pub base_commit: String,
+    pub session_id: String,
+    pub model: String,
+    /// `running`, `finished`, `failed` or `lost`.
+    pub state: String,
+    pub reserved_usd: f64,
+    pub cost_usd: Option<f64>,
+    pub raw_sha256: Option<String>,
+    pub plan_hash: Option<String>,
+    pub error_code: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// How a planning run ended; the hashes are of the raw output and of the validated plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanRunEnd {
+    /// `finished`, `failed` or `lost`.
+    pub state: String,
+    /// The session's final cost; `None` keeps the reservation as the spend (a lost run).
+    pub cost_usd: Option<f64>,
+    pub raw_sha256: Option<String>,
+    pub plan_hash: Option<String>,
+    /// A fixed code (`ReasonCode`), never model text.
+    pub error_code: Option<String>,
+}
+
+const PLAN_RUN_COLS: &str = "id,contract_version,base_commit,session_id,model,state,reserved_usd,cost_usd,raw_sha256,plan_hash,error_code,started_at,ended_at,mac";
+
+fn plan_run_row(r: &Row<'_>) -> rusqlite::Result<(PlanRunRecord, String)> {
+    Ok((
+        PlanRunRecord {
+            id: r.get(0)?,
+            contract_version: r.get(1)?,
+            base_commit: r.get(2)?,
+            session_id: r.get(3)?,
+            model: r.get(4)?,
+            state: r.get(5)?,
+            reserved_usd: r.get(6)?,
+            cost_usd: r.get(7)?,
+            raw_sha256: r.get(8)?,
+            plan_hash: r.get(9)?,
+            error_code: r.get(10)?,
+            started_at: r.get(11)?,
+            ended_at: r.get(12)?,
+        },
+        r.get(13)?,
+    ))
+}
+
+/// The MAC of a run's identity: who, for what, with which reservation. Settlement columns are set
+/// once by triggers and carry no MAC (like attempts).
+fn plan_run_mac_ok(key: Option<&[u8; 32]>, outcome: &str, r: &PlanRunRecord, stored: &str) -> bool {
+    let (v, usd) = (r.contract_version.to_string(), r.reserved_usd.to_string());
+    key.is_some_and(|k| {
+        mac_ok(
+            k,
+            "plan_run",
+            &[
+                &r.id,
+                outcome,
+                &v,
+                &r.base_commit,
+                &r.session_id,
+                &r.model,
+                &usd,
+                &r.started_at,
+            ],
+            stored,
+        )
+    })
+}
+
+fn load_plan_runs(
+    conn: &Connection,
+    key: Option<&[u8; 32]>,
+    id: &OutcomeId,
+) -> Result<Vec<PlanRunRecord>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {PLAN_RUN_COLS} FROM plan_runs WHERE outcome_id=?1 ORDER BY started_at, id LIMIT {LIST_LIMIT}"
+    ))?;
+    let rows = st
+        .query_map([id.as_str()], plan_run_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(r, m)| {
+            if plan_run_mac_ok(key, id.as_str(), &r, &m) {
+                Ok(r)
+            } else {
+                Err(Error::Tampered(format!(
+                    "plan run {}: its reservation does not verify",
+                    r.id
+                )))
+            }
+        })
+        .collect()
+}
+
+impl Reader {
+    /// The outcome's planning runs, oldest first. A row whose MAC does not verify is an error
+    /// (`Tampered`), never a smaller spend.
+    pub fn list_plan_runs(&self, id: &OutcomeId) -> Result<Vec<PlanRunRecord>> {
+        need_v5(&self.conn)?;
+        load_plan_runs(
+            &self.conn,
+            crate::trust::existing_chain_key(&self.home).as_ref(),
+            id,
+        )
+    }
+}
+
+impl OutcomeTx<'_, '_> {
+    /// Reserves the budget of a planning run BEFORE it starts: `min(max_usd, what the outcome cap
+    /// has left)`, counted as spent from now on (a lost run keeps it). One transaction decides it,
+    /// so attempts and planning runs together never reserve past the cap, in any order. Refused
+    /// when: the outcome is not before a plan (no plan, blocked, rework), the current contract is
+    /// not approved, a run is still going, the run limit is reached, a stored run does not verify,
+    /// the session is not an ordinary child of the control session, or the cap has less than
+    /// [`MIN_PLAN_RESERVE_USD`] left.
+    pub fn reserve_plan_run(
+        &mut self,
+        session_id: &str,
+        model: &str,
+        max_usd: f64,
+    ) -> Result<PlanRunRecord> {
+        if !max_usd.is_finite() || max_usd <= 0.0 || !valid_command_text(model, 200) {
+            return Err(Error::Invalid(
+                "a planning run needs a positive budget and a model name of 1 to 200 printable characters".into(),
+            ));
+        }
+        let o = self.outcome()?;
+        if !matches!(
+            o.state,
+            OutcomeState::ContractPending | OutcomeState::Blocked | OutcomeState::ReworkRequired
+        ) {
+            return Err(Error::Invalid(format!(
+                "a plan is not made while the outcome is {}",
+                enum_str(&o.state)
+            )));
+        }
+        if !contract_authentic(self.et.tx, Some(self.et.key()), self.id, o.contract_version)? {
+            return Err(Error::Invalid(
+                "planning needs the approved current contract".into(),
+            ));
+        }
+        let runs = load_plan_runs(self.et.tx, Some(self.et.key()), self.id)?;
+        if runs.len() >= MAX_PLAN_RUNS || runs.iter().any(|r| r.state == "running") {
+            return Err(Error::Invalid(
+                "a planning run is still going, or the limit of planning runs is reached".into(),
+            ));
+        }
+        let control: String = self.et.tx.query_row(
+            "SELECT control_session_id FROM outcomes WHERE id=?1",
+            [self.id.as_str()],
+            |r| r.get(0),
+        )?;
+        let parent: Option<(String, Option<String>)> = self
+            .et
+            .tx
+            .query_row(
+                "SELECT kind,parent_session_id FROM sessions WHERE id=?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if !matches!(parent, Some((k, Some(p))) if k == "chat" && p == control) {
+            return Err(Error::Invalid(
+                "a planning session must be an ordinary child of the control session".into(),
+            ));
+        }
+        // the ceilings may have tightened since the contract was approved (as for an attempt)
+        let contract = self.stored_contract(o.contract_version)?;
+        self.policy.check(&contract)?;
+        let cap = contract.envelope.budgets.max_cost_usd;
+        let left = cap - spend(self.et.tx, self.id)?;
+        // a NaN spend (a corrupt row) is not "enough left" either
+        if left.is_nan() || left < MIN_PLAN_RESERVE_USD {
+            return Err(Error::Invalid(
+                "the outcome cost cap has too little left for a planning run".into(),
+            ));
+        }
+        let usd = max_usd.min(left);
+        let (id, started) = (new_uuid(), ts(self.now));
+        let (v, usd_text) = (o.contract_version.to_string(), usd.to_string());
+        let m = mac(
+            self.et.key(),
+            "plan_run",
+            &[
+                &id,
+                self.id.as_str(),
+                &v,
+                &o.base_commit,
+                session_id,
+                model,
+                &usd_text,
+                &started,
+            ],
+        );
+        self.et.tx.execute(
+            "INSERT INTO plan_runs(id,outcome_id,contract_version,base_commit,session_id,model,state,reserved_usd,mac,started_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,'running',?7,?8,?9)",
+            params![id, self.id.as_str(), o.contract_version, o.base_commit, session_id, model, usd, m, started],
+        )?;
+        self.et.append(
+            ev::PLAN_RUN_RESERVED,
+            json!({"plan_run_id": id, "session_id": session_id, "model": model,
+                   "contract_version": o.contract_version, "reserved_usd": usd}),
+        )?;
+        let (rec, _) = self.et.tx.query_row(
+            &format!("SELECT {PLAN_RUN_COLS} FROM plan_runs WHERE id=?1"),
+            [id.as_str()],
+            plan_run_row,
+        )?;
+        Ok(rec)
+    }
+
+    /// Settles a running planning run, once: its state, its final cost (replacing the
+    /// reservation as the spend) and the hashes of the raw output and of the validated plan.
+    pub fn settle_plan_run(&mut self, run_id: &str, end: &PlanRunEnd) -> Result<PlanRunRecord> {
+        let sha = |h: &Option<String>| h.as_deref().is_none_or(is_sha256);
+        if !matches!(end.state.as_str(), "finished" | "failed" | "lost")
+            || end.cost_usd.is_some_and(|c| !c.is_finite() || c < 0.0)
+            || !sha(&end.raw_sha256)
+            || !sha(&end.plan_hash)
+            || end
+                .error_code
+                .as_deref()
+                .is_some_and(|c| !valid_command_text(c, 64))
+        {
+            return Err(Error::Invalid(
+                "a planning run ends with a state, a cost and hashes".into(),
+            ));
+        }
+        let n = self.et.tx.execute(
+            "UPDATE plan_runs SET state=?3, cost_usd=?4, raw_sha256=?5, plan_hash=?6, error_code=?7, ended_at=?8 \
+             WHERE id=?1 AND outcome_id=?2 AND state='running'",
+            params![run_id, self.id.as_str(), end.state, end.cost_usd, end.raw_sha256, end.plan_hash, end.error_code, ts(self.now)],
+        )?;
+        if n != 1 {
+            return Err(Error::Stale("the planning run is not running".into()));
+        }
+        self.et.append(
+            ev::PLAN_RUN_SETTLED,
+            json!({"plan_run_id": run_id, "state": end.state, "cost_usd": end.cost_usd,
+                   "raw_sha256": end.raw_sha256, "plan_hash": end.plan_hash,
+                   "error_code": end.error_code}),
+        )?;
+        let key = *self.et.key();
+        load_plan_runs(self.et.tx, Some(&key), self.id)?
+            .into_iter()
+            .find(|r| r.id == run_id)
+            .ok_or_else(|| Error::NotFound(format!("plan run {run_id}")))
+    }
+
+    /// The rules of a `plan_approval` decision, checked when it is created (ADR-019): it offers
+    /// only the choices in [`PLAN_CHOICES`], each backed by a plan in the stored action that is
+    /// valid for the current approved contract and is the next plan version; the label the person
+    /// reads is DERIVED from that plan (not trusted as given). The action is the plan: nothing
+    /// else a caller says can reach an install.
+    fn check_plan_approval(&self, d: &NewDecision, brief: &mut Value) -> Result<()> {
+        let bad = |why: &str| Error::Invalid(format!("a plan_approval decision {why}"));
+        let action = d
+            .action
+            .as_ref()
+            .ok_or_else(|| bad("needs a stored action"))?;
+        let o = self.outcome()?;
+        let contract = self.stored_contract(o.contract_version)?;
+        let alts = brief
+            .get_mut("alternatives")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| bad("offers its choices as alternatives"))?;
+        if alts.is_empty() {
+            return Err(bad("offers at least one plan"));
+        }
+        for a in alts.iter_mut() {
+            let id = a.get("id").and_then(Value::as_str).unwrap_or_default();
+            let field = PLAN_CHOICES
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map(|(_, f)| *f)
+                .ok_or_else(|| bad("offers only approve_model_plan and use_stub_plan"))?;
+            let plan: Plan = action
+                .get(field)
+                .cloned()
+                .and_then(|p| serde_json::from_value(p).ok())
+                .ok_or_else(|| bad("carries each offered plan in its action"))?;
+            if plan.version != o.plan_version.unwrap_or(0) + 1
+                || plan.contract_version != o.contract_version
+                || validate_plan(&plan, &contract).is_err()
+            {
+                return Err(bad("offers only a valid next plan of the current contract"));
+            }
+            let hash = body_hash(&serde_json::to_value(&plan)?);
+            let who = if field == "plan" {
+                "the model's plan"
+            } else {
+                "the stub plan"
+            };
+            a["label"] = Value::String(format!(
+                "install exactly {who} (hash {}, {} items)",
+                &hash[..12],
+                plan.items.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl OutcomeWriter {
+    /// See [`OutcomeTx::reserve_plan_run`].
+    pub fn reserve_plan_run(
+        &mut self,
+        session_id: &str,
+        model: &str,
+        max_usd: f64,
+    ) -> Result<PlanRunRecord> {
+        self.atomically(|tx| tx.reserve_plan_run(session_id, model, max_usd))
+    }
+
+    /// See [`OutcomeTx::settle_plan_run`].
+    pub fn settle_plan_run(&mut self, run_id: &str, end: &PlanRunEnd) -> Result<PlanRunRecord> {
+        self.atomically(|tx| tx.settle_plan_run(run_id, end))
+    }
+
+    /// Installs the plan a person approved: the ONLY way a model's plan reaches `plans`. The
+    /// caller names the decision and nothing else. It must be a `plan_approval` a person approved
+    /// with `approve_model_plan` or `use_stub_plan` (MAC verified), the plan is read from its
+    /// stored action (checked against the binding's action hash, so an edited row is `Tampered`)
+    /// and validated again against the current contract by `insert_plan`, and `current_binding`
+    /// must still be the binding the person saw (contract, plan version, policy).
+    pub fn install_plan_from_decision(
+        &mut self,
+        decision: &DecisionId,
+        current_binding: &Value,
+    ) -> Result<Vec<(String, WorkItemId)>> {
+        let d = self
+            .list_decisions(self.id())?
+            .into_iter()
+            .find(|x| x.id == *decision)
+            .ok_or_else(|| Error::NotFound(format!("decision {decision}")))?;
+        if d.kind != "plan_approval" {
+            return Err(Error::Invalid(
+                "only a plan_approval decision installs a plan".into(),
+            ));
+        }
+        let choice = match self.verified_resolution(decision)? {
+            Some(r) if r.state == DecisionState::Approved => r.choice,
+            _ => {
+                return Err(Error::Invalid(
+                    "only a plan a person approved is installed".into(),
+                ));
+            }
+        };
+        let field = PLAN_CHOICES
+            .iter()
+            .find(|(c, _)| *c == choice)
+            .map(|(_, f)| *f)
+            .ok_or_else(|| Error::Invalid("the approved choice installs no plan".into()))?;
+        let action = self
+            .decision_action(decision)?
+            .ok_or_else(|| Error::Invalid("the decision has no stored action".into()))?;
+        let plan: Plan = action
+            .get(field)
+            .cloned()
+            .ok_or_else(|| Error::Invalid("the stored action carries no such plan".into()))
+            .and_then(|p| serde_json::from_value(p).map_err(refuse))?;
+        let plan_hash = body_hash(&serde_json::to_value(&plan)?);
+        self.atomically(|tx| {
+            if !tx.binding_current(&d, current_binding) {
+                return Err(Error::Stale(
+                    "the contract, plan or policy changed since the decision was shown".into(),
+                ));
+            }
+            let ids = tx.insert_plan(&plan)?;
+            tx.emit(
+                ev::PLAN_APPROVED,
+                json!({"decision_id": d.id, "choice": choice, "plan_version": plan.version,
+                       "plan_hash": plan_hash, "action_hash": d.binding.get("action_hash")}),
+            )?;
+            Ok(ids)
+        })
     }
 }

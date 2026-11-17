@@ -327,6 +327,8 @@ fn seeded(r: &Rig) -> (String, String) {
                 requires: vec![],
                 capabilities: vec![],
                 covers: vec![],
+                title: String::new(),
+                instructions: String::new(),
             },
             PlanItem {
                 key: "test".into(),
@@ -334,6 +336,8 @@ fn seeded(r: &Rig) -> (String, String) {
                 requires: vec!["one".into()],
                 capabilities: vec![],
                 covers: vec!["c1".into()],
+                title: String::new(),
+                instructions: String::new(),
             },
         ],
     };

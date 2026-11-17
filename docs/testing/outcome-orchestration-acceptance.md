@@ -183,3 +183,23 @@ Not covered: hostile text with hidden or control characters in the evidence summ
 | `edit_scope_then_a_revised_contract_approved_again_replans_and_the_old_card_is_dead` | `apps/cli/tests/outcome_e2e.rs` | the real owner process, end to end |
 
 Not covered: a live attempt at approval time through the owner (store level only); a revision of a `paused` outcome (refused by design); Linux and Windows runs of the e2e.
+
+## B6 tests (implemented: planner foundations, no model call)
+
+| Test | File | What it proves |
+|---|---|---|
+| `hostile_plans_are_refused_with_a_fixed_code`, `hidden_bidi_and_control_characters_are_refused_in_every_text_field`, `size_and_item_caps_hold_for_a_runaway_plan`, `a_chain_deeper_than_the_cap_is_refused`, `a_read_only_envelope_never_widens` (`plan-unknown-field-refused`, `plan-hidden-chars-refused`) | `synthesis-orchestrator/tests/model_plan.rs` | unknown fields (`approved`, `budgets`, `command`, `paths`), cycles, duplicate ids, a widened capability, an uncovered or unknown criterion, 10,000 items, huge strings, hidden characters, depth |
+| `approving_installs_exactly_the_stored_plan_once`, `the_stub_alternative_installs_the_stub_plan_not_the_model_plan` | same | the installed plan is the stored action's plan, hash equal, audited as `plan.install`, once |
+| `nothing_installs_without_an_approval` (`plan-insert-without-approval-denied`) | same | pending, rejected and other-kind decisions install nothing |
+| `an_edited_action_row_is_tampered_and_nothing_is_installed` (`plan-approval-tampered-action`) | same | an edited action gives `Tampered`, nothing is inserted |
+| `a_moved_contract_invalidates_the_decision_and_installs_nothing`, `an_approved_decision_whose_contract_moved_before_the_install_installs_nothing` (`plan_approval_stale_after_contract_revise`) | same | stale bindings |
+| `a_decision_that_expires_is_a_hold_and_a_late_answer_is_refused`, `an_answer_given_before_the_expiry_stands_after_it` | same | races with expiry |
+| `the_brief_shows_everything_and_preselects_nothing`, `a_replan_brief_diffs_against_the_current_plan`, `the_store_refuses_a_plan_approval_that_offers_more_than_its_action_holds`, `a_plan_approval_can_never_become_a_grant`, `request_evidence_and_edit_scope_are_not_answers_to_a_plan` | same | brief content, alternatives, no grant, no re-brief |
+| `a_plan_run_reserves_min_of_its_cap_and_what_the_outcome_has_left_and_spend_never_passes_the_cap`, `attempt_reservations_and_plan_runs_share_one_cap_in_either_order`, `the_settings_ceiling_bounds_the_planner_too_and_hostile_amounts_refuse` (`planner_spend_counts_in_budget`) | `synthesis-session/tests/outcome_store.rs` | spend accounting never passes the cap |
+| `plan_run_rows_are_set_once_and_never_deleted`, `a_forged_plan_run_row_does_not_verify_and_never_lowers_what_is_counted`, `a_plan_run_is_settled_once_with_a_state_a_cost_and_hashes`, `a_plan_run_needs_a_pre_plan_outcome_an_approved_contract_and_a_child_session`, `the_number_of_plan_runs_of_an_outcome_is_bounded` | same | triggers, MAC, set-once, bounds |
+| `the_planner_is_the_stub_with_one_dollar_and_sixteen_items_by_default`, `the_user_file_sets_and_validates_every_planner_key`, `a_project_or_local_file_cannot_turn_the_model_planner_on_or_change_its_budget`, `managed_planner_settings_win_and_an_unusable_one_fails_closed_to_the_stub` (`project_setting_cannot_enable_model_planner`) | `synthesis-settings/tests/settings.rs` | settings |
+| `only_the_orchestrator_may_spawn_a_planner` | `gateway.rs` unit tests | gateway matrix for `planner.spawn` |
+| `planner_row_names_the_mode_and_limits` | `doctor.rs` | doctor row |
+| `title_and_instructions_are_capped_and_never_hidden_and_an_empty_one_is_not_stored` | `synthesis-core` | the stub plan hash is unchanged (empty fields are not stored) |
+
+Not covered (B7): the planning run itself, the prompt, the repair round, the read-only profile, `plan-readme-injection-widen`, `plan-secret-not-readable`, `plan-run-network-denied`, kill -9 of a planning run, `unpriced_model_falls_back`, the stub-only decision after a failed run.

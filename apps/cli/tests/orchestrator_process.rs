@@ -242,6 +242,8 @@ fn orphaned(r: &Rig) -> (OutcomeWriter, WorkItemId) {
                 requires: vec![],
                 capabilities: vec![],
                 covers: vec![],
+                title: String::new(),
+                instructions: String::new(),
             },
             PlanItem {
                 key: "check".into(),
@@ -249,6 +251,8 @@ fn orphaned(r: &Rig) -> (OutcomeWriter, WorkItemId) {
                 requires: vec!["write".into()],
                 capabilities: vec![],
                 covers: vec!["c1".into()],
+                title: String::new(),
+                instructions: String::new(),
             },
         ],
     };

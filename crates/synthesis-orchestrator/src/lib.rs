@@ -16,6 +16,7 @@ pub mod gateway;
 mod gitsafe;
 mod grants;
 mod host;
+mod model_plan;
 mod planner;
 mod proc;
 mod profile;
@@ -39,9 +40,13 @@ pub use gitsafe::{
 };
 pub use grants::{
     DecisionDriver, GRANT_TTL_HOURS, answered_waiting, awaiting_rebrief, current_binding_for,
-    decided_choices, decision_binding,
+    decided_choices, decision_binding, plan_binding_for,
 };
 pub use host::ProcessHost;
+pub use model_plan::{
+    DEFAULT_MAX_ITEMS, MAX_PLAN_DEPTH, ModelPlanLimits, ReasonCode, ValidatedPlan,
+    install_approved_plan, plan_hash, record_plan_approval, validate_model_plan,
+};
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};

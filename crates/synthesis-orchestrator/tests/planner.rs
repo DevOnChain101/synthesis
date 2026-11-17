@@ -32,6 +32,8 @@ impl Planner for WithLint {
             requires: vec![],
             capabilities: vec!["repo.read".into()],
             covers: vec![],
+            title: String::new(),
+            instructions: String::new(),
         });
         Ok(p)
     }

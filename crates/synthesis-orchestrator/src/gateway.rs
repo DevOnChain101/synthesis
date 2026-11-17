@@ -53,7 +53,7 @@ pub enum Action {
     ReviseContract,
     PlanInstall,
     Notify,
-    /// Reserved (model planner): denied until it lands.
+    /// Starts a model planning run (B7 uses it): the owner only; nothing calls it yet.
     SpawnPlanner,
 }
 
@@ -132,9 +132,6 @@ pub fn authorize(p: Principal, a: Option<Action>) -> Verdict {
     let Some(a) = a else {
         return no("unknown_action");
     };
-    if matches!(a, Action::SpawnPlanner) {
-        return no("not_available");
-    }
     match p {
         Principal::Attempt => no("attempt_principal"),
         Principal::Engine => no("read_only_principal"),
@@ -190,7 +187,7 @@ mod tests {
     fn a_person_may_only_do_person_actions() {
         for s in SURFACES {
             for a in Action::ALL {
-                let want = a.by_person() && !matches!(a, Action::SpawnPlanner);
+                let want = a.by_person();
                 assert_eq!(allowed(Principal::User(s), a), want, "{s:?} {a:?}");
             }
         }
@@ -199,23 +196,27 @@ mod tests {
     #[test]
     fn the_orchestrator_cannot_resolve_approve_or_start() {
         for a in Action::ALL {
-            let want = matches!(a, Action::PlanInstall | Action::Notify);
+            let want = matches!(
+                a,
+                Action::PlanInstall | Action::Notify | Action::SpawnPlanner
+            );
             assert_eq!(allowed(Principal::Orchestrator, a), want, "{a:?}");
         }
     }
 
     #[test]
-    fn reserved_actions_are_denied_for_everyone() {
-        for a in [Action::SpawnPlanner] {
-            for p in [
-                Principal::User(Surface::Cli),
-                Principal::Orchestrator,
-                Principal::Engine,
-                Principal::Attempt,
-            ] {
-                assert_eq!(authorize(p, Some(a)).reason, "not_available");
-            }
+    fn only_the_orchestrator_may_spawn_a_planner() {
+        for s in SURFACES {
+            assert_eq!(
+                authorize(Principal::User(s), Some(Action::SpawnPlanner)).reason,
+                "wrong_principal"
+            );
         }
+        for p in [Principal::Engine, Principal::Attempt] {
+            assert!(!allowed(p, Action::SpawnPlanner), "{p:?}");
+        }
+        let v = authorize(Principal::Orchestrator, Some(Action::SpawnPlanner));
+        assert!(v.allow && v.reason == "owner_action");
     }
 
     #[test]

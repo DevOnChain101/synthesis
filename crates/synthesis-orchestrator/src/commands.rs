@@ -22,7 +22,7 @@ use time::OffsetDateTime;
 use crate::gateway::{Action, Principal, audit, authorize};
 use crate::planner::{Planner, make_plan, replan};
 use crate::sched::{Control, Decisions, SchedError};
-use crate::{DecisionDriver, current_binding_for};
+use crate::{DecisionDriver, current_binding_for, plan_binding_for};
 
 /// Applies every queued command this build knows; returns the ones finished now, oldest first.
 pub fn apply_queued(
@@ -157,8 +157,13 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
         }
         DecisionState::Preparing => return deny(w, c, "the decision is not open yet"),
     }
-    let Some((_, current)) = current_binding_for(w, &d, None)? else {
-        return deny(w, c, "the decision has no work item binding");
+    let current = if d.kind == "plan_approval" {
+        plan_binding_for(w, &d)?
+    } else {
+        let Some((_, current)) = current_binding_for(w, &d, None)? else {
+            return deny(w, c, "the decision has no work item binding");
+        };
+        current
     };
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
         audit_in(tx, c)?;

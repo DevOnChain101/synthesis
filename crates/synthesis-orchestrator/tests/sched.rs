@@ -656,6 +656,8 @@ fn big_outcome(r: &Rig) -> OutcomeWriter {
             requires: vec![],
             capabilities: vec![],
             covers: vec![],
+            title: String::new(),
+            instructions: String::new(),
         })
         .collect();
     items.push(PlanItem {
@@ -664,6 +666,8 @@ fn big_outcome(r: &Rig) -> OutcomeWriter {
         requires: vec!["i000".into()],
         capabilities: vec![],
         covers: vec!["c1".into()],
+        title: String::new(),
+        instructions: String::new(),
     });
     w.insert_plan(&Plan {
         version: 1,

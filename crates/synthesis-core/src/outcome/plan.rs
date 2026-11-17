@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::outcome::contract::{
-    Capability, CapabilityMode, Contract, ContractError, MAX_LIST_ENTRIES, valid_key,
+    Capability, CapabilityMode, Contract, ContractError, MAX_LIST_ENTRIES, hidden_char, valid_key,
     validate_contract,
 };
 
@@ -16,6 +16,10 @@ pub const MAX_PLAN_ITEMS: usize = 256;
 
 /// A plan as JSON (from a planner that is a model, later) is never larger than this.
 pub const MAX_PLAN_JSON_BYTES: usize = 256 * 1024;
+
+/// Longest `PlanItem::title` and `PlanItem::instructions`, in characters.
+pub const MAX_TITLE_CHARS: usize = 120;
+pub const MAX_INSTRUCTIONS_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +45,13 @@ pub struct PlanItem {
     /// Criterion ids this item produces evidence for.
     #[serde(default)]
     pub covers: Vec<String>,
+    /// Short label a model may write; shown to the person at approval. Left out of the stored
+    /// plan when empty, so a plan without it keeps its hash.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// What the worker is asked to do (model-written, approved by a person, grants nothing).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +95,9 @@ pub enum PlanError {
     },
     /// A `requires`, `capabilities` or `covers` list over the cap.
     TooManyEntries(String),
+    /// A `title` or `instructions` over its cap, or with a hidden character (refused, never
+    /// stripped, so the person reads exactly what the worker gets).
+    BadText(String),
     UnknownDependency {
         item: String,
         dependency: String,
@@ -152,6 +166,11 @@ impl std::fmt::Display for PlanError {
                     shown(i)
                 )
             }
+            Self::BadText(i) => write!(
+                f,
+                "work item {:?} has a title or instructions that is too long or has hidden characters",
+                shown(i)
+            ),
             Self::NotIndependentlyVerifiable(c) => write!(
                 f,
                 "mandatory criterion {c:?} is covered by agent items only; a verify item must cover it"
@@ -234,6 +253,17 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
             .any(|n| *n > MAX_LIST_ENTRIES)
         {
             return Err(PlanError::TooManyEntries(it.key.clone()));
+        }
+        let text_ok = |t: &str, max: usize, multiline: bool| {
+            t.chars().count() <= max
+                && !t
+                    .chars()
+                    .any(|c| hidden_char(c) && !(multiline && matches!(c, '\n' | '\t')))
+        };
+        if !text_ok(&it.title, MAX_TITLE_CHARS, false)
+            || !text_ok(&it.instructions, MAX_INSTRUCTIONS_CHARS, true)
+        {
+            return Err(PlanError::BadText(it.key.clone()));
         }
     }
     let criteria: BTreeSet<&str> = contract.criteria.iter().map(|c| c.id.as_str()).collect();
@@ -418,6 +448,8 @@ mod tests {
             requires: requires.iter().map(|s| (*s).into()).collect(),
             capabilities: vec![],
             covers: covers.iter().map(|s| (*s).into()).collect(),
+            title: String::new(),
+            instructions: String::new(),
         }
     }
 
@@ -645,6 +677,8 @@ mod tests {
                         .collect(),
                     capabilities: vec![],
                     covers: if i == 0 { vec!["c1".into()] } else { vec![] },
+                    title: String::new(),
+                    instructions: String::new(),
                 })
                 .collect();
             let plan = Plan {
@@ -696,6 +730,8 @@ mod tests {
                         .collect(),
                     capabilities: vec![],
                     covers: if i == 0 { vec!["c1".into()] } else { vec![] },
+                    title: String::new(),
+                    instructions: String::new(),
                 })
                 .collect();
             let mut plan = Plan {
@@ -925,5 +961,33 @@ mod tests {
         let d = diff_plans(&old, &new);
         assert!(d.unchanged.is_empty(), "nothing is carried over: {d:?}");
         assert_eq!(d.rerun, ["implement", "inspect", "test"]);
+    }
+
+    #[test]
+    fn title_and_instructions_are_capped_and_never_hidden_and_an_empty_one_is_not_stored() {
+        let (mut p, c) = good();
+        let before = serde_json::to_string(&p).unwrap();
+        assert!(!before.contains("title") && !before.contains("instructions"));
+        p.items[0].title = "Read the code".into();
+        p.items[0].instructions = "line one\n\tline two".into();
+        assert!(validate_plan(&p, &c).is_ok());
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<Plan>(&json).unwrap(), p);
+        for (title, ins) in [
+            ("x".repeat(MAX_TITLE_CHARS + 1), String::new()),
+            ("two\nlines".into(), String::new()),
+            ("a\u{202e}b".into(), String::new()),
+            (String::new(), "x".repeat(MAX_INSTRUCTIONS_CHARS + 1)),
+            (String::new(), "a\u{200b}b".into()),
+            (String::new(), "a\rb".into()),
+        ] {
+            p.items[0].title = title;
+            p.items[0].instructions = ins;
+            assert!(
+                matches!(validate_plan(&p, &c), Err(PlanError::BadText(_))),
+                "{:?}",
+                p.items[0]
+            );
+        }
     }
 }

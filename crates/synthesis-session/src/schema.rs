@@ -294,8 +294,31 @@ CREATE TRIGGER commands_request_immutable BEFORE UPDATE OF outcome_id, idempoten
   BEGIN SELECT RAISE(ABORT, 'a command request is immutable'); END;
 CREATE TRIGGER commands_finish_once BEFORE UPDATE ON outcome_commands WHEN OLD.state <> 'queued'
   BEGIN SELECT RAISE(ABORT, 'a finished command does not change'); END;
+-- A model planning run (ADR-017 P-B): one row per run, reserved before it starts and settled after.
+-- The identity columns (run, outcome, contract version, base commit, session, model, reservation,
+-- start) are MAC'd, so a bare UPDATE or INSERT cannot lower what the outcome counts as spent;
+-- the settled columns are set once by triggers (no MAC, like attempts).
+CREATE TABLE plan_runs(
+  id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL REFERENCES outcomes(id),
+  contract_version INTEGER NOT NULL, base_commit TEXT NOT NULL,
+  session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id), model TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('running','finished','failed','lost')),
+  reserved_usd REAL NOT NULL CHECK(reserved_usd > 0),
+  cost_usd REAL CHECK(cost_usd IS NULL OR cost_usd >= 0),   -- the settled cost; NULL = the reservation counts
+  raw_sha256 TEXT, plan_hash TEXT, error_code TEXT,
+  mac TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT);
+CREATE INDEX plan_runs_outcome ON plan_runs(outcome_id, started_at);
+CREATE TRIGGER plan_runs_identity_immutable BEFORE UPDATE OF id, outcome_id, contract_version, base_commit,
+    session_id, model, reserved_usd, mac, started_at ON plan_runs
+  BEGIN SELECT RAISE(ABORT, 'a plan run keeps its identity and reservation'); END;
+CREATE TRIGGER plan_runs_no_delete BEFORE DELETE ON plan_runs
+  BEGIN SELECT RAISE(ABORT, 'plan runs are never deleted'); END;
+CREATE TRIGGER plan_runs_terminal BEFORE UPDATE OF state ON plan_runs
+  WHEN OLD.state <> 'running' BEGIN SELECT RAISE(ABORT, 'a finished plan run does not change'); END;
+CREATE TRIGGER plan_runs_settle_once BEFORE UPDATE OF cost_usd, raw_sha256, plan_hash, error_code, ended_at ON plan_runs
+  WHEN OLD.ended_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a plan run is settled once'); END;
 -- the revision of THIS DDL (1000 + revision); a v5 database made by an earlier draft lacks it
-INSERT INTO schema_migrations(version, applied_at) VALUES (1009, 'outcome-ddl-rev-9');
+INSERT INTO schema_migrations(version, applied_at) VALUES (1010, 'outcome-ddl-rev-10');
 "#,
 ];
 
@@ -306,7 +329,7 @@ pub const OUTCOMES: i64 = 5;
 /// `schema_migrations.version` of the outcome DDL revision this build writes (1000 + revision).
 /// Developer databases that enabled an earlier draft of v5 lack it; the outcome API refuses them
 /// with `OutcomeSchemaOutdated` and `synt doctor` says to restore the pre-v5 backup.
-pub const OUTCOME_DDL_MARKER: i64 = 1009;
+pub const OUTCOME_DDL_MARKER: i64 = 1010;
 /// Newest schema this build can read and write.
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
 
