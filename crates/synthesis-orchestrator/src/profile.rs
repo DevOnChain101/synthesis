@@ -62,6 +62,23 @@ impl std::error::Error for ProfileError {}
 /// shapes the worker's authority is fixed here.
 const EXTRA_WITH_VALUE: [&str; 4] = ["--provider", "--model", "--max-turns", "--max-tool-calls"];
 
+/// The options of `args` that [`EXTRA_WITH_VALUE`] allows, each with its value; anything else is
+/// refused.
+pub(crate) fn allowed_extra(args: &[&str]) -> Result<Vec<String>, ProfileError> {
+    let mut out = vec![];
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match it.next() {
+            Some(v) if EXTRA_WITH_VALUE.contains(a) && !v.starts_with('-') => {
+                out.push((*a).to_string());
+                out.push((*v).to_string());
+            }
+            _ => return Err(ProfileError::Forbidden((*a).to_string())),
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
     program: PathBuf,
@@ -194,17 +211,7 @@ impl Profile {
     /// Adds allow-listed options (`--provider X`, `--model X`, `--max-turns N`,
     /// `--max-tool-calls N`, each with its value). Anything else is refused.
     pub fn with_extra(mut self, args: &[&str]) -> Result<Self, ProfileError> {
-        let mut it = args.iter();
-        while let Some(a) = it.next() {
-            let value = it.next();
-            match value {
-                Some(v) if EXTRA_WITH_VALUE.contains(a) && !v.starts_with('-') => {
-                    self.extra.push((*a).to_string());
-                    self.extra.push((*v).to_string());
-                }
-                _ => return Err(ProfileError::Forbidden((*a).to_string())),
-            }
-        }
+        self.extra.extend(allowed_extra(args)?);
         Ok(self)
     }
 

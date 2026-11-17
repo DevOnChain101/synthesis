@@ -148,6 +148,9 @@ pub struct OutcomeUsage {
     pub cost_usd: f64,
     pub wall_ms: u64,
     pub reserved_usd: f64,
+    /// What the planning runs cost (a run not settled with a cost counts its reservation): already
+    /// part of `cost_usd` / `reserved_usd`, reported apart so a surface can say what planning took.
+    pub planner_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -555,6 +558,11 @@ impl Reader {
     /// store records no token counts.
     pub fn outcome_usage(&self, id: &OutcomeId) -> Result<OutcomeUsage> {
         need_v5(&self.conn)?;
+        let planner_usd: f64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(COALESCE(cost_usd, reserved_usd)),0.0) FROM plan_runs WHERE outcome_id=?1",
+            [id.as_str()],
+            |r| r.get(0),
+        )?;
         Ok(self.conn.query_row(
             "SELECT COALESCE(SUM(COALESCE(json_extract(s.usage,'$.cost_usd'),0)),0.0) \
                       + (SELECT COALESCE(SUM(cost_usd),0.0) FROM plan_runs WHERE outcome_id=?1), \
@@ -574,6 +582,7 @@ impl Reader {
                     cost_usd: r.get(0)?,
                     wall_ms: r.get::<_, i64>(1)?.max(0) as u64,
                     reserved_usd: r.get(2)?,
+                    planner_usd,
                 })
             },
         )?)
@@ -3488,7 +3497,11 @@ impl OutcomeTx<'_, '_> {
 
     /// Reserves `usd` for the attempt, once, before its worker is spawned: from then on the
     /// outcome counts it as spent until a final usage is recorded. Same fence rules as the
-    /// worker's writes; the amount must be positive and finite.
+    /// worker's writes; the amount must be positive and finite. The cap is checked HERE, in the
+    /// transaction that writes the reservation (like [`Self::reserve_plan_run`]): what the caller
+    /// read earlier is only a proposal, so attempts and planning runs together never reserve past
+    /// the outcome cap, in any order. A reservation over what is left is refused, never lowered
+    /// (the worker was told its amount as its own cap).
     pub fn reserve_budget(&mut self, id: &AttemptId, fence: i64, usd: f64) -> Result<()> {
         if !usd.is_finite() || usd <= 0.0 {
             return Err(Error::Invalid(
@@ -3496,6 +3509,24 @@ impl OutcomeTx<'_, '_> {
             ));
         }
         self.live_attempt(id, fence)?;
+        let o = self.outcome()?;
+        let cap = self
+            .stored_contract(o.contract_version)?
+            .envelope
+            .budgets
+            .max_cost_usd;
+        let own: f64 = self.et.tx.query_row(
+            "SELECT COALESCE(reserved_usd,0) FROM attempts WHERE id=?1",
+            [id.as_str()],
+            |r| r.get(0),
+        )?;
+        // this attempt's own earlier reservation is replaced, not added; a NaN spend is not "enough left"
+        let left = cap - spend(self.et.tx, self.id)? + own;
+        if left.is_nan() || usd > left + 1e-9 {
+            return Err(Error::Invalid(
+                "the outcome cost cap has too little left for this attempt".into(),
+            ));
+        }
         self.et.tx.execute(
             "UPDATE attempts SET reserved_usd=?2 WHERE id=?1",
             params![id.as_str(), usd],

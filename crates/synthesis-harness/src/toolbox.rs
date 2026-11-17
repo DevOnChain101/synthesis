@@ -22,6 +22,8 @@ pub struct ToolBox {
     extra: Vec<Arc<dyn Tool>>,
     sources: Vec<Arc<dyn ToolSource>>,
     guard: Option<Arc<McpGuard>>,
+    /// When set, only these tools exist (names): the others are neither listed nor executed.
+    only: Option<Vec<String>>,
 }
 
 impl ToolBox {
@@ -53,6 +55,18 @@ impl ToolBox {
         self
     }
 
+    /// Restricts the box to the named tools (an allow-list: a tool added later stays out).
+    pub fn only(mut self, names: &[&str]) -> Self {
+        self.only = Some(names.iter().map(|n| (*n).to_string()).collect());
+        self
+    }
+
+    fn allowed(&self, name: &str) -> bool {
+        self.only
+            .as_ref()
+            .is_none_or(|o| o.iter().any(|n| n == name))
+    }
+
     pub fn guard(&self) -> Option<&McpGuard> {
         self.guard.as_deref()
     }
@@ -72,17 +86,22 @@ impl ToolBox {
             .filter(|s| !extra.iter().any(|t| t.spec().name == s.name))
             .collect();
         out.extend(extra.iter().map(|t| t.spec().clone()));
+        out.retain(|s| self.allowed(&s.name));
         out
     }
 
     pub fn spec(&self, name: &str) -> Option<ToolSpec> {
         if name == crate::toolsearch::NAME {
-            return Some(crate::toolsearch::spec());
+            return self.allowed(name).then(crate::toolsearch::spec);
         }
         self.specs().into_iter().find(|s| s.name == name)
     }
 
     pub async fn execute(&self, name: &str, input: Value, ctx: &ToolContext) -> ToolOutput {
+        if !self.allowed(name) {
+            return ToolOutput::error(format!("Unknown tool \"{name}\""))
+                .with_meta(json!({"error": "unknown_tool"}));
+        }
         if let Some(t) = self
             .extras()
             .into_iter()
@@ -190,5 +209,17 @@ mod tests {
         *src.0.lock().unwrap() = vec!["mcp__s__b"];
         assert_eq!(names(&tb), ["mcp__s__b"]);
         assert!(tb.spec("mcp__s__a").is_none());
+    }
+
+    #[test]
+    fn an_allow_list_hides_every_other_tool_even_one_added_later() {
+        let src = Arc::new(Live(Mutex::new(vec!["Read", "mcp__s__a"])));
+        let tb = ToolBox::empty().with_source(src.clone()).only(&["Read"]);
+        let names = |t: &ToolBox| t.specs().into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(&tb), ["Read"]);
+        *src.0.lock().unwrap() = vec!["Read", "Write", "mcp__s__b"];
+        assert_eq!(names(&tb), ["Read"]);
+        assert!(tb.spec("Write").is_none() && tb.spec("Read").is_some());
+        assert!(!tb.allowed("Write") && tb.allowed("Read"));
     }
 }

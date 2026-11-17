@@ -70,6 +70,17 @@ pub enum ReasonCode {
     TextTooLong,
     HiddenText,
     PlannerFailed,
+    /// The planning run did not end within its wall cap.
+    Timeout,
+    /// The planning session ended without a final message.
+    NoOutput,
+    /// The planner model has no price: a cost cap cannot be enforced, so nothing is run.
+    UnpricedModel,
+    /// The outcome's cost cap has too little left for a planning run (or for its repair round).
+    NoBudget,
+    /// The owner died while the run was going; it is never run again.
+    Lost,
+    Cancelled,
 }
 
 impl ReasonCode {
@@ -96,6 +107,57 @@ impl ReasonCode {
             Self::TextTooLong => "text_too_long",
             Self::HiddenText => "hidden_text",
             Self::PlannerFailed => "planner_failed",
+            Self::Timeout => "timeout",
+            Self::NoOutput => "no_output",
+            Self::UnpricedModel => "unpriced_model",
+            Self::NoBudget => "no_budget",
+            Self::Lost => "lost",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// A fixed sentence for the repair round of a plan the validator refused: it names the rule,
+    /// never an item key, a criterion id or any other text the model wrote (that text is data, and
+    /// could carry instructions back to the model).
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::TooLarge => "the answer is too long: use fewer items and shorter text",
+            Self::BadJson => {
+                "the answer is not exactly the plan JSON object: only the fields named in the schema are allowed, and nothing else may be in the answer"
+            }
+            Self::BadVersion => {
+                "version or contract_version does not match the values you were given"
+            }
+            Self::ContractInvalid => "the contract is not valid for planning",
+            Self::Empty => "the plan has no items",
+            Self::TooManyItems => "the plan has more items than the limit you were given",
+            Self::TooDeep => "the chain of requires is deeper than the limit you were given",
+            Self::BadKey => {
+                "an item key is not valid: use 1 to 64 characters, letters, digits, _ - and ., starting with a letter or digit"
+            }
+            Self::DuplicateKey => "two items have the same key",
+            Self::DuplicateDependency => "an item lists the same dependency twice",
+            Self::TooManyEntries => "an item has a list with too many entries",
+            Self::UnknownDependency => "an item requires a key that is not an item of the plan",
+            Self::Cycle => "the requires edges contain a cycle",
+            Self::UnknownCapability => "an item names a capability that does not exist",
+            Self::CapabilityDenied => {
+                "an item needs a capability the envelope denies: use only the capabilities you were given"
+            }
+            Self::UnknownCriterion => "an item covers a criterion id that does not exist",
+            Self::UncoveredCriterion => "a mandatory criterion is not covered by any item",
+            Self::NotIndependentlyVerifiable => {
+                "a mandatory criterion must be covered by a verify item"
+            }
+            Self::TextTooLong => "a title or instructions text is over its length limit",
+            Self::HiddenText => "a title or instructions text has a hidden or control character",
+            Self::PlannerFailed
+            | Self::Timeout
+            | Self::NoOutput
+            | Self::UnpricedModel
+            | Self::NoBudget
+            | Self::Lost
+            | Self::Cancelled => "the planning run did not produce a plan",
         }
     }
 }
@@ -292,6 +354,18 @@ pub fn record_plan_approval(
         "unknowns": [],
         "safe_default": "HOLD",
     });
+    open_decision(w, format!("plan:{plan_run_id}"), brief, action, now)
+}
+
+/// Creates a `plan_approval` decision and opens it (`pending`); the same dedupe key returns the
+/// decision made before (a replay creates nothing twice).
+fn open_decision(
+    w: &mut OutcomeWriter,
+    dedupe: String,
+    brief: Value,
+    action: Value,
+    now: OffsetDateTime,
+) -> Result<DecisionRecord, StoreError> {
     let binding = plan_binding(w, "")?;
     let hours = i64::from(w.decision_expiry_hours().min(24));
     let fmt = time::macros::format_description!(
@@ -302,7 +376,7 @@ pub fn record_plan_approval(
         .map_err(|e| StoreError::Invalid(e.to_string()))?;
     let (d, fresh) = w.new_decision(&NewDecision {
         kind: "plan_approval".into(),
-        dedupe_key: format!("plan:{plan_run_id}").chars().take(128).collect(),
+        dedupe_key: dedupe.chars().take(128).collect(),
         brief,
         binding,
         expires_at,
@@ -323,15 +397,68 @@ pub fn record_plan_approval(
         .ok_or_else(|| StoreError::NotFound(format!("decision {}", d.id)))
 }
 
+/// The decision of a planning run that gave no usable plan (or could not run): it offers ONLY the
+/// deterministic stub plan, says why with a fixed code, and waits for the person. Nothing is
+/// switched to the stub automatically. `None` when the stub plan is not valid for this contract
+/// either (nothing can be offered). The same run (or contract version, with no run) asked twice
+/// returns the same decision.
+pub fn record_stub_fallback(
+    w: &mut OutcomeWriter,
+    plan_run_id: Option<&str>,
+    reason: ReasonCode,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionRecord>, StoreError> {
+    let o = w.get_outcome(w.id())?;
+    let next = o.plan_version.unwrap_or(0) + 1;
+    let (contract, _, approved) = w.get_contract(w.id(), o.contract_version)?;
+    if !approved {
+        return Err(StoreError::Invalid(
+            "a plan approval needs the approved current contract".into(),
+        ));
+    }
+    let Ok((stub, _)) = make_plan(&StubPlanner, &contract, next) else {
+        return Ok(None);
+    };
+    let action = json!({"source": "stub_fallback", "plan_run_id": plan_run_id,
+                        "reason_code": reason.as_str(), "stub_plan": serde_json::to_value(&stub)?});
+    let brief = json!({
+        "why": format!("the model planner gave no plan you can use ({}); the deterministic stub plan is offered and nothing runs until you choose", reason.as_str()),
+        "why_human": "the model planner failed",
+        "reason_code": reason.as_str(),
+        "delta_from_contract": "none: the plan cannot change the goal, criteria, checks, envelope or budgets",
+        "alternatives": [{"id": "use_stub_plan", "label": ""}],
+        "plan": {
+            "source": "stub_fallback",
+            "plan_run_id": plan_run_id,
+            "plan_version": next,
+            "plan_hash": plan_hash(&stub),
+            "items": items_json(&stub),
+            "agent_items": stub.items.iter().filter(|i| i.kind == WorkItemKind::Agent).count(),
+            "max_attempts_per_work_item": contract.envelope.budgets.max_attempts_per_work_item,
+            "outcome_cost_cap_usd": contract.envelope.budgets.max_cost_usd,
+        },
+        "unknowns": [],
+        "safe_default": "HOLD",
+    });
+    let key = plan_run_id.map_or_else(
+        || format!("plan:v{}", o.contract_version),
+        |r| format!("plan:{r}"),
+    );
+    open_decision(w, key, brief, action, now).map(Some)
+}
+
 /// Installs the plan of an approved `plan_approval` decision: the gateway allows `plan.install`
 /// for the orchestrator (the verdict is audited either way), the plan is read from the decision's
 /// stored action (hash-checked by the store), a model plan is validated AGAIN against the current
 /// contract (replay re-validates the stored output; the model is never run again), and the store
-/// refuses a moved binding. Returns the version installed.
+/// refuses a moved binding. `max_items` is the user's `planner.max_items` NOW (a setting that
+/// tightened since the plan was proposed refuses it; the depth cap is part of the validator).
+/// Returns the version installed.
 pub fn install_approved_plan(
     w: &mut OutcomeWriter,
     d: &DecisionRecord,
     current: &Value,
+    max_items: usize,
 ) -> Result<u32, StoreError> {
     let allow = authorize(Principal::Orchestrator, Some(Action::PlanInstall)).allow;
     let a = audit(Principal::Orchestrator, Some(Action::PlanInstall));
@@ -361,7 +488,7 @@ pub fn install_approved_plan(
             .ok_or_else(|| StoreError::Invalid("the stored action carries no plan".into()))?;
         let limits = ModelPlanLimits {
             version: o.plan_version.unwrap_or(0) + 1,
-            max_items: MAX_PLAN_ITEMS,
+            max_items,
         };
         validate_model_plan(&text, &contract, &limits).map_err(|c| {
             StoreError::Invalid(format!("the stored plan no longer validates: {c}"))

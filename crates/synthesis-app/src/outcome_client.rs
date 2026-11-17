@@ -316,7 +316,7 @@ impl<T: Transport> OutcomeClient<T> {
         }
     }
 
-    /// `{cost_usd{spent,limit}, wall_secs{spent}, reserved_usd}`; no `remaining`, no tokens.
+    /// `{cost_usd{spent,limit}, wall_secs{spent}, reserved_usd, planner_spent_usd}`; no `remaining`, no tokens.
     pub fn budget(&mut self, outcome: &str) -> Result<Value, ClientError> {
         let v = self.t.call(Call::OutcomeBudget { id: outcome.into() })?;
         object(v, "budget")

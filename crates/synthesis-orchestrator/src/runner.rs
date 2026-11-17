@@ -82,6 +82,18 @@ pub struct SyntSpawn {
 
 impl Spawn for SyntSpawn {
     fn spawn(&self, p: &Profile) -> io::Result<Child> {
+        self.launch(p.program(), p.cwd(), p.argv())
+    }
+}
+
+impl SyntSpawn {
+    /// `program args` in `cwd`: own process group, no stdin, output to the log.
+    pub fn launch(
+        &self,
+        program: &std::path::Path,
+        cwd: &std::path::Path,
+        args: Vec<std::ffi::OsString>,
+    ) -> io::Result<Child> {
         let mut o = std::fs::OpenOptions::new();
         o.create(true).append(true);
         #[cfg(unix)]
@@ -90,12 +102,12 @@ impl Spawn for SyntSpawn {
             o.mode(0o600);
         }
         let log = o.open(&self.log)?;
-        let mut c = Command::new(p.program());
+        let mut c = Command::new(program);
         if let Some(env) = &self.env {
             c.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
         }
-        c.args(p.argv())
-            .current_dir(p.cwd())
+        c.args(args)
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -319,7 +331,7 @@ impl Drop for Running {
 
 /// Kills the child and waits for it, for at most a couple of seconds (a process in an
 /// uninterruptible state must not hang the owner). True when it was reaped.
-fn reap_bounded(child: &mut Child) -> bool {
+pub(crate) fn reap_bounded(child: &mut Child) -> bool {
     let _ = child.kill();
     let until = Instant::now() + Duration::from_secs(3);
     loop {

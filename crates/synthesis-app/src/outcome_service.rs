@@ -216,7 +216,7 @@ impl Service {
                 Ok(
                     json!({"cost_usd": {"spent": u.cost_usd, "limit": contract.envelope.budgets.max_cost_usd},
                           "wall_secs": {"spent": u.wall_ms as f64 / 1000.0},
-                          "reserved_usd": u.reserved_usd}),
+                          "reserved_usd": u.reserved_usd, "planner_spent_usd": u.planner_usd}),
                 )
             }
             Call::AttemptDiff { outcome, id } => {

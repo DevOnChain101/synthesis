@@ -27,6 +27,27 @@ impl std::error::Error for PlannerError {}
 pub trait Planner {
     /// A plan of `version` for `contract`. The result is a proposal: see [`make_plan`].
     fn plan(&self, contract: &Contract, version: u32) -> Result<Plan, PlannerError>;
+
+    /// The plan comes from a model planning run the owner drives (`planrun`) and a person
+    /// approves: the lifecycle commands wait for it instead of calling [`Planner::plan`].
+    fn awaits_model(&self) -> bool {
+        false
+    }
+}
+
+/// The planner of `planner.mode = model`: it makes no plan by itself (see [`Planner::awaits_model`]).
+pub struct ModelPlanner;
+
+impl Planner for ModelPlanner {
+    fn plan(&self, _: &Contract, _: u32) -> Result<Plan, PlannerError> {
+        Err(PlannerError(
+            "the plan of this outcome comes from a planning run and your approval".into(),
+        ))
+    }
+
+    fn awaits_model(&self) -> bool {
+        true
+    }
 }
 
 /// `inspect` (agent, read-only) then `implement` (agent, write) then `test` (verify, covers every

@@ -29,7 +29,16 @@ pub fn apply_queued(
     w: &mut OutcomeWriter,
     now: OffsetDateTime,
 ) -> Result<Vec<CommandRecord>, SchedError> {
-    DecisionDriver::default().drive(w, now)?;
+    apply_queued_with(w, now, &mut DecisionDriver::default())
+}
+
+/// [`apply_queued`] with the owner's decision driver (it carries the user's `planner.max_items`).
+pub fn apply_queued_with(
+    w: &mut OutcomeWriter,
+    now: OffsetDateTime,
+    driver: &mut DecisionDriver,
+) -> Result<Vec<CommandRecord>, SchedError> {
+    driver.drive(w, now)?;
     let mut done = vec![];
     for c in w.queued_commands(w.id())? {
         if !matches!(
@@ -64,7 +73,7 @@ pub fn apply_queued(
         .iter()
         .any(|c| c.kind == "outcome.contract.approve" && c.state == CommandState::Applied)
     {
-        DecisionDriver::default().drive(w, now)?;
+        driver.drive(w, now)?;
     }
     Ok(done)
 }
@@ -337,6 +346,15 @@ fn start(w: &mut OutcomeWriter, planner: &dyn Planner) -> Result<Step, StoreErro
     // each step below is skipped when it already happened, so a crash between them is finished
     // by the next try (the command stays queued until the outcome runs)
     if o.plan_version.is_none() {
+        if planner.awaits_model() {
+            // the planning run and the person's approval install the plan; this command waits
+            return Ok(match crate::planrun::plan_wait(w)? {
+                crate::planrun::PlanWait::Over => Step::Denied(
+                    "no plan was installed: the planning decision was not approved or could not be made; revise the contract to plan again".into(),
+                ),
+                _ => Step::Waiting,
+            });
+        }
         let (contract, _, _) = w.get_contract(w.id(), o.contract_version)?;
         let (plan, _) = make_plan(planner, &contract, 1)
             .map_err(|e| StoreError::Invalid(format!("no plan: {e}")))?;
@@ -433,14 +451,16 @@ pub fn awaiting_replan(
 /// diff names what runs again, and with another contract nothing of the old plan is carried over)
 /// and puts the outcome back to `running`, so the scheduler walks the new plan. A plan from the stub
 /// planner is a function of the approved contract, so it needs no approval of its own; a model plan
-/// will go through a `plan_approval` decision (B6). Evidence of the old plan never counts for the new
+/// goes through a planning run and a `plan_approval` decision (B6, B7): with a model planner this
+/// does nothing. Evidence of the old plan never counts for the new
 /// contract (the store filters it). Returns whether it replanned; each step is skipped when it
 /// already happened, so a crash in between is finished by the next try.
 pub fn replan_after_revise(
     w: &mut OutcomeWriter,
     planner: &dyn Planner,
 ) -> Result<bool, StoreError> {
-    if !awaiting_replan(w, w.id())? {
+    // a model plan is made by the planning run and installed from its approved decision
+    if planner.awaits_model() || !awaiting_replan(w, w.id())? {
         return Ok(false);
     }
     let o = w.get_outcome(w.id())?;

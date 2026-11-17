@@ -221,6 +221,11 @@ pub fn resolve_governed_sandbox_mode(
 }
 
 impl Common {
+    /// An outcome attempt or planning run: the confinement of ADR-019 applies.
+    pub fn confined(&self) -> bool {
+        self.attempt_session || self.plan_session
+    }
+
     pub fn sandbox_mode(&self) -> SandboxMode {
         if self.governed {
             return resolve_governed_sandbox_mode(
@@ -311,6 +316,12 @@ pub struct Common {
     /// servers and no browser tools, never in auto or bypass mode, and only unattended.
     #[arg(long, hide = true, requires = "resume", requires = "unattended")]
     pub attempt_session: bool,
+    /// Internal (the outcome orchestrator's planning run launches `synt run` with it): `--resume`
+    /// names the planner session the owner created, in a plain directory it checked out. Confined
+    /// like an attempt (no MCP, no browser, no allow rules from settings, no extra directories,
+    /// reads stay in the working directory) and its tools are only Read, Grep, Glob and LS.
+    #[arg(long, hide = true, requires = "resume", conflicts_with_all = ["attempt_session", "unattended"])]
+    pub plan_session: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -1282,11 +1293,11 @@ pub fn prepare(
     {
         // an attempt takes a managed mode only if it is stricter than `default`: acceptEdits would
         // allow edits outside the contract's allowed paths
-        Some(Mode::AcceptEdits) if c.attempt_session => mode,
+        Some(Mode::AcceptEdits) if c.confined() => mode,
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
-    if c.attempt_session
+    if c.confined()
         && matches!(
             mode,
             Mode::Auto | Mode::BypassPermissions | Mode::AcceptEdits
@@ -1318,7 +1329,7 @@ pub fn prepare(
         .permissions
         .additional_directories
         .iter()
-        .filter(|_| !c.attempt_session)
+        .filter(|_| !c.confined())
         .filter_map(|d| match std::fs::canonicalize(d) {
             Ok(p) if Path::new(d).is_absolute() && p.is_dir() => Some(p),
             _ => {
@@ -1328,7 +1339,7 @@ pub fn prepare(
         })
         .collect();
 
-    if c.attempt_session && !c.add_dir.is_empty() {
+    if c.confined() && !c.add_dir.is_empty() {
         return Err("an outcome attempt works in its worktree only: --add-dir is refused".into());
     }
     for d in &c.add_dir {
@@ -1786,7 +1797,7 @@ pub fn prepare(
             .permissions
             .allow
             .iter()
-            .filter(|_| !c.attempt_session)
+            .filter(|_| !c.confined())
             .chain(&cli_allow)
             .cloned()
             .collect(),
@@ -1819,7 +1830,7 @@ pub fn prepare(
         .permissions
         .allow
         .iter()
-        .filter(|_| !c.attempt_session)
+        .filter(|_| !c.confined())
         .chain(&cli_allow)
         .cloned()
         .collect();
@@ -1837,7 +1848,7 @@ pub fn prepare(
             .unwrap_or(true),
     };
     perms.block_outside_reads =
-        c.attempt_session || settings.permissions.block_reads_outside_working_directories;
+        c.confined() || settings.permissions.block_reads_outside_working_directories;
 
     let mut hcfg = HarnessConfig::new(res.model.clone());
     hcfg.max_output_tokens = cfg.max_tokens as u32;
@@ -2159,7 +2170,7 @@ pub fn prepare(
         eprintln!("synt: warning: {w}");
         notices.push(w);
     }
-    if c.attempt_session && !mplan.servers.is_empty() {
+    if c.confined() && !mplan.servers.is_empty() {
         // D12: an attempt starts no MCP server (stdio servers run outside the sandbox)
         let n = format!(
             "outcome attempt: {} MCP server(s) not started",
@@ -2294,7 +2305,7 @@ pub fn prepare(
     }
     let registry = Registry::with_terminal_policy(rt.clone(), make_policy).with_new_tools();
     // an outcome attempt has no browser tools (the browser worker is outside the OS sandbox)
-    let registry = if c.attempt_session {
+    let registry = if c.confined() {
         registry
     } else {
         registry.with_browser(browser.config(
@@ -2309,6 +2320,10 @@ pub fn prepare(
     let mut toolbox = ToolBox::new(registry.with_background_on_timeout(is_cli));
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
+    }
+    // a planning run reads the repository and nothing else: an allow-list, not a deny-list
+    if c.plan_session {
+        toolbox = toolbox.only(&["Read", "Grep", "Glob", "LS"]);
     }
     // the four Memory* tools exist only while the run has an open store
     if let Some(m) = &memory {

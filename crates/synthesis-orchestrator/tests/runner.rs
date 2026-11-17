@@ -49,6 +49,15 @@ fn profile(r: &Rig, env: &AttemptEnv, p: &OutcomePolicy) -> Profile {
     Profile::build(PathBuf::from("sh"), env, &c, p, 0.0, "do the work".into()).unwrap()
 }
 
+/// [`profile`] for tests that run several attempts of one outcome: the store checks the cap when
+/// it reserves, and an attempt that never records a usage keeps its whole reservation, so each
+/// attempt asks for 1 USD of the 5 USD cap, not all of it.
+fn small_profile(r: &Rig, env: &AttemptEnv, p: &OutcomePolicy) -> Profile {
+    let mut c = r.contract_for_profile();
+    c.envelope.budgets.attempt_max_cost_usd = Some(1.0);
+    Profile::build(PathBuf::from("sh"), env, &c, p, 0.0, "do the work".into()).unwrap()
+}
+
 fn alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -90,7 +99,7 @@ fn run_script(
         .run_attempt(
             w,
             &env,
-            &profile(r, &env, &policy()),
+            &small_profile(r, &env, &policy()),
             &CancelFlag::default(),
         )
         .unwrap();
@@ -948,7 +957,7 @@ fn only_a_stale_heartbeat_kills_the_worker_and_a_dead_database_gives_the_attempt
         .run_attempt(
             &mut w,
             &env,
-            &profile(&r, &env, &policy()),
+            &small_profile(&r, &env, &policy()),
             &CancelFlag::default(),
         )
         .unwrap_err();
@@ -973,7 +982,7 @@ fn only_a_stale_heartbeat_kills_the_worker_and_a_dead_database_gives_the_attempt
         .run_attempt(
             &mut w,
             &env2,
-            &profile(&r, &env2, &policy()),
+            &small_profile(&r, &env2, &policy()),
             &CancelFlag::default(),
         )
         .unwrap_err();
