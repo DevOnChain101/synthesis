@@ -280,11 +280,14 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
 
 fn geometry_t(aw: f32, ah: f32) -> Geo {
     let tmin = ah < 232.;
-    let (core_h, core_gap, row_h): (f32, f32, f32) = if tmin {
+    let (core_min, core_gap, row_h): (f32, f32, f32) = if tmin {
         (20., 8., 15.)
     } else {
         (24., 10., 19.)
     };
+    // owner decision 2026-11-17: taller core bar in the compact layout. It takes the height the minimum rows
+    // leave (up to 46 px) and falls back to the design's 24/20 px bar when the panel is short.
+    let core_h = (ah - 2. - core_gap - 2. - 2. - 7. * 2. - 8. * row_h).clamp(core_min, 46.);
     // `max-width:100%` of the 22px-padded list clips the core's stretched width (the -20px margin) to it
     let core = R {
         x: 2.,
@@ -713,8 +716,16 @@ pub fn core_layout(mode: Mode, w: f32, h: f32, large: bool, ch: CoreChars) -> Co
         let (border, pad) = (1., 10f32.min(w * 0.1));
         let room = (w - 2. * (border + pad)).max(0.);
         let base = CoreLayout {
-            logo: 14f32.min((h - 2. * border).max(0.)),
-            title: Some(10.5),
+            // owner decision 2026-11-17: core logo/label scaled up, in a taller bar (46 px: logo 34, label 16;
+            // the design's 24 px bar: 20 and 14; the 20 px bar of a short panel: 16 and 12)
+            logo: 34f32.min((h - 2. * border - 2.).max(0.)),
+            title: Some(if h >= 40. {
+                16.
+            } else if h >= 24. {
+                14.
+            } else {
+                12.
+            }),
             track: 0.14,
             sub: false,
             tag: false,
@@ -1228,6 +1239,39 @@ mod tests {
         // 100 px: the title still fits, the sub line and tag do not
         let mid = core_layout(Mode::A, 100., 100., true, ch);
         assert!(mid.title.is_some() && !mid.sub && !mid.tag, "{mid:?}");
+    }
+
+    #[test]
+    fn the_t_core_bar_grows_with_the_panel_and_its_logo_and_label_fit_without_overlap() {
+        // owner decision 2026-11-17: taller core bar in the compact layout
+        let ch = (9, 4, 21);
+        let mut last = 0.;
+        // 168 is the least the 8 rows fit in (the design's own grid height); below it the rows overflow as before
+        for ah in [168., 232., 300., 400.] {
+            let g = geometry(300., ah);
+            assert_eq!(g.mode, Mode::T, "{ah}");
+            let want = if ah >= 232. { 46. } else { 20. };
+            assert_eq!(g.core.h, want, "bar height at {ah}");
+            assert!(g.core.h >= last, "the bar never shrinks as the panel grows");
+            last = g.core.h;
+            let l = core_layout(g.mode, g.core.w, g.core.h, true, ch);
+            let (w, h) = core_content(g.mode, &l, ch);
+            assert!(l.title.is_some(), "{ah}: label shown");
+            assert!(
+                w <= g.core.w - 2. * (l.border + l.pad) + 0.01,
+                "{ah}: {w} wide"
+            );
+            assert!(h <= g.core.h - 2. * l.border + 0.01, "{ah}: {h} high");
+            // the logo clears the border by at least 1 px on each side
+            assert!(
+                l.logo <= g.core.h - 2. * l.border - 2. + 0.01,
+                "{ah}: logo {l:?}"
+            );
+            let (first, lastr) = (g.nodes[0].1, g.nodes[7].1);
+            assert!(first.y > g.core.b(), "{ah}: rows start below the bar");
+            assert!(lastr.b() <= ah, "{ah}: rows end inside the panel");
+        }
+        assert_eq!(core_layout(Mode::T, 300., 46., true, ch).logo, 34.);
     }
 
     #[test]
