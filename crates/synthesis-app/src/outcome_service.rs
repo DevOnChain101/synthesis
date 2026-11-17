@@ -495,9 +495,14 @@ fn attempts_json(r: &Reader, item: &WorkItemId) -> Result<Value, String> {
 /// The state is the verified one (a resolved row without a valid approval is `unverified`, which
 /// no surface can resolve); the brief is stored data, shown whole.
 fn decision_json(r: &Reader, d: &DecisionRecord) -> Value {
-    let state = r
-        .decision_state(&d.id)
-        .map_or_else(|_| json!("unverified"), |st| json!(st));
+    // An open row's state is the one read with its revision: a second read can see the next
+    // revision's state (preparing -> pending) and show a card whose revision cannot be answered.
+    let state = match d.row_state {
+        DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo => r
+            .decision_state(&d.id)
+            .map_or_else(|_| json!("unverified"), |st| json!(st)),
+        open => json!(open),
+    };
     json!({"id": d.id, "kind": d.kind, "state": state, "revision": d.revision, "brief": d.brief,
            "brief_sha256": d.brief_sha256, "binding_hash": d.binding_hash, "expires_at": d.expires_at,
            "created_at": d.created_at})
