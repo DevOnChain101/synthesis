@@ -131,8 +131,17 @@ pub fn current_binding_for(
     )))
 }
 
+/// Does the person's answer mean "continue from the worker's work"? Only the answer to a question
+/// (`ambiguity`) and `grant_once` (`approval_needed`) do. `retry` ("run the work item again"),
+/// the only choice of a `blocked` decision, is a fresh start from the base commit.
+fn carries_work(w: &OutcomeWriter, d: &DecisionRecord) -> Result<bool, StoreError> {
+    Ok(matches!(d.kind.as_str(), "ambiguity" | "approval_needed")
+        && w.verified_resolution(&d.id)?
+            .is_some_and(|r| r.choice != "retry"))
+}
+
 /// The commit attempt `ordinal` of `item` starts from (B9, ADR-019 G-3): the `subject_commit` of the
-/// attempt before it when a person ANSWERED (approved, MAC verified) a decision that this attempt
+/// attempt before it when a person ANSWERED (approved, MAC verified, not `retry`) a decision that this attempt
 /// bound itself to (the same work item, attempt ordinal and commit), so the work is not redone.
 /// `None`: the outcome's base commit. A retry after a failure, an expired or rejected decision
 /// carries nothing. The scope of the final commit is still judged against the BASE commit (the
@@ -160,7 +169,7 @@ pub fn carried_commit(
             && b.get("attempt_ordinal").and_then(Value::as_u64) == Some(u64::from(prev.ordinal))
             && b.get("subject_commit").and_then(Value::as_str) == Some(commit.as_str())
             && w.decision_state(&d.id)? == DecisionState::Approved
-            && w.verified_resolution(&d.id)?.is_some()
+            && carries_work(w, &d)?
         {
             return Ok(Some(commit));
         }

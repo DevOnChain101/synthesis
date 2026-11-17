@@ -20,6 +20,7 @@
 //! as unknown (`None`): the whole reservation stays counted, never zero. A run found `running` with
 //! no process of ours (the owner died) is settled `lost` the same way and is never run again.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -368,25 +369,45 @@ pub enum PlanWait {
 /// Payloads of the events of `kind` in the outcome's control session (only the `outcome.*` events
 /// this crate writes itself, which a reader that does not know them sees as `Unknown`).
 fn events_of(r: &Reader, id: &OutcomeId, kind: &str) -> Result<Vec<Value>, StoreError> {
+    // the log is append-only: each call reads only what is new since the last one (per control
+    // session, this process) and keeps the two kinds it is asked about
+    type Seen = (u64, Vec<(String, Value)>);
+    static SEEN: std::sync::Mutex<BTreeMap<String, Seen>> = std::sync::Mutex::new(BTreeMap::new());
     let control = r.get_outcome(id)?.control_session_id;
-    let (mut after, mut out) = (0, vec![]);
+    let (mut after, mut kept) = SEEN
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&control).cloned())
+        .unwrap_or_default();
     loop {
         let page = r.read_events(&control, after, 500)?;
         if page.is_empty() {
-            return Ok(out);
+            break;
         }
         for rec in page {
             match rec {
                 Record::Known(e) => after = e.seq,
                 Record::Unknown(e) => {
                     after = e.seq;
-                    if e.kind == kind {
-                        out.push(e.payload);
+                    if matches!(
+                        e.kind.as_str(),
+                        "outcome.planner_failed" | "outcome.plan_install_refused"
+                    ) {
+                        kept.push((e.kind, e.payload));
                     }
                 }
             }
         }
     }
+    let out = kept
+        .iter()
+        .filter(|(k, _)| k == kind)
+        .map(|(_, v)| v.clone())
+        .collect();
+    if let Ok(mut m) = SEEN.lock() {
+        m.insert(control, (after, kept));
+    }
+    Ok(out)
 }
 
 /// One planning run per plan state: the contract version and the plan version the outcome has now

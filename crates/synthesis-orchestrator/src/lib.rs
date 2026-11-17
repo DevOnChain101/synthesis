@@ -44,7 +44,9 @@ pub use grants::{
     DecisionDriver, GRANT_TTL_HOURS, answered_plans, answered_waiting, awaiting_rebrief,
     carried_commit, current_binding_for, decided_choices, decision_binding, plan_binding_for,
 };
-pub use host::{PLAN_TEXT_BEGIN, PLAN_TEXT_END, PLAN_TEXT_LABEL, ProcessHost, plan_text_block};
+pub use host::{
+    PLAN_TEXT_BEGIN, PLAN_TEXT_END, PLAN_TEXT_LABEL, ProcessHost, plan_text_block, start_commit,
+};
 pub use model_plan::{
     DEFAULT_MAX_ITEMS, MAX_PLAN_DEPTH, ModelPlanLimits, ReasonCode, ValidatedPlan,
     install_approved_plan, plan_hash, record_plan_approval, record_stub_fallback,

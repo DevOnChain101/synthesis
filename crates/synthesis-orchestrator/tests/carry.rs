@@ -93,15 +93,34 @@ fn decision(
     commit: &str,
     key: &str,
 ) -> DecisionRecord {
+    decision_of(
+        w,
+        one,
+        ordinal,
+        commit,
+        key,
+        "ambiguity",
+        &["REST", "retry", "grant_once"],
+    )
+}
+
+fn decision_of(
+    w: &mut OutcomeWriter,
+    one: &WorkItemId,
+    ordinal: u32,
+    commit: &str,
+    key: &str,
+    kind: &str,
+    choices: &[&str],
+) -> DecisionRecord {
     let o = w.get_outcome(w.id()).unwrap();
     let (c, ..) = w.get_contract(w.id(), o.contract_version).unwrap();
     let policy = compile_envelope(&c.envelope, &[]).unwrap().policy_hash();
     let (d, _) = w
         .new_decision(&NewDecision {
-            kind: "ambiguity".into(),
+            kind: kind.into(),
             dedupe_key: key.into(),
-            brief: json!({"why": "x", "delta_from_contract": "Which API shape?", "alternatives": [
-                {"id": "REST", "label": "REST"}, {"id": "retry", "label": "again"}],
+            brief: json!({"why": "x", "delta_from_contract": "Which API shape?", "alternatives": choices.iter().map(|c| json!({"id": c, "label": c})).collect::<Vec<_>>(),
                 "safe_default": "HOLD"}),
             binding: decision_binding(
                 o.contract_version,
@@ -113,7 +132,7 @@ fn decision(
                 one,
             ),
             expires_at: stamp(),
-            action: Some(json!({"needed": [], "calls": [], "grant_rules": []})),
+            action: Some(json!({"needed": [], "calls": [], "grant_rules": ["Edit(/a)"]})),
         })
         .unwrap();
     w.transition_decision(
@@ -297,4 +316,51 @@ fn the_carried_commit_is_judged_against_the_base_and_earlier_evidence_does_not_c
             .all(|e| !e.fence_current),
         "evidence of the earlier attempt must not be current"
     );
+}
+
+#[test]
+fn retry_starts_fresh_while_an_answer_or_a_grant_carries_the_commit() {
+    need_git!();
+    for (kind, choice, carried) in [
+        ("blocked", "retry", false),
+        ("ambiguity", "retry", false),
+        ("ambiguity", "REST", true),
+        ("approval_needed", "grant_once", true),
+    ] {
+        let r = rig();
+        let (mut w, one, _) = r.outcome();
+        let (_, c1) = attempt(&r, &mut w, &one, 1, &r.head, &[("src/a.txt", "x\n")]);
+        let d = decision_of(&mut w, &one, 1, &c1, "k", kind, &[choice]);
+        answer(&mut w, &d, choice);
+        let got = carried_commit(&w, &one, 2).unwrap();
+        assert_eq!(got.is_some(), carried, "{kind} {choice}");
+    }
+}
+
+#[test]
+fn a_carried_commit_that_no_longer_exists_falls_back_to_the_base_once_with_an_event() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let (_, c1) = attempt(&r, &mut w, &one, 1, &r.head, &[("src/a.txt", "x\n")]);
+    let d = decision(&mut w, &one, 1, &c1, "first");
+    answer(&mut w, &d, "REST");
+    // present: carried
+    let got = start_commit(&mut w, &one, 2, &r.repo, &r.head).unwrap();
+    assert_eq!(got, c1);
+    // a commit that does not exist: base, and a recorded event, no error
+    let (mut w2, one2, _) = r.outcome();
+    let (_, k) = attempt(&r, &mut w2, &one2, 1, &r.head, &[("src/b.txt", "y\n")]);
+    let d2 = decision(&mut w2, &one2, 1, &k, "first");
+    answer(&mut w2, &d2, "REST");
+    let elsewhere = rig();
+    let got = start_commit(&mut w2, &one2, 2, &elsewhere.repo, &r.head).unwrap();
+    assert_eq!(got, r.head);
+    let n = w2
+        .read_events(w2.control_session_id(), 0, 5000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| matches!(e, synthesis_events::Record::Unknown(x) if x.kind == "outcome.carry_dropped"))
+        .count();
+    assert_eq!(n, 1);
 }
