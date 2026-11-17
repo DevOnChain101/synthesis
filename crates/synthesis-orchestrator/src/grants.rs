@@ -19,8 +19,9 @@
 //! chained `policy.decision` event.
 
 use serde_json::Value;
-use synthesis_core::outcome::{DecisionState, WorkItemId, WorkItemState};
+use synthesis_core::outcome::{DecisionState, OutcomeId, WorkItemId, WorkItemState};
 use synthesis_session::Error as StoreError;
+use synthesis_session::Reader;
 use synthesis_session::outcome::{DecisionRecord, Effects, OutcomeWriter, WorkItemRecord};
 use time::OffsetDateTime;
 
@@ -365,7 +366,15 @@ fn evidence_summary(
 ) -> Result<Value, StoreError> {
     let commit = d.binding.get("subject_commit").and_then(Value::as_str);
     // newest first, a bounded number of short strings per row: the summary always fits the store's cap
-    let short = |t: &str| clean(t).chars().take(48).collect::<String>();
+    // by bytes, on a character boundary: 4-byte characters cannot push the summary over the store's cap
+    let short = |t: &str| {
+        let c = clean(t);
+        let mut end = c.len().min(48);
+        while !c.is_char_boundary(end) {
+            end -= 1;
+        }
+        c[..end].to_owned()
+    };
     let rows: Vec<_> = w
         .recent_evidence(w.id(), 200)?
         .into_iter()
@@ -427,8 +436,8 @@ pub fn answered_waiting(w: &mut OutcomeWriter) -> Result<Vec<String>, StoreError
 
 /// Is a decision waiting for its re-brief (a person asked for evidence, no successor yet)? The
 /// owner keeps a `blocked` outcome until the driver has re-briefed or closed it.
-pub fn awaiting_rebrief(w: &OutcomeWriter) -> Result<bool, StoreError> {
-    for d in w.list_decisions(w.id())? {
+pub fn awaiting_rebrief(w: &Reader, id: &OutcomeId) -> Result<bool, StoreError> {
+    for d in w.list_decisions(id)? {
         if w.decision_state(&d.id)? == DecisionState::NeedsMoreInfo
             && w.verified_resolution(&d.id)?
                 .is_some_and(|r| r.choice == "request_evidence")

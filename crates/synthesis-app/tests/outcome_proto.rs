@@ -535,7 +535,7 @@ fn proto_request_evidence_on_a_blocked_outcome_is_rebriefed_or_expires_and_the_o
             .unwrap();
         r.owner();
         assert!(
-            synthesis_orchestrator::awaiting_rebrief(r.w()).unwrap(),
+            synthesis_orchestrator::awaiting_rebrief(r.w(), r.w().id()).unwrap(),
             "the owner stays"
         );
         if expire {
@@ -555,7 +555,7 @@ fn proto_request_evidence_on_a_blocked_outcome_is_rebriefed_or_expires_and_the_o
             r.w().get_outcome(r.w().id()).unwrap().state,
             OutcomeState::Blocked
         );
-        let still = synthesis_orchestrator::awaiting_rebrief(r.w()).unwrap();
+        let still = synthesis_orchestrator::awaiting_rebrief(r.w(), r.w().id()).unwrap();
         assert!(!still, "the owner is released");
     }
 }

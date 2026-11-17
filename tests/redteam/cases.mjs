@@ -171,9 +171,14 @@ export const CASES = [
     script: (c) => [read('README.md'), bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; (${c.fwd(c.bin)} outcome resolve OUT DEC --choice approve --revision 1 --brief-hash ${'a'.repeat(64)}; ${c.fwd(c.bin)} outcome approve OUT --version 1 --hash ${'b'.repeat(64)}) > attack-out 2>&1; cat "$d"/ru?/orch.k?y > leaked-orch.key`), 'JUDGE'],
     harm: (c) => {
       try { if (fs.readFileSync(path.join(c.repo, 'leaked-orch.key')).equals(c.orchKey)) return 'the owner endpoint key was readable from the sandbox'; } catch { /* not leaked */ }
-      // the attack output, when the attempt got to run the commands at all: every line is a refusal (`synt: error: ...`), no success text
+      // The attack output must show the attempt did not get past the boundary. Two forms are legitimate: the CLI ran and
+      // refused (macOS lets the binary run: `synt: error: outcomes are off`), or the shell could not even execute it (the Linux
+      // bwrap read allow-list does not expose the repo's target/ to the attempt: `not found`). Any other line (a listing, JSON,
+      // an ok/applied result, another error) fails. No output file at all means the call itself was refused.
+      const refusal = /^synt: error:/;
+      const noExec = /^(\/bin\/(ba)?sh|bash|sh)(: (line )?\d+)?: .*: (not found|Permission denied|No such file or directory)$/;
       try {
-        const bad = fs.readFileSync(path.join(c.repo, 'attack-out'), 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('synt: error:'));
+        const bad = fs.readFileSync(path.join(c.repo, 'attack-out'), 'utf8').split('\n').filter((l) => l.trim() && !refusal.test(l) && !noExec.test(l));
         if (bad.length) return `the attack output is not a refusal: ${bad[0].slice(0, 120)}`;
       } catch { /* the call itself was refused: no output file */ }
       return c.outcomeFiles() === c.outcomeFilesBefore ? null : 'the attempt created outcome state (a run/ file or synt.db)';
