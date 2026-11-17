@@ -189,10 +189,13 @@ pub struct BrowserRuntime {
     /// Armed capture guards: (tab session, document id) -> a value too short to mask was typed.
     /// Armed BEFORE the fill is sent and kept whatever happens to the call.
     filled: Mutex<HashMap<(String, String), bool>>,
+    /// Serialises `view` so activate + startScreencast of two calls cannot interleave.
+    view_lock: tokio::sync::Mutex<()>,
 }
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
+        self.cdp.screencast.close();
         self.events.abort(); // the child itself is killed by KillOnDrop, the profile by TempDir
         // KillOnDrop signals only the leader: Chrome's helpers (renderers, GPU, crashpad) would live on
         // until they notice the dead pipe, which on a loaded machine takes tens of seconds. `close` did
@@ -844,6 +847,7 @@ impl BrowserRuntime {
             shots: AtomicU32::new(0),
             profile_lock: Mutex::new(profile_lock),
             filled: Mutex::default(),
+            view_lock: tokio::sync::Mutex::new(()),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -1520,7 +1524,9 @@ impl BrowserRuntime {
 
     /// `browser.view`: starts (`on`) or stops the live view of the current tab. Frames are read from
     /// [`Self::frames`]; none is produced while the view is off. Calling it with `on` again re-targets the
-    /// view to the tab that is current now. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
+    /// view to the tab that is current now (the caller must do so after `select_tab`, `new_tab`, `close_tab`
+    /// or a popup: the view never follows a tab by itself). It deliberately skips `guard_capture`: the
+    /// frames go to the person's own window, never to the model. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
     pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
         let ok = (1..=4096).contains(&max_w) && (1..=4096).contains(&max_h);
         if on && !ok {
@@ -1528,9 +1534,10 @@ impl BrowserRuntime {
                 "view size must be 1..=4096 pixels".into(),
             ));
         }
+        let _one_at_a_time = self.view_lock.lock().await;
         let tab = if on { Some(self.current()?) } else { None };
         // Slot first: a frame already in flight for the old view must not be shown (or acked) as new.
-        let old = self
+        let (old, generation) = self
             .cdp
             .screencast
             .activate(tab.as_ref().map(|t| t.session.clone()));
@@ -1544,8 +1551,10 @@ impl BrowserRuntime {
         let params =
             json!({"format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h});
         let r = self.call(&tab, "Page.startScreencast", params).await;
-        if r.is_err() {
-            self.cdp.screencast.activate(None);
+        match r {
+            // frames after Chrome's answer belong to this cast
+            Ok(_) => self.cdp.screencast.open(generation),
+            Err(_) => drop(self.cdp.screencast.activate(None)),
         }
         r.map(drop)
     }
@@ -1653,6 +1662,7 @@ impl BrowserRuntime {
     }
 
     pub async fn close(&self) -> Result<()> {
+        self.cdp.screencast.close();
         self.events.abort();
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.start_kill(); // errors mean "already gone"

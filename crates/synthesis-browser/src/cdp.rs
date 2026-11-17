@@ -173,6 +173,7 @@ impl Cdp {
         let (p, ev) = (pending.clone(), events.clone());
         let screencast = Arc::new(Slot::default());
         let frames = screencast.clone();
+        let ack_out = out.downgrade();
         tokio::spawn(async move {
             while let Some(t) = inc.recv().await {
                 match decode(&t) {
@@ -182,7 +183,17 @@ impl Cdp {
                         }
                     }
                     Some(Incoming::Event(e)) if e.method == "Page.screencastFrame" => {
-                        frames.push(&e);
+                        // a frame dropped on purpose (oversized, stale) is still acked; id 0 is never
+                        // pending, so its response is ignored
+                        if let (Some((s, id)), Some(o)) = (frames.push(&e), ack_out.upgrade()) {
+                            let m = json!({"sessionId": id});
+                            let _ = o.try_send(encode_request(
+                                0,
+                                "Page.screencastFrameAck",
+                                m,
+                                Some(&s),
+                            ));
+                        }
                     }
                     Some(Incoming::Event(e)) => {
                         let _ = ev.send(e);
@@ -192,6 +203,7 @@ impl Cdp {
             }
             // Dropping the senders wakes every waiter with `Closed`.
             p.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            frames.close();
         });
         Self {
             out,
@@ -294,7 +306,8 @@ mod tests {
         let (client_w, _peer_r) = tokio::io::duplex(1024);
         let cdp = Cdp::from_pipe_limited(client_r, client_w, 16, 4096);
         let mut rx = cdp.subscribe();
-        cdp.screencast.activate(Some("S".into()));
+        let (_, g) = cdp.screencast.activate(Some("S".into()));
+        cdp.screencast.open(g);
         let frame = r#"{"method":"Page.screencastFrame","params":{"data":"aGk=","sessionId":1,"metadata":{}},"sessionId":"S"}"#;
         let other = r#"{"method":"Page.loadEventFired","params":{},"sessionId":"S"}"#;
         peer_w

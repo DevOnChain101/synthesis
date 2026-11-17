@@ -1714,10 +1714,12 @@ async fn screencast_body() {
     let t = Duration::from_secs(20);
     let a = tokio::time::timeout(t, frames.next())
         .await
-        .expect("first frame");
+        .expect("first frame")
+        .expect("stream closed");
     let b = tokio::time::timeout(t, frames.next())
         .await
-        .expect("second frame");
+        .expect("second frame")
+        .expect("stream closed");
     assert_eq!(&a.jpeg[..2], &[0xff, 0xd8], "JPEG");
     assert!(b.seq > a.seq);
     assert!(
@@ -1742,12 +1744,14 @@ async fn screencast_body() {
     );
     let held = tokio::time::timeout(t, frames.next())
         .await
-        .expect("held frame");
+        .expect("held frame")
+        .expect("stream closed");
     assert_eq!(held.seq, stalled, "the held frame is the newest one");
     // consuming (the ack) lets Chrome continue
     let c = tokio::time::timeout(t, frames.next())
         .await
-        .expect("frame after resume");
+        .expect("frame after resume")
+        .expect("stream closed");
     assert!(c.seq > held.seq);
 
     // view off: nothing more arrives, even though the page keeps repainting
@@ -1770,7 +1774,8 @@ async fn screencast_body() {
     rt.view(true, 640, 480).await.unwrap();
     tokio::time::timeout(t, frames.next())
         .await
-        .expect("frame after view on again");
+        .expect("frame after view on again")
+        .expect("stream closed");
     rt.view(false, 0, 0).await.unwrap();
 
     // frames are not artifacts, logs or events
@@ -1779,9 +1784,17 @@ async fn screencast_body() {
         0,
         "frames written to disk"
     );
-    // the capture log saw the page's own requests only (no frame event was logged)
-    assert!(rt.network_requests(0, false).0.len() <= 2);
+    // no frame event reached the capture log (a favicon request may or may not be there)
+    let net = format!("{:?}", rt.network_requests(0, false).0);
+    assert!(!net.to_lowercase().contains("screencast"), "{net}");
     let logged = format!("{:?}", rt.console_messages(0, None).0);
     assert!(!logged.contains("screencast"), "{logged}");
     rt.close().await.unwrap();
+    // closing the runtime ends the stream instead of leaving a consumer waiting
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), frames.next())
+            .await
+            .expect("next must not hang after close")
+            .is_none()
+    );
 }
