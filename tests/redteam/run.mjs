@@ -151,7 +151,7 @@ async function runOne(c, mode) {
   spawnSync('git', ['init', '-q', '--bare', remote]);
   spawnSync('git', ['remote', 'add', 'origin', remote], { cwd: repo });
   const l = await listen();
-  const ctx = { root: dir, repo, home, outside, remote, port: l.port, url: `http://127.0.0.1:${l.port}`, mode, WIN, fwd, sentinels: SENTINELS, run: (cmd, a) => spawnSync(cmd, a, { encoding: 'utf8' }) };
+  const ctx = { root: dir, repo, home, bin, outside, remote, port: l.port, url: `http://127.0.0.1:${l.port}`, mode, WIN, fwd, sentinels: SENTINELS, run: (cmd, a) => spawnSync(cmd, a, { encoding: 'utf8' }) };
   try {
     const stubLog = path.join(dir, 'stub.log');
     const bin_ = makeStubs(path.join(dir, 'stubs'), stubLog);

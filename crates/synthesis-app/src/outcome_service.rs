@@ -400,7 +400,7 @@ fn outcome_json(
         .iter()
         .filter(|d| r.decision_state(&d.id).ok() == Some(DecisionState::Pending))
         .count();
-    // Derived from rows, so it survives restarts (ADR-021 section 4). `critical` is not defined yet.
+    // Derived from rows, so it survives restarts (ADR-021 section 4). There is no `critical` (dropped, ADR-021 B2 notes).
     Ok(
         json!({"id": o.id, "workspace_id": o.workspace_id, "goal": o.goal, "state": o.state,
         "revision": o.revision, "contract_version": o.contract_version, "plan_version": o.plan_version,

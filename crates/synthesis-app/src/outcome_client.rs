@@ -8,14 +8,15 @@
 //! made on purpose: the engine cannot send one, and it cannot fake the answer to one.
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use serde_json::Value;
 use synthesis_session::outcome::Surface;
 use synthesis_view::outcomes::{CommandReply, DecisionCard, OutcomeRow, Picker};
 
 use crate::proto::{
-    Call, CommandArgs, Incoming, Out, OutcomeCommand, Request, check_hello, parse_incoming,
-    read_line,
+    Call, CommandArgs, DecisionHint, Incoming, Out, OutcomeCommand, Request, check_hello,
+    parse_incoming, read_line,
 };
 
 /// Unreadable lines tolerated before the engine is considered broken (as the desktop's link).
@@ -47,6 +48,14 @@ impl std::error::Error for ClientError {}
 
 pub trait Transport {
     fn call(&mut self, call: Call) -> Result<Value, ClientError>;
+
+    /// The next decision hint of a link that opted in to push, waiting up to `wait`. The hint only
+    /// says that a decision changed: refetch it, never render from it. A transport without push
+    /// waits out `wait` and says nothing (the caller then refetches anyway).
+    fn next_hint(&mut self, wait: Duration) -> Result<Option<DecisionHint>, ClientError> {
+        std::thread::sleep(wait);
+        Ok(None)
+    }
 }
 
 /// The server in this process: for tests and headless CI only (plan D22), never a surface default.
@@ -234,11 +243,28 @@ impl<T: Transport> OutcomeClient<T> {
         }
     }
 
-    /// The explicit migration to schema v5 (a backup first); the setting must already be on.
+    /// The explicit migration to schema v5 (a backup first); the setting must already be on. The
+    /// reply carries the integrity disclosure (`disclosure: {id, text}`) the surface must show; a
+    /// reply without it is refused (fail closed).
     pub fn enable(&mut self) -> Result<Value, ClientError> {
-        self.t.call(Call::OrchestratorEnable {
+        let v = self.t.call(Call::OrchestratorEnable {
             surface: self.surface,
-        })
+        })?;
+        let shown = |k: &str| {
+            v.pointer(&format!("/disclosure/{k}"))
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty())
+        };
+        if shown("id") && shown("text") {
+            Ok(v)
+        } else {
+            malformed("enable reply without its disclosure")
+        }
+    }
+
+    /// See [`Transport::next_hint`].
+    pub fn next_hint(&mut self, wait: Duration) -> Result<Option<DecisionHint>, ClientError> {
+        self.t.next_hint(wait)
     }
 
     pub fn outcomes(&mut self, workspace: Option<&str>) -> Result<Vec<OutcomeRow>, ClientError> {

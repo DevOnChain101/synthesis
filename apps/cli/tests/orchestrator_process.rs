@@ -349,7 +349,7 @@ fn a_blocked_outcome_owes_one_id_only_notice_even_with_no_client_attached() {
     let mut sent = std::collections::BTreeSet::new();
     let o = w.get_outcome(w.id()).unwrap();
     assert!(
-        due_notices(&w, &o, &mut sent).is_empty(),
+        due_notices(&mut w, &o, &mut sent).is_empty(),
         "running needs nobody"
     );
     let rev = o.revision;
@@ -361,12 +361,60 @@ fn a_blocked_outcome_owes_one_id_only_notice_even_with_no_client_attached() {
     )
     .unwrap();
     let o = w.get_outcome(w.id()).unwrap();
-    let n = due_notices(&w, &o, &mut sent);
+    let n = due_notices(&mut w, &o, &mut sent);
     assert_eq!(n.len(), 1);
     assert_eq!(n[0]["event"], "outcome.blocked");
     assert_eq!(n[0]["outcome_id"], o.id.as_str());
     // ids and codes: no goal, no reason text
     let text = n[0].to_string();
     assert!(!text.contains("goal") && !text.contains("stuck"), "{text}");
-    assert!(due_notices(&w, &o, &mut sent).is_empty(), "told once");
+    assert!(due_notices(&mut w, &o, &mut sent).is_empty(), "told once");
+}
+
+#[test]
+fn notices_are_told_once_across_a_restart_and_a_crash_after_the_mark_loses_one_never_two() {
+    let r = rig();
+    let (mut w, _) = orphaned(&r);
+    let rev = w.get_outcome(w.id()).unwrap().revision;
+    w.transition_outcome(
+        rev,
+        OutcomeState::Blocked,
+        Some("stuck"),
+        &Effects::default(),
+    )
+    .unwrap();
+    let o = w.get_outcome(w.id()).unwrap();
+    assert_eq!(due_notices(&mut w, &o, &mut Default::default()).len(), 1);
+    // a restarted owner has an empty in-memory set: the outbox row still says it was told
+    assert!(
+        due_notices(&mut w, &o, &mut Default::default()).is_empty(),
+        "told again after a restart"
+    );
+    let rows: Vec<_> = w
+        .list_outbox(w.id())
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == OutboxKind::Notify)
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, OutboxState::Done);
+    assert!(
+        !rows[0].payload.to_string().contains("stuck"),
+        "ids and codes only"
+    );
+    // a crash between the mark and the hook: the row is there, so the notice is not sent again
+    // (a row left `pending` by an older or interrupted writer counts as told as well)
+    let key = format!("notify:outcome.verified:{}:{}", o.id, o.revision + 1);
+    w.atomically(|tx| {
+        tx.enqueue(&NewOutbox {
+            idempotency_key: key.clone(),
+            kind: OutboxKind::Notify,
+            payload: json!({"event": "outcome.verified"}),
+        })
+    })
+    .unwrap();
+    let mut o2 = o.clone();
+    o2.state = OutcomeState::Verified;
+    o2.revision += 1;
+    assert!(due_notices(&mut w, &o2, &mut Default::default()).is_empty());
 }

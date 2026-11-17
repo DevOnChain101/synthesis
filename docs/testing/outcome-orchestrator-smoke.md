@@ -73,7 +73,7 @@ Use a scratch git repository with one commit (`R`) and the scratch home above, w
 
 ```sh
 synt outcome enable            # prints the integrity notice and exits 2: nothing changed
-synt outcome enable --yes      # backup, then schema v5
+synt outcome enable --yes      # backup, then schema v5, then the owner's disclosure text (same first paragraph as the notice)
 echo '[{"id":"c1","text":"the endpoint answers","check_ids":["t"]}]' > criteria.json
 echo '[{"id":"t","command":"true"}]' > checks.json
 echo '{"allowed_paths":["src/**"],"capabilities":{"repo.read":"allow","repo.write":"allow"},"budgets":{"max_cost_usd":1.0}}' > envelope.json
@@ -84,12 +84,13 @@ synt outcome approve ID --version 1 --hash HASH        # the hash `create` and `
 synt outcome start ID
 synt outcome status ID                                 # first line: what needs you
 synt outcome decisions ID                              # when a decision is pending: the whole brief, its revision and brief hash
+synt outcome decisions ID --watch                      # stays open: shows a card again when it changes (push hint, then refetch); Ctrl-C ends
 synt outcome resolve ID DECISION --choice REST --revision N --brief-hash H
 synt outcome pause ID; synt outcome resume ID; synt outcome cancel ID
 synt outcome inspect ID --tab evidence; synt outcome events ID
 ```
 
-Expect: `create` prints the id and the approve command; `approve` ends `done`; `status --json` is one object with `"schema": 1`; `resolve` without `--choice` prints the card and exits 2 without sending anything; with a stale revision or hash it exits 2 and sends nothing; a second answer to the same decision exits 1. With outcomes off every command exits 2 saying so and starts no process. A worker only does real work with a provider configured; without one the attempt fails and the outcome blocks, which is expected here.
+Expect: `create` prints the id and the approve command; `approve` ends `done`; `status --json` is one object with `"schema": 1`; `resolve` without `--choice` prints the card and exits 2 without sending anything; with a stale revision or hash it exits 2 and sends nothing; a second answer to the same decision exits 1. With outcomes off every command exits 2 saying so and starts no process. `enable --yes` prints the integrity disclosure after the schema line, and `--json` carries `disclosure: {id, text}`. For `--watch`, answer a decision from a second terminal: the first shows the card again as approved (on the push hint; at the latest after 60 s). A worker only does real work with a provider configured; without one the attempt fails and the outcome blocks, which is expected here.
 
 ## What is covered by automated tests instead
 

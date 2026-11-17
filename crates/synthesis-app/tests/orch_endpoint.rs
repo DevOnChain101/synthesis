@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use synthesis_app::orch_endpoint::{self as ep, LocalSocket};
 use synthesis_app::orch_owner::serve_with;
 use synthesis_app::outcome_client::{ClientError, OutcomeClient, Transport};
 use synthesis_app::outcome_service::Service;
-use synthesis_app::proto::{Call, CommandArgs, OutcomeCommand};
+use synthesis_app::proto::{Call, CommandArgs, DecisionHint, OutcomeCommand};
 use synthesis_config::Env;
 use synthesis_core::outcome::*;
 use synthesis_peers::net::{connect, handshake_client};
@@ -301,7 +301,12 @@ fn create_approve_and_cancel_go_through_the_owner() {
     let e = err_text(c.create(&repo_s, "HEAD", contract()));
     assert!(e.contains("commit id"), "{e}");
     // the explicit migration, then the creation
-    assert_eq!(c.enable().unwrap()["schema"], 5);
+    let en = c.enable().unwrap();
+    assert_eq!(en["schema"], 5);
+    assert_eq!(
+        en["disclosure"]["text"],
+        synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE
+    );
     // a well-formed id that is no commit of this repository
     let e = err_text(c.create(&repo_s, &"a".repeat(40), contract()));
     assert!(e.contains("not in the repository"), "{e}");
@@ -418,6 +423,7 @@ fn bare(idle: Duration, queue: usize) -> Bare {
         jobs: tx,
         link_idle: idle,
         clients: std::sync::atomic::AtomicUsize::new(0),
+        push: tokio::sync::broadcast::channel(ep::PUSH_QUEUE).0,
         last_call: std::sync::atomic::AtomicU64::new(ep::now_secs()),
     });
     let listener = {
@@ -439,14 +445,133 @@ fn bare(idle: Duration, queue: usize) -> Bare {
 impl Bare {
     /// A link that proved the key and attached as the CLI.
     async fn link(&self) -> synthesis_peers::net::Conn {
+        self.attach(json!({"t": "attach", "surface": "cli"})).await
+    }
+
+    async fn attach(&self, attach: Value) -> synthesis_peers::net::Conn {
         let mut c = connect(&self.endpoint).await.unwrap();
         handshake_client(&mut c, &self.key).await.unwrap();
-        c.send(&json!({"t": "attach", "surface": "cli"}))
-            .await
-            .unwrap();
+        c.send(&attach).await.unwrap();
         assert_eq!(c.recv().await.unwrap().unwrap()["msg"], "hello");
         c
     }
+
+    fn hint(&self, n: i64) -> usize {
+        self.ctx
+            .push
+            .send(DecisionHint {
+                outcome: "o1".into(),
+                id: "d1".into(),
+                revision: n,
+                state: "pending".into(),
+            })
+            .unwrap_or(0)
+    }
+}
+
+fn status_req(id: u64) -> Value {
+    serde_json::to_value(synthesis_app::proto::Request {
+        id,
+        call: Call::OrchestratorStatus,
+    })
+    .unwrap()
+}
+
+#[test]
+fn push_only_after_opt_in_and_the_line_holds_ids_and_codes_only() {
+    let b = bare(Duration::from_secs(60), 4);
+    b.rt.block_on(async {
+        let mut plain = b.link().await;
+        let mut pushed = b
+            .attach(json!({"t": "attach", "surface": "cli", "push": ["decision"]}))
+            .await;
+        assert_eq!(b.hint(7), 1, "only the link that opted in listens");
+        let line = tokio::time::timeout(Duration::from_secs(5), pushed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            line,
+            json!({"msg": "decision", "outcome": "o1", "id": "d1", "revision": 7, "state": "pending"})
+        );
+        // the plain link's next line is the answer to its call, not a hint
+        plain.send(&status_req(1)).await.unwrap();
+        let r = plain.recv().await.unwrap().unwrap();
+        assert_eq!((r["msg"].as_str(), r["id"].as_u64()), (Some("result"), Some(1)));
+    });
+}
+
+#[test]
+fn an_unknown_push_topic_is_refused_at_attach() {
+    let b = bare(Duration::from_secs(60), 4);
+    b.rt.block_on(async {
+        for push in [
+            json!(["decision", "x"]),
+            json!("decision"),
+            json!([]),
+            json!(["brief"]),
+        ] {
+            let mut c = connect(&b.endpoint).await.unwrap();
+            handshake_client(&mut c, &b.key).await.unwrap();
+            c.send(&json!({"t": "attach", "surface": "cli", "push": push}))
+                .await
+                .unwrap();
+            let r = tokio::time::timeout(Duration::from_secs(5), c.recv())
+                .await
+                .unwrap();
+            assert!(matches!(r, Ok(None) | Err(_)), "{push}: {r:?}");
+        }
+    });
+}
+
+#[test]
+fn a_slow_reader_loses_old_hints_and_keeps_the_newest() {
+    let b = bare(Duration::from_secs(60), 4);
+    b.rt.block_on(async {
+        let mut c = b
+            .attach(json!({"t": "attach", "surface": "cli", "push": ["decision"]}))
+            .await;
+        // far more than the socket buffer and the queue hold, while nobody reads
+        for n in 0..20_000 {
+            b.hint(n);
+            if n % 500 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let (mut got, mut last) = (0, -1);
+        while let Ok(Ok(Some(v))) = tokio::time::timeout(Duration::from_millis(500), c.recv()).await
+        {
+            let n = v["revision"].as_i64().unwrap();
+            assert!(n > last, "out of order");
+            (got, last) = (got + 1, n);
+        }
+        assert!(got < 20_000, "nothing was dropped: {got}");
+        assert_eq!(last, 19_999, "the newest hint must survive");
+    });
+}
+
+#[test]
+fn a_push_client_queues_hints_that_come_before_a_result_and_hands_them_out() {
+    let b = bare(Duration::from_secs(60), 4);
+    let home = b.ctx.home.clone();
+    ep::write_registry(&home, &b.endpoint).unwrap();
+    let mut t = LocalSocket::connect_with(&home, Surface::Cli, true).unwrap();
+    assert_eq!(b.hint(1), 1);
+    assert_eq!(b.hint(2), 1);
+    // the call's result arrives after the hints; the hints are kept, not lost or fatal
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(t.call(Call::OrchestratorStatus).is_ok());
+    let h = t.next_hint(Duration::from_secs(5)).unwrap().unwrap();
+    assert_eq!((h.id.as_str(), h.revision), ("d1", 1));
+    assert_eq!(
+        t.next_hint(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .revision,
+        2
+    );
+    assert_eq!(t.next_hint(Duration::from_millis(100)).unwrap(), None);
 }
 
 #[test]
