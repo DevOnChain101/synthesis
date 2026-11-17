@@ -48,6 +48,8 @@ impl Planner for StubPlanner {
             requires: requires.iter().map(|s| (*s).into()).collect(),
             capabilities,
             covers,
+            title: String::new(),
+            instructions: String::new(),
         };
         Ok(Plan {
             version,

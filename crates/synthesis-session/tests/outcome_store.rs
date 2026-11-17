@@ -163,6 +163,8 @@ fn plan() -> Plan {
         requires: requires.iter().map(|s| (*s).into()).collect(),
         capabilities: vec![],
         covers: covers.iter().map(|s| (*s).into()).collect(),
+        title: String::new(),
+        instructions: String::new(),
     };
     Plan {
         version: 1,
@@ -3640,4 +3642,285 @@ fn dec_contract_mutate_after_approve_a_bare_new_version_never_runs() {
                 .is_err()
         );
     }
+}
+
+// ------------------------------------------------------------ model planning runs (B6)
+
+fn sha(c: char) -> String {
+    c.to_string().repeat(64)
+}
+
+fn end(state: &str, cost: Option<f64>) -> PlanRunEnd {
+    PlanRunEnd {
+        state: state.into(),
+        cost_usd: cost,
+        raw_sha256: Some(sha('a')),
+        plan_hash: (state == "finished").then(|| sha('b')),
+        error_code: (state == "failed").then(|| "cycle".to_string()),
+    }
+}
+
+/// An approved, plan-less outcome and a fresh planner session under its control session.
+fn planning(e: &Env, store: &Store, session: &str) -> OutcomeWriter {
+    let w = approved_outcome(e, store);
+    e.child(store, session, w.control_session_id());
+    w
+}
+
+#[test]
+fn a_plan_run_reserves_min_of_its_cap_and_what_the_outcome_has_left_and_spend_never_passes_the_cap()
+{
+    let e = env();
+    let store = e.v5();
+    let mut w = planning(&e, &store, "p1");
+    let id = w.id().clone();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 0.0);
+    // the cap is 5.0; ask for 3.0
+    let r1 = w.reserve_plan_run("p1", "m-1", 3.0).unwrap();
+    assert_eq!((r1.reserved_usd, r1.state.as_str()), (3.0, "running"));
+    assert_eq!(r1.base_commit, "c0ffee");
+    assert_eq!(r1.contract_version, 1);
+    assert_eq!(
+        w.outcome_spend(&id).unwrap(),
+        3.0,
+        "reserved before the run"
+    );
+    // one run at a time
+    e.child(&store, "p2", w.control_session_id());
+    assert!(w.reserve_plan_run("p2", "m-1", 1.0).is_err());
+    // a lost run keeps its reservation as spent
+    w.settle_plan_run(&r1.id, &end("lost", None)).unwrap();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 3.0);
+    // the next one gets what is left, however much it asks
+    let r2 = w.reserve_plan_run("p2", "m-1", 100.0).unwrap();
+    assert_eq!(r2.reserved_usd, 2.0);
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    // settled with a real cost: that cost replaces the reservation
+    let done = w
+        .settle_plan_run(&r2.id, &end("finished", Some(0.5)))
+        .unwrap();
+    assert_eq!(done.cost_usd, Some(0.5));
+    assert_eq!(w.outcome_spend(&id).unwrap(), 3.5);
+    let usage = w.outcome_usage(&id).unwrap();
+    assert_eq!((usage.cost_usd, usage.reserved_usd), (0.5, 3.0));
+    // the rest of the cap can be reserved, and nothing beyond it ever
+    e.child(&store, "p3", w.control_session_id());
+    let r3 = w.reserve_plan_run("p3", "m-1", 100.0).unwrap();
+    assert_eq!(r3.reserved_usd, 1.5);
+    w.settle_plan_run(&r3.id, &end("failed", None)).unwrap();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    e.child(&store, "p4", w.control_session_id());
+    assert!(
+        w.reserve_plan_run("p4", "m-1", 0.5).is_err(),
+        "no budget left"
+    );
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    assert_eq!(w.list_plan_runs(&id).unwrap().len(), 3);
+}
+
+#[test]
+fn the_settings_ceiling_bounds_the_planner_too_and_hostile_amounts_refuse() {
+    let e = env();
+    let store = e.v5();
+    let w = approved_outcome(&e, &store);
+    let id = w.id().clone();
+    let control = w.control_session_id().to_owned();
+    drop(w);
+    e.child(&store, "p1", &control);
+    // the ceilings tightened below the contract's cap since it was approved: no planning run, as no attempt
+    assert!(
+        store
+            .open_outcome(&id, &with(|p| p.max_cost_usd = Some(2.0)))
+            .unwrap()
+            .reserve_plan_run("p1", "m", 1.0)
+            .is_err()
+    );
+    let mut w = store.open_outcome(&id, &policy()).unwrap();
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(w.reserve_plan_run("p1", "m", bad).is_err(), "{bad}");
+    }
+    for m in ["", "has space", "new\nline", &"m".repeat(201), "\u{202e}x"] {
+        assert!(w.reserve_plan_run("p1", m, 1.0).is_err(), "{m:?}");
+    }
+    assert_eq!(
+        w.reserve_plan_run("p1", "m", 50.0).unwrap().reserved_usd,
+        5.0,
+        "a hostile amount is bounded by the outcome cap"
+    );
+}
+
+#[test]
+fn attempt_reservations_and_plan_runs_share_one_cap_in_either_order() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, it) = ready_for_attempt(&e, &store);
+    let id = w.id().clone();
+    go(&mut w, OutcomeState::Blocked);
+    // an attempt that spent 4.0 (its reservation), then a replanning run asks for 3.0
+    e.child(&store, "p1", w.control_session_id());
+    let (a, _) = w
+        .new_attempt(&it, 1, "att-1", "local-inproc", NONE)
+        .unwrap();
+    w.reserve_budget(&a.id, a.fence, 4.0).unwrap();
+    assert_eq!(w.outcome_spend(&id).unwrap(), 4.0);
+    let r = w.reserve_plan_run("p1", "m", 3.0).unwrap();
+    assert_eq!(r.reserved_usd, 1.0, "the attempt came first");
+    assert_eq!(w.outcome_spend(&id).unwrap(), 5.0);
+    // the other way round: the next attempt is sized from this spend (cap minus spend), which
+    // now holds the plan run, so nothing is left for another reservation
+    assert_eq!(5.0 - w.outcome_spend(&id).unwrap(), 0.0);
+}
+
+#[test]
+fn a_plan_run_needs_a_pre_plan_outcome_an_approved_contract_and_a_child_session() {
+    let e = env();
+    let store = e.v5();
+    // not approved yet
+    let mut w = new_outcome(&e, &store);
+    go(&mut w, OutcomeState::ContractPending);
+    e.child(&store, "p1", w.control_session_id());
+    assert!(w.reserve_plan_run("p1", "m", 1.0).is_err());
+    let h = contract_hash(&w);
+    w.approve_contract(1, &h, "user").unwrap();
+    // a session that is not under the control session
+    e.session(&store, "stray", false);
+    assert!(w.reserve_plan_run("stray", "m", 1.0).is_err());
+    assert!(w.reserve_plan_run("nope", "m", 1.0).is_err());
+    let r = w.reserve_plan_run("p1", "m", 1.0).unwrap();
+    // the same session cannot plan twice
+    w.settle_plan_run(&r.id, &end("failed", None)).unwrap();
+    assert!(w.reserve_plan_run("p1", "m", 1.0).is_err());
+    // an outcome that already runs does not plan
+    let (mut w2, _) = ready_outcome(&e, &store);
+    e.child(&store, "q1", w2.control_session_id());
+    assert!(w2.reserve_plan_run("q1", "m", 1.0).is_err());
+}
+
+#[test]
+fn a_plan_run_is_settled_once_with_a_state_a_cost_and_hashes() {
+    let e = env();
+    let store = e.v5();
+    let mut w = planning(&e, &store, "p1");
+    let r = w.reserve_plan_run("p1", "m", 1.0).unwrap();
+    for bad in [
+        end("running", None),
+        end("done", None),
+        end("finished", Some(-1.0)),
+        end("finished", Some(f64::NAN)),
+        PlanRunEnd {
+            raw_sha256: Some("xyz".into()),
+            ..end("finished", None)
+        },
+        PlanRunEnd {
+            plan_hash: Some("A".repeat(64)),
+            ..end("finished", None)
+        },
+        PlanRunEnd {
+            error_code: Some("has space".into()),
+            ..end("failed", None)
+        },
+    ] {
+        assert!(w.settle_plan_run(&r.id, &bad).is_err(), "{bad:?}");
+    }
+    assert!(w.settle_plan_run("nope", &end("lost", None)).is_err());
+    let done = w
+        .settle_plan_run(&r.id, &end("finished", Some(0.25)))
+        .unwrap();
+    assert_eq!(done.state, "finished");
+    assert_eq!(done.plan_hash, Some(sha('b')));
+    assert!(done.ended_at.is_some());
+    assert!(matches!(
+        w.settle_plan_run(&r.id, &end("lost", None)),
+        Err(Error::Stale(_))
+    ));
+}
+
+#[test]
+fn plan_run_rows_are_set_once_and_never_deleted() {
+    let e = env();
+    let store = e.v5();
+    let mut w = planning(&e, &store, "p1");
+    let r = w.reserve_plan_run("p1", "m", 2.0).unwrap();
+    let db = e.db();
+    for sql in [
+        "UPDATE plan_runs SET reserved_usd=0.01",
+        "UPDATE plan_runs SET model='other'",
+        "UPDATE plan_runs SET session_id='x'",
+        "UPDATE plan_runs SET base_commit='x'",
+        "UPDATE plan_runs SET started_at='2000-01-01T00:00:00.000Z'",
+        "UPDATE plan_runs SET mac='00'",
+        "DELETE FROM plan_runs",
+    ] {
+        assert!(db.execute(sql, []).is_err(), "{sql}");
+    }
+    w.settle_plan_run(&r.id, &end("finished", Some(1.0)))
+        .unwrap();
+    for sql in [
+        "UPDATE plan_runs SET cost_usd=0.0",
+        "UPDATE plan_runs SET plan_hash=NULL",
+        "UPDATE plan_runs SET raw_sha256=NULL",
+        "UPDATE plan_runs SET error_code='x'",
+        "UPDATE plan_runs SET ended_at=NULL",
+        "UPDATE plan_runs SET state='running'",
+        "UPDATE plan_runs SET state='lost'",
+    ] {
+        assert!(db.execute(sql, []).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn a_forged_plan_run_row_does_not_verify_and_never_lowers_what_is_counted() {
+    let e = env();
+    let store = e.v5();
+    let mut w = planning(&e, &store, "p1");
+    let id = w.id().clone();
+    let r = w.reserve_plan_run("p1", "m", 2.0).unwrap();
+    assert_eq!(w.list_plan_runs(&id).unwrap()[0].id, r.id);
+    // a writer that drops the trigger and rewrites the reservation: the MAC no longer verifies
+    let db = e.db();
+    db.execute("DROP TRIGGER plan_runs_identity_immutable", [])
+        .unwrap();
+    db.execute("UPDATE plan_runs SET reserved_usd=0.01", [])
+        .unwrap();
+    assert!(matches!(w.list_plan_runs(&id), Err(Error::Tampered(_))));
+    // and no new run is reserved on top of a row that does not verify
+    e.child(&store, "p2", w.control_session_id());
+    w.settle_plan_run(&r.id, &end("lost", None)).unwrap_err();
+    assert!(w.reserve_plan_run("p2", "m", 1.0).is_err());
+    // a row inserted by someone who cannot compute the MAC does not verify either
+    db.execute("UPDATE plan_runs SET reserved_usd=2.0", [])
+        .unwrap();
+    assert!(
+        w.list_plan_runs(&id).is_ok(),
+        "the original value verifies again"
+    );
+    db.execute(
+        "INSERT INTO plan_runs(id,outcome_id,contract_version,base_commit,session_id,model,state,reserved_usd,mac,started_at) \
+         VALUES ('forged',?1,1,'c0ffee','p2','m','finished',0.01,'00','2026-01-01T00:00:00.000Z')",
+        [id.as_str()],
+    )
+    .unwrap();
+    assert!(matches!(w.list_plan_runs(&id), Err(Error::Tampered(_))));
+    assert!(w.reserve_plan_run("p2", "m", 1.0).is_err());
+}
+
+#[test]
+fn the_number_of_plan_runs_of_an_outcome_is_bounded() {
+    let e = env();
+    let store = e.v5();
+    let mut w = approved_outcome(&e, &store);
+    let mut made = 0;
+    for i in 0..(MAX_PLAN_RUNS + 2) {
+        let s = format!("s{i}");
+        e.child(&store, &s, w.control_session_id());
+        match w.reserve_plan_run(&s, "m", 0.01) {
+            Ok(r) => {
+                w.settle_plan_run(&r.id, &end("finished", Some(0.0)))
+                    .unwrap();
+                made += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    assert_eq!(made, MAX_PLAN_RUNS);
 }

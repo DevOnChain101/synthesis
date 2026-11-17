@@ -143,7 +143,7 @@ const ORCH_MAX_PARALLEL: u64 = 16;
 const ORCH_MAX_ATTEMPTS: u64 = 10;
 
 /// Every key `synt.orchestrator` accepts (`attempt` is an object with the two `attempt.*` keys).
-pub const ORCHESTRATOR_KEYS: [&str; 9] = [
+pub const ORCHESTRATOR_KEYS: [&str; 10] = [
     "enabled",
     "max_parallel_workers",
     "max_attempts_per_work_item",
@@ -152,8 +152,48 @@ pub const ORCHESTRATOR_KEYS: [&str; 9] = [
     "worktree_retention_days",
     "decision_expiry_hours",
     "idle_exit_minutes",
+    "planner",
     "version",
 ];
+
+/// Ceilings of `synt.orchestrator.planner.*`: items equal to `synthesis_core::outcome::MAX_PLAN_ITEMS`
+/// (this crate does not depend on core); the cost of one planning run never exceeds 10 USD, whatever
+/// the file says (the outcome cap and the contract limit it further).
+const PLANNER_MAX_ITEMS: u64 = 256;
+pub const PLANNER_MAX_COST_CEILING_USD: f64 = 10.0;
+
+/// Who writes the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlannerMode {
+    /// The deterministic stub plan (the default).
+    #[default]
+    Stub,
+    /// A model proposes a plan and a person approves it.
+    Model,
+}
+
+/// `synt.orchestrator.planner.*` (user and managed settings only, like the rest of `orchestrator`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannerSettings {
+    pub mode: PlannerMode,
+    /// Same syntax as `--model`; `None` is the user's default model.
+    pub model: Option<String>,
+    /// Cost of one planning run, at most [`PLANNER_MAX_COST_CEILING_USD`] and never more than the
+    /// outcome cap still has.
+    pub max_cost_usd: f64,
+    pub max_items: u32,
+}
+
+impl Default for PlannerSettings {
+    fn default() -> Self {
+        Self {
+            mode: PlannerMode::Stub,
+            model: None,
+            max_cost_usd: 1.0,
+            max_items: 16,
+        }
+    }
+}
 
 /// `synt.orchestrator.*` (plan section 5): shared by every surface, so security- and
 /// money-relevant values are never per surface. Defaults are the plan's D10 and D9/D20 answers;
@@ -171,6 +211,7 @@ pub struct OrchestratorSettings {
     pub worktree_retention_days: u32,
     pub decision_expiry_hours: u32,
     pub idle_exit_minutes: u32,
+    pub planner: PlannerSettings,
     /// The managed file had a value this build could not use: the feature is locked off (the
     /// organisation's intent is unknown, so the safe reading wins, never the user's value).
     pub fail_closed: bool,
@@ -188,6 +229,7 @@ impl Default for OrchestratorSettings {
             worktree_retention_days: 7,
             decision_expiry_hours: 24,
             idle_exit_minutes: 10,
+            planner: PlannerSettings::default(),
             fail_closed: false,
         }
     }
@@ -217,6 +259,7 @@ impl OrchestratorSettings {
     pub(crate) fn lock_off(&mut self, what: &str, why: &str, diags: &mut Vec<String>) {
         self.enabled = false;
         self.fail_closed = true;
+        self.planner.mode = PlannerMode::Stub;
         diags.push(format!(
             "{what}: synt.orchestrator {why}: outcome orchestration is switched off"
         ));
@@ -274,6 +317,71 @@ impl OrchestratorSettings {
                         k,
                         "a whole number from 1 to 1440",
                     ),
+                },
+                "planner" => match v.as_object() {
+                    None => bad(diags, &mut invalid, what, k, "an object"),
+                    Some(p) => {
+                        for (pk, pv) in p {
+                            let key = format!("planner.{pk}");
+                            match pk.as_str() {
+                                "mode" => match pv.as_str() {
+                                    Some("stub") => self.planner.mode = PlannerMode::Stub,
+                                    Some("model") => self.planner.mode = PlannerMode::Model,
+                                    _ => bad(
+                                        diags,
+                                        &mut invalid,
+                                        what,
+                                        &key,
+                                        "\"stub\" or \"model\"",
+                                    ),
+                                },
+                                "model" => match pv.as_str().filter(|m| {
+                                    (1..=200).contains(&m.len())
+                                        && m.chars().all(|c| {
+                                            !c.is_whitespace()
+                                                && !synthesis_config::is_invisible_or_blank(c)
+                                        })
+                                }) {
+                                    Some(m) => self.planner.model = Some(m.to_owned()),
+                                    None => bad(
+                                        diags,
+                                        &mut invalid,
+                                        what,
+                                        &key,
+                                        "a model name of 1 to 200 visible characters",
+                                    ),
+                                },
+                                "max_cost_usd" => {
+                                    match money(pv).filter(|n| *n <= PLANNER_MAX_COST_CEILING_USD) {
+                                        Some(n) => self.planner.max_cost_usd = n,
+                                        None => bad(
+                                            diags,
+                                            &mut invalid,
+                                            what,
+                                            &key,
+                                            "a positive number of at most 10",
+                                        ),
+                                    }
+                                }
+                                "max_items" => match int(pv, 1, PLANNER_MAX_ITEMS) {
+                                    Some(n) => self.planner.max_items = n as u32,
+                                    None => bad(
+                                        diags,
+                                        &mut invalid,
+                                        what,
+                                        &key,
+                                        "a whole number from 1 to 256",
+                                    ),
+                                },
+                                _ => {
+                                    invalid = true;
+                                    diags.push(format!(
+                                        "{what}: synt.orchestrator.planner.{pk} is not a setting, ignored"
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 },
                 "attempt" => match v.as_object() {
                     None => bad(diags, &mut invalid, what, k, "an object"),

@@ -64,6 +64,8 @@ fn plan() -> Plan {
                 requires: vec![],
                 capabilities: vec![],
                 covers: vec![],
+                title: String::new(),
+                instructions: String::new(),
             },
             PlanItem {
                 key: "test".into(),
@@ -71,6 +73,8 @@ fn plan() -> Plan {
                 requires: vec!["one".into()],
                 capabilities: vec![],
                 covers: vec!["c1".into()],
+                title: String::new(),
+                instructions: String::new(),
             },
         ],
     }

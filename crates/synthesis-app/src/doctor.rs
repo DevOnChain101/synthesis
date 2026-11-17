@@ -546,6 +546,9 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
             .unwrap_or(false);
     let (level, text) = orchestrator_row(st.synthesis.orchestrator.enabled, schema, marker_ok);
     add(level, text);
+    if st.synthesis.orchestrator.enabled {
+        add(Level::Ok, planner_row(&st.synthesis.orchestrator.planner));
+    }
     if st.synthesis.orchestrator.fail_closed {
         add(
             Level::Warn,
@@ -553,6 +556,22 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
         );
     }
     v
+}
+
+/// The `orchestrator planner:` line: names and numbers only.
+fn planner_row(p: &synthesis_settings::PlannerSettings) -> String {
+    use synthesis_settings::PlannerMode;
+    match p.mode {
+        PlannerMode::Stub => {
+            "orchestrator planner: stub (the deterministic plan, the default)".into()
+        }
+        PlannerMode::Model => format!(
+            "orchestrator planner: model {}, at most {} USD per run and {} items; a model plan always needs your approval. The planning run is not in this build yet, so the stub plan is used",
+            p.model.as_deref().unwrap_or("(your default model)"),
+            p.max_cost_usd,
+            p.max_items
+        ),
+    }
 }
 
 /// The `orchestrator:` line: the setting, the store's schema version, what each means together.
@@ -1016,6 +1035,22 @@ mod tests {
         );
         assert!(all.contains("cp -R"), "{all}");
         assert!(summary(&r).contains("warn"));
+    }
+
+    #[test]
+    fn planner_row_names_the_mode_and_limits() {
+        use synthesis_settings::{PlannerMode, PlannerSettings};
+        let t = planner_row(&PlannerSettings::default());
+        assert!(t.contains("stub") && t.contains("default"), "{t}");
+        let t = planner_row(&PlannerSettings {
+            mode: PlannerMode::Model,
+            model: Some("m-1".into()),
+            ..PlannerSettings::default()
+        });
+        assert!(
+            t.contains("model m-1") && t.contains("1 USD") && t.contains("16 items"),
+            "{t}"
+        );
     }
 
     #[test]

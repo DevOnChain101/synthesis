@@ -127,6 +127,8 @@ fn rig() -> Rig {
                     requires: vec![],
                     capabilities: vec![],
                     covers: vec![],
+                    title: String::new(),
+                    instructions: String::new(),
                 },
                 PlanItem {
                     key: "test".into(),
@@ -134,6 +136,8 @@ fn rig() -> Rig {
                     requires: vec!["one".into()],
                     capabilities: vec![],
                     covers: vec!["c1".into()],
+                    title: String::new(),
+                    instructions: String::new(),
                 },
             ],
         })

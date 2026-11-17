@@ -1,6 +1,6 @@
 # Orchestrator: remaining backend (model planner, OrchGateway, decision push, Enable gate)
 
-Status: Proposed design (2026-11-17). No product code. Needs the owner decisions in section 6 before the PRs in section 5 start.
+Status: Proposed design (2026-11-17); owner accepted the recommended defaults of O1-O10 on 2026-11-17. Implemented so far: B1 to B5 and **B6 (planner foundations, no model call)**; see the plan's B6 note for what is and is not done. B7 and B9 remain.
 Inputs: [plan](../architecture/outcome-orchestration-plan.md) (D13, section 3b), [ADR-016..021](../architecture/adr/README.md), [threat model](../architecture/outcome-orchestration-threat-model.md), [gap analysis](../architecture/outcome-orchestration-gap-analysis.md), [MVP slice](../architecture/outcome-orchestration-mvp-slice.md), [acceptance](../testing/outcome-orchestration-acceptance.md); code in `crates/synthesis-orchestrator` (`planner.rs`, `host.rs`, `decision.rs`, `grants.rs`, `commands.rs`), `crates/synthesis-core/src/outcome/{plan,contract}.rs`, `crates/synthesis-session/src/{schema,outcome}.rs`, `crates/synthesis-app/src/{orch_owner,orch_endpoint,outcome_service,outcome_client,notify}.rs`.
 
 Assumptions are marked **[A]**; everything else was read in the code or the docs named above.

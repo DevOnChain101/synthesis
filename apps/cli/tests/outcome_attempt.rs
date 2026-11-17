@@ -165,6 +165,8 @@ fn plan() -> Plan {
         requires: requires.iter().map(|s| (*s).into()).collect(),
         capabilities: vec![],
         covers: covers.iter().map(|s| (*s).to_string()).collect(),
+        title: String::new(),
+        instructions: String::new(),
     };
     Plan {
         version: 1,

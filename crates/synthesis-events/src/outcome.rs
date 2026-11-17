@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub const OUTCOME_CREATED: &str = "outcome.created";
 pub const CONTRACT_CREATED: &str = "contract.created";
 pub const PLAN_CREATED: &str = "plan.created";
+/// A model planning run reserved its budget, and later settled (state, cost, hashes; never plan text).
+pub const PLAN_RUN_RESERVED: &str = "plan.run.reserved";
+pub const PLAN_RUN_SETTLED: &str = "plan.run.settled";
+/// A person approved a `plan_approval` decision and the plan of its stored action was installed.
+pub const PLAN_APPROVED: &str = "plan.approved";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";
 pub const DECISION_RESOLVED: &str = "decision.resolved";

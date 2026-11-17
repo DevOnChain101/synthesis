@@ -1297,3 +1297,165 @@ fn sandbox_limits_are_user_or_managed_only_whole_numbers() {
         );
     }
 }
+
+#[test]
+fn the_planner_is_the_stub_with_one_dollar_and_sixteen_items_by_default() {
+    let p = fx()
+        .load(ProjectTrust::Trusted)
+        .synthesis
+        .orchestrator
+        .planner;
+    assert_eq!(p, PlannerSettings::default());
+    assert_eq!(p.mode, PlannerMode::Stub);
+    assert_eq!((p.max_cost_usd, p.max_items, p.model), (1.0, 16, None));
+}
+
+#[test]
+fn the_user_file_sets_and_validates_every_planner_key() {
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"planner":{
+        "mode": "model", "model": "prov/model-1", "max_cost_usd": 2.5, "max_items": 40}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    let p = &s.synthesis.orchestrator.planner;
+    assert_eq!(
+        (p.mode, p.model.as_deref(), p.max_cost_usd, p.max_items),
+        (PlannerMode::Model, Some("prov/model-1"), 2.5, 40)
+    );
+    assert!(s.diagnostics.is_empty(), "{:?}", s.diagnostics);
+    // bounds: the cost ceiling and the item ceiling are hard
+    let ok = |v: serde_json::Value| {
+        let f = fx();
+        f.user(json!({"synt":{"orchestrator":{"planner": v}}}));
+        f.load(ProjectTrust::Trusted)
+    };
+    assert_eq!(
+        ok(json!({"max_cost_usd": 10}))
+            .synthesis
+            .orchestrator
+            .planner
+            .max_cost_usd,
+        10.0
+    );
+    assert_eq!(
+        ok(json!({"max_items": 256}))
+            .synthesis
+            .orchestrator
+            .planner
+            .max_items,
+        256
+    );
+    for (v, key) in [
+        (json!({"mode": "auto"}), "planner.mode"),
+        (json!({"mode": true}), "planner.mode"),
+        (json!({"model": ""}), "planner.model"),
+        (json!({"model": "a b"}), "planner.model"),
+        (json!({"model": "a\u{202e}b"}), "planner.model"),
+        (json!({"model": "m".repeat(201)}), "planner.model"),
+        (json!({"max_cost_usd": 10.01}), "planner.max_cost_usd"),
+        (json!({"max_cost_usd": 0}), "planner.max_cost_usd"),
+        (json!({"max_cost_usd": -1}), "planner.max_cost_usd"),
+        (json!({"max_cost_usd": 1e308}), "planner.max_cost_usd"),
+        (json!({"max_items": 0}), "planner.max_items"),
+        (json!({"max_items": 257}), "planner.max_items"),
+        (json!({"max_items": 1.5}), "planner.max_items"),
+        (json!({"unknown": 1}), "planner.unknown"),
+    ] {
+        let s = ok(v.clone());
+        assert_eq!(
+            s.synthesis.orchestrator.planner,
+            PlannerSettings::default(),
+            "{v}: a wrong value keeps the default"
+        );
+        let d = s.diagnostics.join("\n");
+        assert!(d.contains(&format!("synt.orchestrator.{key}")), "{v}: {d}");
+        assert!(
+            !d.contains("1e308") && !d.contains("257"),
+            "values stay out: {d}"
+        );
+    }
+    let s = ok(json!([1]));
+    assert!(
+        s.diagnostics.iter().any(|d| d.contains("planner")),
+        "{:?}",
+        s.diagnostics
+    );
+}
+
+#[test]
+fn a_project_or_local_file_cannot_turn_the_model_planner_on_or_change_its_budget() {
+    for trust in [ProjectTrust::Trusted, ProjectTrust::Untrusted] {
+        let f = fx();
+        f.project(json!({"synt":{"orchestrator":{"planner":{
+            "mode": "model", "model": "evil", "max_cost_usd": 9, "max_items": 256}}}}));
+        write(
+            f.proj.path(),
+            ".synt/settings.local.json",
+            json!({"synt":{"orchestrator":{"planner":{"mode": "model"}}}}),
+        );
+        let s = f.load(trust);
+        assert_eq!(
+            s.synthesis.orchestrator.planner,
+            PlannerSettings::default(),
+            "{trust:?}"
+        );
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("ignored")),
+            "{trust:?}: {:?}",
+            s.diagnostics
+        );
+    }
+    // a user value survives a project that says otherwise
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"planner":{"mode": "stub", "max_cost_usd": 0.5}}}}));
+    f.project(json!({"synt":{"orchestrator":{"planner":{"mode": "model", "max_cost_usd": 9}}}}));
+    let p = f.load(ProjectTrust::Trusted).synthesis.orchestrator.planner;
+    assert_eq!((p.mode, p.max_cost_usd), (PlannerMode::Stub, 0.5));
+    // nor does a surface section carry it
+    let f = fx();
+    f.user(json!({"synt":{"cli":{"orchestrator":{"planner":{"mode": "model"}}}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted)
+            .synthesis
+            .orchestrator
+            .planner
+            .mode,
+        PlannerMode::Stub
+    );
+}
+
+#[test]
+fn managed_planner_settings_win_and_an_unusable_one_fails_closed_to_the_stub() {
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"enabled": true, "planner":{"mode": "model", "max_cost_usd": 9}}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"orchestrator":{"planner":{"mode": "stub", "max_cost_usd": 0.25}}}}),
+    );
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert!(o.enabled);
+    assert_eq!(
+        (o.planner.mode, o.planner.max_cost_usd),
+        (PlannerMode::Stub, 0.25)
+    );
+    for bad in [
+        json!({"planner": {"mode": "maybe"}}),
+        json!({"planner": {"max_cost_usd": 50}}),
+        json!({"planner": {"max_items": 0}}),
+        json!({"planner": "model"}),
+        json!({"planner": {"nope": 1}}),
+    ] {
+        let f = fx();
+        f.user(json!({"synt":{"orchestrator":{"enabled": true, "planner":{"mode": "model"}}}}));
+        write(
+            f.home.path(),
+            "managed.json",
+            json!({"synt":{"orchestrator": bad}}),
+        );
+        let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+        assert!(
+            !o.enabled && o.fail_closed && o.planner.mode == PlannerMode::Stub,
+            "{bad}: the user's model mode must not survive"
+        );
+    }
+}
