@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Stages and archives the desktop app (apps/desktop) for one target. Called by release.yml, runnable locally.
-//   node scripts/package-desktop.mjs --target aarch64-apple-darwin --version 0.1.0 --bin target/release/synthesis-desktop --out dist
+//   node scripts/package-desktop.mjs --target aarch64-apple-darwin --version 0.1.0 --bin target/release/synthesis-desktop --out dist [--synt target/release/synt]
 // Output: <out>/synthesis-desktop-<version>-<target>.{zip|tar.gz}
-//   macOS   .zip of Synthesis.app (Info.plist, synthesis.icns; ad-hoc signed, NOT notarized)
+//   macOS   .zip of Synthesis.app (Info.plist, synthesis.icns; ad-hoc signed, NOT notarized). With --synt, the CLI binary is put
+//           in Contents/MacOS next to the app: the Outcomes tab starts `synt orchestrator --serve` from there and from
+//           nowhere else. Without it the app still works and the Outcomes tab cannot start the orchestrator itself.
 //   Windows .zip with Synthesis.exe (icon embedded by apps/desktop/build.rs)
 //   Linux   .tar.gz with synthesis-desktop, synthesis.desktop, hicolor icons, README.txt
 // Needs: ditto + codesign (macOS), 7z (Windows), tar (Linux), all preinstalled on the runners.
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -78,10 +80,11 @@ function run(cmd, args, opts = {}) {
 function main() {
   const a = {};
   for (let i = 2; i < process.argv.length; i += 2) a[process.argv[i].replace(/^--/, "")] = process.argv[i + 1];
-  const { target, version, bin, out } = a;
+  const { target, version, bin, out, synt } = a;
   if (!target || !version || !bin || !out) throw new Error("usage: --target T --version V --bin PATH --out DIR");
   if (!/^[0-9A-Za-z.+-]+$/.test(version)) throw new Error(`bad version: ${version}`);
   if (!existsSync(bin)) throw new Error(`binary not found: ${bin}`);
+  if (synt && !existsSync(synt)) throw new Error(`synt binary not found: ${synt}`);
 
   const name = `synthesis-desktop-${version}-${target}`;
   const stage = join(out, name);
@@ -96,6 +99,15 @@ function main() {
     mkdirSync(join(app, "MacOS"), { recursive: true });
     mkdirSync(join(app, "Resources"), { recursive: true });
     copyFileSync(bin, join(app, "MacOS", "Synthesis"));
+    if (synt) {
+      // next to the executable, 0755 (the app only starts a `synt` that is a regular file of the user's, not writable by others)
+      copyFileSync(synt, join(app, "MacOS", "synt"));
+      chmodSync(join(app, "MacOS", "synt"), 0o755);
+      // sealed on its own first, then the bundle seal below covers it
+      run("codesign", ["--force", "--sign", "-", join(app, "MacOS", "synt")]);
+    } else {
+      console.warn("package-desktop: WARNING no --synt: Synthesis.app has no synt beside it, so the Outcomes tab cannot start the orchestrator itself");
+    }
     cpSync(join(assets, "synthesis.icns"), join(app, "Resources", "synthesis.icns"));
     writeFileSync(join(app, "Info.plist"), infoPlist(version));
     legal();
@@ -103,10 +115,13 @@ function main() {
     run("codesign", ["--force", "--sign", "-", join(stage, "Synthesis.app")]);
     run("ditto", ["-c", "-k", "--keepParent", "--norsrc", "--noextattr", join(stage, "Synthesis.app"), join(out, `${name}.zip`)]);
   } else if (target.includes("windows")) {
+    if (synt) console.warn("package-desktop: --synt is only used for macOS; Windows keeps refusing outcomes natively");
     copyFileSync(bin, join(stage, "Synthesis.exe"));
     legal();
     run("7z", ["a", "-tzip", `${name}.zip`, name], { cwd: out, stdio: ["ignore", "ignore", "inherit"] });
   } else if (target.includes("linux")) {
+    // TODO(Linux): ship synt beside synthesis-desktop (the app looks for "synt" next to its own executable) once Linux packaging takes a synt build
+    if (synt) console.warn("package-desktop: --synt is only used for macOS so far");
     copyFileSync(bin, join(stage, "synthesis-desktop"));
     writeFileSync(join(stage, "synthesis.desktop"), desktopEntry());
     writeFileSync(join(stage, "README.txt"), linuxReadme(version));

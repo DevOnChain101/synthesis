@@ -59,6 +59,9 @@ pub enum Req {
     },
     /// Read the stored contract of an outcome whose contract is not approved, for review.
     Review(String),
+    /// The explicit store migration, after the person confirmed the disclosure. Only served while the
+    /// orchestrator says the store is not migrated; never sent by itself.
+    Enable,
 }
 
 /// What the worker says to the open form.
@@ -98,6 +101,8 @@ pub enum Msg {
     },
     Answered(String),
     Form(FormMsg),
+    /// The migration's result (`Err` is the reason; the worker reconnects itself after an `Ok`).
+    Enabled(Result<(), String>),
 }
 
 pub struct Link {
@@ -142,14 +147,35 @@ fn synt_exe() -> Option<std::path::PathBuf> {
 }
 
 /// The `synt` in the folder `exe` really is in: the path is resolved first, so a symlink to the app from a
-/// folder the user can write does not pick a `synt` that sits beside the link. A regular file, never a
-/// symlink, never a PATH search.
+/// folder the user can write does not pick a `synt` that sits beside the link (inside `Synthesis.app` that is
+/// `Contents/MacOS`). A regular file, never a symlink, never a PATH search, and only one `usable_synt` accepts.
 fn synt_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let p = std::fs::canonicalize(exe)
-        .ok()?
-        .parent()?
-        .join(if cfg!(windows) { "synt.exe" } else { "synt" });
-    std::fs::symlink_metadata(&p).ok()?.is_file().then_some(p)
+    let dir = std::fs::canonicalize(exe).ok()?.parent()?.to_path_buf();
+    let p = dir.join(if cfg!(windows) { "synt.exe" } else { "synt" });
+    usable_synt(
+        &std::fs::metadata(&dir).ok()?,
+        &std::fs::symlink_metadata(&p).ok()?,
+    )
+    .then_some(p)
+}
+
+/// A regular file (a symlink is not one). On unix also: the user's own, executable, and neither it nor its
+/// folder writable by group or others, so nobody else can have put it there or swapped it.
+fn usable_synt(dir: &std::fs::Metadata, file: &std::fs::Metadata) -> bool {
+    if !file.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let me = rustix::process::geteuid().as_raw();
+        file.uid() == me && file.mode() & 0o111 != 0 && (file.mode() | dir.mode()) & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
+    }
 }
 
 /// The synchronous check before anything starts: the platform supports outcomes and `synt.orchestrator.enabled`
@@ -212,9 +238,16 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                             Err(e) => Screen::Unreachable(e),
                         }
                     }
-                    Ok(_) => Screen::NotReady(
-                        "the orchestrator is on but the store is not migrated: run `synt outcome enable` in a terminal, then press r".into(),
-                    ),
+                    Ok(_) => {
+                        let _ = out.unbounded_send(Msg::Screen(Screen::NotReady(
+                            "the orchestrator is on but the session store is not migrated".into(),
+                        )));
+                        // the one request this state serves is the person's explicit migration
+                        if !await_enable(&mut c, rx, out) {
+                            return;
+                        }
+                        continue;
+                    }
                     Err(e) => Screen::Unreachable(e.to_string()),
                 };
                 let _ = out.unbounded_send(Msg::Screen(screen));
@@ -230,6 +263,36 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                 Ok(_) => {}
                 Err(_) => return,
             }
+        }
+    }
+}
+
+/// The store is not migrated: waits for `Retry` (`true`: connect again) or the person's `Enable` (the
+/// migration; `true` after it worked, so the worker connects to the migrated store). A migration whose
+/// reply is not this build's disclosure is refused (the client says so) and reported; the worker then keeps
+/// waiting. `false`: the window closed.
+fn await_enable<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    rx: &Receiver<Req>,
+    out: &UnboundedSender<Msg>,
+) -> bool {
+    loop {
+        match rx.recv() {
+            Ok(Req::Retry) => return true,
+            Ok(Req::Enable) => match c.enable() {
+                Ok(_) => {
+                    let _ = out.unbounded_send(Msg::Enabled(Ok(())));
+                    return true;
+                }
+                Err(e) => {
+                    let _ = out.unbounded_send(Msg::Enabled(Err(e.to_string())));
+                    if matches!(e, ClientError::Io(_)) {
+                        return true;
+                    }
+                }
+            },
+            Ok(_) => {}
+            Err(_) => return false,
         }
     }
 }
@@ -303,6 +366,8 @@ pub(super) fn serve<T: Transport>(
                     let m = review_draft(c, &id)?;
                     let _ = out.unbounded_send(Msg::Form(m));
                 }
+                // the migration is only served while the store is not migrated (`await_enable`)
+                Ok(Req::Enable) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }

@@ -16,13 +16,44 @@ use super::ask::Ask;
 use super::form::{Form, FormText, Review, Stage, Submit};
 use super::link::FormMsg;
 
-/// What the Off screen says (the setting, then the explicit enable step; this window never enables).
-pub const OFF_LINES: [&str; 4] = [
-    "Outcomes are off. Nothing here runs, and nothing is started or migrated for you.",
-    "1. Set synt.orchestrator.enabled to true in your user settings ($SYNT_HOME/synt.json, or your organisation's managed settings).",
-    "2. Run `synt outcome enable` once in a terminal: it shows the integrity notice, backs the session store up and migrates it.",
-    "Then press r here. This window does not turn outcomes on.",
+/// What the Off screen says above its button. It is opt-in and nothing happens before two explicit confirms.
+pub const OFF_LINES: [&str; 3] = [
+    "Super Agent is off. Nothing here runs, and nothing is started or migrated until you confirm it.",
+    "Experimental: Super Agent uses the stub planner, and its workers run with your configured provider and cost tokens.",
+    "Turning it on takes two steps, each with its own confirmation: the setting synt.orchestrator.enabled in your user settings, then the one-time migration of the session store (a backup is made first).",
 ];
+
+/// What the not-migrated screen says above its button.
+pub const MIGRATE_LINES: [&str; 2] = [
+    "The setting is on, but the session store is not migrated yet. The migration is its own step: it makes a backup first, then moves the store to schema v5.",
+    "Releases without outcomes refuse a migrated store.",
+];
+
+/// The step of the guided enable flow a disclosure is open for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Step {
+    /// Write `synt.orchestrator.enabled` to the user settings.
+    Setting,
+    /// The explicit store migration (`OutcomeClient::enable`).
+    Migrate,
+}
+
+/// A button of the disclosure; the keys move between them, and nothing starts focused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Btn {
+    Cancel,
+    Confirm,
+}
+
+/// The open disclosure of the guided flow. Consent is never kept: closing it, or a step that ends, drops it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Guide {
+    pub step: Step,
+    pub focus: Option<Btn>,
+    /// The confirmed step is on its way (a migration waits for the orchestrator): no key or click acts.
+    pub busy: bool,
+    pub error: Option<String>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -110,6 +141,8 @@ pub struct State {
     pub workspace: String,
     /// The open "New outcome" or "Revise contract" form.
     pub form: Option<Form>,
+    /// The open disclosure of the Off / not-migrated screens.
+    pub guide: Option<Guide>,
 }
 
 /// A key, with the modifiers that matter (any other modifier means it is not ours).
@@ -145,6 +178,10 @@ pub enum Effect {
     },
     /// Read the stored, unapproved contract of this outcome for review.
     Review(String),
+    /// The person confirmed the disclosure: write `synt.orchestrator.enabled` (user settings).
+    EnableSetting,
+    /// The person confirmed the disclosure: migrate the store (`OutcomeClient::enable`).
+    Migrate,
 }
 
 impl State {
@@ -163,6 +200,7 @@ impl State {
             answers: 0,
             workspace: String::new(),
             form: None,
+            guide: None,
         }
     }
 
@@ -230,6 +268,14 @@ impl State {
     pub fn set_screen(&mut self, screen: Screen) {
         // the choice made before is gone: after a reconnect the card is a fresh one
         self.ask.link_changed();
+        // a disclosure belongs to the screen that opened it
+        let open = matches!(
+            (self.guide.as_ref().map(|g| g.step), &screen),
+            (Some(Step::Setting), Screen::Off) | (Some(Step::Migrate), Screen::NotReady(_))
+        );
+        if !open {
+            self.guide = None;
+        }
         self.screen = screen;
     }
 
@@ -422,14 +468,91 @@ impl State {
         self.ask.send(&outcome, &card, now).into_iter().collect()
     }
 
+    // ------------------------------------------------------------------------- the guided enable flow
+
+    /// The screen's button: opens the disclosure for the step the screen is at. Nothing is focused, nothing
+    /// is written or sent.
+    pub fn open_guide(&mut self) {
+        let step = match self.screen {
+            Screen::Off => Step::Setting,
+            Screen::NotReady(_) => Step::Migrate,
+            _ => return,
+        };
+        self.guide = Some(Guide {
+            step,
+            focus: None,
+            busy: false,
+            error: None,
+        });
+    }
+
+    /// Esc, Cancel: nothing was written or sent. Not while a confirmed step is on its way.
+    pub fn close_guide(&mut self) {
+        if self.guide.as_ref().is_some_and(|g| !g.busy) {
+            self.guide = None;
+        }
+    }
+
+    /// The Confirm button (a click, or Enter with the button focused): the step's effect, once.
+    pub fn confirm_guide(&mut self) -> Vec<Effect> {
+        match self.guide.as_mut() {
+            Some(g) if !g.busy => {
+                g.busy = true;
+                g.error = None;
+                vec![match g.step {
+                    Step::Setting => Effect::EnableSetting,
+                    Step::Migrate => Effect::Migrate,
+                }]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The step failed: the dialog stays open with the (sanitised when drawn) reason.
+    pub fn guide_failed(&mut self, why: String) {
+        if let Some(g) = self.guide.as_mut() {
+            g.busy = false;
+            g.error = Some(why);
+        }
+    }
+
+    /// The step is done: the disclosure is gone, and the link looks again.
+    pub fn guide_done(&mut self) {
+        self.guide = None;
+    }
+
+    /// Keys while the disclosure is open: all of them are its own. Tab moves between Cancel and Confirm (the
+    /// first Tab lands on Cancel), Enter acts on the focused button only, Esc cancels.
+    fn guide_key(&mut self, name: &str) -> Vec<Effect> {
+        let Some(g) = self.guide.as_mut().filter(|g| !g.busy) else {
+            return vec![];
+        };
+        match (name, g.focus) {
+            ("escape", _) => self.guide = None,
+            ("tab", Some(Btn::Cancel)) => g.focus = Some(Btn::Confirm),
+            ("tab", _) => g.focus = Some(Btn::Cancel),
+            ("enter", Some(Btn::Confirm)) => return self.confirm_guide(),
+            ("enter", Some(Btn::Cancel)) => self.guide = None,
+            _ => {}
+        }
+        vec![]
+    }
+
     /// A key. `None`: not ours (the window may use it).
     pub fn key(&mut self, k: &Key, now: i64) -> Option<Vec<Effect>> {
         if k.other_mod || self.form.is_some() {
             return None;
         }
+        if self.guide.is_some() {
+            return Some(self.guide_key(k.name));
+        }
         if self.screen != Screen::Ready {
             return match (&self.screen, k.name) {
                 (Screen::Loading | Screen::Windows, _) => None,
+                (Screen::Off | Screen::NotReady(_), "enter") => {
+                    self.open_guide();
+                    Some(vec![])
+                }
                 (_, "r" | "enter") => Some(vec![Effect::Retry]),
                 _ => None,
             };

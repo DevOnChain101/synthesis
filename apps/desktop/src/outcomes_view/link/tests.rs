@@ -375,6 +375,12 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
     assert_eq!(synt_beside(&user.join("app")), None);
     std::fs::remove_file(real.join("synt")).unwrap();
     std::fs::write(real.join("synt"), "ok").unwrap();
+    // not executable: refused; executable: used
+    assert_eq!(synt_beside(&user.join("app")), None);
+    use std::os::unix::fs::PermissionsExt as _;
+    for (p, m) in [(real.join("synt"), 0o755), (real.clone(), 0o755)] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
     assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
 }
 
@@ -736,4 +742,183 @@ fn a_queued_approval_is_not_reported_as_approved() {
         panic!()
     };
     assert!(text.contains("not approved yet"), "{text}");
+}
+
+// ------------------------------------------------------------------------ the migration step
+
+/// An orchestrator whose store is not migrated: only `orchestrator.enable` is answered.
+struct Unmigrated {
+    calls: Rc<RefCell<Vec<String>>>,
+    reply: Option<Result<Value, ClientError>>,
+}
+
+impl Transport for Unmigrated {
+    fn next_hint(
+        &mut self,
+        _: Duration,
+    ) -> Result<Option<synthesis_app::proto::DecisionHint>, ClientError> {
+        Ok(None)
+    }
+    fn call(&mut self, call: Call) -> Result<Value, ClientError> {
+        let v = serde_json::to_value(&call).unwrap();
+        self.calls
+            .borrow_mut()
+            .push(v["method"].as_str().unwrap().into());
+        self.reply
+            .take()
+            .unwrap_or_else(|| Err(ClientError::Io("no reply scripted".into())))
+    }
+}
+
+fn enable_run(
+    reply: Result<Value, ClientError>,
+    reqs: Vec<Req>,
+) -> (Vec<String>, Vec<Result<(), String>>, bool) {
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut c = OutcomeClient::new(
+        Unmigrated {
+            calls: calls.clone(),
+            reply: Some(reply),
+        },
+        Surface::Superagent,
+    );
+    let (tx, rx) = channel();
+    for r in reqs {
+        tx.send(r).unwrap();
+    }
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    let reconnect = await_enable(&mut c, &rx, &out);
+    drop(out);
+    let res = std::iter::from_fn(|| orx.try_recv().ok())
+        .filter_map(|m| match m {
+            Msg::Enabled(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    let calls = calls.borrow().clone();
+    (calls, res, reconnect)
+}
+
+fn good() -> Value {
+    json!({"schema": 5, "backups": "backups/pre-v5-*", "disclosure": {
+        "id": synthesis_app::outcome_policy::DISCLOSURE_ID,
+        "text": synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE}})
+}
+
+#[test]
+fn the_store_is_migrated_only_on_the_explicit_request_then_the_worker_reconnects() {
+    // nothing asked: nothing sent (a closed window ends the wait)
+    let (calls, res, reconnect) = enable_run(Ok(good()), vec![]);
+    assert!((calls.is_empty(), res.is_empty(), reconnect) == (true, true, false));
+    // other requests are ignored; a retry only looks again
+    let (calls, _, reconnect) = enable_run(Ok(good()), vec![Req::Refresh, Req::Retry]);
+    assert!(calls.is_empty() && reconnect);
+    let (calls, res, reconnect) = enable_run(Ok(good()), vec![Req::Enable]);
+    assert_eq!(calls, ["orchestrator.enable"]);
+    assert_eq!(res, vec![Ok(())]);
+    assert!(reconnect);
+}
+
+#[test]
+fn a_disclosure_that_is_not_this_builds_is_refused_and_reported() {
+    for bad in [
+        json!({"schema": 5}),
+        json!({"disclosure": {"id": "integrity-v0", "text": synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE}}),
+        json!({"disclosure": {"id": synthesis_app::outcome_policy::DISCLOSURE_ID, "text": "another wording"}}),
+    ] {
+        let (calls, res, reconnect) = enable_run(Ok(bad), vec![Req::Enable]);
+        assert_eq!(calls.len(), 1);
+        let [Err(why)] = res.as_slice() else {
+            panic!("{res:?}")
+        };
+        assert!(why.contains("integrity disclosure"), "{why}");
+        assert!(
+            !reconnect,
+            "the worker keeps waiting; it never claims the store is enabled"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_is_reported_and_a_lost_link_reconnects() {
+    let (_, res, reconnect) = enable_run(
+        Err(ClientError::Refused("set the setting first".into())),
+        vec![Req::Enable],
+    );
+    assert!(
+        matches!(res.as_slice(), [Err(w)] if w.contains("set the setting first")) && !reconnect
+    );
+    let (_, res, reconnect) = enable_run(Err(ClientError::Io("closed".into())), vec![Req::Enable]);
+    assert!(matches!(res.as_slice(), [Err(_)]) && reconnect);
+}
+
+// ------------------------------------------------------------------------ the synt beside the app
+
+#[cfg(unix)]
+mod beside {
+    use super::super::synt_beside;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// `<tmp>/Synthesis.app/Contents/MacOS/{Synthesis,synt}` with the given mode on synt (None: no synt).
+    fn bundle(mode: Option<u32>) -> (tempfile::TempDir, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let macos = std::fs::canonicalize(t.path())
+            .unwrap()
+            .join("Synthesis.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(macos.join("Synthesis"), b"x").unwrap();
+        if let Some(m) = mode {
+            std::fs::write(macos.join("synt"), b"x").unwrap();
+            std::fs::set_permissions(macos.join("synt"), std::fs::Permissions::from_mode(m))
+                .unwrap();
+        }
+        (t, macos)
+    }
+
+    #[test]
+    fn the_synt_inside_the_app_bundle_is_found_from_the_app_executable() {
+        let (_t, macos) = bundle(Some(0o755));
+        assert_eq!(
+            synt_beside(&macos.join("Synthesis")),
+            Some(macos.join("synt"))
+        );
+    }
+
+    #[test]
+    fn a_missing_non_executable_or_writable_by_others_synt_is_refused() {
+        let (_t, macos) = bundle(None);
+        assert_eq!(synt_beside(&macos.join("Synthesis")), None);
+        for mode in [0o644, 0o775, 0o757] {
+            let (_t, macos) = bundle(Some(mode));
+            assert_eq!(synt_beside(&macos.join("Synthesis")), None, "{mode:o}");
+        }
+        // a folder others can write to: the file could have been swapped
+        let (_t, macos) = bundle(Some(0o755));
+        std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(synt_beside(&macos.join("Synthesis")), None);
+    }
+
+    #[test]
+    fn a_symlinked_synt_is_refused_and_a_symlinked_app_looks_where_it_really_is() {
+        let (t, macos) = bundle(None);
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"x").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&elsewhere, macos.join("synt")).unwrap();
+        assert_eq!(
+            synt_beside(&macos.join("Synthesis")),
+            None,
+            "never a symlink"
+        );
+        // a link to the app from another folder does not pick the synt that sits beside the link
+        let (_t2, real) = bundle(None);
+        let dir = t.path().join("links");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("synt"), b"x").unwrap();
+        std::fs::set_permissions(dir.join("synt"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(real.join("Synthesis"), dir.join("Synthesis")).unwrap();
+        assert_eq!(synt_beside(&dir.join("Synthesis")), None);
+    }
 }

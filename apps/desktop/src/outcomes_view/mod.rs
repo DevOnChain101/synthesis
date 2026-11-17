@@ -24,6 +24,7 @@ use model::{Effect, Key, Pane, Screen, State};
 pub mod ask;
 pub mod form;
 mod form_view;
+mod guide_view;
 pub mod link;
 pub mod model;
 pub(crate) mod render;
@@ -168,6 +169,11 @@ impl OutcomesView {
                 }
                 Msg::Answered(note) => self.state.answered(note),
                 Msg::Form(m) => self.state.apply_form(m),
+                Msg::Enabled(Ok(())) => {
+                    self.state.guide_done();
+                    self.state.set_screen(Screen::Loading);
+                }
+                Msg::Enabled(Err(e)) => self.state.guide_failed(e),
             }
         }
         cx.notify();
@@ -176,6 +182,10 @@ impl OutcomesView {
     /// Does what the state asked for. The sample answers locally (and sends nothing).
     fn run(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
         for e in effects {
+            if e == Effect::EnableSetting {
+                self.enable_setting();
+                continue;
+            }
             match (e, &self.link) {
                 (Effect::Scroll(n), _) => scroll(
                     &self.scroll[match self.state.pane {
@@ -239,6 +249,11 @@ impl OutcomesView {
                         self.state.inspector = Some(sample::inspector(t, &item));
                     }
                 }
+                (Effect::Migrate, None) => self
+                    .state
+                    .guide_failed("Sample data: nothing was sent.".into()),
+                (Effect::Migrate, Some(l)) => l.send(Req::Enable),
+                (Effect::EnableSetting, _) => {}
                 (Effect::Refresh | Effect::Retry, None) => {}
                 (Effect::Refresh, Some(l)) => l.send(Req::Refresh),
                 (Effect::Retry, Some(l)) => {
@@ -264,6 +279,27 @@ impl OutcomesView {
         cx.notify();
     }
 
+    /// The person confirmed the disclosure of the Off screen: the user settings file gets
+    /// `synt.orchestrator.enabled = true` (the Settings rows' writer: atomic, other keys kept, a managed value
+    /// refuses), then the link checks again. Nothing is remembered about the confirmation.
+    fn enable_setting(&mut self) {
+        let Some(env) = &self.env else {
+            self.state
+                .guide_failed("Sample data: nothing was written.".into());
+            return;
+        };
+        match crate::settings_view::model::write_orchestrator(env, true) {
+            Ok(()) => {
+                self.state.guide_done();
+                self.state.set_screen(Screen::Loading);
+                if let Some(l) = &self.link {
+                    l.send(Req::Retry);
+                }
+            }
+            Err(e) => self.state.guide_failed(e),
+        }
+    }
+
     /// A request after a failed link goes after a retry: the worker that ended waits for one, and the
     /// request stays queued behind it (the form's text and key are kept either way).
     fn reconnect_first(&self, l: &Link) {
@@ -283,6 +319,10 @@ impl OutcomesView {
         }
         let k = &ev.keystroke;
         let m = &k.modifiers;
+        // a held key (auto-repeat) never acts on the disclosure: one deliberate press does
+        if ev.is_held && self.state.guide.is_some() {
+            return true;
+        }
         let key = Key {
             name: &k.key,
             shift: m.shift,
