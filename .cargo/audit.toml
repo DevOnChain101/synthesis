@@ -1,7 +1,8 @@
 # cargo-audit policy (CI: `cargo audit --deny warnings`). Every entry needs a written reason.
-# All nine are "unmaintained" notices (no vulnerability) reached only through the GPUI desktop
-# app's pinned UI stack (apps/desktop: gpui-pre 0.3.10, gpui-component 0.8.1); none is in the engine,
-# CLI or TUI. They go away only with a new GPUI release, so re-check on every GPUI bump.
+# All nine are "unmaintained" notices (no vulnerability). Eight are reached only through the GPUI
+# desktop app's pinned UI stack (apps/desktop: gpui-pre 0.3.10, gpui-component 0.8.1); chrono is also
+# reached through rmcp (MCP client), so it is in the engine and CLI too. They go away only with a new
+# GPUI (or rmcp) release, so re-check on every bump.
 [advisories]
 ignore = [
   # gpui-base / gpui-component timing helper; replaced upstream by web-time, not by us.
@@ -18,6 +19,6 @@ ignore = [
   "RUSTSEC-2026-0371", # zbus_names
   "RUSTSEC-2026-0370", # zvariant
   "RUSTSEC-2026-0372", # zvariant_derive
-  # date and time library of gpui-pre, gpui-base, gpui-component and gpui-kit-assets (cargo tree -i chrono).
+  # date and time library of the gpui-* stack AND of rmcp/schemars (MCP client in synthesis-mcp, so also the engine/CLI); unmaintained notice, no vulnerability; re-check on GPUI or rmcp bumps (cargo tree -i chrono).
   "RUSTSEC-2026-0543", # chrono
 ]
