@@ -28,9 +28,9 @@ use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, ModelPlanner, PlanCfg, PlanRun,
-    Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig, Scheduler,
-    Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
-    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan,
+    PlanWait, Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig,
+    Scheduler, Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
+    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan, plan_wait,
     recover_attempts, recover_plan_runs, replan_after_revise, restore_pause, start_plan_run,
     wall_secs,
 };
@@ -463,7 +463,17 @@ impl<'a> Owner<'a> {
             max_items: ctx.settings.max_items as usize,
         };
         match start_plan_run(&mut ow.w, self.store, self.spawn, &cfg, model, now) {
-            Ok(run) => ow.planning = run,
+            Ok(run) => {
+                ow.planning = run;
+                // nothing was started and nothing was offered (not even the stub plan is valid):
+                // it is said once, not asked again every cycle
+                if ow.planning.is_none()
+                    && plan_wait(&ow.w).map_or(true, |w| w == PlanWait::NotStarted)
+                {
+                    self.plan_failed
+                        .insert((id.to_string(), o.contract_version));
+                }
+            }
             Err(e) => {
                 log(&format!("outcome {id}: planning run not started: {e}"));
                 self.plan_failed
