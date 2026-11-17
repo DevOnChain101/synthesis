@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synthesis_events::Envelope;
 use synthesis_harness::UserReply;
+use synthesis_orchestrator::Action;
 use synthesis_permissions::{Decision, Mode, RuleSpec, Suggestion};
 use synthesis_session::outcome::Surface;
 use synthesis_tools::NeedsUser;
@@ -413,9 +414,9 @@ impl Call {
                 | Call::OutcomeList { .. }
                 | Call::OutcomeGet { .. }
                 | Call::OutcomeContractGet { .. }
+                | Call::OutcomeContractDiff { .. }
                 | Call::OutcomeContractApprove { .. }
                 | Call::OutcomeContractRevise { .. }
-                | Call::OutcomeContractDiff { .. }
                 | Call::OutcomeStart(_)
                 | Call::OutcomePause(_)
                 | Call::OutcomeResume(_)
@@ -450,6 +451,85 @@ impl Call {
             | Call::OutcomeCancel(c)
             | Call::OutcomeAck(c) => Some(c.cmd.surface),
             _ => None,
+        }
+    }
+
+    /// The gateway action of a call that changes owner state (`None`: a read, or not an outcome
+    /// call). Exhaustive on purpose: a new `Call` variant does not compile until it is classified,
+    /// so a new mutating call cannot skip the gateway table.
+    pub fn action(&self) -> Option<Action> {
+        match self {
+            Call::OutcomeCreate { .. } => Some(Action::CreateOutcome),
+            Call::OrchestratorEnable { .. } => Some(Action::Enable),
+            Call::OutcomeContractApprove { .. } => Some(Action::ApproveContract),
+            Call::OutcomeContractRevise { .. } => Some(Action::ReviseContract),
+            Call::OutcomeStart(_) => Some(Action::Start),
+            Call::OutcomePause(_) => Some(Action::Pause),
+            Call::OutcomeResume(_) => Some(Action::Resume),
+            Call::OutcomeCancel(_) => Some(Action::Cancel),
+            Call::OutcomeAck(_) => Some(Action::Ack),
+            Call::DecisionResolve { .. } => Some(Action::ResolveDecision),
+            Call::OrchestratorStatus
+            | Call::OutcomeList { .. }
+            | Call::OutcomeGet { .. }
+            | Call::OutcomeContractGet { .. }
+            | Call::OutcomeContractDiff { .. }
+            | Call::PlanGet { .. }
+            | Call::WorkItemGet { .. }
+            | Call::AttemptInspect { .. }
+            | Call::OutcomeBudget { .. }
+            | Call::AttemptDiff { .. }
+            | Call::DecisionList { .. }
+            | Call::DecisionGet { .. }
+            | Call::EvidenceGet { .. }
+            | Call::CommandStatus { .. }
+            | Call::EventsSubscribe { .. } => None,
+            // not outcome calls: sessions, files, memory, settings (never an owner effect)
+            Call::Start { .. }
+            | Call::Send { .. }
+            | Call::Answer { .. }
+            | Call::AnswerInput { .. }
+            | Call::SetMode { .. }
+            | Call::WorkspacesList
+            | Call::SessionsList { .. }
+            | Call::SessionPreview { .. }
+            | Call::SessionResume { .. }
+            | Call::SessionNew
+            | Call::SessionRename { .. }
+            | Call::SessionClose { .. }
+            | Call::WorkspaceClose { .. }
+            | Call::UsageSummary { .. }
+            | Call::TrustState
+            | Call::TrustSet { .. }
+            | Call::TrustRevoke { .. }
+            | Call::ModelSet { .. }
+            | Call::FsList { .. }
+            | Call::FsRead { .. }
+            | Call::FsGitStatus
+            | Call::FsGitDiff
+            | Call::ImagePut { .. }
+            | Call::ImageDrop { .. }
+            | Call::RewindList
+            | Call::RewindDryRun { .. }
+            | Call::RewindApply { .. }
+            | Call::CleanPlan
+            | Call::CleanApply { .. }
+            | Call::MemoryList
+            | Call::MemoryRetrieve { .. }
+            | Call::MemoryShow { .. }
+            | Call::MemoryAdd { .. }
+            | Call::MemoryForget { .. }
+            | Call::MemoryNote { .. }
+            | Call::ConfigEffort { .. }
+            | Call::ContextSet { .. }
+            | Call::DoctorSummary
+            | Call::McpList
+            | Call::McpAdd { .. }
+            | Call::McpRemove { .. }
+            | Call::Compact { .. }
+            | Call::Clear
+            | Call::Cancel
+            | Call::Close => None,
         }
     }
 
@@ -765,6 +845,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_mutating_call_maps_to_a_gateway_action_named_like_its_method() {
+        let p = r#""params":{"id":"o","version":1,"hash":"h","expected_revision":1,"outcome":"o","choice":"c","brief_sha256":"h","idempotency_key":"kkkkkkkk","surface":"cli"}"#;
+        for m in [
+            "orchestrator.enable",
+            "outcome.contract.approve",
+            "outcome.start",
+            "outcome.pause",
+            "outcome.resume",
+            "outcome.cancel",
+            "outcome.ack",
+            "decision.resolve",
+        ] {
+            let r: Request =
+                serde_json::from_str(&format!(r#"{{"id":1,"method":"{m}",{p}}}"#)).unwrap();
+            assert!(r.call.surface().is_some(), "{m}");
+            assert_eq!(r.call.action().map(Action::name), Some(m), "{m}");
+        }
+        for m in [
+            "orchestrator.status",
+            "outcome.list",
+            "outcome.get",
+            "outcome.contract.get",
+            "plan.get",
+            "decision.list",
+            "evidence.get",
+            "events.subscribe",
+            "command.status",
+            "send",
+        ] {
+            let r: Result<Request, _> =
+                serde_json::from_str(&format!(r#"{{"id":1,"method":"{m}",{p}}}"#));
+            if let Ok(r) = r {
+                assert!(
+                    r.call.surface().is_none() && r.call.action().is_none(),
+                    "{m}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn requests_round_trip() {
         let r: Request =
             serde_json::from_str(r#"{"id":3,"method":"send","params":{"text":"hi"}}"#).unwrap();
@@ -821,6 +942,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(r.call.action(), Some(Action::ReviseContract));
         assert_eq!(serde_json::to_string(&r).unwrap(), revise);
         for drop in [r#""expected_revision":5,"#, r#","idempotency_key":"k""#] {
             assert!(

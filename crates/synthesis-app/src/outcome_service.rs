@@ -21,7 +21,21 @@ use synthesis_session::{
     Reader, SCHEMA_VERSION_OUTCOMES, SCHEMA_VERSION_SUPPORTED, Store, StoreOptions,
 };
 
+use synthesis_orchestrator::gateway::{audit, authorize};
+use synthesis_orchestrator::{Action, Principal};
+
 use crate::proto::{Call, CommandArgs, OutcomeCommand, PROTOCOL};
+
+/// The gateway's verdict on a call at the link. A denial is audited here as one stderr line of
+/// codes (no outcome row exists to chain it to; an allowed command is audited in the outcome's
+/// control session when the owner applies it).
+pub fn gateway_allows(p: Principal, a: Action) -> bool {
+    let ok = authorize(p, Some(a)).allow;
+    if !ok {
+        eprintln!("synt orchestrator: policy.decision {}", audit(p, Some(a)));
+    }
+    ok
+}
 
 /// Events per `events.subscribe` page.
 const EVENT_PAGE: usize = 200;
@@ -91,11 +105,21 @@ impl Service {
         if !self.enabled {
             return Err("outcomes are off (synt.orchestrator.enabled is false)".into());
         }
-        if !self.may_queue && call.surface().is_some() {
-            return Err(
-                "commands are accepted only on the orchestrator endpoint (this link is read-only)"
-                    .into(),
-            );
+        // the gateway is the one policy point: the stdio engine is the read-only principal and is
+        // denied every mutation; a surface principal is the one the endpoint link attached
+        if let Some(a) = call.action() {
+            let p = match call.surface() {
+                Some(s) if self.may_queue => Principal::User(s),
+                _ => Principal::Engine,
+            };
+            if !gateway_allows(p, a) {
+                return Err(if self.may_queue {
+                    "the owner's policy table does not allow this call".into()
+                } else {
+                    "commands are accepted only on the orchestrator endpoint (this link is read-only)"
+                        .into()
+                });
+            }
         }
         if !self.home.join("synt.db").is_file() {
             return Err("there is no session store yet".into());

@@ -19,6 +19,7 @@ use synthesis_session::Error as StoreError;
 use synthesis_session::outcome::{CommandRecord, CommandState, Effects, OutcomeWriter, Resolution};
 use time::OffsetDateTime;
 
+use crate::gateway::{Action, Principal, audit, authorize};
 use crate::planner::{Planner, make_plan, replan};
 use crate::sched::{Control, Decisions, SchedError};
 use crate::{DecisionDriver, current_binding_for};
@@ -31,6 +32,16 @@ pub fn apply_queued(
     DecisionDriver::default().drive(w, now)?;
     let mut done = vec![];
     for c in w.queued_commands(w.id())? {
+        if !matches!(
+            c.kind.as_str(),
+            "decision.resolve" | "outcome.contract.approve" | "outcome.contract.revise"
+        ) {
+            continue;
+        }
+        if let Some(rec) = refuse_unless_allowed(w, &c)? {
+            done.push(rec);
+            continue;
+        }
         let run = match c.kind.as_str() {
             "decision.resolve" => resolve(w, &c),
             "outcome.contract.approve" => approve(w, &c),
@@ -58,6 +69,36 @@ pub fn apply_queued(
     Ok(done)
 }
 
+/// The gateway's verdict on a queued command: the principal is the surface the endpoint link
+/// attached as when the row was queued, the action comes from the kind (an unknown kind is denied).
+fn gate(c: &CommandRecord) -> (Principal, Option<Action>) {
+    (Principal::User(c.from_surface), Action::parse(&c.kind))
+}
+
+/// Writes the command's `policy.decision` in the transaction that finishes it, so a replay (the
+/// row is no longer queued) never audits twice.
+fn audit_in(
+    tx: &mut synthesis_session::outcome::OutcomeTx<'_, '_>,
+    c: &CommandRecord,
+) -> Result<(), StoreError> {
+    let (p, a) = gate(c);
+    tx.emit(synthesis_events::outcome::POLICY_DECISION, audit(p, a))?;
+    Ok(())
+}
+
+/// The one policy point of the owner's commands: a command the gateway does not allow is finished
+/// `denied` (and audited) without being looked at.
+fn refuse_unless_allowed(
+    w: &mut OutcomeWriter,
+    c: &CommandRecord,
+) -> Result<Option<CommandRecord>, StoreError> {
+    let (p, a) = gate(c);
+    if authorize(p, a).allow {
+        return Ok(None);
+    }
+    deny(w, c, "this principal may not do this").map(Some)
+}
+
 /// A refusal that changed nothing: any validation error of the store, mapped to `denied`.
 fn refused(e: &StoreError) -> bool {
     matches!(e, StoreError::Invalid(_) | StoreError::InvalidTransition(_))
@@ -69,7 +110,10 @@ fn finish(
     state: CommandState,
     body: Value,
 ) -> Result<CommandRecord, StoreError> {
-    w.apply_command(&c.idempotency_key, |_, _| Ok((state, body.clone())))
+    w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
+        Ok((state, body.clone()))
+    })
 }
 
 fn deny(
@@ -117,6 +161,7 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
         return deny(w, c, "the decision has no work item binding");
     };
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
         let to = tx.resolve_decision(&r, &current)?;
         let mut body =
             json!({"decision_id": r.decision_id, "state": to, "revision": r.decision_revision + 1});
@@ -153,6 +198,7 @@ fn approve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
     let surface = json!(c.from_surface);
     let approver = format!("user:{}", surface.as_str().unwrap_or("unknown"));
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
         tx.approve_contract(version, hash, &approver)?;
         Ok((CommandState::Applied, json!({"version": version})))
     });
@@ -181,6 +227,7 @@ fn revise(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, Sto
         return deny(w, c, "revising needs the outcome revision you saw");
     };
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
         let (version, hash) = tx.revise_contract(rev, contract.clone())?;
         Ok((
             CommandState::Applied,
@@ -230,6 +277,10 @@ pub fn apply_lifecycle(
             kind,
             "outcome.start" | "outcome.pause" | "outcome.resume" | "outcome.cancel" | "outcome.ack"
         ) {
+            continue;
+        }
+        if let Some(rec) = refuse_unless_allowed(w, &c)? {
+            done.push(rec);
             continue;
         }
         let o = w.get_outcome(w.id())?;
@@ -301,6 +352,7 @@ fn marker(
 ) -> Result<Step, StoreError> {
     // the command and the marker event are one transaction
     w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
         tx.emit(kind, json!({}))?;
         Ok((CommandState::Applied, body.clone()))
     })?;

@@ -131,3 +131,8 @@ Design: `docs/specs/orchestrator-remaining-backend.md` (O11, O12, O13). Everythi
 - **CLI.** `synt outcome revise OUTCOME --contract-file F [--expected-revision N]` queues the revision (default revision: the outcome's now), prints the server's diff with a `WARNING:` block when the revision widens the scope or lowers the bar, then the `Approve: synt outcome approve OUTCOME --version N --hash H` line. It approves nothing. Refused on native Windows like every mutating command. `--json` carries `version`, `hash`, `diff`, `widens_scope`.
 - **Reply text.** The `decision.resolve` result for `edit_scope` carries a `note` that says what happens next (revise, read the diff, approve that version and hash; until then the approved contract stays in force).
 - Details of the store, the rebind and the races: ADR-019 (B4).
+
+## Implementation notes (B5: gateway at the endpoint)
+
+- **No protocol change** (`PROTOCOL` stays 4). The principal of a call is the surface the link attached as (or `engine` for the stdio server), never a param: a mutating call that names another surface is refused as before, and the gateway table (ADR-019 B5 notes) then decides. Every mutating `Call` variant maps to a gateway action (`Call::action()`, exhaustive; test `every_mutating_call_maps_to_a_gateway_action_named_like_its_method`). Allowed and finished commands are audited in the control session; link-level denials are a stderr line of codes. Not a security boundary against a same-user process holding `run/orch.key`.
+- **Gateway.** `outcome.contract.revise` maps to the gateway action `outcome.contract.revise` (person only, audited); see ADR-019 (B4 review fixes).

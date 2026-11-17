@@ -48,8 +48,10 @@ use time::format_description::well_known::Rfc3339;
 use crate::notify::{Notifier, outcome_payload};
 use crate::orch_endpoint::{self as ep, Ctx, Job};
 use crate::outcome_policy::{DISCLOSURE_ID, INTEGRITY_DISCLOSURE, outcome_policy};
-use crate::outcome_service::settings_of;
+use crate::outcome_service::{gateway_allows, settings_of};
 use crate::proto::{Call, DecisionHint};
+use synthesis_orchestrator::gateway::audit;
+use synthesis_orchestrator::{Action, Principal};
 
 /// Pause between cycles of the owner loop (a job wakes it earlier).
 const TICK: Duration = Duration::from_millis(500);
@@ -70,6 +72,9 @@ const KINDS: [&str; 8] = [
     "outcome.cancel",
     "outcome.ack",
 ];
+
+/// Failed replans of one revised contract after which the owner lets the outcome go (about 5 steps).
+const MAX_REPLAN_FAILURES: u32 = 5;
 
 fn s<E: ToString>(e: E) -> String {
     e.to_string()
@@ -133,6 +138,8 @@ pub struct Owner<'a> {
     push: Option<tokio::sync::broadcast::Sender<DecisionHint>>,
     /// `(idempotency key, request fingerprint, reply)` of the latest creates, oldest first.
     created: VecDeque<(String, String, Value)>,
+    /// `(outcome, contract version)` -> failed replans of a revised contract (this process only).
+    replan_failed: BTreeMap<(String, u32), u32>,
     #[cfg(feature = "test-provider")]
     pub test: TestHooks,
 }
@@ -176,6 +183,7 @@ impl<'a> Owner<'a> {
             notifier,
             push: None,
             created: VecDeque::new(),
+            replan_failed: BTreeMap::new(),
             #[cfg(feature = "test-provider")]
             test: TestHooks::default(),
         }
@@ -201,7 +209,8 @@ impl<'a> Owner<'a> {
                 || !(active
                     || has_work(&r, &o.id).map_err(s)?
                     || awaiting_rebrief(&r, &o.id).unwrap_or(false)
-                    || awaiting_replan(&r, &o.id).unwrap_or(false))
+                    || (awaiting_replan(&r, &o.id).unwrap_or(false)
+                        && !self.replan_given_up(&id, o.contract_version)))
             {
                 continue;
             }
@@ -291,6 +300,52 @@ impl<'a> Owner<'a> {
         }
     }
 
+    fn replan_given_up(&self, id: &str, version: u32) -> bool {
+        self.replan_failed
+            .get(&(id.to_string(), version))
+            .is_some_and(|n| *n >= MAX_REPLAN_FAILURES)
+    }
+
+    /// Stores the plan of a rebound contract. A failure is logged and audited once per (outcome,
+    /// contract version) as `outcome.replan_failed`; after `MAX_REPLAN_FAILURES` tries in a row the
+    /// owner lets the outcome go: it stays `blocked` (a new `outcome revise` is queued as any command
+    /// and is adopted again), and this process does not adopt it again for that version (a restart
+    /// tries again).
+    fn replan(&mut self, ow: &mut Owned<'a>, id: &str) {
+        let key = (
+            id.to_string(),
+            ow.w.get_outcome(ow.w.id())
+                .map_or(0, |o| o.contract_version),
+        );
+        if self.replan_given_up(id, key.1) {
+            return;
+        }
+        match replan_after_revise(&mut ow.w, &StubPlanner) {
+            Ok(_) => {
+                self.replan_failed.remove(&key);
+            }
+            Err(e) => {
+                let n = self.replan_failed.entry(key.clone()).or_insert(0);
+                *n += 1;
+                if *n == 1 || *n == MAX_REPLAN_FAILURES {
+                    log(&format!(
+                        "outcome {id}: replan of contract v{} failed (try {n}): {e}",
+                        key.1
+                    ));
+                    let fact = json!({"contract_version": key.1, "tries": *n,
+                        "gave_up": *n >= MAX_REPLAN_FAILURES, "reason": e.to_string()});
+                    if let Err(x) =
+                        ow.w.atomically(|tx| tx.emit("outcome.replan_failed", fact.clone()))
+                    {
+                        log(&format!(
+                            "outcome {id}: cannot record the failed replan: {x}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns whether the outcome stays owned.
     fn step(&mut self, ow: &mut Owned<'a>, pol: &OutcomePolicy) -> bool {
         let now = OffsetDateTime::now_utc();
@@ -302,9 +357,7 @@ impl<'a> Owner<'a> {
             log(&format!("outcome {id}: commands: {e}"));
         }
         // a revised contract was approved: its plan is stored and the outcome runs again (retried each step until it works)
-        if let Err(e) = replan_after_revise(&mut ow.w, &StubPlanner) {
-            log(&format!("outcome {id}: replan: {e}"));
-        }
+        self.replan(ow, &id);
         let Ok(mut o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
@@ -403,7 +456,8 @@ impl<'a> Owner<'a> {
             || has_work(&ow.w, ow.w.id()).unwrap_or(true)
             // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
             || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false)
-            || awaiting_replan(&ow.w, ow.w.id()).unwrap_or(false);
+            || (awaiting_replan(&ow.w, ow.w.id()).unwrap_or(false)
+                && !self.replan_given_up(&id, o.contract_version));
         if !keep {
             if let Some(sc) = ow.sched.as_mut() {
                 sc.shutdown(&mut ow.w, "the outcome is no longer running");
@@ -532,6 +586,15 @@ impl<'a> Owner<'a> {
 
     /// The calls that need the owner itself: they take control-session locks.
     pub fn job(&mut self, call: Call, pol: &OutcomePolicy) -> Result<Value, String> {
+        // the endpoint verified the call's surface is the link's; the gateway decides here again
+        // (defence in depth) and writes the allowed create into the new outcome's chain
+        let by = call
+            .surface()
+            .map(Principal::User)
+            .unwrap_or(Principal::Engine);
+        if !call.action().is_some_and(|a| gateway_allows(by, a)) {
+            return Err("the owner's policy table does not allow this call".into());
+        }
         match call {
             Call::OutcomeCreate {
                 workspace,
@@ -539,7 +602,7 @@ impl<'a> Owner<'a> {
                 contract,
                 idempotency_key,
                 ..
-            } => self.create(&workspace, base_commit, &contract, idempotency_key, pol),
+            } => self.create(&workspace, base_commit, &contract, idempotency_key, pol, by),
             Call::OrchestratorEnable { .. } => self.enable(pol),
             _ => Err("not an owner call".into()),
         }
@@ -555,9 +618,10 @@ impl<'a> Owner<'a> {
         contract: &Contract,
         key: Option<String>,
         pol: &OutcomePolicy,
+        by: Principal,
     ) -> Result<Value, String> {
         let Some(key) = key else {
-            return self.make(workspace, base_commit, contract, pol);
+            return self.make(workspace, base_commit, contract, pol, by);
         };
         if !(8..=128).contains(&key.len())
             || !key
@@ -579,7 +643,7 @@ impl<'a> Owner<'a> {
                 Err("the idempotency key was already used by a different request".into())
             };
         }
-        let reply = self.make(workspace, base_commit, contract, pol)?;
+        let reply = self.make(workspace, base_commit, contract, pol, by)?;
         if self.created.len() >= KEPT_CREATES {
             self.created.pop_front();
         }
@@ -593,6 +657,7 @@ impl<'a> Owner<'a> {
         base_commit: String,
         contract: &Contract,
         pol: &OutcomePolicy,
+        by: Principal,
     ) -> Result<Value, String> {
         if !commit_id(&base_commit) {
             return Err("base_commit must be a full lowercase commit id".into());
@@ -627,6 +692,9 @@ impl<'a> Owner<'a> {
             &Effects::default(),
         )
         .map_err(s)?;
+        let a = audit(by, Some(Action::CreateOutcome));
+        w.audit_policy("outcome.create", "allow", a["detail"].clone())
+            .map_err(s)?;
         let (_, hash, _) = w.get_contract(w.id(), contract.version).map_err(s)?;
         Ok(
             json!({"id": w.id(), "state": "contract_pending", "contract_version": contract.version,

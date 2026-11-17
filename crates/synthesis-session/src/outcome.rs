@@ -409,6 +409,9 @@ fn outbox_row(r: &Row<'_>) -> rusqlite::Result<OutboxRecord> {
     })
 }
 
+/// Most unapproved revisions of one outcome (each `outcome.contract.revise` stores a row).
+const MAX_CONTRACT_DRAFTS: i64 = 20;
+
 // -------------------------------------------------------------------- reading
 
 impl Reader {
@@ -2869,6 +2872,16 @@ impl OutcomeTx<'_, '_> {
             [self.id.as_str()],
             |r| r.get(0),
         )?;
+        let drafts: i64 = self.et.tx.query_row(
+            "SELECT COUNT(*) FROM contracts WHERE outcome_id=?1 AND version>?2 AND approved_at IS NULL",
+            params![self.id.as_str(), o.contract_version],
+            |r| r.get(0),
+        )?;
+        if drafts >= MAX_CONTRACT_DRAFTS {
+            return Err(Error::Invalid(format!(
+                "{MAX_CONTRACT_DRAFTS} revisions wait for approval: approve the newest or cancel the outcome"
+            )));
+        }
         contract.version = newest + 1;
         let current = self.stored_contract(o.contract_version)?;
         if diff_contracts(&current, &contract).changes.is_empty() {

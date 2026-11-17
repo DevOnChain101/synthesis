@@ -527,3 +527,49 @@ fn the_rebind_event_says_whether_the_scope_widened() {
         );
     }
 }
+
+#[test]
+fn unapproved_revisions_are_capped_per_outcome() {
+    need_git!();
+    let r = rig();
+    let mut b = blocked(&r);
+    for i in 0..20 {
+        let mut c = contract();
+        c.envelope.budgets.max_cost_usd = 6.0 + f64::from(i);
+        assert_eq!(
+            revise(&r, &mut b.w, &format!("rev-{i}"), &c).state,
+            CommandState::Applied,
+            "{i}"
+        );
+    }
+    let mut c = contract();
+    c.envelope.budgets.max_cost_usd = 99.0;
+    let d = revise(&r, &mut b.w, "rev-over", &c);
+    assert_eq!(d.state, CommandState::Denied);
+    assert!(
+        d.result.as_ref().unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("wait for approval")
+    );
+}
+
+#[test]
+fn the_gateway_allows_a_revision_to_a_person_only_and_audits_it() {
+    need_git!();
+    use synthesis_events::Record;
+    let r = rig();
+    let mut b = blocked(&r);
+    let w = &mut b.w;
+    assert_eq!(
+        revise(&r, w, "rev-1", &widened()).state,
+        CommandState::Applied
+    );
+    let audited = w
+        .read_events(w.control_session_id(), 0, 5000)
+        .unwrap()
+        .into_iter()
+        .any(|e| matches!(e, Record::Unknown(raw) if raw.kind == "policy.decision"
+            && raw.payload["action"] == "outcome.contract.revise" && raw.payload["result"] == "allow"));
+    assert!(audited);
+}

@@ -12,6 +12,7 @@ mod alloc;
 mod commands;
 mod decision;
 mod envelope;
+pub mod gateway;
 mod gitsafe;
 mod grants;
 mod host;
@@ -30,6 +31,7 @@ pub use commands::{
 };
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
+pub use gateway::{Action, Principal};
 pub use gitsafe::{
     ChangeReport, DIFF_MAX_FILE_PATCH, DIFF_MAX_FILES, DIFF_MAX_PATCH, DiffFile, DiffReport, Entry,
     Scratch, change_flags, changed_files, commit_diff, file_edits, fresh_checkout, inspect_change,

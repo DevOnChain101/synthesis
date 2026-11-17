@@ -51,8 +51,24 @@ fn limit_up<T: PartialOrd>(old: Option<T>, new: Option<T>) -> bool {
     }
 }
 
-/// `old` is the approved contract, `new` the revision. The version numbers are not compared.
+/// `old` is the approved contract, `new` the revision. The version numbers are not compared. Every
+/// field of `Contract` and its parts is destructured WITHOUT `..`: a field added later does not
+/// compile until the diff says what to do with it.
 pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
+    let Contract {
+        version: _,
+        goal: og,
+        criteria: oc,
+        envelope: oe,
+        checks: oh,
+    } = old;
+    let Contract {
+        version: _,
+        goal: ng,
+        criteria: nc,
+        envelope: ne,
+        checks: nh,
+    } = new;
     let mut d = ContractDiff::default();
     let put = |d: &mut ContractDiff, area, key: &str, o: Option<String>, n: Option<String>| {
         if o != n {
@@ -64,18 +80,14 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
             });
         }
     };
-    put(
-        &mut d,
-        "goal",
-        "",
-        Some(old.goal.clone()),
-        Some(new.goal.clone()),
-    );
+    put(&mut d, "goal", "", Some(og.clone()), Some(ng.clone()));
 
-    fn by(c: &Contract) -> BTreeMap<&str, &super::ContractCriterion> {
-        c.criteria.iter().map(|k| (k.id.as_str(), k)).collect()
-    }
-    let (oc, nc) = (by(old), by(new));
+    let by = |v: &[super::ContractCriterion]| {
+        v.iter()
+            .map(|k| (k.id.clone(), k.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let (oc, nc) = (by(oc), by(nc));
     for id in oc.keys().chain(nc.keys()).collect::<BTreeSet<_>>() {
         match (oc.get(id), nc.get(id)) {
             (Some(o), None) => {
@@ -84,58 +96,93 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
             }
             (None, Some(n)) => put(&mut d, "criteria", id, None, Some(n.text.clone())),
             (Some(o), Some(n)) => {
+                let super::ContractCriterion {
+                    id: _,
+                    text: ot,
+                    mandatory: om,
+                    manual: oman,
+                    required_trust: ot_trust,
+                    check_ids: ocheck,
+                } = o;
+                let super::ContractCriterion {
+                    id: _,
+                    text: nt,
+                    mandatory: nm,
+                    manual: nman,
+                    required_trust: nt_trust,
+                    check_ids: ncheck,
+                } = n;
                 let f = |field: &str| format!("{id}.{field}");
                 put(
                     &mut d,
                     "criteria",
                     &f("text"),
-                    Some(o.text.clone()),
-                    Some(n.text.clone()),
+                    Some(ot.clone()),
+                    Some(nt.clone()),
                 );
                 put(
                     &mut d,
                     "criteria",
                     &f("mandatory"),
-                    Some(o.mandatory.to_string()),
-                    Some(n.mandatory.to_string()),
+                    Some(om.to_string()),
+                    Some(nm.to_string()),
                 );
                 put(
                     &mut d,
                     "criteria",
                     &f("manual"),
-                    Some(o.manual.to_string()),
-                    Some(n.manual.to_string()),
+                    Some(oman.to_string()),
+                    Some(nman.to_string()),
                 );
                 put(
                     &mut d,
                     "criteria",
                     &f("required_trust"),
-                    Some(format!("{:?}", o.required_trust)),
-                    Some(format!("{:?}", n.required_trust)),
+                    Some(format!("{ot_trust:?}")),
+                    Some(format!("{nt_trust:?}")),
                 );
                 put(
                     &mut d,
                     "criteria",
                     &f("check_ids"),
-                    Some(o.check_ids.join(",")),
-                    Some(n.check_ids.join(",")),
+                    Some(ocheck.join(",")),
+                    Some(ncheck.join(",")),
                 );
-                if o.mandatory && !n.mandatory {
+                if ot != nt {
+                    d.weakens.push(format!(
+                        "criterion {id} text changed (what counts as done may differ)"
+                    ));
+                }
+                if *om && !*nm {
                     d.weakens
                         .push(format!("criterion {id} is no longer mandatory"));
+                }
+                if *oman && !*nman {
+                    d.weakens
+                        .push(format!("criterion {id} no longer needs a person's review"));
+                }
+                if nt_trust < ot_trust {
+                    d.weakens
+                        .push(format!("criterion {id} accepts weaker evidence"));
+                }
+                if ocheck.iter().any(|c| !ncheck.contains(c)) {
+                    d.weakens
+                        .push(format!("criterion {id} is checked by fewer checks"));
                 }
             }
             (None, None) => {}
         }
     }
 
-    fn ch(c: &Contract) -> BTreeMap<&str, String> {
-        c.checks
-            .iter()
-            .map(|k| (k.id.as_str(), k.command.clone()))
-            .collect()
-    }
-    let (oh, nh) = (ch(old), ch(new));
+    let ch = |v: &[super::ContractCheck]| {
+        v.iter()
+            .map(|k| {
+                let super::ContractCheck { id, command } = k;
+                (id.clone(), command.clone())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let (oh, nh) = (ch(oh), ch(nh));
     for id in oh.keys().chain(nh.keys()).collect::<BTreeSet<_>>() {
         put(
             &mut d,
@@ -144,12 +191,52 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
             oh.get(id).cloned(),
             nh.get(id).cloned(),
         );
-        if !nh.contains_key(id) {
-            d.weakens.push(format!("check {id} removed"));
+        match (oh.get(id), nh.get(id)) {
+            (Some(_), None) => d.weakens.push(format!("check {id} removed")),
+            // a check command runs on the independent runner: a new or changed one is a new thing
+            // that runs, and a swapped command can make a check pass that did not
+            (None, Some(_)) => d
+                .widens
+                .push(format!("check {id} added (a new command runs)")),
+            (Some(o), Some(n)) if o != n => {
+                d.widens.push(format!(
+                    "check {id} command changed (a different command runs)"
+                ));
+                d.weakens
+                    .push(format!("check {id} command changed (it may check less)"));
+            }
+            _ => {}
         }
     }
 
-    let (ob, nb) = (&old.envelope.budgets, &new.envelope.budgets);
+    let super::Envelope {
+        allowed_paths: oa,
+        denied_paths: od,
+        capabilities: _,
+        budgets: ob,
+        quality_gates: og2,
+    } = oe;
+    let super::Envelope {
+        allowed_paths: na,
+        denied_paths: nd,
+        capabilities: _,
+        budgets: nb,
+        quality_gates: ng2,
+    } = ne;
+    let super::Budgets {
+        max_cost_usd: oco,
+        max_parallel_workers: opw,
+        max_attempts_per_work_item: oat,
+        attempt_max_cost_usd: oac,
+        attempt_max_wall_secs: oaw,
+    } = ob;
+    let super::Budgets {
+        max_cost_usd: nco,
+        max_parallel_workers: npw,
+        max_attempts_per_work_item: nat,
+        attempt_max_cost_usd: nac,
+        attempt_max_wall_secs: naw,
+    } = nb;
     let budget =
         |d: &mut ContractDiff, name: &str, o: Option<String>, n: Option<String>, up: bool| {
             put(d, "budgets", name, o, n);
@@ -157,48 +244,36 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
                 d.widens.push(format!("budget {name} is raised or removed"));
             }
         };
-    budget(
-        &mut d,
-        "max_cost_usd",
-        Some(ob.max_cost_usd.to_string()),
-        Some(nb.max_cost_usd.to_string()),
-        nb.max_cost_usd > ob.max_cost_usd,
-    );
-    budget(
-        &mut d,
-        "max_parallel_workers",
-        Some(ob.max_parallel_workers.to_string()),
-        Some(nb.max_parallel_workers.to_string()),
-        nb.max_parallel_workers > ob.max_parallel_workers,
-    );
+    let s = |v: &dyn std::fmt::Display| Some(v.to_string());
+    budget(&mut d, "max_cost_usd", s(oco), s(nco), nco > oco);
+    budget(&mut d, "max_parallel_workers", s(opw), s(npw), npw > opw);
     budget(
         &mut d,
         "max_attempts_per_work_item",
-        Some(ob.max_attempts_per_work_item.to_string()),
-        Some(nb.max_attempts_per_work_item.to_string()),
-        nb.max_attempts_per_work_item > ob.max_attempts_per_work_item,
+        s(oat),
+        s(nat),
+        nat > oat,
     );
     budget(
         &mut d,
         "attempt_max_cost_usd",
-        ob.attempt_max_cost_usd.map(|v| v.to_string()),
-        nb.attempt_max_cost_usd.map(|v| v.to_string()),
-        limit_up(ob.attempt_max_cost_usd, nb.attempt_max_cost_usd),
+        oac.map(|v| v.to_string()),
+        nac.map(|v| v.to_string()),
+        limit_up(*oac, *nac),
     );
     budget(
         &mut d,
         "attempt_max_wall_secs",
-        ob.attempt_max_wall_secs.map(|v| v.to_string()),
-        nb.attempt_max_wall_secs.map(|v| v.to_string()),
-        limit_up(ob.attempt_max_wall_secs, nb.attempt_max_wall_secs),
+        oaw.map(|v| v.to_string()),
+        naw.map(|v| v.to_string()),
+        limit_up(*oaw, *naw),
     );
 
-    let (oe, ne) = (&old.envelope, &new.envelope);
     // a pattern added to the allowed paths, or taken off the denied ones, gives more room (a pattern
     // that happens to be narrower is still reported: no glob algebra here)
     for (area, o, n, widen_on_add) in [
-        ("allowed_paths", &oe.allowed_paths, &ne.allowed_paths, true),
-        ("denied_paths", &oe.denied_paths, &ne.denied_paths, false),
+        ("allowed_paths", oa, na, true),
+        ("denied_paths", od, nd, false),
     ] {
         let (o, n): (BTreeSet<_>, BTreeSet<_>) = (o.iter().collect(), n.iter().collect());
         for p in n.difference(&o) {
@@ -232,14 +307,11 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
             ));
         }
     }
-    let (og, ng): (BTreeSet<_>, BTreeSet<_>) = (
-        oe.quality_gates.iter().collect(),
-        ne.quality_gates.iter().collect(),
-    );
-    for g in ng.difference(&og) {
+    let (og2, ng2): (BTreeSet<_>, BTreeSet<_>) = (og2.iter().collect(), ng2.iter().collect());
+    for g in ng2.difference(&og2) {
         put(&mut d, "quality_gates", g, None, Some("added".into()));
     }
-    for g in og.difference(&ng) {
+    for g in og2.difference(&ng2) {
         put(&mut d, "quality_gates", g, Some("removed".into()), None);
         d.weakens.push(format!("quality gate {g} removed"));
     }
@@ -249,6 +321,7 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
 #[cfg(test)]
 mod tests {
     use super::super::contract::fixtures::contract;
+    use super::super::{ContractCheck, TrustClass};
     use super::*;
 
     #[test]
@@ -321,5 +394,96 @@ mod tests {
         let d = diff_contracts(&a, &b);
         assert!(d.widens.iter().any(|x| x.contains("attempt_max_wall_secs")));
         assert_eq!(d.weakens.len(), 2, "{:?}", d.weakens);
+    }
+
+    #[test]
+    fn a_swapped_or_new_check_a_lowered_trust_and_fewer_checks_are_flagged() {
+        let mut a = contract(&["c1", "c2"]);
+        a.checks = vec![ContractCheck {
+            id: "t".into(),
+            command: "cargo test".into(),
+        }];
+        a.criteria[0].check_ids = vec!["t".into()];
+        a.criteria[1].manual = true;
+        a.criteria[1].required_trust = TrustClass::HumanReview;
+        let any = |v: &[String], w: &str| v.iter().any(|x| x.contains(w));
+
+        let mut b = a.clone();
+        b.checks[0].command = "true".into();
+        let d = diff_contracts(&a, &b);
+        assert!(
+            any(&d.widens, "check t command changed") && any(&d.weakens, "check t command changed")
+        );
+
+        let mut b = a.clone();
+        b.checks.push(ContractCheck {
+            id: "u".into(),
+            command: "make".into(),
+        });
+        assert!(any(&diff_contracts(&a, &b).widens, "check u added"));
+
+        let mut b = a.clone();
+        b.criteria[0].check_ids.clear();
+        assert!(any(&diff_contracts(&a, &b).weakens, "fewer checks"));
+
+        let mut b = a.clone();
+        b.criteria[1].required_trust = TrustClass::ObservedInAttempt;
+        assert!(any(&diff_contracts(&a, &b).weakens, "weaker evidence"));
+
+        let mut b = a.clone();
+        b.criteria[1].manual = false;
+        assert!(any(&diff_contracts(&a, &b).weakens, "person's review"));
+
+        let mut b = a.clone();
+        b.criteria[0].text = "something easier".into();
+        assert!(any(&diff_contracts(&a, &b).weakens, "text changed"));
+    }
+
+    /// Every field of the contract and its parts is read by `diff_contracts` through a destructuring
+    /// without `..` (a new field does not compile until classified); this checks that each field the
+    /// serialised contract has today moves the diff when changed.
+    #[test]
+    fn every_serialised_field_moves_the_diff() {
+        let mut base = contract(&["c1"]);
+        base.checks = vec![ContractCheck {
+            id: "t".into(),
+            command: "x".into(),
+        }];
+        base.envelope.quality_gates = vec!["g".into()];
+        base.envelope.budgets.attempt_max_cost_usd = Some(1.0);
+        base.envelope.budgets.attempt_max_wall_secs = Some(10);
+        let v = serde_json::to_value(&base).unwrap();
+        fn paths(v: &serde_json::Value, at: String, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => m
+                    .iter()
+                    .for_each(|(k, x)| paths(x, format!("{at}/{k}"), out)),
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, x)| paths(x, format!("{at}/{i}"), out)),
+                _ => out.push(at),
+            }
+        }
+        let mut leaves = vec![];
+        paths(&v, String::new(), &mut leaves);
+        for p in leaves.iter().filter(|p| *p != "/version") {
+            let orig = v.pointer(p).unwrap().clone();
+            let changed = match &orig {
+                serde_json::Value::String(s) => serde_json::json!(format!("{s}x")),
+                serde_json::Value::Bool(b) => serde_json::json!(!b),
+                serde_json::Value::Number(_) => serde_json::json!(orig.as_f64().unwrap() + 1.0),
+                o => o.clone(),
+            };
+            let mut w = v.clone();
+            *w.pointer_mut(p).unwrap() = changed;
+            let Ok(other) = serde_json::from_value::<Contract>(w) else {
+                continue;
+            };
+            assert!(
+                !diff_contracts(&base, &other).changes.is_empty(),
+                "{p} does not move the diff"
+            );
+        }
     }
 }

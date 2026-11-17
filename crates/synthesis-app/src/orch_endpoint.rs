@@ -22,8 +22,9 @@ use synthesis_peers::{Key, endpoint_ok, load_or_create_named_key, run_dir, write
 use synthesis_session::outcome::Surface;
 
 use crate::outcome_client::{ClientError, Transport};
-use crate::outcome_service::{Service, settings_of};
+use crate::outcome_service::{Service, gateway_allows, settings_of};
 use crate::proto::{Call, DecisionHint, Out, PROTOCOL, Request, VERSION};
+use synthesis_orchestrator::Principal;
 
 pub const KEY_FILE: &str = "orch.key";
 pub const REGISTRY_FILE: &str = "orch.json";
@@ -200,6 +201,11 @@ pub async fn dispatch(ctx: &Ctx, attached: Surface, call: Call) -> Result<Value,
     }
     if call.surface().is_some_and(|s| s != attached) {
         return Err("the call names another surface than the one this link attached as".into());
+    }
+    if let Some(a) = call.action()
+        && !gateway_allows(Principal::User(attached), a)
+    {
+        return Err("the owner's policy table does not allow this call".into());
     }
     if matches!(
         call,
