@@ -9,7 +9,8 @@ import AppKit
 let src = "design/01-brand/app-icons/synthesis-logo-transparent-1024.png"
 let out = "apps/desktop/assets/icons/synthesis.icns"
 let bodyFraction = 896.0 / 1024.0   // Apple template body
-let squircleExponent = 5.0          // superellipse |x|^n + |y|^n = 1: continuous corners like Apple's icon shape
+let cornerFraction = 0.225          // corner radius / body
+let cornerSmoothing = 0.6           // Figma-style corner smoothing (0 = circular arc): G2-continuous blend into the straight edges
 let gradientTop: UInt32 = 0x3A3F47
 let gradientBottom: UInt32 = 0x14161A
 // Depth, in px at 1024 (scaled with the icon). Below depthMinPx the effects would only muddy the icon, so they are skipped.
@@ -32,13 +33,32 @@ let cs = CGColorSpace(name: CGColorSpace.sRGB)!
 func hex(_ h: UInt32) -> CGColor { CGColor(srgbRed: CGFloat((h >> 16) & 255) / 255, green: CGFloat((h >> 8) & 255) / 255, blue: CGFloat(h & 255) / 255, alpha: 1) }
 let gradient = CGGradient(colorsSpace: cs, colors: [hex(gradientTop), hex(gradientBottom)] as CFArray, locations: [0, 1])!
 func tint(_ white: CGFloat, _ a: Double) -> CGColor { CGColor(srgbRed: white, green: white, blue: white, alpha: a) }
+// Rounded rect with smoothed (continuous) corners, after the Figma corner-smoothing construction: each corner is two
+// cubic Beziers plus a small circular arc, starting (1 + smoothing) * radius from the corner; the edges stay straight.
 func squircle(_ r: CGRect) -> CGPath {
-    let path = CGMutablePath(), steps = 720, e = 2 / squircleExponent
-    for i in 0..<steps {
-        let t = Double(i) / Double(steps) * 2 * Double.pi, c = cos(t), s = sin(t)
-        let dx: Double = (c < 0 ? -1 : 1) * pow(abs(c), e), dy: Double = (s < 0 ? -1 : 1) * pow(abs(s), e)
-        let pt = CGPoint(x: Double(r.midX) + Double(r.width) / 2 * dx, y: Double(r.midY) + Double(r.height) / 2 * dy)
-        if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+    let rad = Double(r.width) * cornerFraction, sm = cornerSmoothing
+    let p = (1 + sm) * rad
+    let theta = (.pi / 2) * (1 - sm)                      // angle of the circular arc
+    let arcLen = sin(theta / 2) * rad * 2.0.squareRoot()  // chord of that arc
+    let beta = (.pi / 4) * sm
+    let c = rad * tan((.pi / 2 - theta) / 4) * cos(beta), d = c * tan(beta)
+    let b = (p - arcLen - c - d) / 3, a = 2 * b
+    let k = 4.0 / 3.0 * tan(theta / 4) * rad              // cubic control length for the arc
+    let t0 = (x: -cos(beta), y: sin(beta)), t1 = (x: -sin(beta), y: cos(beta))
+    // corner in a local frame: origin at the corner, x along the incoming edge (away from the corner), y inward
+    let p0 = (x: p - a - b - c, y: d), p3 = (x: p - a - b - c - arcLen, y: d + arcLen)
+    let local: [(Double, Double)] = [(p - a, 0), (p - a - b, 0), (p0.x, p0.y),
+        (p0.x + k * t0.x, p0.y + k * t0.y), (p3.x - k * t1.x, p3.y - k * t1.y), (p3.x, p3.y),
+        (p3.x - d, p3.y + c), (p3.x - d, p3.y + b + c), (0, p)]
+    let (x0, x1, y0, y1) = (Double(r.minX), Double(r.maxX), Double(r.minY), Double(r.maxY))
+    let maps: [((Double, Double)) -> CGPoint] = [   // clockwise from the top-right corner
+        { CGPoint(x: x1 - $0.0, y: y1 - $0.1) }, { CGPoint(x: x1 - $0.1, y: y0 + $0.0) },
+        { CGPoint(x: x0 + $0.0, y: y0 + $0.1) }, { CGPoint(x: x0 + $0.1, y: y1 - $0.0) }]
+    let path = CGMutablePath()
+    for (i, m) in maps.enumerated() {
+        let start = m((p, 0))
+        if i == 0 { path.move(to: start) } else { path.addLine(to: start) }
+        for j in stride(from: 0, to: local.count, by: 3) { path.addCurve(to: m(local[j + 2]), control1: m(local[j]), control2: m(local[j + 1])) }
     }
     path.closeSubpath()
     return path
