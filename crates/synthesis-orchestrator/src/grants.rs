@@ -72,7 +72,7 @@ pub(crate) fn plan_binding(w: &OutcomeWriter, action_hash: &str) -> Result<Value
     }))
 }
 
-/// [`plan_binding`] with the action hash the decision stores.
+/// `plan_binding` with the action hash the decision stores.
 pub fn plan_binding_for(w: &OutcomeWriter, d: &DecisionRecord) -> Result<Value, StoreError> {
     plan_binding(
         w,

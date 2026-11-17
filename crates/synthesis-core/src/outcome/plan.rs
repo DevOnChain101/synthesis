@@ -17,6 +17,25 @@ pub const MAX_PLAN_ITEMS: usize = 256;
 /// A plan as JSON (from a planner that is a model, later) is never larger than this.
 pub const MAX_PLAN_JSON_BYTES: usize = 256 * 1024;
 
+/// Characters that draw nothing but blank space, which `hidden_char` leaves out (the set of
+/// `synthesis_config::is_invisible_or_blank`, which core cannot depend on): NBSP, the Unicode
+/// space separators, the Arabic number signs, the Braille blank.
+fn blank_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{a0}'
+            | '\u{600}'..='\u{605}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{2800}'
+            | '\u{3000}'
+    )
+}
+
 /// Longest `PlanItem::title` and `PlanItem::instructions`, in characters.
 pub const MAX_TITLE_CHARS: usize = 120;
 pub const MAX_INSTRUCTIONS_CHARS: usize = 2_000;
@@ -256,9 +275,9 @@ pub fn validate_plan(plan: &Plan, contract: &Contract) -> Result<ValidPlan, Plan
         }
         let text_ok = |t: &str, max: usize, multiline: bool| {
             t.chars().count() <= max
-                && !t
-                    .chars()
-                    .any(|c| hidden_char(c) && !(multiline && matches!(c, '\n' | '\t')))
+                && !t.chars().any(|c| {
+                    (hidden_char(c) || blank_char(c)) && !(multiline && matches!(c, '\n' | '\t'))
+                })
         };
         if !text_ok(&it.title, MAX_TITLE_CHARS, false)
             || !text_ok(&it.instructions, MAX_INSTRUCTIONS_CHARS, true)
@@ -977,6 +996,9 @@ mod tests {
             ("x".repeat(MAX_TITLE_CHARS + 1), String::new()),
             ("two\nlines".into(), String::new()),
             ("a\u{202e}b".into(), String::new()),
+            ("a\u{a0}b".into(), String::new()),
+            (String::new(), "a\u{1680}b".into()),
+            (String::new(), "a\u{3000}b".into()),
             (String::new(), "x".repeat(MAX_INSTRUCTIONS_CHARS + 1)),
             (String::new(), "a\u{200b}b".into()),
             (String::new(), "a\rb".into()),
