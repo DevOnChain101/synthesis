@@ -206,6 +206,26 @@ Why not alacritty's `tty`: it adds to the inherited environment and owns the spa
 
 ---
 
+### 1.12 Reply path (what the engine writes back to a shared PTY on its own)
+
+Before T1 the property was "nothing writes to a PTY except the person's input and the agent's gated `pty_send`". It is
+replaced by this bounded allow-list:
+
+- Only the engine's `Term` replies, and only to two queries: the cursor position report (`ESC[6n` -> `ESC[row;colR`, both
+  numbers 1-5 digits; ConPTY asks for it at start-up and passes no output until it is answered) and primary device
+  attributes (`ESC[c` -> the fixed `ESC[?6c`). Every other query (status reports, DA2, mode queries, text-area size,
+  colour, title, clipboard) is ignored; no reply holds a newline or any program-chosen byte.
+- The reply goes to the shell's stdin, so a program that prints these queries can make stray `ESC[..R` bytes appear as
+  input of whatever reads the terminal. That is the standard terminal behaviour and carries no command: the bytes contain
+  no newline and no text.
+- Caps: at most 64 replies per second per PTY (the rest dropped) into a write queue of 16 entries (overflow dropped),
+  drained by one writer thread per PTY. Typed input and agent input share that queue and fail with a timeout after 2 s when
+  it is full. A child that never reads its input therefore stalls only the writer thread; the reader, the screen lock,
+  `screen_text` and `close` never wait on a write. The writer thread ends when the PTY is killed or closed.
+- A `Term` that draws a shared PTY on the desktop (T4) must NOT reply (the program would get two answers); only the engine
+  `Term` is built with the replying listener, and its allow-list is unit tested (`only_cpr_and_fixed_da1_are_answered`).
+  T4 must keep that rule when it adds the drawing `Term`.
+
 ## 2. Browser
 
 ### 2.1 Options
@@ -409,7 +429,7 @@ programs (vim, pwsh), WSL2 end to end, Linux Wayland input.
 - Decided in T1: log cap kill = SIGKILL (unix) of the shell group and of the foreground group, `taskkill /T /F` on Windows; afterwards the reader keeps draining and discarding the master until EOF, because a dying tty waits for its output to drain (observed on macOS: the shell stayed in the exiting state while the master was unread). The over-cap bytes are not written to the log.
 - Decided in T1: kill = the shell's process group plus the current foreground group (`tcgetpgrp`, via portable-pty `process_group_leader`), not "every foreground group seen". A job started with `&` in an interactive shell has its own group and is not killed unless the shell hangs it up (bash does, dash may not) or bubblewrap's PID namespace takes it; documented limit, tested.
 - Decided in T1: `close` = SIGHUP to the group, up to 2 s for the shell to exit, then SIGKILL; drop (session close, runtime drop) = SIGKILL at once. The unix kill uses rustix's safe `kill_process_group`; no `unsafe` in our code.
-- Decided in T1: no 16 ms chunk coalescing in the engine (one chunk per `read`, at most 64 KiB), no disk-quota watcher for PTYs, and OSC 52 is `Disabled`. REVISED after CI: the engine `Term` DOES answer terminal queries (cursor position report etc., written back to the PTY when its writer is free), because ConPTY asks for the cursor position at start-up and passes no output until it is answered. The drawing `Term` of a shared PTY (T4) must therefore NOT answer, or the program gets two replies.
+- Decided in T1: no 16 ms chunk coalescing in the engine (one chunk per `read`, at most 64 KiB), no disk-quota watcher for PTYs, and OSC 52 is `Disabled`. REVISED after CI and review: the engine `Term` DOES answer two terminal queries (cursor position report, fixed DA1; see 1.12, bounded queue and writer thread), because ConPTY asks for the cursor position at start-up and passes no output until it is answered. The drawing `Term` of a shared PTY (T4) must therefore NOT answer, or the program gets two replies.
 - Decided in T1 (security review): the shell's pid is never signalled once it was reaped (a recycled pid could be another group leader of the same user; `taskkill /T /F /PID` likewise): the reap flag is checked under the same lock as the kill, `close` kills before it reaps, and a dropped PTY is reaped by a thread that retries for up to 60 s. The foreground-group lookup stays (it fails once the session is gone).
 - Decided in T1 (security review): Term memory is bounded by `MAX_COLS = 300` (about 40 MB per PTY at 5000 scrollback + 500 rows x 300 cols x ~24 B), by counting EVERY registered PTY, exited ones included, against `MAX_PTYS` until `close_pty` (checked again under the registry lock), and by clearing the scrollback when the output ends. The wire limit for `pty.resize` is 1..300 x 1..500.
 - Decided in T1 (security review): `close`/drop mark the PTY `dropped`; the reader (which holds a dup of the master fd) ends at its next wake-up, also while draining after a cap kill. A missing `cwd` is an error, never a fallback to the home directory. `HISTFILE=/dev/null` and `HISTSIZE=0` are set, and `LD_*`, `DYLD_*`, `PROMPT_COMMAND`, `SHELLOPTS`, `BASHOPTS`, `PS4` are dropped from the env, `spec.env` included. `PtySpec.sandbox`/`env` come from trusted code only, never from model arguments; `unsandboxed_by_request()` is also true for `BestEffort` without a policy, so consumers read `sandbox == None` as "unconfined".

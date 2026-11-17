@@ -16,7 +16,10 @@
 //!   (`setsid`, double fork, a background job `cmd &` of the interactive shell) survives.
 //! - The environment is the session env minus `SYNT_*` (except the `SYNT_AGENT_SESSION`
 //!   marker) and secret-shaped names; `TERM`/`COLORTERM` describe our emulator.
-//! - The engine `Term` answers terminal queries (cursor position report, ...): ConPTY needs it.
+//! - The engine `Term` answers exactly two terminal queries (cursor position report, fixed
+//!   primary device attributes; ConPTY needs the first), rate limited, through the same bounded
+//!   write queue and writer thread as typed input; a child that never reads stdin stalls only
+//!   that thread. Replies reach the shell's stdin and may show up as stray input.
 //! - shortcut: no 16 ms chunk coalescing (a chunk is one `read`, at most 64 KiB), no disk-quota
 //!   watcher; add them with the consumers (T2/T4).
 
@@ -25,9 +28,9 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -207,22 +210,72 @@ impl Ctl {
     }
 }
 
-type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+/// Everything written to the child (typed input and replies) goes through this bounded queue to
+/// one writer thread, the only place that blocks on the master: a child that never reads its
+/// input stalls that thread, never the reader, the screen lock or a caller.
+type Writer = SyncSender<Vec<u8>>;
+const WRITE_QUEUE: usize = 16;
+/// Replies per second the engine `Term` may send (the rest is dropped).
+const REPLIES_PER_SEC: u32 = 64;
 
-/// Answers the terminal queries the program sends (cursor position report and the like). ConPTY
-/// asks for the cursor position at start-up and does not pass output until it is answered, so
-/// the engine `Term` must reply (the drawing `Term` of a shared PTY must NOT, or the program gets
-/// two answers). A reply is dropped when the writer is busy: the reader thread must never block
-/// on a child that is not reading its input.
-struct Reply(Writer);
+/// The only replies the engine `Term` sends: the cursor position report `ESC[row;colR` (ConPTY
+/// asks for it at start-up and passes no output until it is answered) and the fixed primary
+/// device attributes `ESC[?6c`. Nothing else, so no program-chosen bytes reach the shell.
+fn allowed_reply(s: &str) -> bool {
+    let digits = |d: &str| !d.is_empty() && d.len() <= 5 && d.bytes().all(|b| b.is_ascii_digit());
+    s == "\x1b[?6c"
+        || s.strip_prefix("\x1b[")
+            .and_then(|r| r.strip_suffix('R'))
+            .and_then(|r| r.split_once(';'))
+            .is_some_and(|(a, b)| digits(a) && digits(b))
+}
+
+/// Answers terminal queries from the allow-list, rate limited, into the bounded write queue
+/// with `try_send` (never blocks, drops on overflow). Only the ENGINE `Term` replies: a `Term`
+/// that draws the same PTY elsewhere (T4) must not, or the program gets two answers.
+struct Reply {
+    tx: Writer,
+    window: Mutex<(Instant, u32)>,
+}
 
 impl EventListener for Reply {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event
-            && let Ok(mut w) = self.0.try_lock()
+        let Event::PtyWrite(text) = event else { return };
+        if !allowed_reply(&text) {
+            return;
+        }
         {
-            let _ = w.write_all(text.as_bytes());
-            let _ = w.flush();
+            let mut w = lock(&self.window);
+            if w.0.elapsed() >= Duration::from_secs(1) {
+                *w = (Instant::now(), 0);
+            }
+            w.1 += 1;
+            if w.1 > REPLIES_PER_SEC {
+                return;
+            }
+        }
+        let _ = self.tx.try_send(text.into_bytes());
+    }
+}
+
+/// The writer thread: ends when the PTY is killed or closed (a blocked write fails once the
+/// child is gone) or when every sender is dropped.
+fn write_loop(mut w: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>, inner: Arc<Inner>) {
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(data) => {
+                if inner.closed.load(Ordering::Relaxed)
+                    || w.write_all(&data).and_then(|()| w.flush()).is_err()
+                {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if inner.closed.load(Ordering::Relaxed) || inner.dropped.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
@@ -326,8 +379,9 @@ impl Pty {
         }
     }
 
-    /// Types into the PTY. Blocks while the child does not read its input; call it off an async
-    /// executor thread.
+    /// Queues typed input for the writer thread (so `Ok` means queued, not yet written). Waits
+    /// up to 2 s for room; a child that does not read its input fills the queue and the call
+    /// fails with a timeout instead of blocking.
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
         if data.len() > MAX_INPUT {
             return Err(Error::InvalidSpec(format!(
@@ -335,10 +389,21 @@ impl Pty {
                 data.len()
             )));
         }
-        let mut w = lock(&self.writer);
-        w.write_all(data)?;
-        w.flush()?;
-        Ok(())
+        let end = Instant::now() + Duration::from_secs(2);
+        let mut data = data.to_vec();
+        loop {
+            match self.writer.try_send(data) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => return Err(io_err("pty closed")),
+                Err(TrySendError::Full(d)) => {
+                    if Instant::now() >= end || self.inner.closed.load(Ordering::Relaxed) {
+                        return Err(Error::Io(std::io::ErrorKind::TimedOut.into()));
+                    }
+                    data = d;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -391,7 +456,6 @@ impl Pty {
         self.inner.dropped.store(true, Ordering::Relaxed);
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            use std::time::Instant;
             if !*lock(&self.ctl.reaped) {
                 signal_group(pid, rustix::process::Signal::HUP);
             }
@@ -665,7 +729,8 @@ impl TerminalRuntime {
         let child = pair.slave.spawn_command(b).map_err(io_err)?;
         drop(pair.slave); // else the reader never sees EOF
         let reader = pair.master.try_clone_reader().map_err(io_err)?;
-        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(io_err)?));
+        let master_writer = pair.master.take_writer().map_err(io_err)?;
+        let (writer, write_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
 
         let term = Term::new(
             Config {
@@ -677,7 +742,10 @@ impl TerminalRuntime {
                 cols: spec.cols.into(),
                 rows: spec.rows.into(),
             },
-            Reply(writer.clone()),
+            Reply {
+                tx: writer.clone(),
+                window: Mutex::new((Instant::now(), 0)),
+            },
         );
         let inner = Arc::new(Inner {
             screen: Mutex::new(Screen {
@@ -715,12 +783,14 @@ impl TerminalRuntime {
             writer,
             child: Mutex::new(child),
         });
-        if let Err(e) = std::thread::Builder::new()
+        let inner_w = pty.inner.clone();
+        // `pty` drops (and kills the shell) when either thread cannot start
+        std::thread::Builder::new()
             .name("synt-pty-read".into())
-            .spawn(move || read_loop(reader, cx))
-        {
-            return Err(Error::Io(e)); // `pty` drops here and kills the shell
-        }
+            .spawn(move || read_loop(reader, cx))?;
+        std::thread::Builder::new()
+            .name("synt-pty-write".into())
+            .spawn(move || write_loop(master_writer, write_rx, inner_w))?;
         self.register_pty(session_id, pty.clone())?;
         Ok(pty)
     }
@@ -818,6 +888,27 @@ mod tests {
         );
         assert_eq!(env["TERM"], "xterm-256color");
         assert_eq!(env["HISTFILE"], "/dev/null");
+    }
+
+    #[test]
+    fn only_cpr_and_fixed_da1_are_answered() {
+        for ok in ["\x1b[1;1R", "\x1b[24;80R", "\x1b[?6c"] {
+            assert!(allowed_reply(ok), "{ok:?}");
+        }
+        for bad in [
+            "\x1b[0n",
+            "\x1b[?62;4c",
+            "\x1b[>0;95;0c",
+            "\x1b[?25;1$y",
+            "\x1b[8;24;80t",
+            "\x1b[1;1R\n",
+            "\x1b[1;R",
+            "\x1b[a;1R",
+            "\x1b[123456;1R",
+            "echo x\n",
+        ] {
+            assert!(!allowed_reply(bad), "{bad:?}");
+        }
     }
 
     #[test]

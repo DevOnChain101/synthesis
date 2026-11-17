@@ -276,21 +276,49 @@ mod unix {
     fn exited_ptys_still_count_against_the_cap() {
         let rt = rt_off();
         let _fx = open(&rt);
-        let mut ptys = vec![];
-        for _ in 0..synthesis_terminal::MAX_PTYS {
-            let p = rt.open_pty(SID, PtySpec::new(80, 24)).unwrap();
-            p.write_input(b"exit\r").unwrap();
-            ptys.push(p);
-        }
+        let ptys: Vec<_> = (0..synthesis_terminal::MAX_PTYS)
+            .map(|_| rt.open_pty(SID, PtySpec::new(80, 24)).unwrap())
+            .collect();
+        // only one shell has to exit: the others are still running and count anyway
+        ptys[0].write_input(b"exit\r").unwrap();
         let end = Instant::now() + Duration::from_secs(20);
-        while ptys.iter().any(|p| p.exit_code().is_none()) && Instant::now() < end {
+        while ptys[0].exit_code().is_none() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(ptys.iter().all(|p| p.exit_code().is_some()));
+        assert!(ptys[0].exit_code().is_some());
         let e = rt.open_pty(SID, PtySpec::new(80, 24)).err().unwrap();
         assert!(matches!(e, Error::LimitExceeded(_)), "{e}");
         rt.close_pty(SID, &ptys[0].id).unwrap(); // closing an exited, reaped PTY frees the slot
         assert!(rt.open_pty(SID, PtySpec::new(80, 24)).is_ok());
+    }
+
+    /// A child that never reads stdin while its output asks for cursor reports: the replies fill
+    /// the tty input queue, which must stall only the writer thread, not input, the screen, the
+    /// reader or close.
+    #[test]
+    fn query_flood_with_a_deaf_child_blocks_nothing() {
+        let rt = rt_off();
+        let _fx = open(&rt);
+        let p = rt.open_pty(SID, PtySpec::new(80, 24)).unwrap();
+        // `sleep` never reads stdin; the shell is busy in the foreground job and does not read
+        p.write_input(b"yes $'\\e[6n' | head -c 1000000 >&2; sleep 600 </dev/null\r")
+            .unwrap();
+        let bytes = Instant::now() + Duration::from_secs(20);
+        while p.log_bytes() < 900_000 && Instant::now() < bytes {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(p.log_bytes() >= 900_000, "flood did not arrive");
+        let t = Instant::now();
+        // typed input past the queue fails fast instead of blocking; the screen stays readable
+        for _ in 0..40 {
+            let _ = p.write_input(&[b'x'; 4096]);
+        }
+        let _ = p.screen_text(50);
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        let t = Instant::now();
+        rt.close_pty(SID, &p.id).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(8), "{:?}", t.elapsed());
+        assert!(p.output_ended() || p.exit_code().is_some());
     }
 
     #[test]
