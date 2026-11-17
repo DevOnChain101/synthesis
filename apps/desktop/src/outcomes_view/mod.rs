@@ -45,6 +45,9 @@ pub struct OutcomesView {
     form_scroll: ScrollHandle,
     /// The form was on its review stage at the last frame (the keys go back to the window when it starts).
     was_reviewing: bool,
+    /// The review has been drawn at least once: before that nothing can approve it (a held Enter that sent
+    /// the form must not land on the button in the frame the review appears).
+    review_armed: bool,
 }
 
 /// The text inputs and the two buttons' focus of the form. Lists are one entry per line.
@@ -86,6 +89,7 @@ impl OutcomesView {
             form_ui: None,
             form_scroll: ScrollHandle::new(),
             was_reviewing: false,
+            review_armed: false,
         }
     }
 
@@ -169,7 +173,10 @@ impl OutcomesView {
                     }
                 }
                 (Effect::Head(ws), Some(l)) => l.head(ws),
-                (Effect::Review(id), Some(l)) => l.send(Req::Review(id)),
+                (Effect::Review(id), Some(l)) => {
+                    self.reconnect_first(l);
+                    l.send(Req::Review(id));
+                }
                 (Effect::Submit(s), Some(l)) => {
                     self.reconnect_first(l);
                     l.send(Req::Submit(s));
@@ -379,7 +386,7 @@ impl OutcomesView {
                 let t = self.form_text(cx);
                 self.state.submit(&t)
             }
-            Some(Stage::Review(_)) => self.state.approve(),
+            Some(Stage::Review(_)) if self.review_armed => self.state.approve(),
             _ => vec![],
         };
         self.run(e, cx);
@@ -417,6 +424,8 @@ impl OutcomesView {
                     window.focus_next(cx)
                 }
             }
+            // a held key (auto-repeat) never acts: one deliberate press does
+            "enter" if ev.is_held => {}
             "enter" => {
                 let (confirm, cancel) = self
                     .form_ui
@@ -472,6 +481,7 @@ impl OutcomesView {
         // the review starts with no button focused: approving takes a Tab to it, then Enter, never the
         // Enter that sent the form
         let reviewing = self.state.form_review().is_some();
+        self.review_armed = reviewing && self.was_reviewing;
         if reviewing && !self.was_reviewing {
             let root = self.focus.clone();
             window.defer(cx, move |window, cx| window.focus(&root, cx));

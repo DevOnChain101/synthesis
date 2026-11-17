@@ -67,7 +67,7 @@ fn button_labels(f: &Form) -> (&'static str, &'static str) {
         (Stage::Sending, _) => ("Sending...", "Close"),
         (Stage::Review(_), _) => ("Approve contract", "Not now"),
         (Stage::Approving(_), _) => ("Approving...", "Close"),
-        (Stage::Edit, Mode::Draft { .. }) => ("", "Close"),
+        (Stage::Edit, Mode::Draft { .. }) => ("Try again", "Close"),
     }
 }
 
@@ -144,13 +144,16 @@ fn warning(id: &'static str, head: &str, items: &[String]) -> Option<Div> {
 }
 
 fn review_body(f: &Form, r: &Review) -> Div {
-    let first = r.diff.is_none();
+    let first = r.version == 1;
     let lead = match (&f.mode, first) {
-        (Mode::New, _) | (_, true) => {
+        (Mode::New, _) if first => {
             "The outcome is created. Its contract is NOT approved: nothing runs until you approve it."
         }
+        (Mode::Draft { .. }, true) => {
+            "This contract is NOT approved: nothing runs until you approve it."
+        }
         _ => {
-            "The revision is stored as a new version. The approved contract stays in force until you approve this one."
+            "A new contract version is stored and not approved. The approved contract stays in force until you approve this one."
         }
     };
     let mut d = div()
@@ -283,7 +286,7 @@ impl OutcomesView {
         };
         let sending = matches!(f.stage, Stage::Sending | Stage::Approving(_));
         let can_confirm = match &f.stage {
-            Stage::Edit => !matches!(f.mode, Mode::Draft { .. }),
+            Stage::Edit => true,
             Stage::Review(r) => r.approvable(),
             _ => false,
         };

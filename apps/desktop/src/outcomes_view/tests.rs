@@ -477,3 +477,43 @@ fn the_form_fits_both_window_sizes(cx: &mut TestAppContext) {
         let _ = o;
     }
 }
+
+#[gpui::test]
+fn a_held_enter_or_one_in_the_frame_the_review_appears_approves_nothing(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    let (shell, v) = open(cx, 1400., 900.);
+    let o = view(&shell, v);
+    v.simulate_keystrokes("v");
+    v.run_until_parked();
+    o.update(v, |o, cx| {
+        o.state
+            .apply_form(link::FormMsg::Review(Box::new(sample::review(true))));
+        // confirm pressed before the review was ever drawn
+        o.confirm(cx);
+    });
+    assert!(o.read_with(v, |o, _| o.state.form_review().is_some()
+        && matches!(o.state.form.as_ref().unwrap().stage, form::Stage::Review(_))));
+    v.run_until_parked();
+    for _ in 0..4 {
+        if confirm_focused(&o, v) {
+            break;
+        }
+        v.simulate_keystrokes("tab");
+    }
+    assert!(confirm_focused(&o, v));
+    // a held (auto-repeated) Enter on the focused button does nothing
+    let held = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: true,
+        prefer_character_input: false,
+    };
+    v.simulate_event(held);
+    assert!(o.read_with(v, |o, _| matches!(
+        o.state.form.as_ref().unwrap().stage,
+        form::Stage::Review(_)
+    )));
+    // one deliberate press does (the sample answers that nothing was sent)
+    v.simulate_keystrokes("enter");
+    let errs = o.read_with(v, |o, _| o.state.form.as_ref().unwrap().errors.clone());
+    assert_eq!(errs, ["Sample data: nothing was sent."]);
+}

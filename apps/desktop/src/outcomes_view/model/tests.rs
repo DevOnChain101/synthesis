@@ -413,3 +413,24 @@ fn what_the_worker_says_reaches_an_open_form_and_an_approval_closes_it() {
     });
     assert!(s.form.is_none());
 }
+
+#[test]
+fn a_draft_whose_read_failed_can_be_asked_again_or_closed() {
+    let mut s = sample::state();
+    if let Some(Ok(c)) = s.detail.as_mut().map(|d| &mut d.contract) {
+        c.approved = Some(false);
+    }
+    press(&mut s, "a", 0);
+    s.apply_form(FormMsg::Failed {
+        text: "unreachable".into(),
+        spent: false,
+    });
+    assert_eq!(s.form.as_ref().unwrap().errors, ["unreachable"]);
+    assert_eq!(
+        s.submit(&FormText::default()),
+        vec![Effect::Review("o_auth".into())]
+    );
+    assert_eq!(s.form.as_ref().unwrap().stage, form::Stage::Sending);
+    s.close_form();
+    assert!(s.form.is_none());
+}

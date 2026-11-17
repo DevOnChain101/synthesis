@@ -98,9 +98,8 @@ fn default_envelope() -> Envelope {
 }
 
 /// The contract the text says. With `prev` (a revision) everything the form cannot show (denied paths,
-/// capabilities, caps per attempt, a criterion's manual flag and checks) stays as it was, matched by line
-/// position: a line that is moved or removed changes which criterion it edits, and the server's diff, shown
-/// before anything is approved, says what changed. Errors are one line each; `validate_contract` is the
+/// capabilities, caps per attempt, a criterion's flags and checks) stays as it was, matched by the exact text
+/// of the line (see below); the server's diff, shown before anything is approved, says what changed. Errors are one line each; `validate_contract` is the
 /// core's own check and runs last.
 pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<String>> {
     let mut errs = vec![];
@@ -145,41 +144,56 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
         .flat_map(|p| &p.criteria)
         .map(|k| k.id.to_ascii_lowercase())
         .collect();
+    // Lines are matched to the previous contract by their exact text: an unchanged line keeps its id and
+    // flags whatever moved around it; a new or edited line is a new entry with the STRICT defaults
+    // (mandatory, independent check, backed by every check). The server's diff then shows what changed.
+    let mut taken_checks = vec![false; prev.map_or(0, |p| p.checks.len())];
     let checks: Vec<ContractCheck> = checks
         .into_iter()
-        .enumerate()
-        .map(|(i, command)| ContractCheck {
-            id: match prev.and_then(|p| p.checks.get(i)) {
-                Some(k) => k.id.clone(),
-                None => fresh("t", &mut used_checks),
-            },
-            command,
+        .map(|command| {
+            let old = prev.and_then(|p| {
+                let i = (0..p.checks.len())
+                    .find(|&i| !taken_checks[i] && p.checks[i].command == command)?;
+                taken_checks[i] = true;
+                Some(p.checks[i].id.clone())
+            });
+            ContractCheck {
+                id: old.unwrap_or_else(|| fresh("t", &mut used_checks)),
+                command,
+            }
         })
         .collect();
     let all: Vec<String> = checks.iter().map(|k| k.id.clone()).collect();
+    let mut taken_crit = vec![false; prev.map_or(0, |p| p.criteria.len())];
     let criteria: Vec<ContractCriterion> = criteria
         .into_iter()
-        .enumerate()
-        .map(|(i, text)| match prev.and_then(|p| p.criteria.get(i)) {
-            Some(k) => ContractCriterion {
-                text,
-                // a check that is gone from the list is not named any more
-                check_ids: k
-                    .check_ids
-                    .iter()
-                    .filter(|c| all.contains(c))
-                    .cloned()
-                    .collect(),
-                ..k.clone()
-            },
-            None => ContractCriterion {
-                id: fresh("c", &mut used_crit),
-                text,
-                mandatory: true,
-                manual: false,
-                required_trust: TrustClass::IndependentCheck,
-                check_ids: all.clone(),
-            },
+        .map(|text| {
+            let old = prev.and_then(|p| {
+                let i = (0..p.criteria.len())
+                    .find(|&i| !taken_crit[i] && p.criteria[i].text == text)?;
+                taken_crit[i] = true;
+                Some(p.criteria[i].clone())
+            });
+            match old {
+                Some(k) => ContractCriterion {
+                    // a check that is gone from the list is not named any more
+                    check_ids: k
+                        .check_ids
+                        .iter()
+                        .filter(|c| all.contains(c))
+                        .cloned()
+                        .collect(),
+                    ..k
+                },
+                None => ContractCriterion {
+                    id: fresh("c", &mut used_crit),
+                    text,
+                    mandatory: true,
+                    manual: false,
+                    required_trust: TrustClass::IndependentCheck,
+                    check_ids: all.clone(),
+                },
+            }
         })
         .collect();
     let mut envelope = prev.map_or_else(default_envelope, |p| p.envelope.clone());
@@ -279,7 +293,8 @@ pub struct Review {
     pub hash: String,
     /// The stored contract; an error blocks the approval (what cannot be read cannot be approved).
     pub contract: Result<CriteriaView, String>,
-    /// `None`: the first version, there is nothing to compare it with. An error blocks the approval.
+    /// Always read for a version above 1; `None` only for the first version, which has nothing to compare
+    /// with. An error (or none, above 1) blocks the approval.
     pub diff: Option<Result<DiffView, String>>,
     /// Sent with the approval and kept for a retry after a lost reply.
     pub key: String,
@@ -287,7 +302,12 @@ pub struct Review {
 
 impl Review {
     pub fn approvable(&self) -> bool {
-        self.contract.is_ok() && !matches!(self.diff, Some(Err(_)))
+        // a later version is compared with the approved one, and only a diff that was read allows approving it
+        self.contract.is_ok()
+            && match self.version {
+                1 => true,
+                _ => matches!(self.diff, Some(Ok(_))),
+            }
     }
 }
 
@@ -506,6 +526,29 @@ impl Form {
             self.sent = None;
         }
         self.errors = vec![text];
+    }
+
+    /// The commit moved between what the form showed and the moment of sending: nothing was created, the new
+    /// base is shown and the person confirms again.
+    pub fn base_moved(&mut self, ws: &str, commit: String, text: String) {
+        self.head = Some(Head::Known {
+            ws: ws.to_string(),
+            commit,
+        });
+        self.sent = None;
+        self.stage = Stage::Edit;
+        self.errors = vec![text];
+    }
+
+    /// A draft whose read failed: ask again (`Some(outcome)`).
+    pub fn retry_read(&mut self) -> Option<String> {
+        let (Mode::Draft { outcome }, Stage::Edit) = (&self.mode, &self.stage) else {
+            return None;
+        };
+        let outcome = outcome.clone();
+        self.stage = Stage::Sending;
+        self.errors.clear();
+        Some(outcome)
     }
 
     /// The server stored the contract; the person reads it before approving.

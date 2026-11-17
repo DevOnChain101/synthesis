@@ -76,6 +76,12 @@ pub enum FormMsg {
     /// The server stored the contract: read it (and its diff) before approving.
     Review(Box<Review>),
     Approved(String),
+    /// `HEAD` moved since the form showed its base commit: nothing was created.
+    BaseMoved {
+        ws: String,
+        commit: String,
+        text: String,
+    },
 }
 
 pub enum Msg {
@@ -192,7 +198,9 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                 let mut c = OutcomeClient::new(link, Surface::Superagent);
                 let screen = match c.status() {
                     Ok(s) if s.get("ready") == Some(&Value::Bool(true)) => {
-                        match serve(&mut c, rx, out, HINT_WAIT) {
+                        match serve(&mut c, rx, out, HINT_WAIT, &|ws| {
+                            synthesis_view::project::head_commit(std::path::Path::new(ws), env)
+                        }) {
                             Ok(()) => return,
                             Err(e) => Screen::Unreachable(e),
                         }
@@ -231,6 +239,7 @@ pub(super) fn serve<T: Transport>(
     rx: &Receiver<Req>,
     out: &UnboundedSender<Msg>,
     wait: Duration,
+    head: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let mut w = Watch {
         selected: None,
@@ -269,7 +278,7 @@ pub(super) fn serve<T: Transport>(
                     last = Instant::now();
                 }
                 Ok(Req::Submit(s)) => {
-                    submit(c, s, &mut w, out)?;
+                    submit(c, s, &mut w, out, head)?;
                     refresh(c, &mut w, out)?;
                     last = Instant::now();
                 }
@@ -560,7 +569,6 @@ fn review<T: Transport>(
     outcome: &str,
     version: u32,
     hash: &str,
-    with_diff: bool,
 ) -> Result<Review, String> {
     let contract = soft(c.contract(outcome, Some(version)))?.and_then(|v| {
         let cv = CriteriaView::from_json(&v)?;
@@ -570,7 +578,8 @@ fn review<T: Transport>(
             Err("the stored contract is not the version and hash the orchestrator reported, so it cannot be approved here".into())
         }
     });
-    let diff = if with_diff {
+    // every version above the first is read against the approved one, whatever opened the review
+    let diff = if version > 1 {
         Some(
             soft(c.contract_diff(outcome, version))?
                 .and_then(|v| DiffView::from_json(&v, version, hash)),
@@ -593,11 +602,10 @@ fn to_review<T: Transport>(
     id: &str,
     version: Option<u64>,
     hash: Option<&str>,
-    with_diff: bool,
 ) -> Result<FormMsg, String> {
     match (version.and_then(|v| u32::try_from(v).ok()), hash) {
         (Some(v), Some(h)) if valid_alt_id(id) && is_hex(h, 64) => {
-            Ok(FormMsg::Review(Box::new(review(c, id, v, h, with_diff)?)))
+            Ok(FormMsg::Review(Box::new(review(c, id, v, h)?)))
         }
         _ => Ok(FormMsg::Failed {
             text: "The orchestrator sent an outcome id, version or contract hash of an unexpected shape; nothing is shown or approved.".into(),
@@ -612,6 +620,7 @@ fn submit<T: Transport>(
     s: Submit,
     w: &mut Watch,
     out: &UnboundedSender<Msg>,
+    head: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let m = match s {
         Submit::Create {
@@ -619,7 +628,27 @@ fn submit<T: Transport>(
             base_commit,
             contract,
             key,
-        } => match c.create_with_key(&workspace, &base_commit, *contract, &key) {
+        } => match head(&workspace) {
+            // HEAD is read again now: a base that moved since the form showed it is not used
+            Ok(now) if now != base_commit => {
+                let text = format!(
+                    "The base commit moved while you were editing: HEAD is now {now} (the form showed {base_commit}). Nothing was created. Check it, then confirm again to use the new base."
+                );
+                let _ = out.unbounded_send(Msg::Form(FormMsg::BaseMoved {
+                    ws: workspace,
+                    commit: now,
+                    text,
+                }));
+                return Ok(());
+            }
+            Err(why) => {
+                let _ = out.unbounded_send(Msg::Form(FormMsg::Failed {
+                    text: format!("Base commit: {why} Nothing was created."),
+                    spent: false,
+                }));
+                return Ok(());
+            }
+            Ok(_) => match c.create_with_key(&workspace, &base_commit, *contract, &key) {
             Ok(v) => {
                 let id = v.get("id").and_then(Value::as_str).unwrap_or_default();
                 // the new outcome is the one shown next
@@ -629,10 +658,10 @@ fn submit<T: Transport>(
                     id,
                     v.get("contract_version").and_then(Value::as_u64),
                     v.get("contract_hash").and_then(Value::as_str),
-                    false,
                 )?
             }
-            Err(e) => return form_fail(out, &e),
+                Err(e) => return form_fail(out, &e),
+            },
         },
         Submit::Revise {
             outcome,
@@ -651,7 +680,6 @@ fn submit<T: Transport>(
                         &outcome,
                         r.result.get("version").and_then(Value::as_u64),
                         r.result.get("hash").and_then(Value::as_str),
-                        true,
                     )?,
                     CommandState::Stale => FormMsg::Failed {
                         text: STALE.into(),
@@ -695,9 +723,17 @@ fn approve<T: Transport>(
             text: format!("Sent; the state could not be read: {e}"),
             spent: false,
         },
-        Ok(r) if matches!(r.state, CommandState::Applied | CommandState::Queued) => {
+        Ok(r) if r.state == CommandState::Applied => {
             FormMsg::Approved(format!("Contract v{version}: {}", r.describe()))
         }
+        // not applied yet: the contract is still not approved, and the same key looks again
+        Ok(r) if r.state == CommandState::Queued => FormMsg::Failed {
+            text: format!(
+                "The approval of version {version} is {}. It is not approved yet: confirm again to look again (the same request is not repeated), or close this window and watch the outcome.",
+                r.describe()
+            ),
+            spent: false,
+        },
         Ok(r) => FormMsg::Failed {
             text: format!("Not approved: {}", r.describe()),
             spent: true,
@@ -717,7 +753,6 @@ fn review_draft<T: Transport>(c: &mut OutcomeClient<T>, id: &str) -> Result<Form
             id,
             v.get("version").and_then(Value::as_u64),
             v.get("hash").and_then(Value::as_str),
-            false,
         )?,
         Ok(_) => fail("This contract is already approved.".into()),
     })

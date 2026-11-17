@@ -88,39 +88,61 @@ fn the_cores_own_validation_speaks_for_what_the_form_does_not_check() {
 }
 
 #[test]
-fn a_revision_keeps_what_the_form_cannot_show_and_matches_lines_by_position() {
+fn a_revision_matches_lines_by_exact_text_so_deleting_one_never_shifts_flags() {
     let p = prev();
     let t = text_of(&p);
-    // unchanged text, unchanged contract (c3 stays manual-ish and optional, ids stay)
-    let same = build(&t, Some(&p)).unwrap();
-    assert_eq!(same, p);
-    // an edit of one line changes only that criterion; the second check is dropped
+    // unchanged text, unchanged contract
+    assert_eq!(build(&t, Some(&p)).unwrap(), p);
+    // deleting the middle criterion: c3 keeps its id and its manual, optional, human-review flags
     let mut t2 = t.clone();
-    t2.criteria = t2
+    t2.criteria = t
         .criteria
-        .replace("Login through OIDC works", "Login via OIDC works");
-    t2.checks = "cargo test -p auth".into();
-    t2.budget = "6".into();
+        .lines()
+        .filter(|l| !l.contains("old API"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let c = build(&t2, Some(&p)).unwrap();
-    assert_eq!(c.criteria[0].text, "Login via OIDC works with the test IdP");
-    assert_eq!(c.criteria[1].id, "c2");
+    assert_eq!(c.criteria.len(), 2);
     assert_eq!(
-        c.criteria[1].check_ids,
-        ["t1"],
-        "a check that is gone is not named"
+        c.criteria[1], p.criteria[2],
+        "the manual criterion is untouched"
     );
-    assert!(
-        !c.criteria[2].mandatory,
-        "flags the form has no field for stay"
+    assert!(c.criteria[1].manual && !c.criteria[1].mandatory);
+    // reordering keeps each line's own flags
+    let mut t3 = t.clone();
+    t3.criteria = t.criteria.lines().rev().collect::<Vec<_>>().join("\n");
+    let c = build(&t3, Some(&p)).unwrap();
+    assert_eq!(c.criteria[0], p.criteria[2]);
+    assert_eq!(c.criteria[2], p.criteria[0]);
+    // an edited line is a NEW criterion with the strict defaults, never the old one's flags
+    let mut t4 = t.clone();
+    t4.criteria = t4.criteria.replace(
+        "Integration tests pass against OIDC",
+        "Integration tests pass",
     );
+    let c = build(&t4, Some(&p)).unwrap();
+    let edited = &c.criteria[2];
+    assert_eq!(edited.id, "c4");
+    assert!(edited.mandatory && !edited.manual);
+    assert_eq!(edited.required_trust, TrustClass::IndependentCheck);
+    assert_eq!(edited.check_ids, ["t1", "t2"]);
+    // checks too: the kept check keeps its id, a dropped one is no longer named, the budget is applied
+    let mut t5 = t.clone();
+    t5.checks = "cargo test -p auth".into();
+    t5.budget = "6".into();
+    let c = build(&t5, Some(&p)).unwrap();
+    assert_eq!(c.checks.len(), 1);
+    assert_eq!(c.checks[0].id, "t1");
+    assert_eq!(c.criteria[1].check_ids, ["t1"]);
     assert_eq!(c.envelope.budgets.attempt_max_wall_secs, Some(1200));
     assert_eq!(c.envelope.budgets.max_cost_usd, 6.0);
-    // a new line gets an id that is not taken
-    let mut t3 = t.clone();
-    t3.criteria.push_str("\nA new criterion");
-    let c = build(&t3, Some(&p)).unwrap();
-    assert_eq!(c.criteria[3].id, "c4");
-    assert_eq!(c.criteria[3].check_ids, ["t1", "t2"]);
+    // a check whose command changed is a new check
+    let mut t6 = t.clone();
+    t6.checks = t6
+        .checks
+        .replace("cargo test -p auth", "cargo test -p auth --all");
+    let c = build(&t6, Some(&p)).unwrap();
+    assert_eq!(c.checks[0].id, "t3");
 }
 
 #[test]
@@ -220,6 +242,10 @@ fn approving_is_a_separate_step_on_the_review_with_the_servers_version_and_hash(
 fn a_review_that_cannot_be_read_or_compared_cannot_be_approved() {
     let mut r = sample::review(true);
     assert!(r.approvable());
+    // a version above the first with no diff at all is not approvable either
+    let mut none = r.clone();
+    none.diff = None;
+    assert!(!none.approvable());
     r.diff = Some(Err("the diff is about another contract version".into()));
     assert!(!r.approvable());
     let mut f = new_form();

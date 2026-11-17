@@ -34,6 +34,10 @@ struct Fake {
     sent: Rc<RefCell<Vec<(String, Value)>>>,
     /// The contract of `outcome.contract.get` is not approved yet.
     draft: bool,
+    /// `outcome.contract.get` of the current contract is an unapproved version 2 (a revision made elsewhere).
+    draft_v2: bool,
+    /// `outcome.contract.diff` is refused.
+    diff_fails: bool,
     /// `outcome.contract.get` for version 2 reports another hash than the revise reply did.
     wrong_hash: bool,
 }
@@ -68,6 +72,7 @@ impl Transport for Fake {
             "outcome.contract.get" => {
                 let mut v = match p["version"].as_u64() {
                     Some(2) => sample::contract_v2(),
+                    None if self.draft_v2 => sample::contract_v2(),
                     _ => sample::contract(),
                 };
                 if self.draft {
@@ -101,6 +106,17 @@ impl Transport for Fake {
                 };
                 let state = if state.is_empty() { "applied" } else { state };
                 json!({"idempotency_key": p["idempotency_key"], "kind": m, "state": state, "result": result})
+            }
+            "command.status" => {
+                let (a, r) = (*self.approve.borrow(), *self.revise.borrow());
+                let state = [a, r]
+                    .into_iter()
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("applied");
+                json!({"idempotency_key": p["idempotency_key"], "kind": "outcome.contract.approve", "state": state, "result": {}})
+            }
+            "outcome.contract.diff" if self.diff_fails => {
+                return Err(ClientError::Refused("no such version".into()));
             }
             "outcome.contract.diff" => sample::diff_v2(),
             "decision.list" => {
@@ -152,7 +168,7 @@ fn run(f: &Fake, reqs: Vec<Req>) -> Vec<Msg> {
     }
     drop(tx);
     let (out, mut orx) = unbounded();
-    let r = serve(&mut client(f), &rx, &out, Duration::ZERO);
+    let r = serve(&mut client(f), &rx, &out, Duration::ZERO, &ok_head);
     assert_eq!(r, Ok(()));
     drop(out);
     std::iter::from_fn(|| orx.try_recv().ok()).collect()
@@ -318,6 +334,7 @@ fn a_failed_link_ends_the_loop_with_its_text() {
         &rx,
         &out,
         Duration::ZERO,
+        &ok_head,
     );
     assert_eq!(r, Err("the orchestrator closed the link".into()));
 }
@@ -329,7 +346,7 @@ fn a_flood_of_hints_is_one_refetch_not_one_per_hint() {
     let (tx, rx) = channel::<Req>();
     *f.end.borrow_mut() = Some(tx);
     let (out, _orx) = unbounded();
-    serve(&mut client(&f), &rx, &out, Duration::ZERO).unwrap();
+    serve(&mut client(&f), &rx, &out, Duration::ZERO, &ok_head).unwrap();
     let lists = f
         .log
         .borrow()
@@ -359,6 +376,10 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
     std::fs::remove_file(real.join("synt")).unwrap();
     std::fs::write(real.join("synt"), "ok").unwrap();
     assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
+}
+
+fn ok_head(_: &str) -> Result<String, String> {
+    Ok(BASE.into())
 }
 
 const BASE: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
@@ -440,7 +461,7 @@ fn a_create_whose_reply_was_lost_is_retried_with_the_same_key_and_makes_one_draf
     tx.send(create("create-k1")).unwrap();
     drop(tx);
     let (out, mut orx) = unbounded();
-    let r = serve(&mut client(&f), &rx, &out, Duration::ZERO);
+    let r = serve(&mut client(&f), &rx, &out, Duration::ZERO, &ok_head);
     assert!(r.is_err(), "the link failure ends the worker with its text");
     drop(out);
     let first: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
@@ -488,7 +509,8 @@ fn a_refused_create_is_a_spent_key_and_the_workers_keep_going() {
             &mut OutcomeClient::new(Refuse(f), Surface::Superagent),
             &rx,
             &out,
-            Duration::ZERO
+            Duration::ZERO,
+            &ok_head,
         ),
         Ok(())
     );
@@ -620,4 +642,98 @@ fn a_draft_is_read_for_review_only_while_its_contract_is_not_approved() {
     assert_eq!((r.version, r.diff.is_none()), (1, true));
     let msgs = run(&fake(), vec![Req::Review("o_auth".into())]);
     assert!(matches!(forms(&msgs)[..], [FormMsg::Failed { .. }]));
+}
+
+#[test]
+fn an_unapproved_later_version_is_reviewed_with_the_servers_diff_and_warnings() {
+    let f = Fake {
+        draft_v2: true,
+        ..fake()
+    };
+    let msgs = run(&f, vec![Req::Review("o_auth".into())]);
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!()
+    };
+    assert_eq!(r.version, 2);
+    let d = r.diff.as_ref().unwrap().as_ref().unwrap();
+    assert!(!d.widens.is_empty() && !d.weakens.is_empty());
+    assert!(
+        f.log
+            .borrow()
+            .contains(&"outcome.contract.diff".to_string())
+    );
+    assert!(r.approvable());
+}
+
+#[test]
+fn a_later_version_whose_diff_cannot_be_read_cannot_be_approved() {
+    let f = Fake {
+        draft_v2: true,
+        diff_fails: true,
+        ..fake()
+    };
+    let msgs = run(&f, vec![Req::Review("o_auth".into())]);
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!()
+    };
+    assert!(matches!(r.diff, Some(Err(_))) && !r.approvable());
+}
+
+#[test]
+fn a_base_commit_that_moved_stops_the_create_and_shows_the_new_one() {
+    let f = fake();
+    let (tx, rx) = channel();
+    tx.send(create("create-k1")).unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    let moved = |_: &str| Ok("b".repeat(40));
+    assert_eq!(
+        serve(&mut client(&f), &rx, &out, Duration::ZERO, &moved),
+        Ok(())
+    );
+    drop(out);
+    let msgs: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
+    assert!(
+        f.drafts.borrow().is_empty(),
+        "nothing was created on a stale base"
+    );
+    let fm = forms(&msgs);
+    let [FormMsg::BaseMoved { commit, text, .. }] = fm.as_slice() else {
+        panic!()
+    };
+    assert_eq!(commit, &"b".repeat(40));
+    assert!(text.contains("Nothing was created"));
+    // a folder git cannot read is an error in the form, not a create
+    let (tx, rx) = channel();
+    tx.send(create("create-k2")).unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    let bad = |_: &str| Err("is not the top folder".to_string());
+    serve(&mut client(&f), &rx, &out, Duration::ZERO, &bad).unwrap();
+    drop(out);
+    let msgs: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
+    assert!(f.drafts.borrow().is_empty());
+    assert!(matches!(forms(&msgs)[..], [FormMsg::Failed { .. }]));
+}
+
+#[test]
+fn a_queued_approval_is_not_reported_as_approved() {
+    let f = fake();
+    *f.approve.borrow_mut() = "queued";
+    let msgs = run(
+        &f,
+        vec![Req::Approve {
+            outcome: "o_auth".into(),
+            version: 2,
+            hash: sample::HASH_V2.into(),
+            key: "approve-k1".into(),
+        }],
+    );
+    let fm = forms(&msgs);
+    let [FormMsg::Failed { text, spent: false }] = fm.as_slice() else {
+        panic!()
+    };
+    assert!(text.contains("not approved yet"), "{text}");
 }

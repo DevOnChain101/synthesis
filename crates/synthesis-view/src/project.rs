@@ -882,24 +882,42 @@ impl ProjectData {
     }
 }
 
-/// The full commit id `HEAD` names in the repository of `cwd`, through the same hardened git. The Outcomes
-/// form shows it as the base commit of a new outcome. The error says why there is none (no git, not a
-/// repository, no commit yet).
+/// The full commit id `HEAD` names in the repository whose TOP folder is `cwd`, through the same hardened git.
+/// The Outcomes form shows it as the base commit of a new outcome. The error says why there is none (no git,
+/// not a repository, not its top folder, no commit yet).
+///
+/// Trust: `scan_lazy` needs the host's per-folder trust decision because it runs `status` and `diff`, which can
+/// run programs a repository's config names. This runs only `rev-parse`, which runs none, and every call
+/// still turns `core.fsmonitor`, pagers, hooks and helper programs off and keeps a closed environment; the
+/// folder is one the person typed on purpose for an outcome, and the orchestrator checks the commit again.
 pub fn head_commit(cwd: &Path, env: &Env) -> Result<String, String> {
     let git = Git::new(env);
-    let out = git
-        .run(cwd, &["rev-parse", "--verify", "HEAD^{commit}"], b'\n')
-        .map(|(o, _)| String::from_utf8_lossy(&o).trim().to_string());
-    match out {
-        Some(h)
-            if matches!(h.len(), 40 | 64)
-                && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
-        {
-            Ok(h)
-        }
-        _ => Err(format!(
+    let out = |args: &[&str]| {
+        git.run(cwd, args, b'\n')
+            .map(|(o, _)| String::from_utf8_lossy(&o).trim().to_string())
+    };
+    let here = || {
+        format!(
             "no commit found in {}: is it a git repository with at least one commit, and is git installed?",
             clean_line(&cwd.display().to_string())
+        )
+    };
+    let (Some(top), Some(h)) = (
+        out(&["rev-parse", "--show-toplevel"]),
+        out(&["rev-parse", "--verify", "HEAD^{commit}"]),
+    ) else {
+        return Err(here());
+    };
+    if !matches!(h.len(), 40 | 64) || !h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(here());
+    }
+    // the workspace of an outcome is the repository's top folder, not a folder inside it
+    match (std::fs::canonicalize(&top), std::fs::canonicalize(cwd)) {
+        (Ok(t), Ok(c)) if t == c => Ok(h),
+        _ => Err(format!(
+            "{} is not the top folder of its repository ({}): use the top folder as the workspace.",
+            clean_line(&cwd.display().to_string()),
+            clean_line(&top)
         )),
     }
 }

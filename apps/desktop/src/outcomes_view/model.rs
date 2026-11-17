@@ -367,6 +367,9 @@ impl State {
 
     /// Confirm on the edit stage: the request, or the errors inline.
     pub fn submit(&mut self, t: &FormText) -> Vec<Effect> {
+        if let Some(o) = self.form.as_mut().and_then(Form::retry_read) {
+            return vec![Effect::Review(o)];
+        }
         match self.form.as_mut().and_then(|f| f.submit(t)) {
             Some(s) => vec![Effect::Submit(s)],
             None => vec![],
@@ -399,6 +402,7 @@ impl State {
                 match m {
                     FormMsg::Head { ws, result } => f.head_known(&ws, result),
                     FormMsg::Failed { text, spent } => f.failed(text, spent),
+                    FormMsg::BaseMoved { ws, commit, text } => f.base_moved(&ws, commit, text),
                     FormMsg::Review(r) => f.reviewing(*r),
                     FormMsg::Approved(_) => {}
                 }
