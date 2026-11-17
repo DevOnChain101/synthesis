@@ -882,6 +882,28 @@ impl ProjectData {
     }
 }
 
+/// The full commit id `HEAD` names in the repository of `cwd`, through the same hardened git. The Outcomes
+/// form shows it as the base commit of a new outcome. The error says why there is none (no git, not a
+/// repository, no commit yet).
+pub fn head_commit(cwd: &Path, env: &Env) -> Result<String, String> {
+    let git = Git::new(env);
+    let out = git
+        .run(cwd, &["rev-parse", "--verify", "HEAD^{commit}"], b'\n')
+        .map(|(o, _)| String::from_utf8_lossy(&o).trim().to_string());
+    match out {
+        Some(h)
+            if matches!(h.len(), 40 | 64)
+                && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            Ok(h)
+        }
+        _ => Err(format!(
+            "no commit found in {}: is it a git repository with at least one commit, and is git installed?",
+            clean_line(&cwd.display().to_string())
+        )),
+    }
+}
+
 /// The tree of the file explorer, LAZY: the first level of the folder and the directories in `open` (`None`:
 /// the parents of the changed files, for the first look) are listed; every other directory is read when the
 /// person opens it ([`children_rows`]), so a huge `target/` or `node_modules/` never uses up the listing.
@@ -1166,6 +1188,22 @@ mod tests {
             .status
             .success();
         assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn head_commit_is_the_full_id_or_says_why_not() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(head_commit(d.path(), &env()).is_err(), "not a repository");
+        run(d.path(), &["init", "-q"]);
+        assert!(head_commit(d.path(), &env()).is_err(), "no commit yet");
+        std::fs::write(d.path().join("a.txt"), "a").unwrap();
+        run(d.path(), &["add", "."]);
+        run(d.path(), &["commit", "-q", "-m", "x"]);
+        let h = head_commit(d.path(), &env()).unwrap();
+        assert!(
+            h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{h}"
+        );
     }
 
     #[test]

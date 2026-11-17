@@ -3,6 +3,8 @@ use serde_json::{Value, json};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_view::outcomes::{DecisionCard, InspectorTab, WSL2_REFUSAL, uncovered};
 
+use super::form;
+use super::link;
 use super::model::{CentreTab, OFF_LINES, Pane, Screen};
 use super::render::{card_layout, state_colour, state_rgb};
 use super::*;
@@ -310,4 +312,168 @@ fn settings_over_the_outcomes_tab_and_back_keeps_the_tab(cx: &mut TestAppContext
     v.run_until_parked();
     let o = view(&shell, v);
     assert_eq!(o.read_with(v, |o, _| o.state.screen.clone()), Screen::Ready);
+}
+
+fn confirm_focused(o: &Entity<OutcomesView>, v: &mut VisualTestContext) -> bool {
+    let h = o.read_with(v, |o, _| o.form_ui.as_ref().map(|u| u.confirm.clone()));
+    h.is_some_and(|h| v.update(|window, _| h.is_focused(window)))
+}
+
+#[gpui::test]
+fn the_new_outcome_form_is_keyboard_first_keeps_what_was_typed_and_sends_only_from_its_button(
+    cx: &mut TestAppContext,
+) {
+    let _g = theme::opacity_guard();
+    let (shell, v) = open(cx, 1400., 900.);
+    let o = view(&shell, v);
+    v.simulate_keystrokes("n");
+    v.run_until_parked();
+    // the form is there with its base commit read (the sample answers locally), the goal field has the keys
+    assert!(v.debug_bounds("out-form").is_some() && v.debug_bounds("out-form-confirm").is_some());
+    let base = o.read_with(v, |o, _| o.state.form.as_ref().unwrap().head.clone());
+    assert!(matches!(base, Some(form::Head::Known { .. })), "{base:?}");
+    v.simulate_input("Move login to OIDC");
+    // Enter inside a field is a new line, never a send
+    v.simulate_keystrokes("enter");
+    assert!(o.read_with(v, |o, _| o.state.form.as_ref().unwrap().errors.is_empty()));
+    // Tab goes to the next field (not a tab character) and Shift+Tab back
+    v.simulate_keystrokes("tab");
+    v.simulate_input("Login works");
+    v.simulate_keystrokes("shift-tab");
+    v.simulate_input("!");
+    let t = o.read_with(v, |o, cx| o.form_text(cx));
+    assert_eq!(t.goal, "Move login to OIDC\n!");
+    assert_eq!(t.criteria, "Login works");
+    // Tab reaches the confirm button; with fields missing it shows every error inline and keeps the text
+    for _ in 0..12 {
+        if confirm_focused(&o, v) {
+            break;
+        }
+        v.simulate_keystrokes("tab");
+    }
+    assert!(
+        confirm_focused(&o, v),
+        "the confirm button is on the Tab ring"
+    );
+    v.simulate_keystrokes("enter");
+    v.run_until_parked();
+    let errs = o.read_with(v, |o, _| o.state.form.as_ref().unwrap().errors.clone());
+    assert!(errs.iter().any(|e| e.starts_with("Checks")), "{errs:?}");
+    assert!(v.debug_bounds("out-form-errors").is_some());
+    assert_eq!(
+        o.read_with(v, |o, cx| o.form_text(cx)).criteria,
+        "Login works"
+    );
+    // Esc closes without sending anything and gives the keys back to the tab
+    v.simulate_keystrokes("escape");
+    v.run_until_parked();
+    assert!(o.read_with(v, |o, _| o.state.form.is_none() && o.form_ui.is_none()));
+    assert!(v.debug_bounds("out-form").is_none());
+    v.simulate_keystrokes("tab");
+    assert_eq!(o.read_with(v, |o, _| o.state.pane), Pane::Centre);
+}
+
+#[gpui::test]
+fn a_complete_new_outcome_form_builds_a_contract_and_the_sample_sends_nothing(
+    cx: &mut TestAppContext,
+) {
+    let _g = theme::opacity_guard();
+    let (shell, v) = open(cx, 1400., 900.);
+    let o = view(&shell, v);
+    v.simulate_keystrokes("n");
+    v.run_until_parked();
+    // goal, criteria, checks, budget, scope
+    for text in ["Move login", "Login works", "cargo test", "5", "auth/**"] {
+        v.simulate_input(text);
+        v.simulate_keystrokes("tab");
+    }
+    for _ in 0..12 {
+        if confirm_focused(&o, v) {
+            break;
+        }
+        v.simulate_keystrokes("tab");
+    }
+    v.simulate_keystrokes("enter");
+    v.run_until_parked();
+    // the sample refuses to send, says so inline and keeps the form and its text for another try
+    let (errs, stage) = o.read_with(v, |o, _| {
+        let f = o.state.form.as_ref().unwrap();
+        (f.errors.clone(), f.stage.clone())
+    });
+    assert_eq!(errs, ["Sample data: nothing was sent."]);
+    assert_eq!(stage, form::Stage::Edit);
+    assert_eq!(o.read_with(v, |o, cx| o.form_text(cx)).budget, "5");
+}
+
+#[gpui::test]
+fn the_review_shows_the_servers_warnings_and_approves_only_from_its_button(
+    cx: &mut TestAppContext,
+) {
+    let _g = theme::opacity_guard();
+    let (shell, v) = open(cx, 1400., 900.);
+    let o = view(&shell, v);
+    v.simulate_keystrokes("v");
+    v.run_until_parked();
+    // the revise form starts from the current contract
+    assert_eq!(
+        o.read_with(v, |o, cx| o.form_text(cx)).scope,
+        "auth/**\ntests/**"
+    );
+    assert!(
+        v.debug_bounds("out-form-base").is_none(),
+        "no base commit when revising"
+    );
+    o.update(v, |o, cx| {
+        o.state
+            .apply_form(link::FormMsg::Review(Box::new(sample::review(true))));
+        cx.notify();
+    });
+    v.run_until_parked();
+    // the widening and the lowered bar are shown on their own, as the server worded them
+    assert!(v.debug_bounds("out-widens").is_some() && v.debug_bounds("out-weakens").is_some());
+    // nothing is selected for the person: Enter with no button focused approves nothing
+    v.simulate_keystrokes("enter");
+    assert!(o.read_with(v, |o, _| matches!(
+        o.state.form.as_ref().unwrap().stage,
+        form::Stage::Review(_)
+    )));
+    for _ in 0..4 {
+        if confirm_focused(&o, v) {
+            break;
+        }
+        v.simulate_keystrokes("tab");
+    }
+    assert!(confirm_focused(&o, v));
+    v.simulate_keystrokes("enter");
+    v.run_until_parked();
+    // the sample sends nothing: the review is still there, with the refusal inline
+    let (errs, review) = o.read_with(v, |o, _| {
+        (
+            o.state.form.as_ref().unwrap().errors.clone(),
+            o.state.form_review().is_some(),
+        )
+    });
+    assert!(
+        review && errs == ["Sample data: nothing was sent."],
+        "{errs:?}"
+    );
+}
+
+#[gpui::test]
+fn the_form_fits_both_window_sizes(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    for (w, h) in [(1400., 900.), (1100., 700.)] {
+        let (shell, v) = open(cx, w, h);
+        let o = view(&shell, v);
+        v.simulate_keystrokes("n");
+        v.run_until_parked();
+        for sel in ["out-form", "out-form-confirm", "out-form-cancel"] {
+            let b = bounds(v, sel);
+            assert!(
+                b.0 >= 0. && b.1 >= 0. && b.0 + b.2 <= w && b.1 + b.3 <= h,
+                "{w}x{h} {sel}: {b:?}"
+            );
+        }
+        let _ = o;
+    }
 }

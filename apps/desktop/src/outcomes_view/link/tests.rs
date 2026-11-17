@@ -22,6 +22,20 @@ struct Fake {
     /// Hints still to give, and the request sender dropped when they are used up (ends the loop).
     hints: Rc<RefCell<u32>>,
     end: Rc<RefCell<Option<std::sync::mpsc::Sender<Req>>>>,
+    /// The orchestrator's memory of `outcome.create` keys: `(key, params)`, one draft per key.
+    drafts: Rc<RefCell<Vec<(String, Value)>>>,
+    /// Creates whose reply is lost (the link fails after the draft was made).
+    lose: Rc<RefCell<u32>>,
+    /// What `outcome.contract.revise` answers: `applied` (default), `stale`, `denied` or `queued`.
+    revise: Rc<RefCell<&'static str>>,
+    /// What `outcome.contract.approve` answers (default `applied`).
+    approve: Rc<RefCell<&'static str>>,
+    /// Every revise and approve call, as sent.
+    sent: Rc<RefCell<Vec<(String, Value)>>>,
+    /// The contract of `outcome.contract.get` is not approved yet.
+    draft: bool,
+    /// `outcome.contract.get` for version 2 reports another hash than the revise reply did.
+    wrong_hash: bool,
 }
 
 impl Transport for Fake {
@@ -51,7 +65,44 @@ impl Transport for Fake {
         Ok(match m.as_str() {
             "outcome.list" => json!({"outcomes": sample::rows()}),
             "outcome.budget" => sample::budget(p["id"].as_str().unwrap()),
-            "outcome.contract.get" => sample::contract(),
+            "outcome.contract.get" => {
+                let mut v = match p["version"].as_u64() {
+                    Some(2) => sample::contract_v2(),
+                    _ => sample::contract(),
+                };
+                if self.draft {
+                    v["approved"] = json!(false);
+                }
+                if self.wrong_hash && p["version"] == 2 {
+                    v["hash"] = json!("f".repeat(64));
+                }
+                v
+            }
+            "outcome.create" => {
+                let key = p["idempotency_key"].as_str().unwrap().to_string();
+                if !self.drafts.borrow().iter().any(|(k, _)| *k == key) {
+                    self.drafts.borrow_mut().push((key, p.clone()));
+                }
+                if std::mem::take(&mut *self.lose.borrow_mut()) > 0 {
+                    return Err(ClientError::Io("the orchestrator closed the link".into()));
+                }
+                let s = sample::contract();
+                json!({"id": "o_new", "state": "contract_pending", "contract_version": 1, "contract_hash": s["hash"]})
+            }
+            "outcome.contract.revise" | "outcome.contract.approve" => {
+                self.sent.borrow_mut().push((m.clone(), p.clone()));
+                let (state, result) = if m.ends_with("revise") {
+                    (
+                        *self.revise.borrow(),
+                        json!({"version": 2, "hash": sample::HASH_V2}),
+                    )
+                } else {
+                    (*self.approve.borrow(), json!({}))
+                };
+                let state = if state.is_empty() { "applied" } else { state };
+                json!({"idempotency_key": p["idempotency_key"], "kind": m, "state": state, "result": result})
+            }
+            "outcome.contract.diff" => sample::diff_v2(),
             "decision.list" => {
                 let mut cards: Vec<Value> = sample::cards_json();
                 cards[0]["revision"] = json!(*self.revision.borrow());
@@ -308,4 +359,265 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
     std::fs::remove_file(real.join("synt")).unwrap();
     std::fs::write(real.join("synt"), "ok").unwrap();
     assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
+}
+
+const BASE: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
+
+fn contract() -> synthesis_core::outcome::Contract {
+    serde_json::from_value(sample::contract()["contract"].clone()).unwrap()
+}
+
+fn create(key: &str) -> Req {
+    Req::Submit(Submit::Create {
+        workspace: "/work/app".into(),
+        base_commit: BASE.into(),
+        contract: Box::new(contract()),
+        key: key.into(),
+    })
+}
+
+fn revise(key: &str) -> Req {
+    Req::Submit(Submit::Revise {
+        outcome: "o_auth".into(),
+        revision: 12,
+        contract: Box::new(contract()),
+        key: key.into(),
+    })
+}
+
+fn forms(m: &[Msg]) -> Vec<&FormMsg> {
+    m.iter()
+        .filter_map(|m| match m {
+            Msg::Form(f) => Some(f),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_created_outcome_is_stored_for_review_and_nothing_is_approved() {
+    let f = fake();
+    let msgs = run(&f, vec![create("create-k1")]);
+    let drafts = f.drafts.borrow();
+    assert_eq!(drafts.len(), 1);
+    let (key, p) = &drafts[0];
+    assert_eq!(key, "create-k1");
+    assert_eq!(
+        (
+            p["workspace"].as_str(),
+            p["base_commit"].as_str(),
+            p["surface"].as_str()
+        ),
+        (Some("/work/app"), Some(BASE), Some("superagent"))
+    );
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!("{:?}", forms(&msgs).len())
+    };
+    // the first version has nothing to compare with: no diff call, and the server's hash is the one to approve
+    assert_eq!(
+        (r.outcome.as_str(), r.version, r.diff.is_none()),
+        ("o_new", 1, true)
+    );
+    assert_eq!(r.hash, sample::review(false).hash);
+    assert!(r.contract.is_ok() && r.approvable());
+    let log = f.log.borrow();
+    assert!(
+        !log.iter()
+            .any(|m| m.contains("approve") || m.contains("diff")),
+        "{log:?}"
+    );
+    // the list is looked at again, so the new outcome is the one shown
+    assert!(matches!(msgs.last(), Some(Msg::Snapshot { .. })));
+}
+
+#[test]
+fn a_create_whose_reply_was_lost_is_retried_with_the_same_key_and_makes_one_draft() {
+    let f = fake();
+    *f.lose.borrow_mut() = 1;
+    // first try: the draft is made, the link fails before the answer
+    let (tx, rx) = channel();
+    tx.send(create("create-k1")).unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    let r = serve(&mut client(&f), &rx, &out, Duration::ZERO);
+    assert!(r.is_err(), "the link failure ends the worker with its text");
+    drop(out);
+    let first: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
+    assert!(matches!(
+        forms(&first)[..],
+        [FormMsg::Failed { spent: false, .. }]
+    ));
+    // the retry (the form sends the same key): the orchestrator returns the first draft
+    let msgs = run(&f, vec![create("create-k1")]);
+    assert_eq!(
+        f.drafts.borrow().len(),
+        1,
+        "a retry never makes a second draft"
+    );
+    assert!(matches!(forms(&msgs)[..], [FormMsg::Review(_)]));
+}
+
+#[test]
+fn a_refused_create_is_a_spent_key_and_the_workers_keep_going() {
+    let f = fake();
+    let bad = Req::Submit(Submit::Create {
+        workspace: "/work/app".into(),
+        base_commit: BASE.into(),
+        contract: Box::new(contract()),
+        key: "create-k9".into(),
+    });
+    // the fake refuses an unknown method like a server refuses a request: a text, not a dead link
+    struct Refuse(Fake);
+    impl Transport for Refuse {
+        fn call(&mut self, c: Call) -> Result<Value, ClientError> {
+            if matches!(c, Call::OutcomeCreate { .. }) {
+                return Err(ClientError::Refused(
+                    "base_commit does not exist in the repository".into(),
+                ));
+            }
+            self.0.call(c)
+        }
+    }
+    let (tx, rx) = channel();
+    tx.send(bad).unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    assert_eq!(
+        serve(
+            &mut OutcomeClient::new(Refuse(f), Surface::Superagent),
+            &rx,
+            &out,
+            Duration::ZERO
+        ),
+        Ok(())
+    );
+    drop(out);
+    let msgs: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
+    let fm = forms(&msgs);
+    let [FormMsg::Failed { text, spent: true }] = fm.as_slice() else {
+        panic!()
+    };
+    assert!(text.contains("does not exist"));
+}
+
+#[test]
+fn a_revision_is_stored_then_the_servers_diff_is_read_and_nothing_is_approved() {
+    let f = fake();
+    let msgs = run(&f, vec![revise("revise-k1")]);
+    let sent = f.sent.borrow();
+    assert_eq!(sent.len(), 1, "only the revise call was made, no approve");
+    assert_eq!(sent[0].0, "outcome.contract.revise");
+    assert_eq!(sent[0].1["expected_revision"], 12);
+    assert_eq!(sent[0].1["idempotency_key"], "revise-k1");
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!()
+    };
+    // the version and hash to approve are the ones the server reported
+    assert_eq!((r.version, r.hash.as_str()), (2, sample::HASH_V2));
+    let d = r.diff.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(d.widens.len(), 1);
+    assert_eq!(d.weakens.len(), 1);
+    assert!(r.approvable());
+    assert!(
+        f.log
+            .borrow()
+            .contains(&"outcome.contract.diff".to_string())
+    );
+}
+
+#[test]
+fn a_stale_revision_says_to_reload_and_a_denied_one_says_when_a_contract_can_be_revised() {
+    let f = fake();
+    *f.revise.borrow_mut() = "stale";
+    let msgs = run(&f, vec![revise("revise-k1")]);
+    let fm = forms(&msgs);
+    let [FormMsg::Failed { text, spent: true }] = fm.as_slice() else {
+        panic!()
+    };
+    assert_eq!(text, STALE);
+    assert!(text.contains("reload") && text.contains("Your text is kept"));
+    let f = fake();
+    *f.revise.borrow_mut() = "denied";
+    let msgs = run(&f, vec![revise("revise-k1")]);
+    let fm = forms(&msgs);
+    let [FormMsg::Failed { text, spent: true }] = fm.as_slice() else {
+        panic!()
+    };
+    assert!(text.contains("blocked with no live attempt"), "{text}");
+    // a queued one is not a failure of the request: the same key looks again
+    let f = fake();
+    *f.revise.borrow_mut() = "queued";
+    let msgs = run(&f, vec![revise("revise-k1")]);
+    assert!(matches!(
+        forms(&msgs)[..],
+        [FormMsg::Failed { spent: false, .. }]
+    ));
+}
+
+#[test]
+fn a_stored_contract_that_is_not_the_reported_hash_cannot_be_approved() {
+    let f = Fake {
+        wrong_hash: true,
+        ..fake()
+    };
+    let msgs = run(&f, vec![revise("revise-k1")]);
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!()
+    };
+    assert!(
+        r.contract
+            .as_ref()
+            .unwrap_err()
+            .contains("cannot be approved")
+    );
+    assert!(!r.approvable());
+}
+
+#[test]
+fn an_approval_sends_the_reviewed_version_hash_and_key_and_a_refusal_is_not_a_success() {
+    let f = fake();
+    let req = |key: &str| Req::Approve {
+        outcome: "o_auth".into(),
+        version: 2,
+        hash: sample::HASH_V2.into(),
+        key: key.into(),
+    };
+    let msgs = run(&f, vec![req("approve-k1")]);
+    let sent = f.sent.borrow();
+    assert_eq!(sent[0].0, "outcome.contract.approve");
+    assert_eq!(
+        (
+            sent[0].1["version"].as_u64(),
+            sent[0].1["hash"].as_str(),
+            sent[0].1["idempotency_key"].as_str()
+        ),
+        (Some(2), Some(sample::HASH_V2), Some("approve-k1"))
+    );
+    assert!(matches!(forms(&msgs)[..], [FormMsg::Approved(n)] if n.contains("done")));
+    drop(sent);
+    *f.approve.borrow_mut() = "stale";
+    let msgs = run(&f, vec![req("approve-k2")]);
+    assert!(matches!(
+        forms(&msgs)[..],
+        [FormMsg::Failed { spent: true, .. }]
+    ));
+}
+
+#[test]
+fn a_draft_is_read_for_review_only_while_its_contract_is_not_approved() {
+    let f = Fake {
+        draft: true,
+        ..fake()
+    };
+    let msgs = run(&f, vec![Req::Review("o_auth".into())]);
+    let fm = forms(&msgs);
+    let [FormMsg::Review(r)] = fm.as_slice() else {
+        panic!()
+    };
+    assert_eq!((r.version, r.diff.is_none()), (1, true));
+    let msgs = run(&fake(), vec![Req::Review("o_auth".into())]);
+    assert!(matches!(forms(&msgs)[..], [FormMsg::Failed { .. }]));
 }

@@ -7,9 +7,10 @@ use synthesis_view::outcomes::{
     BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab, OutcomeRow, OverviewTab,
 };
 
+use super::form::{DiffView, Review};
 use super::model::{Detail, Item, Screen, State};
 
-const COMMIT: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
+pub const COMMIT: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
 const HASH: &str = "3c9a41be7d02f58a6e1c90d4b7a3582f1e60c9d47b2a8f35e0614cd9a7b3e5e1";
 
 fn row(
@@ -71,10 +72,57 @@ pub fn contract() -> Value {
                 {"id": "c2", "text": "The old API still answers 200 for the recorded requests", "mandatory": true, "manual": false,
                  "required_trust": "independent_check", "check_ids": ["t1", "t2"]},
                 {"id": "c3", "text": "Integration tests pass against OIDC", "mandatory": false, "manual": true,
-                 "required_trust": "independent_check", "check_ids": []}],
+                 "required_trust": "human_review", "check_ids": []}],
             "checks": [{"id": "t1", "command": "cargo test -p auth"},
                        {"id": "t2", "command": "cargo clippy -p auth -- -D warnings"}],
-            "envelope": {"budgets": {"max_cost_usd": 5.0, "attempt_max_wall_secs": 1200}}}})
+            "envelope": {"allowed_paths": ["auth/**", "tests/**"],
+                         "budgets": {"max_cost_usd": 5.0, "attempt_max_wall_secs": 1200}}}})
+}
+
+pub(super) const HASH_V2: &str = "a41f0c9e27b3d86510fe4a7c2d9b3e80651f7a4c9d02be3586f1a0c7e94d2b63";
+
+/// The sample's revision (version 2): the scope is wider and a criterion is gone.
+pub(super) fn contract_v2() -> Value {
+    let mut v = contract();
+    v["version"] = json!(2);
+    v["hash"] = json!(HASH_V2);
+    v["approved"] = json!(false);
+    v["contract"]["version"] = json!(2);
+    v["contract"]["envelope"]["allowed_paths"] = json!(["auth/**", "tests/**", "billing/**"]);
+    v["contract"]["criteria"].as_array_mut().map(|a| a.pop());
+    v
+}
+
+pub(super) fn diff_v2() -> Value {
+    json!({"base": {"version": 1, "hash": "7be2c4d19a3f06e85b71d2c4a98f3e105d6b7c82a4e91f03b5d7c6a8e2f14d4d", "approved": true},
+        "version": 2, "hash": HASH_V2, "approved": false,
+        "diff": {"changes": [
+            {"area": "envelope", "key": "allowed_paths", "old": "auth/**, tests/**", "new": "auth/**, tests/**, billing/**"},
+            {"area": "criteria", "key": "c3", "old": "Integration tests pass against OIDC", "new": null}],
+          "widens": ["allowed_paths: billing/**"],
+          "weakens": ["criterion c3 removed"]},
+        "widens_scope": true})
+}
+
+/// What the form's review stage shows after a create (`revision` false: the first version, no diff) or a
+/// revise (the server's diff, with its widening and weakening warnings).
+pub fn review(revision: bool) -> Review {
+    let (v, diff) = if revision {
+        (
+            contract_v2(),
+            Some(DiffView::from_json(&diff_v2(), 2, HASH_V2)),
+        )
+    } else {
+        (contract(), None)
+    };
+    Review {
+        outcome: "o_auth".into(),
+        version: if revision { 2 } else { 1 },
+        hash: v["hash"].as_str().unwrap_or_default().into(),
+        contract: CriteriaView::from_json(&v),
+        diff,
+        key: "approve-sample".into(),
+    }
 }
 
 fn brief_scope() -> Value {
@@ -213,6 +261,7 @@ pub fn detail(item: &Item) -> Detail {
     Detail {
         outcome: item.row.id.clone(),
         cards: Ok(if main { cards() } else { vec![] }),
+        current: serde_json::from_value(contract()["contract"].clone()).ok(),
         contract: CriteriaView::from_json(&contract()),
         history: InspectorContent::activity(&events(), 5),
     }
@@ -228,6 +277,7 @@ pub fn state() -> State {
         })
         .collect();
     let mut s = State::new(Screen::Ready);
+    s.workspace = "/home/dev/auth-service".into();
     s.selected = Some(items[0].row.id.clone());
     let (d, i) = (
         detail(&items[0]),
