@@ -9,6 +9,7 @@ mod error;
 mod policy;
 pub mod profile;
 mod redact;
+mod screencast;
 pub mod secret;
 mod snapshot;
 mod untrusted;
@@ -18,6 +19,7 @@ pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
 pub use policy::{Resolver, UrlPolicy};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
+pub use screencast::{Frame, FrameMeta, FrameStream};
 pub use untrusted::UntrustedText;
 
 use base64::Engine;
@@ -187,10 +189,13 @@ pub struct BrowserRuntime {
     /// Armed capture guards: (tab session, document id) -> a value too short to mask was typed.
     /// Armed BEFORE the fill is sent and kept whatever happens to the call.
     filled: Mutex<HashMap<(String, String), bool>>,
+    /// Serialises `view` so activate + startScreencast of two calls cannot interleave.
+    view_lock: tokio::sync::Mutex<()>,
 }
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
+        self.cdp.screencast.close();
         self.events.abort(); // the child itself is killed by KillOnDrop, the profile by TempDir
         // KillOnDrop signals only the leader: Chrome's helpers (renderers, GPU, crashpad) would live on
         // until they notice the dead pipe, which on a loaded machine takes tens of seconds. `close` did
@@ -613,6 +618,16 @@ async fn default_context(cdp: &Cdp) -> Result<(String, Option<String>)> {
     Err(BrowserError::Launch("the browser opened no page".into()))
 }
 
+/// Turns the view off when `view` is cancelled or fails before it completed.
+struct ViewOff<'a>(Option<&'a Arc<screencast::Slot>>);
+impl Drop for ViewOff<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.0 {
+            drop(s.activate(None));
+        }
+    }
+}
+
 impl BrowserRuntime {
     /// Discovers a browser (`SYNT_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
@@ -842,6 +857,7 @@ impl BrowserRuntime {
             shots: AtomicU32::new(0),
             profile_lock: Mutex::new(profile_lock),
             filled: Mutex::default(),
+            view_lock: tokio::sync::Mutex::new(()),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -1516,6 +1532,59 @@ impl BrowserRuntime {
         }
     }
 
+    /// `browser.view`: starts (`on`) or stops the live view of the current tab. Frames are read from
+    /// [`Self::frames`]; none is produced while the view is off. Calling it with `on` again re-targets the
+    /// view to the tab that is current now (cancelling or failing the call leaves the view off; the caller must call it again after `select_tab`, `new_tab`, `close_tab`
+    /// or a popup: the view never follows a tab by itself). It deliberately skips `guard_capture`: the
+    /// frames go to the person's own window, never to the model. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
+    pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
+        let ok = (1..=4096).contains(&max_w) && (1..=4096).contains(&max_h);
+        if on && !ok {
+            return Err(BrowserError::Refused(
+                "view size must be 1..=4096 pixels".into(),
+            ));
+        }
+        let _one_at_a_time = self.view_lock.lock().await;
+        let tab = if on { Some(self.current()?) } else { None };
+        // If this future is cancelled (timeout, select) the view ends up off, never half-open.
+        let mut off_on_drop = ViewOff(Some(&self.cdp.screencast));
+        // Slot first: a frame already in flight for the old view must not be shown (or acked) as new.
+        let (old, generation) = self
+            .cdp
+            .screencast
+            .activate(tab.as_ref().map(|t| t.session.clone()));
+        // Also stops a cast a cancelled call may have left running (Chrome refuses a second start).
+        for s in old.iter().chain(tab.as_ref().map(|t| &t.session)) {
+            let _ = self
+                .cdp
+                .send(Some(s), "Page.stopScreencast", json!({}))
+                .await;
+        }
+        let Some(tab) = tab else {
+            off_on_drop.0 = None;
+            return Ok(());
+        };
+        // The pipe is ordered: every frame of the old cast was dispatched before the stop answer came
+        // back, so from here on frames are the new cast's. Opening before `startScreencast` (not after
+        // its answer) keeps a first frame that arrives right behind that answer.
+        self.cdp.screencast.open(generation);
+        let params =
+            json!({"format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h});
+        let r = self.call(&tab, "Page.startScreencast", params).await;
+        if r.is_ok() {
+            off_on_drop.0 = None; // keep the view on
+        }
+        r.map(drop)
+    }
+
+    /// The consumer end of the live view (one shared slot; see [`FrameStream::next`]).
+    pub fn frames(&self) -> FrameStream {
+        FrameStream {
+            slot: self.cdp.screencast.clone(),
+            cdp: Arc::downgrade(&self.cdp),
+        }
+    }
+
     pub async fn screenshot(&self, full_page: bool) -> Result<Screenshot> {
         let tab = self.current()?;
         self.guard_capture(&tab, false).await?;
@@ -1611,6 +1680,7 @@ impl BrowserRuntime {
     }
 
     pub async fn close(&self) -> Result<()> {
+        self.cdp.screencast.close();
         self.events.abort();
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.start_kill(); // errors mean "already gone"

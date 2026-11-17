@@ -750,15 +750,17 @@ pub fn core_layout(mode: Mode, w: f32, h: f32, large: bool, ch: CoreChars) -> Co
     let room = (side - 2. * (border + pad)).max(0.);
     let a = mode == Mode::A;
     let base = CoreLayout {
-        logo: if a { 0.4 * side } else { 0.38 * side }.min(if a { 76. } else { 44. }),
+        // owner decision 2026-11-17: grid core logo/label scaled up (design: logo 0.4/0.38 side, cap 76/44; title
+        // A 14/12/10.5, B 11/9.5)
+        logo: if a { 0.5 * side } else { 0.48 * side }.min(if a { 96. } else { 56. }),
         title: Some(if !a {
-            if side >= 130. { 11. } else { 9.5 }
+            if side >= 130. { 13. } else { 11. }
         } else if side >= 170. {
-            14.
+            16.
         } else if side >= 140. {
-            12.
+            14.
         } else {
-            10.5
+            12.
         }),
         track: if !a {
             0.
@@ -1235,7 +1237,27 @@ mod tests {
         let degenerate = core_layout(Mode::A, 0., 0., true, ch);
         assert!(degenerate.logo == 0. && degenerate.title.is_none());
         let huge = core_layout(Mode::A, 2000., 2000., true, ch);
-        assert!(huge.logo <= 76. && huge.title.is_some() && huge.tag);
+        assert!(huge.logo == 96. && huge.title.is_some() && huge.tag);
+        // the scaled-up grid core (owner decision 2026-11-17) at a small, a mid and a large square: nothing clipped
+        for (mode, side, logo) in [
+            (Mode::A, 130., 65.),
+            (Mode::A, 200., 96.),
+            (Mode::B, 130., 56.),
+            (Mode::B, 100., 48.),
+        ] {
+            let l = core_layout(mode, side, side, true, ch);
+            let (w, h) = core_content(mode, &l, ch);
+            let room = side - 2. * (l.border + l.pad);
+            assert!(
+                w <= room && h <= room && l.logo <= logo + 0.01,
+                "{mode:?} {side}: {l:?}"
+            );
+        }
+        let big = core_layout(Mode::A, 200., 200., true, ch);
+        assert!(
+            big.sub && big.tag && big.logo == 96. && big.title == Some(16.),
+            "{big:?}"
+        );
         // 100 px: the title still fits, the sub line and tag do not
         let mid = core_layout(Mode::A, 100., 100., true, ch);
         assert!(mid.title.is_some() && !mid.sub && !mid.tag, "{mid:?}");
