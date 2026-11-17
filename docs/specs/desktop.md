@@ -82,7 +82,7 @@ of the TUI design, in this repo, running the Rust engine in process.
 
 - Names: the cargo binary stays `synthesis-desktop` (technical; it is not the `synt` command and there is no alias). Display name "Synthesis"
   (bundle name, window/app name in the menu, `.desktop` Name, `Synthesis.exe`). Bundle identifier `dev.synthesis.desktop`
-  (`[package.metadata.bundle]`). Icons: `assets/icons/` (committed .icns/.ico/png, from `design/01-brand/app-icons`; the .icns builds a charcoal-gradient superellipse (continuous-corner) body of 896/1024 per Apple's template with the transparent logo (`design/01-brand/app-icons/synthesis-logo-transparent-512.png`, ribbon about 77% of the body width), an inner edge rim/shade, a faint top sheen and a soft drop shadow in the margin (skipped below 64 px), regenerate with `swift scripts/make-macos-icns.swift`; .ico and PNG stay full-bleed); fonts are compiled in.
+  (`[package.metadata.bundle]`). Icons: `assets/icons/` (committed .icns/.ico/png, from `design/01-brand/app-icons`; the .icns builds a charcoal-gradient superellipse (continuous-corner) body of 896/1024 per Apple's template with the transparent logo (`design/01-brand/app-icons/synthesis-logo-transparent-1024.png`, ribbon about 77% of the body width), an inner edge rim/shade, a faint top sheen and a soft drop shadow in the margin (skipped below 64 px), regenerate with `swift scripts/make-macos-icns.swift`; .ico and PNG stay full-bleed); fonts are compiled in.
 - No signing or notarization (no secrets in the pipeline). Started from Finder the cwd is `/`; the app then uses the home folder.
 
 ## 4. Phases

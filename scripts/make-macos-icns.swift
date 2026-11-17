@@ -6,7 +6,7 @@
 // Windows .ico and the Linux PNGs stay full-bleed (those platforms do not pad icons).
 import AppKit
 
-let src = "design/01-brand/app-icons/synthesis-logo-transparent-512.png"
+let src = "design/01-brand/app-icons/synthesis-logo-transparent-1024.png"
 let out = "apps/desktop/assets/icons/synthesis.icns"
 let bodyFraction = 896.0 / 1024.0   // Apple template body
 let squircleExponent = 5.0          // superellipse |x|^n + |y|^n = 1: continuous corners like Apple's icon shape
