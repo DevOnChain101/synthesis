@@ -16,10 +16,11 @@ use synthesis_app::outcome_client::{ClientError, OutcomeClient, Transport};
 use synthesis_config::Env;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
-    AttemptView, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab,
-    OverviewTab,
+    AttemptView, BudgetView, CommandReply, CriteriaView, DecisionCard, InspectorContent,
+    InspectorTab, OverviewTab, is_hex, valid_alt_id,
 };
 
+use super::form::{DiffView, Review, Submit};
 use super::model::{Detail, Item, Screen};
 
 /// How long without a hint before the worker looks again.
@@ -48,6 +49,39 @@ pub enum Req {
         card: Box<DecisionCard>,
         choice: String,
     },
+    /// Create or revise (the key is the form's: a retry after a lost reply sends the same one).
+    Submit(Submit),
+    Approve {
+        outcome: String,
+        version: u32,
+        hash: String,
+        key: String,
+    },
+    /// Read the stored contract of an outcome whose contract is not approved, for review.
+    Review(String),
+}
+
+/// What the worker says to the open form.
+pub enum FormMsg {
+    Head {
+        ws: String,
+        result: Result<String, String>,
+    },
+    /// A refusal or a failure. `spent`: the server answered, so the idempotency key is used up; otherwise the
+    /// reply is lost and the same request goes out again with the same key.
+    Failed {
+        text: String,
+        spent: bool,
+    },
+    /// The server stored the contract: read it (and its diff) before approving.
+    Review(Box<Review>),
+    Approved(String),
+    /// `HEAD` moved since the form showed its base commit: nothing was created.
+    BaseMoved {
+        ws: String,
+        commit: String,
+        text: String,
+    },
 }
 
 pub enum Msg {
@@ -63,10 +97,13 @@ pub enum Msg {
         content: InspectorContent,
     },
     Answered(String),
+    Form(FormMsg),
 }
 
 pub struct Link {
     tx: Sender<Req>,
+    out: UnboundedSender<Msg>,
+    env: Env,
 }
 
 impl Link {
@@ -74,8 +111,22 @@ impl Link {
     pub fn start(env: Env) -> (Link, UnboundedReceiver<Msg>) {
         let (tx, rx) = channel();
         let (out, orx) = unbounded();
+        let link = Link {
+            tx,
+            out: out.clone(),
+            env: env.clone(),
+        };
         std::thread::spawn(move || run(&env, &rx, &out));
-        (Link { tx }, orx)
+        (link, orx)
+    }
+
+    /// Reads `HEAD` of the folder `ws` on its own thread (git, never on the window's) for the form.
+    pub fn head(&self, ws: String) {
+        let (out, env) = (self.out.clone(), self.env.clone());
+        std::thread::spawn(move || {
+            let result = synthesis_view::project::head_commit(std::path::Path::new(&ws), &env);
+            let _ = out.unbounded_send(Msg::Form(FormMsg::Head { ws, result }));
+        });
     }
 
     pub fn send(&self, r: Req) {
@@ -147,7 +198,9 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                 let mut c = OutcomeClient::new(link, Surface::Superagent);
                 let screen = match c.status() {
                     Ok(s) if s.get("ready") == Some(&Value::Bool(true)) => {
-                        match serve(&mut c, rx, out, HINT_WAIT) {
+                        match serve(&mut c, rx, out, HINT_WAIT, &|ws| {
+                            synthesis_view::project::head_commit(std::path::Path::new(ws), env)
+                        }) {
                             Ok(()) => return,
                             Err(e) => Screen::Unreachable(e),
                         }
@@ -186,6 +239,7 @@ pub(super) fn serve<T: Transport>(
     rx: &Receiver<Req>,
     out: &UnboundedSender<Msg>,
     wait: Duration,
+    head: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let mut w = Watch {
         selected: None,
@@ -222,6 +276,25 @@ pub(super) fn serve<T: Transport>(
                     let _ = out.unbounded_send(Msg::Answered(note));
                     refresh(c, &mut w, out)?;
                     last = Instant::now();
+                }
+                Ok(Req::Submit(s)) => {
+                    submit(c, s, &mut w, out, head)?;
+                    refresh(c, &mut w, out)?;
+                    last = Instant::now();
+                }
+                Ok(Req::Approve {
+                    outcome,
+                    version,
+                    hash,
+                    key,
+                }) => {
+                    approve(c, &outcome, version, &hash, &key, out)?;
+                    refresh(c, &mut w, out)?;
+                    last = Instant::now();
+                }
+                Ok(Req::Review(id)) => {
+                    let m = review_draft(c, &id)?;
+                    let _ = out.unbounded_send(Msg::Form(m));
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
@@ -279,9 +352,14 @@ fn refresh<T: Transport>(
             Err(e) => InspectorContent::unavailable(InspectorTab::Activity, e),
         };
         inspector = Some(tab_content(c, w.tab, item, &contract, &events)?);
+        let current = contract
+            .as_ref()
+            .ok()
+            .and_then(|v| serde_json::from_value(v.get("contract")?.clone()).ok());
         detail = Some(Box::new(Detail {
             outcome: id,
             cards,
+            current,
             contract: contract.and_then(|v| CriteriaView::from_json(&v)),
             history,
         }));
@@ -448,6 +526,236 @@ fn answer<T: Transport>(
         };
     }
     Ok(format!("Answer {choice}: {}", r.describe()))
+}
+
+/// Tells the form that the request failed. A failed link or a server that broke the protocol also ends the
+/// worker (the window shows the screen for it; the form stays open with its text and the same key).
+fn form_fail(out: &UnboundedSender<Msg>, e: &ClientError) -> Result<(), String> {
+    let _ = out.unbounded_send(Msg::Form(FormMsg::Failed {
+        text: e.to_string(),
+        spent: matches!(e, ClientError::Refused(_)),
+    }));
+    match e {
+        ClientError::Io(_) | ClientError::Hostile(_) => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+pub const STALE: &str = "The outcome changed since you opened this form, so nothing was revised. Your text is kept here: close the form, reload (r), read the outcome again, then revise it again.";
+
+/// Follows a queued command for up to `SETTLE`.
+fn settle<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    outcome: &str,
+    mut r: CommandReply,
+    key: &str,
+) -> Result<Result<CommandReply, String>, String> {
+    let end = Instant::now() + SETTLE;
+    while r.state == CommandState::Queued && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(150));
+        r = match soft(c.command_status(outcome, key))? {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+    }
+    Ok(Ok(r))
+}
+
+/// The contract the server stored as version `version`, with the server's own diff when there is an earlier
+/// contract to compare it with. What cannot be read, or is not the version and hash reported, is an error in
+/// the review and blocks the approval.
+fn review<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    outcome: &str,
+    version: u32,
+    hash: &str,
+) -> Result<Review, String> {
+    let contract = soft(c.contract(outcome, Some(version)))?.and_then(|v| {
+        let cv = CriteriaView::from_json(&v)?;
+        if cv.hash == hash && cv.version == Some(i64::from(version)) {
+            Ok(cv)
+        } else {
+            Err("the stored contract is not the version and hash the orchestrator reported, so it cannot be approved here".into())
+        }
+    });
+    // every version above the first is read against the approved one, whatever opened the review
+    let diff = if version > 1 {
+        Some(
+            soft(c.contract_diff(outcome, version))?
+                .and_then(|v| DiffView::from_json(&v, version, hash)),
+        )
+    } else {
+        None
+    };
+    Ok(Review {
+        outcome: outcome.to_string(),
+        version,
+        hash: hash.to_string(),
+        contract,
+        diff,
+        key: format!("approve-{}", uuid::Uuid::new_v4()),
+    })
+}
+
+fn to_review<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    id: &str,
+    version: Option<u64>,
+    hash: Option<&str>,
+) -> Result<FormMsg, String> {
+    match (version.and_then(|v| u32::try_from(v).ok()), hash) {
+        (Some(v), Some(h)) if valid_alt_id(id) && is_hex(h, 64) => {
+            Ok(FormMsg::Review(Box::new(review(c, id, v, h)?)))
+        }
+        _ => Ok(FormMsg::Failed {
+            text: "The orchestrator sent an outcome id, version or contract hash of an unexpected shape; nothing is shown or approved.".into(),
+            spent: false,
+        }),
+    }
+}
+
+/// Creates or revises. The contract is stored and waits: nothing is approved here.
+fn submit<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    s: Submit,
+    w: &mut Watch,
+    out: &UnboundedSender<Msg>,
+    head: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let m = match s {
+        Submit::Create {
+            workspace,
+            base_commit,
+            contract,
+            key,
+        } => match head(&workspace) {
+            // HEAD is read again now: a base that moved since the form showed it is not used
+            Ok(now) if now != base_commit => {
+                let text = format!(
+                    "The base commit moved while you were editing: HEAD is now {now} (the form showed {base_commit}). Nothing was created. Check it, then confirm again to use the new base."
+                );
+                let _ = out.unbounded_send(Msg::Form(FormMsg::BaseMoved {
+                    ws: workspace,
+                    commit: now,
+                    text,
+                }));
+                return Ok(());
+            }
+            Err(why) => {
+                let _ = out.unbounded_send(Msg::Form(FormMsg::Failed {
+                    text: format!("Base commit: {why} Nothing was created."),
+                    spent: false,
+                }));
+                return Ok(());
+            }
+            Ok(_) => match c.create_with_key(&workspace, &base_commit, *contract, &key) {
+            Ok(v) => {
+                let id = v.get("id").and_then(Value::as_str).unwrap_or_default();
+                // the new outcome is the one shown next
+                w.selected = Some(id.to_string());
+                to_review(
+                    c,
+                    id,
+                    v.get("contract_version").and_then(Value::as_u64),
+                    v.get("contract_hash").and_then(Value::as_str),
+                )?
+            }
+                Err(e) => return form_fail(out, &e),
+            },
+        },
+        Submit::Revise {
+            outcome,
+            revision,
+            contract,
+            key,
+        } => match c.revise_contract(&outcome, revision, *contract, &key) {
+            Ok(r) => match settle(c, &outcome, r, &key)? {
+                Err(e) => FormMsg::Failed {
+                    text: format!("Sent; the state could not be read: {e}"),
+                    spent: false,
+                },
+                Ok(r) => match r.state {
+                    CommandState::Applied => to_review(
+                        c,
+                        &outcome,
+                        r.result.get("version").and_then(Value::as_u64),
+                        r.result.get("hash").and_then(Value::as_str),
+                    )?,
+                    CommandState::Stale => FormMsg::Failed {
+                        text: STALE.into(),
+                        spent: true,
+                    },
+                    CommandState::Queued => FormMsg::Failed {
+                        text: "The revision is queued and not applied yet. Confirm again to look again: the same request is not repeated.".into(),
+                        spent: false,
+                    },
+                    CommandState::Denied | CommandState::AlreadyResolved => FormMsg::Failed {
+                        text: format!(
+                            "The orchestrator refused the revision ({}). A contract can be revised only while the outcome is blocked with no live attempt.",
+                            r.describe()
+                        ),
+                        spent: true,
+                    },
+                },
+            },
+            Err(e) => return form_fail(out, &e),
+        },
+    };
+    let _ = out.unbounded_send(Msg::Form(m));
+    Ok(())
+}
+
+/// Approves the version and hash of the review (the ones the server reported, never others).
+fn approve<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    outcome: &str,
+    version: u32,
+    hash: &str,
+    key: &str,
+    out: &UnboundedSender<Msg>,
+) -> Result<(), String> {
+    let r = match c.approve_contract(outcome, version, hash, key) {
+        Ok(r) => r,
+        Err(e) => return form_fail(out, &e),
+    };
+    let m = match settle(c, outcome, r, key)? {
+        Err(e) => FormMsg::Failed {
+            text: format!("Sent; the state could not be read: {e}"),
+            spent: false,
+        },
+        Ok(r) if r.state == CommandState::Applied => {
+            FormMsg::Approved(format!("Contract v{version}: {}", r.describe()))
+        }
+        // not applied yet: the contract is still not approved, and the same key looks again
+        Ok(r) if r.state == CommandState::Queued => FormMsg::Failed {
+            text: format!(
+                "The approval of version {version} is {}. It is not approved yet: confirm again to look again (the same request is not repeated), or close this window and watch the outcome.",
+                r.describe()
+            ),
+            spent: false,
+        },
+        Ok(r) => FormMsg::Failed {
+            text: format!("Not approved: {}", r.describe()),
+            spent: true,
+        },
+    };
+    let _ = out.unbounded_send(Msg::Form(m));
+    Ok(())
+}
+
+/// The stored contract of an outcome that is waiting for its first approval.
+fn review_draft<T: Transport>(c: &mut OutcomeClient<T>, id: &str) -> Result<FormMsg, String> {
+    let fail = |text: String| FormMsg::Failed { text, spent: false };
+    Ok(match soft(c.contract(id, None))? {
+        Err(e) => fail(e),
+        Ok(v) if v.get("approved") == Some(&Value::Bool(false)) => to_review(
+            c,
+            id,
+            v.get("version").and_then(Value::as_u64),
+            v.get("hash").and_then(Value::as_str),
+        )?,
+        Ok(_) => fail("This contract is already approved.".into()),
+    })
 }
 
 #[cfg(test)]

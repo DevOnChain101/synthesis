@@ -2,7 +2,7 @@ use serde_json::json;
 use synthesis_view::outcomes::{DecisionCard, InspectorTab};
 
 use super::*;
-use crate::outcomes_view::sample;
+use crate::outcomes_view::{form, sample};
 
 fn k(name: &str) -> Key<'_> {
     Key {
@@ -328,4 +328,109 @@ fn a_link_that_dies_mid_send_does_not_leave_send_stuck_and_nothing_is_resent() {
     assert!(press(&mut s, "enter", 30_000).is_empty());
     press(&mut s, "2", 30_000);
     assert_eq!(press(&mut s, "enter", 30_000).len(), 1);
+}
+
+#[test]
+fn new_outcome_opens_the_form_on_the_workspace_and_reads_its_commit_and_the_form_owns_the_keys() {
+    let mut s = sample::state();
+    let e = press(&mut s, "n", 0);
+    assert_eq!(e, vec![Effect::Head(sample::workspace())]);
+    let f = s.form.as_ref().unwrap();
+    assert!(f.is_new() && f.initial.workspace == sample::workspace());
+    // with the form open, none of the tab's keys act behind it
+    assert_eq!(s.key(&k("r"), 0), None);
+    assert_eq!(s.key(&k("down"), 0), None);
+    s.close_form();
+    assert!(s.form.is_none());
+    assert!(s.key(&k("down"), 0).is_some());
+}
+
+#[test]
+fn revise_starts_from_the_current_contract_and_the_revision_that_is_shown() {
+    let mut s = sample::state();
+    assert!(press(&mut s, "v", 0).is_empty());
+    let f = s.form.as_ref().unwrap();
+    assert_eq!(
+        f.mode,
+        form::Mode::Revise {
+            outcome: "o_auth".into(),
+            revision: 12
+        }
+    );
+    assert!(f.initial.goal.starts_with("Move login to OIDC"));
+    assert_eq!(f.initial.scope, "auth/**\ntests/**");
+    // a contract this build cannot read in full is not revised from a guess
+    let mut s = sample::state();
+    s.detail.as_mut().unwrap().current = None;
+    press(&mut s, "v", 0);
+    assert!(s.form.is_none());
+    assert!(s.notice.as_deref().unwrap().contains("cannot be revised"));
+}
+
+#[test]
+fn review_and_approve_is_offered_only_for_a_contract_that_waits() {
+    let mut s = sample::state();
+    assert!(press(&mut s, "a", 0).is_empty());
+    assert!(
+        s.form.is_none(),
+        "an approved contract has nothing to approve"
+    );
+    if let Some(Ok(c)) = s.detail.as_mut().map(|d| &mut d.contract) {
+        c.approved = Some(false);
+    }
+    assert_eq!(press(&mut s, "a", 0), vec![Effect::Review("o_auth".into())]);
+    assert!(matches!(
+        s.form.as_ref().unwrap().mode,
+        form::Mode::Draft { .. }
+    ));
+}
+
+#[test]
+fn what_the_worker_says_reaches_an_open_form_and_an_approval_closes_it() {
+    let mut s = sample::state();
+    press(&mut s, "n", 0);
+    s.apply_form(FormMsg::Head {
+        ws: sample::workspace(),
+        result: Ok("a".repeat(40)),
+    });
+    s.apply_form(FormMsg::Review(Box::new(sample::review(false))));
+    assert!(s.form_review().is_some());
+    // approving asks for exactly the reviewed version and hash, once
+    let e = s.approve();
+    assert_eq!(e.len(), 1);
+    assert!(matches!(&e[0], Effect::Approve { version: 1, .. }));
+    assert!(
+        s.approve().is_empty(),
+        "no second approval while one is on its way"
+    );
+    s.apply_form(FormMsg::Approved("Contract v1: done".into()));
+    assert!(s.form.is_none());
+    assert_eq!(s.notice.as_deref(), Some("Contract v1: done"));
+    // a reply for a form that was closed is dropped
+    s.apply_form(FormMsg::Failed {
+        text: "late".into(),
+        spent: true,
+    });
+    assert!(s.form.is_none());
+}
+
+#[test]
+fn a_draft_whose_read_failed_can_be_asked_again_or_closed() {
+    let mut s = sample::state();
+    if let Some(Ok(c)) = s.detail.as_mut().map(|d| &mut d.contract) {
+        c.approved = Some(false);
+    }
+    press(&mut s, "a", 0);
+    s.apply_form(FormMsg::Failed {
+        text: "unreachable".into(),
+        spent: false,
+    });
+    assert_eq!(s.form.as_ref().unwrap().errors, ["unreachable"]);
+    assert_eq!(
+        s.submit(&FormText::default()),
+        vec![Effect::Review("o_auth".into())]
+    );
+    assert_eq!(s.form.as_ref().unwrap().stage, form::Stage::Sending);
+    s.close_form();
+    assert!(s.form.is_none());
 }

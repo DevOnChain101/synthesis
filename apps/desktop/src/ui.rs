@@ -478,7 +478,9 @@ impl Shell {
         hidden: layout::Hidden,
         settings_cfg: Result<settings_view::model::Cfg, String>,
     ) -> Self {
-        let env = live.as_ref().map(|c| c.env.clone());
+        let env = live
+            .as_ref()
+            .map(|c| (c.env.clone(), c.project.display().to_string()));
         let tui = cx.new(|cx| match live {
             Some(cfg) => TuiView::live(window, cx, cfg, hidden, 0.),
             None => TuiView::new(0., hidden),
@@ -497,16 +499,16 @@ impl Shell {
         Self::with_outcomes(window, cx, tui, settings_cfg, None)
     }
 
-    /// `outcomes_env`: the environment the live Outcomes tab reads its setting and home from; `None` is the sample.
+    /// `outcomes_env`: the environment the live Outcomes tab reads its setting and home from, and the workspace a new outcome works in by default; `None` is the sample.
     fn with_outcomes(
         window: &mut Window,
         cx: &mut Context<Self>,
         tui: Entity<TuiView>,
         settings_cfg: Result<settings_view::model::Cfg, String>,
-        outcomes_env: Option<synthesis_config::Env>,
+        outcomes_env: Option<(synthesis_config::Env, String)>,
     ) -> Self {
         let outcomes = cx.new(|cx| match outcomes_env {
-            Some(env) => OutcomesView::live(env, cx),
+            Some((env, ws)) => OutcomesView::live(env, ws, cx),
             None => OutcomesView::sample(cx),
         });
         tui.update(cx, |t, cx| {

@@ -14,6 +14,7 @@ use synthesis_view::outcomes::{
 };
 
 use super::OutcomesView;
+use super::form_view::small_button;
 use super::model::{CentreTab, Item, OFF_LINES, Pane, Screen};
 use crate::live::now_ms;
 use crate::theme::{self, hsla};
@@ -81,7 +82,7 @@ impl CardLayout {
     }
 }
 
-fn mono(s: impl Into<String>) -> Div {
+pub(super) fn mono(s: impl Into<String>) -> Div {
     div().font_family(brand::MONO_FONT).child(s.into())
 }
 
@@ -96,7 +97,7 @@ fn lines(s: &str) -> Div {
     }))
 }
 
-fn heading(s: &str) -> Div {
+pub(super) fn heading(s: &str) -> Div {
     div()
         .mt(px(10.))
         .mb(px(4.))
@@ -105,7 +106,7 @@ fn heading(s: &str) -> Div {
 }
 
 /// `label  value` rows of a card: the label in a dim column.
-fn field(label: &str, value: impl IntoElement) -> Div {
+pub(super) fn field(label: &str, value: impl IntoElement) -> Div {
     div()
         .flex()
         .gap(px(12.))
@@ -146,7 +147,7 @@ fn needs_badges(n: &NeedsYou) -> Vec<AnyElement> {
 
 impl OutcomesView {
     /// A click handler: the keys go to this view, then `f` runs.
-    fn click(
+    pub(super) fn click(
         &self,
         cx: &Context<Self>,
         f: impl Fn(&mut Self, &mut Context<Self>) + 'static,
@@ -196,7 +197,15 @@ impl OutcomesView {
                     .ml_auto()
                     .text_color(dim())
                     .child(s.items.len().to_string()),
-            );
+            )
+            .child(small_button(
+                "out-new",
+                "New outcome",
+                self.click(cx, |this, cx| {
+                    let e = this.state.open_new();
+                    this.run(e, cx);
+                }),
+            ));
         let rows = s
             .items
             .iter()
@@ -308,7 +317,7 @@ impl OutcomesView {
         })
         .font_family(brand::MONO_FONT);
         let body = match s.centre {
-            CentreTab::Goal => self.goal(),
+            CentreTab::Goal => self.goal(cx),
             CentreTab::Decisions => self.decisions(cx),
             CentreTab::History => self.history(),
         };
@@ -337,7 +346,7 @@ impl OutcomesView {
         }))
     }
 
-    fn goal(&self) -> Div {
+    fn goal(&self, cx: &Context<Self>) -> Div {
         let Some(it) = self.state.selected_item() else {
             return div().text_color(dim()).child("No outcome selected.");
         };
@@ -383,11 +392,34 @@ impl OutcomesView {
             }
             None => d = d.child(div().mt(px(10.)).text_color(dim()).child("Loading...")),
         }
+        let waiting = matches!(
+            self.state.detail.as_ref().map(|d| &d.contract),
+            Some(Ok(c)) if c.approved == Some(false)
+        );
         d.child(
             div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.))
                 .mt(px(14.))
-                .text_color(dim())
-                .child("Read-only for now: creating an outcome and editing its contract come in a later step (use the synt outcome command for them)."),
+                .child(small_button(
+                    "out-revise",
+                    "Revise contract",
+                    self.click(cx, |this, cx| {
+                        let e = this.state.open_revise();
+                        this.run(e, cx);
+                    }),
+                ))
+                .children(waiting.then(|| {
+                    small_button(
+                        "out-review",
+                        "Review and approve",
+                        self.click(cx, |this, cx| {
+                            let e = this.state.review_draft();
+                            this.run(e, cx);
+                        }),
+                    )
+                })),
         )
     }
 
@@ -628,6 +660,14 @@ impl OutcomesView {
     fn hints(&self) -> Vec<(String, String)> {
         let h = |k: &str, d: &str| (k.to_string(), d.to_string());
         let s = &self.state;
+        if s.form.is_some() {
+            return vec![
+                h("Tab", "next field"),
+                h("Shift+Tab", "previous"),
+                h("Enter", "on a button"),
+                h("Esc", "close"),
+            ];
+        }
         if s.screen != Screen::Ready {
             return vec![h("r", "check again")];
         }
@@ -650,7 +690,11 @@ impl OutcomesView {
                 h("\u{2191}\u{2193}", "scroll"),
             ]),
         }
-        v.push(h("r", "refresh"));
+        v.extend([
+            h("n", "new outcome"),
+            h("v", "revise contract"),
+            h("r", "refresh"),
+        ]);
         v
     }
 
@@ -715,6 +759,7 @@ impl OutcomesView {
 
 impl Render for OutcomesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_form_ui(window, cx);
         let vw = f32::from(window.viewport_size().width);
         let s = &self.state;
         let ready = s.screen == Screen::Ready;
@@ -760,6 +805,7 @@ impl Render for OutcomesView {
         div()
             .debug_selector(|| "outcomes".to_string())
             .id("outcomes")
+            .relative()
             .track_focus(&self.focus)
             .key_context("Outcomes")
             .size_full()
@@ -767,13 +813,14 @@ impl Render for OutcomesView {
             .flex_col()
             .text_size(px(13.))
             .text_color(text())
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if this.on_key(ev, cx) {
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
+                if this.on_key(ev, w, cx) {
                     cx.stop_propagation();
                 }
             }))
             .child(div().flex_1().min_h(px(0.)).p(px(10.)).child(main))
             .child(chrome::footer(&self.hints(), &chips).border_color(rule()))
+            .children(self.form_overlay(window, cx))
     }
 }
 
@@ -850,7 +897,7 @@ fn extras(rows: &[BriefRow]) -> impl Iterator<Item = Div> + '_ {
     })
 }
 
-fn contract_block(c: &CriteriaView) -> Div {
+pub(super) fn contract_block(c: &CriteriaView) -> Div {
     let mut d = div()
         .flex()
         .flex_col()
