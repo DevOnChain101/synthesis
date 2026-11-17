@@ -168,3 +168,34 @@ fn an_outcome_without_independent_evidence_is_not_verified() {
     // and doing it again changes nothing
     assert_eq!(conclude(&mut w).unwrap(), OutcomeState::ReworkRequired);
 }
+
+#[test]
+fn every_finished_command_is_audited_once_with_the_principal_of_its_link() {
+    need_git!();
+    let r = rig();
+    let mut w = pending(&r);
+    let audits = |w: &OutcomeWriter| -> Vec<serde_json::Value> {
+        w.read_events(w.control_session_id(), 0, 5000)
+            .unwrap()
+            .into_iter()
+            .filter_map(|rec| match rec {
+                synthesis_events::Record::Unknown(e) if e.kind == "policy.decision" => {
+                    Some(serde_json::to_value(e).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let before = audits(&w).len();
+    queue(&w, &r, "s1", "outcome.start", None);
+    apply_lifecycle(&mut w, &Control::default(), &StubPlanner).unwrap();
+    // a replay finds the row no longer queued: nothing more is written
+    apply_lifecycle(&mut w, &Control::default(), &StubPlanner).unwrap();
+    let a = audits(&w);
+    assert_eq!(a.len(), before + 1);
+    let text = a.last().unwrap().to_string();
+    assert!(
+        text.contains("outcome.start") && text.contains("user:cli") && text.contains("allow"),
+        "{text}"
+    );
+}
