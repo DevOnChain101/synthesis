@@ -1,7 +1,7 @@
 # Spec: Desktop app (native GPUI): draft 0.2, phase 0
 
 Replaces the archived spec (tag `archive/ui-before-removal`, `docs/specs/desktop.md`: Mode 1/Mode 2,
-See also [conductor.md](conductor.md): proposed Conductor mode of the TUI tab (design only, 2026-11-17).
+See also [super-agent.md](super-agent.md) (the Super Agent mode: layout, chat, session detail, phases S0-S3; design only, 2026-11-17) and [conductor.md](conductor.md) (the backend and safety design of its chat; not a mode).
 onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" has the one-line note.
 
 ## 1. Goals and non-goals
@@ -10,7 +10,7 @@ A native GPUI app (no webview) for macOS, Linux and Windows that is the desktop 
 of the TUI design, in this repo, running the Rust engine in process.
 
 - One interface, plus a placeholder and Settings: **TUI** (the terminal-style tab, drawn natively from engine
-  data, `cli.html` exactly), **Outcomes** (the former "Super Agent" tab, renamed 2026-11-17; section "Outcomes tab") and **Settings**
+  data, `cli.html` exactly), **Super Agent** (the former "Outcomes" tab, renamed back 2026-11-17 by the mode normalisation: only two modes, TUI and Super Agent; design in `super-agent.md`; section "Outcomes tab" is its current build) and **Settings**
   (a centred popup over the TUI view, section 6). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
   palette (`docs/cli-palette.md`), not its blue/green. The first Super Agent view (`agent_view/`, built on `#view2`) was
   removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
@@ -214,7 +214,7 @@ Not ported: topology mode L (tall and narrow falls back to T). The "Latest user 
 
 Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the design's chrome (`index.html` `#chrome`)
 (`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
-the TUI and Outcomes icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
+the TUI and Super Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
 Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
 without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
 native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
@@ -305,7 +305,9 @@ tools and skills, conversation. Not done, with where the data would come from:
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: reversed 2026-11-16 (was: not wanted): native embedded terminal, see `terminal-browser.md`.
 
-### Outcomes tab (step 1)
+### Outcomes tab (step 1; the Super Agent tab, rename in S0)
+
+Owner decision 2026-11-17 (mode normalisation, supersedes the next paragraph): the tab is **Super Agent**; there are only two modes, TUI and Super Agent, and the Conductor is the chat frame of Super Agent, not a mode ([super-agent.md](super-agent.md), [conductor.md](conductor.md)). Until PR S0 the code, UI strings and shot names still say "outcomes"; the layout below becomes the rail and the Goal/Decisions screens.
 
 Owner decision 2026-11-17: the tab is **Outcomes** (not the Conductor, `conductor.md`); the TUI view is unchanged while outcomes are off (see "TUI view: outcomes (step 3)" below for what it shows when they are on). Code: `apps/desktop/src/outcomes_view/` (`model.rs` state and keys with no window, `link.rs` the worker thread, `render.rs`, `sample.rs`, `shot.rs`). It is a surface in the sense of ADR-021: it talks to the orchestrator only through `OutcomeClient` over `LocalSocket` (surface `superagent`), renders only `synthesis_view::outcomes` models, and `apps/desktop` does not depend on `synthesis-orchestrator` (test `deps_surfaces_do_not_import_orchestrator`).
 
@@ -318,6 +320,8 @@ Owner decision 2026-11-17: the tab is **Outcomes** (not the Conductor, `conducto
 - **New outcome and Revise contract (step 2).** `n` or the list's button opens a form (`form.rs` state, `form_view.rs` drawing): goal, acceptance criteria, checks (verification commands), budget (no default), write scope, workspace (the app's folder) and the base commit, which the worker reads as `HEAD` of that folder (`synthesis_view::project::head_commit`, hardened git) and shows. Lists are one entry per line. The text becomes a `synthesis_core::outcome::Contract` (new: reversible capabilities only, every criterion backed by every check) and is checked by the core's `validate_contract`; its errors show inline and typed text is never cleared. Empty goal, criteria, checks, scope or budget are refused. `v` (or the Goal tab's button) opens the same form from the outcome's current contract and revision; what the form has no field for stays as it was (lines are matched to criteria and checks by their exact text: an unchanged line keeps its id and flags wherever it moves, a new or edited line is a new entry with the strict defaults, so deleting or reordering never shifts a manual or optional flag onto another line; the server's diff flags a removed criterion, a lost `mandatory` or `manual`, weaker trust and fewer checks as "weakens"). Create goes through `OutcomeClient::create_with_key` and revise through `revise_contract(id, expected_revision, contract, key)`. The idempotency key is made once per submit and reused for an identical retry after a lost reply (an edited request gets a new key; the key is dropped once the server answered). Neither approves anything: the form then shows the review (the server's `contract_diff` with the widening and lowered-bar warnings for a revision; the stored contract for a first version, which has nothing to compare with) and approves version and hash the server reported only from the Approve button, reached by Tab then Enter (the review starts with no button focused). A stale revision says the outcome changed and to reload, and keeps the text. Keys: Tab and Shift+Tab between fields and buttons, Enter acts on a button only, Esc closes without sending. The inputs are the project's `gpui_component` inputs. Before creating, the worker reads `HEAD` again: a base that moved stops the create and shows the new base for another confirmation. The workspace must be the repository's top folder (`rev-parse --show-toplevel`). `head_commit` needs no per-folder trust decision like `scan_lazy`: it runs only `rev-parse` (no program a repository config names), through the hardened git with a closed environment, on a folder the person typed on purpose; the orchestrator checks the commit again. A queued approval is shown as not approved yet. Known limits: a pending revision can be approved only from the review that follows its submit (an unapproved contract the server reports as current, which may be a later version made elsewhere, can be reviewed later with `a`; every version above 1 is read with the server's diff and cannot be approved without it); the form's text is lost when it is closed, and a form kept open after a stale revision still carries the old expected revision (close and reopen).
 
 ### TUI view: outcomes (step 3)
+
+**Moves to Super Agent in S0** (owner decision 2026-11-17; `super-agent.md` sections 5 and 8): the centre tab "outcomes N", the Approvals panel and the decision popup leave the TUI view and become decision cards inline in the Super Agent chat, with the same safety rules; the TUI keeps only a badge with the count of waiting things on the Super Agent title-bar tab (a click or Cmd/Ctrl+2 opens it). The text below describes what is built today.
 
 Wireframe `synthesis-compare/mockups/tui-conductor-v5.svg`. Code: `tui_view/approvals_ui.rs` (drawing, keys, the link to the shell), `approvals.rs` (ages, merge and order, the popup's key machine, the gate), `outcomes_view/ask.rs` (the answer rules shared with the Outcomes tab). The TUI view reads the Outcomes tab's own state (`OutcomesView::state`) and sends through its worker (`send_effect`); it has no link of its own and depends on no orchestrator crate.
 
@@ -333,7 +337,7 @@ Wireframe `synthesis-compare/mockups/tui-conductor-v5.svg`. Code: `tui_view/appr
 
 ### Super Agent view (removed)
 
-The first Super Agent view (phase 3) is gone; its tab is now the Outcomes tab (below), a different design. What it built on `synthesis_view::agent`
+The first Super Agent view (phase 3) is gone; its tab is now the Super Agent tab (the Outcomes tab section above), a different design. What it built on `synthesis_view::agent`
 (`AgentPanes`: sub-agents, commands, verification, browser calls and frames, changed files) is used by the TUI view's
 tabs and its sub-agent transcript (the `* main / developer` switch under the prompt opens a transcript beside the chat).
 Known gaps: browser events carry no image bytes (screenshots are the saved artifacts, no live stream); concurrent

@@ -1,4 +1,6 @@
-# Spec: Conductor (TUI mode: chat with a conducting agent over a grid of live sessions)
+# Spec: Conductor (backend and safety design of the Super Agent's orchestrator chat)
+
+> **Mode normalisation, 2026-11-17 (owner, binding; it overrides everything below, including clarifications (a)-(d)).** The Conductor is **not a TUI mode** and not a separate mode: the desktop has only two top-level modes, **TUI** (unchanged) and **Super Agent**. This document is the backend and design of the Super Agent's **chat frame** (the orchestrator chat); the UI, layout, keys and phases are in [super-agent.md](super-agent.md). Read the rest accordingly: there is **one chat frame**, not a grid of per-session frames; "frame" below means a session row or a read-only session view in Super Agent; there is no Chat/Conductor switch, no popup above a TUI input, and no "click-set target chip" (the target chip is set by selecting a rail row and is shown, see super-agent.md section 4); the tab is **Super Agent** (not "Outcomes"). Sessions' own approvals are answered in the session itself (TUI, `Open in TUI`); outcome decisions are cards inline in the chat. The safety sections (N1, 3, 5, the tools and the red-team cases) stand unchanged.
 
 > Owner clarifications, 2026-11-17 (they override the wireframe and any conflicting text below):
 > - (a) The TUI is keyboard-first. The big chat frame holds the TRANSCRIPT panes of the orchestrator and of each session; there is no clickable button grid. An approval opens as a POPUP above the single chat input (as in the current TUI) while that session's pane highlights/blinks.
@@ -11,7 +13,7 @@ Status: Proposed design (2026-11-17). No product code. Needs the owner decisions
 Inputs: owner direction 2026-11-17 and wireframe `synthesis-compare/mockups/tui-conductor.png`; [desktop.md](desktop.md) (engine, `synthesis-view`, section 8 stdio protocol, WSL); [messaging.md](messaging.md) (addressing, A3 drain points, A4 trust, peers B and J); [terminal-browser.md](terminal-browser.md) (control arbitration pattern); [orchestrator-remaining-backend.md](orchestrator-remaining-backend.md) and ADR-016..021 (outcomes, protocol v4, thin surfaces); code: `crates/synthesis-harness/src/{comm.rs,hub.rs,classifier.rs}`, `apps/desktop/src/{engine.rs,live.rs,remote.rs}`, `crates/synthesis-view/src/{running.rs,state.rs}`.
 Assumptions are marked **[A]**; everything else was read in the code or the docs named above.
 
-Terminology (CLAUDE.md): **CLI** = the `synt` terminal app; **TUI** = the terminal-style tab of the desktop app; the TUI tab gets two **modes**: **Chat** (today's single session, unchanged) and **Conductor** (new). "Orchestrator" in this document always means the outcome orchestrator (ADR-017); the conversational agent is the **conductor**, so the two are never confused.
+Terminology (CLAUDE.md): **CLI** = the `synt` terminal app; **TUI** = the terminal-style tab of the desktop app; the desktop has two top-level modes, **TUI** (unchanged) and **Super Agent**; the Conductor is the chat frame of Super Agent (not a mode, 2026-11-17). "Orchestrator" in this document always means the outcome orchestrator (ADR-017); the conversational agent is the **conductor**, so the two are never confused.
 
 ## 0. Problem and non-negotiables
 
@@ -55,8 +57,8 @@ Strongest reason against A: the desktop becomes a multi-engine host (N harnesses
 ```
  desktop window (GPUI)                         engines (in process locally; WSL: one `synt engine --stdio` child each)
  ┌───────────────────────────────┐   tool call  ┌──────────────────────────────┐
- │ Conductor view (TUI mode)     │◄────────────►│ conductor engine (role=conductor)
- │  chat · cards · grid · frames │  host.call   │  tools: conductor_* only      │
+ │ Super Agent chat frame        │◄────────────►│ conductor engine (role=conductor)
+ │  chat · cards · rail · detail │  host.call   │  tools: conductor_* only      │
  └──────────┬────────────────────┘              └──────────────────────────────┘
             │ view models (synthesis-view::conductor)
  ┌──────────▼────────────────────┐  Engine::send / send_via_conductor / interrupt / close / approvals
@@ -103,7 +105,7 @@ There is no pause primitive in the harness: "pause" in the owner's list maps to 
 
 ### 2.6 Direct path (no model)
 
-A line whose **first token** is `@sN`, `@<sid8+>` or a click-set target chip goes straight to that session as the person's own line (`Origin::User`, through `send_user_message`), no card (the person typed it). A mid-text `@s1` is text for the conductor. The conductor sees direct sends later as fenced `<host_note>` rows, so it knows what happened.
+A line whose **first token** is `@sN`, `@<sid8+>` or the target chip (set by selecting a rail row, always shown) goes straight to that session as the person's own line (`Origin::User`, through `send_user_message`), no card (the person typed it). A mid-text `@s1` is text for the conductor. The conductor sees direct sends later as fenced `<host_note>` rows, so it knows what happened.
 
 ## 3. Security model
 
@@ -155,8 +157,8 @@ Separate systems. The conductor never creates, starts, approves or cancels outco
 
 ## 6. Naming (proposals only)
 
-- **Conductor** (TUI mode): it coordinates and does not play; the name carries no authority, unlike "Orchestrator" (taken by ADR-017) or "Autopilot". Rejected: "Dispatch" (sounds like a queue), "Fleet" (implies outcomes), "Multi" (says nothing).
-- Desktop tab "Super Agent" → **Outcomes** recommended, **Missions** as the owner's proposal. Outcomes matches `synt outcome`, ADR-021 and the protocol, so docs and UI use one word. Missions collides with the TUI's existing **MISSION** panel (#83, sub-agent roster) and would need that panel renamed. Code names stay `outcome` either way.
+- **Conductor** (the name of the backend and the chat's role, not a mode; the UI says "orchestrator"): it coordinates and does not play; the name carries no authority, unlike "Orchestrator" (taken by ADR-017) or "Autopilot". Rejected: "Dispatch" (sounds like a queue), "Fleet" (implies outcomes), "Multi" (says nothing).
+- Superseded 2026-11-17: the tab is **Super Agent** again (the Conductor is its chat frame). Earlier text, kept for the record: desktop tab "Super Agent" → **Outcomes** recommended, **Missions** as the owner's proposal. Outcomes matches `synt outcome`, ADR-021 and the protocol, so docs and UI use one word. Missions collides with the TUI's existing **MISSION** panel (#83, sub-agent roster) and would need that panel renamed. Code names stay `outcome` either way.
 - Technical: settings `synt.conductor.*` (behaviour, user/managed only) and `synt.tui.conductor.*` (rendering only); tools `conductor_*`; stdio role `conductor`; event value `via: "conductor"`. The conductor still answers "I'm Synt".
 
 ## 7. Phased PR plan (each PR alone shippable; CI = fmt, clippy, tests on 3 OSes; security-reviewer on C1-C3, C6, C7)
@@ -168,7 +170,7 @@ Separate systems. The conductor never creates, starts, approves or cancels outco
 | C2 | Conductor role: `HostTools`, restricted tool set, RULES, no project AGENTS.md/memory, peers off; stdio `start{role}` + `host.call`/`host.result` | role engine lists only `conductor_*`; `host.call` from a normal engine kills the link; second outstanding call kills it; `SendMessage` to the conductor is `not_found` | M |
 | C3 | `synthesis-app::conductor`: registry, resolver, policy and taint, limits, cost caps, create validation and mode clamp, report builder | resolver table (explicit, ambiguous, not_found, ended, attempt sid); policy matrix (confirm knob x taint x basis); bypass/auto requests clamped; `/`, `~`, `$SYNT_HOME` refused; unknown input fields refused; reports redacted (`sk-ant-...`) and capped | L |
 | C4 | `synthesis-view::conductor`: `FrameModel`, `Attention`, `ProposalCard`, grid layout, blink schedule (pure) | attention from approval events; blink stops after 30 s or focus; motion off never blinks; every card field rendered (`uncovered`-style test) | M |
-| C5 | Desktop: mode switch, conductor chat and cards, grid, frames with docks, keyboard, Running ordering, shots | `design_tests`/shots at 1400x900, 1100x700; chat mode rects unchanged; Enter in conductor input with a fresh dock answers nothing; Cmd/Ctrl+J focuses oldest waiting frame | L |
+| C5 | Desktop (see super-agent.md S1: chat frame and cards, no grid and no docks; mode switch dropped; session detail is read-only, S2): conductor chat and cards, keyboard, Running ordering, shots | `design_tests`/shots at 1400x900, 1100x700; chat mode rects unchanged; Enter in conductor input with a fresh dock answers nothing; Cmd/Ctrl+J focuses oldest waiting frame | L |
 | C6 | WSL: conductor and sessions as stdio children, `start{mode}` | fake `wsl.exe` test drives create, send, approve-in-frame, close end to end | M |
 | C7 | Red-team suite, `docs/SECURITY.md`, `synt doctor` row, enable flag | the cases below, all on 3 OSes | M |
 
@@ -184,7 +186,7 @@ Red-team cases (fake providers scripted to comply with the attack, so the host i
 
 ## 8. Owner decisions (recommended default)
 
-- O1 Names: Conductor for the TUI mode; **Outcomes** for the desktop tab (Missions if you prefer it, then the MISSION panel is renamed).
+- O1 Names (superseded 2026-11-17): Conductor is backend naming only; the desktop tab is **Super Agent**.
 - O2 Confirmation: every create/send/interrupt/close needs a card by default; `synt.conductor.confirm` (user/managed) may auto-list send/interrupt/create, with the taint and described-target overrides of 3.2. **Recommended: as written.**
 - O3 Reach: only sessions this window hosts; CLI sessions, other windows and peers are not addressable. **Yes.**
 - O4 Outcomes: no conductor access in v1 (static `needs_you` row only); read-only status later. **Yes.**
