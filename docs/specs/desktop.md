@@ -1,6 +1,7 @@
 # Spec: Desktop app (native GPUI): draft 0.2, phase 0
 
 Replaces the archived spec (tag `archive/ui-before-removal`, `docs/specs/desktop.md`: Mode 1/Mode 2,
+See also [conductor.md](conductor.md): proposed Conductor mode of the TUI tab (design only, 2026-11-17).
 onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" has the one-line note.
 
 ## 1. Goals and non-goals
