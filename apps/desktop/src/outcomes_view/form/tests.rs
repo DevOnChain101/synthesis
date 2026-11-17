@@ -4,6 +4,11 @@ use synthesis_core::outcome::Capability;
 use super::*;
 use crate::outcomes_view::sample;
 
+/// An absolute folder on every OS (`/tmp/x` on Unix, `C:\\...\\x` on Windows).
+fn ws(name: &str) -> String {
+    std::env::temp_dir().join(name).display().to_string()
+}
+
 const COMMIT: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
 
 fn text() -> FormText {
@@ -13,7 +18,7 @@ fn text() -> FormText {
         checks: "cargo test -p auth\ncargo clippy -p auth -- -D warnings".into(),
         budget: "5".into(),
         scope: "auth/**\ntests/**".into(),
-        workspace: "/work/app".into(),
+        workspace: ws("app"),
     }
 }
 
@@ -23,9 +28,9 @@ fn prev() -> Contract {
 
 /// A new-outcome form whose base commit is known for `/work/app`.
 fn new_form() -> Form {
-    let mut f = Form::new_outcome("/work/app");
-    f.resolving("/work/app");
-    f.head_known("/work/app", Ok(COMMIT.into()));
+    let mut f = Form::new_outcome(&ws("app"));
+    f.resolving(&ws("app"));
+    f.head_known(&ws("app"), Ok(COMMIT.into()));
     f
 }
 
@@ -136,13 +141,36 @@ fn a_revision_matches_lines_by_exact_text_so_deleting_one_never_shifts_flags() {
     assert_eq!(c.criteria[1].check_ids, ["t1"]);
     assert_eq!(c.envelope.budgets.attempt_max_wall_secs, Some(1200));
     assert_eq!(c.envelope.budgets.max_cost_usd, 6.0);
-    // a check whose command changed is a new check
+    // exactly one check edited: it keeps its id, so the criteria keep naming it
     let mut t6 = t.clone();
     t6.checks = t6
         .checks
         .replace("cargo test -p auth", "cargo test -p auth --all");
     let c = build(&t6, Some(&p)).unwrap();
-    assert_eq!(c.checks[0].id, "t3");
+    assert_eq!(c.checks[0].id, "t1");
+    assert_eq!(c.criteria[0].check_ids, ["t1"]);
+    assert_eq!(c.criteria[1].check_ids, ["t1", "t2"]);
+    // two edited at once are two new checks (nothing says which old one each replaces)
+    let mut t7 = t6.clone();
+    t7.checks = t7.checks.replace("cargo clippy", "cargo clippy --all");
+    let c = build(&t7, Some(&p)).unwrap();
+    assert_eq!(
+        (c.checks[0].id.as_str(), c.checks[1].id.as_str()),
+        ("t3", "t4")
+    );
+    assert!(c.criteria[1].check_ids.is_empty());
+}
+
+#[test]
+fn a_criterion_whose_text_has_a_line_break_is_still_matched_by_the_flattened_line() {
+    let mut p = prev();
+    p.criteria[0].text = "Login through OIDC\nworks with the test IdP".into();
+    p.criteria[0].check_ids = vec!["t1".into()];
+    let c = build(&text_of(&p), Some(&p)).unwrap();
+    // matched, so it is unchanged: id, flags and the original text (no spurious change in the diff)
+    assert_eq!(c.criteria[0].id, "c1");
+    assert_eq!(c.criteria[0].check_ids, ["t1"]);
+    assert_eq!(c.criteria[0], p.criteria[0]);
 }
 
 #[test]
@@ -159,7 +187,7 @@ fn a_retry_after_a_lost_reply_carries_the_same_key_and_an_edit_a_new_one() {
     };
     assert_eq!(
         (base_commit.as_str(), workspace.as_str()),
-        (COMMIT, "/work/app")
+        (COMMIT, ws("app").as_str())
     );
     assert_eq!(f.stage, Stage::Sending);
     // nothing else is sent while one is in flight
@@ -190,19 +218,19 @@ fn a_retry_after_a_lost_reply_carries_the_same_key_and_an_edit_a_new_one() {
 
 #[test]
 fn a_new_outcome_needs_an_absolute_folder_and_the_commit_of_that_folder() {
-    let mut f = Form::new_outcome("/work/app");
+    let mut f = Form::new_outcome(&ws("app"));
     // not resolved yet
     assert_eq!(f.submit(&text()), None);
     assert!(f.errors[0].starts_with("Base commit"), "{:?}", f.errors);
     // resolved for another folder: not used
-    f.resolving("/work/other");
-    f.head_known("/work/other", Ok(COMMIT.into()));
+    f.resolving(&ws("other"));
+    f.head_known(&ws("other"), Ok(COMMIT.into()));
     assert_eq!(f.submit(&text()), None);
     // the answer for a folder that is no longer asked about is dropped
-    f.resolving("/work/app");
-    f.head_known("/work/other", Err("late".into()));
-    assert_eq!(f.head, Some(Head::Resolving("/work/app".into())));
-    f.head_known("/work/app", Err("no commit found".into()));
+    f.resolving(&ws("app"));
+    f.head_known(&ws("other"), Err("late".into()));
+    assert_eq!(f.head, Some(Head::Resolving(ws("app"))));
+    f.head_known(&ws("app"), Err("no commit found".into()));
     assert_eq!(f.submit(&text()), None);
     assert!(f.errors.iter().any(|e| e.contains("no commit found")));
     // relative folder
@@ -213,8 +241,8 @@ fn a_new_outcome_needs_an_absolute_folder_and_the_commit_of_that_folder() {
     // the field is looked at again only when the folder changed
     let f = new_form();
     assert_eq!(f.needs_head(&text()), None);
-    t.workspace = "/work/elsewhere".into();
-    assert_eq!(f.needs_head(&t), Some("/work/elsewhere".into()));
+    t.workspace = ws("elsewhere");
+    assert_eq!(f.needs_head(&t), Some(ws("elsewhere")));
 }
 
 #[test]

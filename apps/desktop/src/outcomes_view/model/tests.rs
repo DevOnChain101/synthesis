@@ -334,9 +334,9 @@ fn a_link_that_dies_mid_send_does_not_leave_send_stuck_and_nothing_is_resent() {
 fn new_outcome_opens_the_form_on_the_workspace_and_reads_its_commit_and_the_form_owns_the_keys() {
     let mut s = sample::state();
     let e = press(&mut s, "n", 0);
-    assert_eq!(e, vec![Effect::Head("/home/dev/auth-service".into())]);
+    assert_eq!(e, vec![Effect::Head(sample::workspace())]);
     let f = s.form.as_ref().unwrap();
-    assert!(f.is_new() && f.initial.workspace == "/home/dev/auth-service");
+    assert!(f.is_new() && f.initial.workspace == sample::workspace());
     // with the form open, none of the tab's keys act behind it
     assert_eq!(s.key(&k("r"), 0), None);
     assert_eq!(s.key(&k("down"), 0), None);
@@ -390,7 +390,7 @@ fn what_the_worker_says_reaches_an_open_form_and_an_approval_closes_it() {
     let mut s = sample::state();
     press(&mut s, "n", 0);
     s.apply_form(FormMsg::Head {
-        ws: "/home/dev/auth-service".into(),
+        ws: sample::workspace(),
         result: Ok("a".repeat(40)),
     });
     s.apply_form(FormMsg::Review(Box::new(sample::review(false))));

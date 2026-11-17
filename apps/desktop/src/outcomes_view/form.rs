@@ -43,7 +43,6 @@ pub enum Mode {
 
 /// The text of a contract, as the form shows it.
 pub fn text_of(c: &Contract) -> FormText {
-    let flat = |s: &str| s.replace(['\n', '\r'], " ");
     FormText {
         goal: c.goal.clone(),
         criteria: c
@@ -62,6 +61,11 @@ pub fn text_of(c: &Contract) -> FormText {
         scope: c.envelope.allowed_paths.join("\n"),
         workspace: String::new(),
     }
+}
+
+/// A criterion or command as one form line (the form shows one entry per line).
+fn flat(s: &str) -> String {
+    s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
 fn lines(s: &str) -> Vec<String> {
@@ -147,20 +151,32 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
     // Lines are matched to the previous contract by their exact text: an unchanged line keeps its id and
     // flags whatever moved around it; a new or edited line is a new entry with the STRICT defaults
     // (mandatory, independent check, backed by every check). The server's diff then shows what changed.
+    // checks: a command that is unchanged keeps its id; when exactly one old command and one new command
+    // are left over, the new one is that check edited, so it keeps the id (criteria keep naming it)
     let mut taken_checks = vec![false; prev.map_or(0, |p| p.checks.len())];
+    let mut ids: Vec<Option<String>> = checks
+        .iter()
+        .map(|command| {
+            let p = prev?;
+            let i = (0..p.checks.len())
+                .find(|&i| !taken_checks[i] && flat(&p.checks[i].command) == *command)?;
+            taken_checks[i] = true;
+            Some(p.checks[i].id.clone())
+        })
+        .collect();
+    let left_old: Vec<usize> = (0..taken_checks.len())
+        .filter(|&i| !taken_checks[i])
+        .collect();
+    let left_new: Vec<usize> = (0..ids.len()).filter(|&i| ids[i].is_none()).collect();
+    if let (Some(p), [old], [new]) = (prev, &left_old[..], &left_new[..]) {
+        ids[*new] = Some(p.checks[*old].id.clone());
+    }
     let checks: Vec<ContractCheck> = checks
         .into_iter()
-        .map(|command| {
-            let old = prev.and_then(|p| {
-                let i = (0..p.checks.len())
-                    .find(|&i| !taken_checks[i] && p.checks[i].command == command)?;
-                taken_checks[i] = true;
-                Some(p.checks[i].id.clone())
-            });
-            ContractCheck {
-                id: old.unwrap_or_else(|| fresh("t", &mut used_checks)),
-                command,
-            }
+        .zip(ids)
+        .map(|(command, id)| ContractCheck {
+            id: id.unwrap_or_else(|| fresh("t", &mut used_checks)),
+            command,
         })
         .collect();
     let all: Vec<String> = checks.iter().map(|k| k.id.clone()).collect();
@@ -170,7 +186,7 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
         .map(|text| {
             let old = prev.and_then(|p| {
                 let i = (0..p.criteria.len())
-                    .find(|&i| !taken_crit[i] && p.criteria[i].text == text)?;
+                    .find(|&i| !taken_crit[i] && flat(&p.criteria[i].text) == text)?;
                 taken_crit[i] = true;
                 Some(p.criteria[i].clone())
             });

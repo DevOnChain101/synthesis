@@ -21,6 +21,7 @@ ignore = [
   { id = "RUSTSEC-2026-0371", reason = "zbus_names: D-Bus stack of gpui-pre-linux (desktop portals), Linux only" },
   { id = "RUSTSEC-2026-0370", reason = "zvariant: D-Bus stack of gpui-pre-linux (desktop portals), Linux only" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: D-Bus stack of gpui-pre-linux (desktop portals), Linux only" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono: date/time library of the gpui-pre/gpui-base/gpui-component stack (unmaintained notice, GPUI desktop stack only)" },
 ]
 
 [licenses]

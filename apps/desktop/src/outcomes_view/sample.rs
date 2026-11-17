@@ -10,6 +10,15 @@ use synthesis_view::outcomes::{
 use super::form::{DiffView, Review};
 use super::model::{Detail, Item, Screen, State};
 
+/// The sample's workspace: an absolute path on the OS it runs on.
+pub fn workspace() -> String {
+    if cfg!(windows) {
+        r"C:\dev\auth-service".into()
+    } else {
+        "/home/dev/auth-service".into()
+    }
+}
+
 pub const COMMIT: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
 const HASH: &str = "3c9a41be7d02f58a6e1c90d4b7a3582f1e60c9d47b2a8f35e0614cd9a7b3e5e1";
 
@@ -277,7 +286,7 @@ pub fn state() -> State {
         })
         .collect();
     let mut s = State::new(Screen::Ready);
-    s.workspace = "/home/dev/auth-service".into();
+    s.workspace = workspace();
     s.selected = Some(items[0].row.id.clone());
     let (d, i) = (
         detail(&items[0]),
