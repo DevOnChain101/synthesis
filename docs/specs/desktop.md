@@ -177,6 +177,7 @@ lays the sample out in GPUI at the same sizes and compares (1px; 1.5px for panel
 synthesis-desktop --features shot -- --shot out.png --size 1400x900 [--hide session,tools,...]` (headless
 Metal/wgpu, no window server); `node scripts/design-compare.mjs <ref-dir> <shots-dir> <out-dir>` writes
 [design | app | difference] images from Chrome renders of `cli.html` (`ref-WxH.png`) and the shots.
+Core node (owner decision 2026-11-17, a DEVIATION from `cli.html`): in the trunk list (mode T) the SYNTHESIS bar's logo is 20 px (design 14) and its label 14 px (design 10.5; 12 px in the 20px bar of a short panel); the bar box is unchanged, so the design rects still hold.
 Column rule (owner decision 2026-11-07, an approved DEVIATION from the proportions of `cli.html`, whose 250|1fr|500 gave
 the chat 43% of a 1400px window): the chat column (tabs, conversation, prompt, mode bar) is at least 55% of the window
 width at every width and fills the content height. `layout::cols`: left column 250 from 1400, else 220; right column

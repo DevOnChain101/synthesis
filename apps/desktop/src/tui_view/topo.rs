@@ -713,8 +713,10 @@ pub fn core_layout(mode: Mode, w: f32, h: f32, large: bool, ch: CoreChars) -> Co
         let (border, pad) = (1., 10f32.min(w * 0.1));
         let room = (w - 2. * (border + pad)).max(0.);
         let base = CoreLayout {
-            logo: 14f32.min((h - 2. * border).max(0.)),
-            title: Some(10.5),
+            // owner decision 2026-11-17: core logo/label scaled up (14 -> 20 px, 10.5 -> 14 px; 12 px in the
+            // 20px bar of a short panel), inside the unchanged bar
+            logo: 20f32.min((h - 2. * border - 2.).max(0.)),
+            title: Some(if h >= 24. { 14. } else { 12. }),
             track: 0.14,
             sub: false,
             tag: false,
