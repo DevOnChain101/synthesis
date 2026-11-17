@@ -385,6 +385,7 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
 }
 
 /// The usable `synt` beside `exe`, if any.
+#[cfg(unix)]
 fn found(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     match synt_beside(exe) {
         Sibling::Usable(p) => Some(p),
@@ -951,8 +952,6 @@ mod beside {
         assert_eq!(found(&dir.join("Synthesis")), None);
     }
 }
-
-use super::Sibling;
 
 #[test]
 fn a_migration_confirm_that_comes_late_is_answered_not_dropped() {
