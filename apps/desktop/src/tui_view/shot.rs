@@ -46,6 +46,8 @@ pub struct Args {
     /// true|false` makes the window count as active or in the background (the block caret needs it active).
     focus_at: Option<FocusAt>,
     window_active: Option<bool>,
+    /// `--outcomes approvals-1|approvals-3|decision|tab`: the outcome sample states (Approvals panel, popup, tab).
+    outcomes: Option<super::approvals_ui::OutShot>,
     /// `--bare`: the Files and Browser tabs get no seeded project or screenshots (their empty states).
     bare: bool,
     /// `--expand`: every tool card open (Ctrl+O).
@@ -342,6 +344,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
             && val("--focus").and_then(|v| focus_at(v)).is_none(),
         attach_image: val("--attach-image").map(PathBuf::from),
         focus_at: val("--focus").and_then(|v| focus_at(v)),
+        outcomes: val("--outcomes").and_then(|v| super::approvals_ui::OutShot::parse(v)),
         window_active: val("--active-window").and_then(|v| v.parse().ok()),
         bare: args.iter().any(|a| a == "--bare"),
         expand: args.iter().any(|a| a == "--expand"),
@@ -761,6 +764,11 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cx.new(|cx| crate::ui::Shell::around(window, cx, tui, Err("--shot".into())))
     })?;
     cx.run_until_parked();
+    if let (Some(what), Some(tui)) = (a.outcomes, tui_slot.borrow().clone()) {
+        let view = win.update(&mut cx, |s, _, _| s.outcomes().clone())?;
+        tui.update(&mut cx, |t, cx| t.seed_sample(what, view, cx));
+        cx.run_until_parked();
+    }
     if let Some(tui) = tui_slot.borrow().clone() {
         if a.tab == super::ChatTab::Browser {
             // the saved screenshot loads off the thread
@@ -874,6 +882,27 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     cx.run_until_parked();
     if let (Some(n), Some(tui)) = (a.perf, tui_slot.borrow().clone()) {
         perf_run(&mut cx, win.into(), &tui, n)?;
+    }
+    // the popup holds the window's focus (set after the prompt took it above, as the keys are in the popup then)
+    if let (
+        Some(
+            what @ (super::approvals_ui::OutShot::DecisionFocused
+            | super::approvals_ui::OutShot::DecisionExpanded),
+        ),
+        Some(tui),
+    ) = (a.outcomes, tui_slot.borrow().clone())
+    {
+        win.update(&mut cx, |_, window, cx| {
+            tui.update(cx, |t, cx| {
+                t.focus_decision(window, cx);
+                if what == super::approvals_ui::OutShot::DecisionExpanded {
+                    t.expand_decision(cx);
+                }
+            })
+        })?;
+        cx.run_until_parked();
+        win.update(&mut cx, |_, _, cx| tui.update(cx, |_, cx| cx.notify()))?;
+        cx.run_until_parked();
     }
     let img = cx.capture_screenshot(win.into())?;
     img.save(&a.path)?;

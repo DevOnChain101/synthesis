@@ -125,7 +125,15 @@ fn money(a: Option<f64>) -> String {
     a.map_or_else(|| "unknown".into(), |v| format!("${v:.2}"))
 }
 
-fn needs_badges(n: &NeedsYou) -> Vec<AnyElement> {
+/// "$1.20 of $5.00", or "budget unknown" when the server gave neither (the list's line, here and in the TUI view).
+pub(crate) fn budget_line(b: &BudgetView) -> String {
+    match (b.cost_usd.spent, b.cost_usd.limit) {
+        (None, None) => "budget unknown".to_string(),
+        (s, l) => format!("{} of {}", money(s), money(l)),
+    }
+}
+
+pub(crate) fn needs_badges(n: &NeedsYou) -> Vec<AnyElement> {
     let mut v = vec![];
     if n.decisions_pending > 0 {
         v.push(
@@ -236,11 +244,7 @@ impl OutcomesView {
 
     fn list_row(&self, i: usize, it: &Item, cx: &Context<Self>) -> impl IntoElement {
         let on = self.state.selected.as_deref() == Some(it.row.id.as_str());
-        let cost = &it.budget.cost_usd;
-        let budget = match (cost.spent, cost.limit) {
-            (None, None) => "budget unknown".to_string(),
-            _ => format!("{} of {}", money(cost.spent), money(cost.limit)),
-        };
+        let budget = budget_line(&it.budget);
         div()
             .id(("out", i))
             .debug_selector(move || format!("out-row-{i}"))
@@ -511,7 +515,7 @@ impl OutcomesView {
                 .text_color(dim())
                 .mt(px(4.)),
         );
-        let Some(p) = &s.picker else {
+        let Some(p) = &s.ask.picker else {
             return d.child(div().text_color(hsla(t::WARN)).child(format!(
                 "This decision cannot be answered: it is {}.",
                 c.state
@@ -576,12 +580,12 @@ impl OutcomesView {
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .text_color(if s.notice.is_some() {
+                        .text_color(if s.ask.notice.is_some() {
                             hsla(t::WARN)
                         } else {
                             dim()
                         })
-                        .child(s.notice.clone().unwrap_or_else(|| {
+                        .child(s.ask.notice.clone().unwrap_or_else(|| {
                             "Step 2: press Enter or Send answer. Esc clears the choice.".into()
                         })),
                 )

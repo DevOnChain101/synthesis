@@ -4,6 +4,7 @@
 > - (a) The TUI is keyboard-first. The big chat frame holds the TRANSCRIPT panes of the orchestrator and of each session; there is no clickable button grid. An approval opens as a POPUP above the single chat input (as in the current TUI) while that session's pane highlights/blinks.
 > - (b) Proposed keys: Tab/Shift+Tab focus panes, Enter zooms, Esc goes back, 1-9 jump to a session, Alt+A goes to the next approval; the popup keys 1/2/3 and Esc act only when the input is empty. Ctrl+M cannot switch mode in a terminal (it is Enter); the spec's Cmd/Ctrl+Shift+M applies.
 > - (c) The Super Agent tab is renamed "Outcomes" (preferred, since it avoids the existing MISSION panel) over "Missions".
+> - (d) Built in the desktop TUI view (2026-11-17, `desktop.md` "TUI view: outcomes", not the Conductor mode itself): the Approvals panel, the outcome decision popup above the input, the "outcomes" centre tab (Alt+0) and Alt+A (next approval, oldest first). As in (a) the popup opens by itself above the input; unlike (b) its keys do not depend on an empty input: it never takes the keys until Alt+A or a click gives it focus (Esc or Alt+A returns them), see `desktop.md`. The rest of this spec (conductor chat, per-session frames) is still a proposal.
 
 
 Status: Proposed design (2026-11-17). No product code. Needs the owner decisions in section 8 before the PRs in section 7 start. Queues behind the orchestrator backend (B3, B8) per the standing backend-first goal.

@@ -9,13 +9,12 @@
 
 use synthesis_core::outcome::Contract;
 use synthesis_view::outcomes::{
-    ActivityTab, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab,
-    OutcomeRow, Picker,
+    ActivityTab, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab, OutcomeRow,
 };
 
+use super::ask::Ask;
 use super::form::{Form, FormText, Review, Stage, Submit};
 use super::link::FormMsg;
-use crate::live::ARM_MS;
 
 /// What the Off screen says (the setting, then the explicit enable step; this window never enables).
 pub const OFF_LINES: [&str; 4] = [
@@ -92,13 +91,6 @@ pub struct Detail {
     pub history: InspectorContent,
 }
 
-/// Which brief a picker belongs to: a card is the same one only while all three match.
-type CardKey = (String, i64, String);
-
-fn key_of(c: &DecisionCard) -> CardKey {
-    (c.id.clone(), c.revision, c.brief_sha256.clone())
-}
-
 pub struct State {
     pub screen: Screen,
     pub items: Vec<Item>,
@@ -110,15 +102,10 @@ pub struct State {
     pub itab: InspectorTab,
     /// Index of the expanded decision card.
     pub active: usize,
-    /// The answer cursor of the expanded card (starts on nothing), `None` when it cannot be answered.
-    pub picker: Option<Picker>,
-    seen: Option<CardKey>,
-    /// Enter and "Send answer" do nothing before this (ms): a key typed ahead of the card answers nothing.
-    pub armed_until: i64,
-    /// An answer is on its way: no second one.
-    pub sending: bool,
-    /// One line for the footer: what the last answer or refresh said.
-    pub notice: Option<String>,
+    /// The answer cursor, arming delay, in-flight flag and footer notice of the expanded card.
+    pub ask: Ask,
+    /// Replies to answers so far (`answered` calls): the TUI view's popup waits for this to grow.
+    pub answers: u64,
     /// The folder a new outcome works in by default (the app's workspace).
     pub workspace: String,
     /// The open "New outcome" or "Revise contract" form.
@@ -172,11 +159,8 @@ impl State {
             centre: CentreTab::Decisions,
             itab: InspectorTab::Overview,
             active: 0,
-            picker: None,
-            seen: None,
-            armed_until: 0,
-            sending: false,
-            notice: None,
+            ask: Ask::default(),
+            answers: 0,
             workspace: String::new(),
             form: None,
         }
@@ -201,9 +185,7 @@ impl State {
 
     /// Enter and "Send answer" would send now (a choice, armed, nothing in flight).
     pub fn can_send(&self, now: i64) -> bool {
-        !self.sending
-            && now >= self.armed_until
-            && self.picker.as_ref().and_then(Picker::choice).is_some()
+        self.ask.can_send(now)
     }
 
     // ------------------------------------------------------------------------- incoming data
@@ -246,17 +228,14 @@ impl State {
     /// A screen other than the list (the link ended, a retry, a recheck). An answer that was in flight is
     /// not resent and not waited for: the send flag goes, and the person looks at the fresh card first.
     pub fn set_screen(&mut self, screen: Screen) {
-        self.sending = false;
         // the choice made before is gone: after a reconnect the card is a fresh one
-        self.seen = None;
+        self.ask.link_changed();
         self.screen = screen;
     }
 
     pub fn answered(&mut self, note: String) {
-        self.sending = false;
-        // whatever came of it, the next answer is a new choice (and the refetch is not "a card that changed")
-        self.seen = None;
-        self.notice = Some(note);
+        self.answers += 1;
+        self.ask.answered(note);
     }
 
     /// Keeps the picker for the expanded card while the card is the same brief; a new card (other id, a new
@@ -266,32 +245,16 @@ impl State {
         if self.active >= len {
             self.active = 0;
         }
-        let Some(card) = self.active_card().cloned() else {
-            self.picker = None;
-            self.seen = None;
-            return;
-        };
-        let key = key_of(&card);
-        if self.seen.as_ref() == Some(&key) && self.picker.is_some() == card.resolvable() {
-            return;
-        }
-        if matches!(&self.seen, Some(s) if s.0 == card.id) {
-            self.notice = Some(
-                "This decision changed since you saw it: the new version is shown and nothing was sent. Read it again, then choose."
-                    .into(),
-            );
-        }
-        self.picker = Picker::new(&card);
-        self.seen = Some(key);
-        self.armed_until = now + ARM_MS;
+        let card = self.cards().get(self.active).cloned();
+        self.ask.sync(card.as_ref(), now);
     }
 
     /// Expand card `i` (a click, `[` or `]`).
     pub fn show_card(&mut self, i: usize, now: i64) {
         if i < self.cards().len() && i != self.active {
             self.active = i;
-            self.seen = None;
-            self.notice = None;
+            self.ask.forget();
+            self.ask.notice = None;
             self.sync_picker(now);
         }
     }
@@ -318,7 +281,7 @@ impl State {
             .filter(|d| Some(&d.outcome) == self.selected.as_ref());
         let (Some(item), Some(prev)) = (self.selected_item(), cur.and_then(|d| d.current.clone()))
         else {
-            self.notice = Some(
+            self.ask.notice = Some(
                 "The contract is not loaded, or is not one this window can read in full, so it cannot be revised here."
                     .into(),
             );
@@ -340,7 +303,7 @@ impl State {
                 vec![Effect::Review(id.clone())]
             }
             _ => {
-                self.notice =
+                self.ask.notice =
                     Some("The contract of this outcome is not waiting for approval.".into());
                 vec![]
             }
@@ -395,7 +358,7 @@ impl State {
         match m {
             FormMsg::Approved(note) => {
                 self.form = None;
-                self.notice = Some(note);
+                self.ask.notice = Some(note);
             }
             m => {
                 let Some(f) = self.form.as_mut() else { return };
@@ -421,10 +384,7 @@ impl State {
 
     /// Moves the answer cursor to option `i` (a click, a number): it chooses nothing yet. Out of range: unchanged.
     pub fn choose(&mut self, i: usize) {
-        if let Some(p) = self.picker.as_mut().filter(|p| i < p.options.len()) {
-            p.move_to(i);
-            self.notice = None;
-        }
+        self.ask.choose(i);
     }
 
     pub fn select(&mut self, i: usize) -> Vec<Effect> {
@@ -438,9 +398,7 @@ impl State {
         self.detail = None;
         self.inspector = None;
         self.active = 0;
-        self.picker = None;
-        self.seen = None;
-        self.notice = None;
+        self.ask.clear();
         vec![Effect::Select(id)]
     }
 
@@ -455,36 +413,13 @@ impl State {
 
     /// Enter or "Send answer": the answer of the expanded card, when it may be sent; else why not.
     pub fn send(&mut self, now: i64) -> Vec<Effect> {
-        let (Some(card), Some(p), Some(outcome)) = (
-            self.active_card(),
-            self.picker.as_ref(),
-            self.selected.as_ref(),
+        let (Some(card), Some(outcome)) = (
+            self.cards().get(self.active).cloned(),
+            self.selected.clone(),
         ) else {
             return vec![];
         };
-        let Some(choice) = p.choice().map(str::to_string) else {
-            self.notice = Some(
-                "Nothing is chosen. Choose an answer (arrows, 1-9 or a click), then press Enter to send it."
-                    .into(),
-            );
-            return vec![];
-        };
-        if self.sending {
-            return vec![];
-        }
-        if now < self.armed_until {
-            self.notice =
-                Some("The decision has just appeared: look at it, then press Enter again.".into());
-            return vec![];
-        }
-        let out = Effect::Resolve {
-            outcome: outcome.clone(),
-            card: Box::new(card.clone()),
-            choice,
-        };
-        self.sending = true;
-        self.notice = Some("Sending the answer...".into());
-        vec![out]
+        self.ask.send(&outcome, &card, now).into_iter().collect()
     }
 
     /// A key. `None`: not ours (the window may use it).
@@ -525,24 +460,19 @@ impl State {
                     vec![]
                 }
                 (CentreTab::Decisions, "up" | "down") => {
-                    if let Some(p) = &self.picker {
-                        let n = p.options.len();
-                        let to = match (p.cursor(), k.name) {
-                            (None, "down") => 0,
-                            (None, _) => n - 1,
-                            (Some(c), "down") => (c + 1).min(n - 1),
-                            (Some(c), _) => c.saturating_sub(1),
-                        };
-                        self.choose(to);
-                    }
+                    self.ask.step(k.name == "down");
                     vec![]
                 }
                 (CentreTab::Decisions, "enter") => self.send(now),
                 (CentreTab::Decisions, "escape")
-                    if self.picker.as_ref().is_some_and(|p| p.cursor().is_some()) =>
+                    if self
+                        .ask
+                        .picker
+                        .as_ref()
+                        .is_some_and(|p| p.cursor().is_some()) =>
                 {
                     // clears the choice: a new picker, the cursor on nothing
-                    self.seen = None;
+                    self.ask.forget();
                     self.sync_picker(now);
                     vec![]
                 }

@@ -6,6 +6,7 @@
 //! PTY. Panels hide with the CLI's `panels.*` keys (`layout::Hidden`).
 
 pub mod activity;
+pub mod approvals_ui;
 pub mod chat;
 mod chat_sel;
 mod clean;
@@ -15,6 +16,8 @@ pub mod dialog;
 pub mod driver;
 mod filesel;
 pub mod layout;
+#[cfg(test)]
+mod outcomes_tests;
 pub mod panels;
 mod quote;
 mod rewind;
@@ -94,6 +97,8 @@ pub enum ChatTab {
     Terminal,
     Browser,
     Files,
+    /// The outcome list (read-only). Not in [`ChatTab::ALL`]: it exists only while outcomes are on (`approvals_ui`).
+    Outcomes,
 }
 
 fn t_mode_name(m: synthesis_permissions::Mode) -> String {
@@ -134,6 +139,11 @@ impl ChatTab {
             ChatTab::Files => chrome::Tab {
                 label: "file explorer",
                 icon: "folder",
+                badge: None,
+            },
+            ChatTab::Outcomes => chrome::Tab {
+                label: "outcomes",
+                icon: "shield",
                 badge: None,
             },
         }
@@ -195,6 +205,8 @@ pub struct TuiView {
     input_strip: Option<(bool, bool)>,
     /// `--shot --active-window`: the window counts as active (or not) whatever the platform says.
     pub(crate) window_active: Option<bool>,
+    /// The Outcomes link of the shell (`None` while outcomes are off or unsupported: no panel, tab or popup).
+    pub(crate) outcomes: Option<approvals_ui::Wire>,
 }
 
 /// A side column of the view.
@@ -262,6 +274,7 @@ impl TuiView {
             folded: Default::default(),
             input_strip: None,
             window_active: None,
+            outcomes: None,
         }
     }
 
@@ -748,24 +761,27 @@ impl TuiView {
 
     fn chat(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.snap;
-        let tabs: Vec<chrome::Tab> = ChatTab::ALL
+        let list = self.tab_list();
+        let tabs: Vec<chrome::Tab> = list
             .iter()
             .map(|t| chrome::Tab {
-                badge: self.badge(*t),
+                badge: if *t == ChatTab::Outcomes {
+                    self.outcomes_badge(cx)
+                } else {
+                    self.badge(*t)
+                },
                 ..t.tab()
             })
             .collect();
         let tab_click = |i: usize| -> panels::OnClick {
+            let tab = list[i];
             Box::new(cx.listener(move |this, _, _, cx| {
-                this.select_tab(ChatTab::ALL[i], cx);
+                this.select_tab(tab, cx);
             }))
         };
         let strip = chrome::tabs(
             &tabs,
-            ChatTab::ALL
-                .iter()
-                .position(|t| *t == self.ts.tab)
-                .unwrap_or(0),
+            list.iter().position(|t| *t == self.ts.tab).unwrap_or(0),
             true,
             self.centre_w - 2.,
             &tab_click,
@@ -787,6 +803,11 @@ impl TuiView {
             .px(px(layout::TAB_PAD_X))
             .child(body);
         let dock = self.dialog_dock(cx);
+        let decision = if dock.is_none() {
+            self.decision_popup(cx)
+        } else {
+            None
+        };
         let prompt = if self.live.is_some() {
             self.live_prompt(cx)
         } else {
@@ -823,6 +844,7 @@ impl TuiView {
             .child(strip)
             .child(body)
             .children(dock)
+            .children(decision)
             .child(prompt)
             .children(self.quote_chips(cx))
             .child(self.agent_switch(cx))
@@ -859,6 +881,10 @@ impl TuiView {
             .gap(px(GAP))
             .min_h(px(0.))
             .overflow_hidden();
+        // PHÊ DUYỆT: on top, only while outcomes are on and something waits (nothing is drawn otherwise)
+        if let Some(p) = self.approvals_panel(cx) {
+            col = col.child(p);
+        }
         if !hid.topology {
             let pad = if tier.compact_head {
                 Pad::COMPACT
@@ -1081,6 +1107,7 @@ impl Render for TuiView {
             chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
         self.refresh(window, cx);
+        self.sync_outcomes(window, cx);
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
@@ -1203,7 +1230,7 @@ mod tests {
     }
 
     /// A throwaway live view (no engine): the conversation is whatever the test pushes.
-    fn live_cfg() -> driver::LiveCfg {
+    pub(super) fn live_cfg() -> driver::LiveCfg {
         use clap::Parser as _;
         let dir = std::env::temp_dir();
         driver::LiveCfg {

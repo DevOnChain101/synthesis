@@ -2,6 +2,7 @@ use serde_json::json;
 use synthesis_view::outcomes::{DecisionCard, InspectorTab};
 
 use super::*;
+use crate::live::ARM_MS;
 use crate::outcomes_view::{form, sample};
 
 fn k(name: &str) -> Key<'_> {
@@ -27,14 +28,23 @@ fn press(s: &mut State, key: &str, now: i64) -> Vec<Effect> {
 #[test]
 fn nothing_is_chosen_for_the_person_and_a_choice_takes_two_steps() {
     let mut s = decisions();
-    let p = s.picker.as_ref().unwrap();
+    let p = s.ask.picker.as_ref().unwrap();
     assert_eq!(p.cursor(), None, "no preselection");
     // Enter with nothing chosen sends nothing and says what to do
     assert!(press(&mut s, "enter", 10_000).is_empty());
-    assert!(s.notice.as_deref().unwrap().contains("Nothing is chosen"));
+    assert!(
+        s.ask
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("Nothing is chosen")
+    );
     // step 1: the arrow moves the cursor (first Down: the first answer, in the brief's order); nothing is sent
     assert!(press(&mut s, "down", 10_000).is_empty());
-    assert_eq!(s.picker.as_ref().unwrap().choice(), Some("approve_with_w5"));
+    assert_eq!(
+        s.ask.picker.as_ref().unwrap().choice(),
+        Some("approve_with_w5")
+    );
     // step 2: Enter sends the card's own revision and hash
     let e = press(&mut s, "enter", 10_000);
     let [
@@ -54,7 +64,7 @@ fn nothing_is_chosen_for_the_person_and_a_choice_takes_two_steps() {
     assert_eq!(card.revision, 4);
     assert_eq!(card.brief_sha256.len(), 64);
     // one answer at a time
-    assert!(s.sending && press(&mut s, "enter", 10_000).is_empty());
+    assert!(s.ask.sending && press(&mut s, "enter", 10_000).is_empty());
 }
 
 #[test]
@@ -62,7 +72,7 @@ fn enter_waits_for_the_arming_delay_of_a_card_that_just_appeared() {
     let mut s = decisions();
     press(&mut s, "down", 0);
     assert!(press(&mut s, "enter", 399).is_empty(), "armed_until is 400");
-    assert!(s.notice.as_deref().unwrap().contains("just appeared"));
+    assert!(s.ask.notice.as_deref().unwrap().contains("just appeared"));
     assert!(!s.can_send(399) && s.can_send(400));
     assert_eq!(press(&mut s, "enter", 400).len(), 1);
 }
@@ -72,24 +82,24 @@ fn numbers_and_arrows_move_only_the_cursor_and_out_of_range_changes_nothing() {
     let mut s = decisions();
     press(&mut s, "4", 0);
     assert_eq!(
-        s.picker.as_ref().unwrap().choice(),
+        s.ask.picker.as_ref().unwrap().choice(),
         Some("request_evidence")
     );
     press(&mut s, "9", 0);
     assert_eq!(
-        s.picker.as_ref().unwrap().choice(),
+        s.ask.picker.as_ref().unwrap().choice(),
         Some("request_evidence")
     );
     press(&mut s, "up", 0);
-    assert_eq!(s.picker.as_ref().unwrap().choice(), Some("reject"));
+    assert_eq!(s.ask.picker.as_ref().unwrap().choice(), Some("reject"));
     // from nothing, Up starts at the last answer, Down at the first: never a default
     let mut s = decisions();
     press(&mut s, "up", 0);
-    assert_eq!(s.picker.as_ref().unwrap().choice(), Some("edit_scope"));
+    assert_eq!(s.ask.picker.as_ref().unwrap().choice(), Some("edit_scope"));
     // Esc clears the choice (and re-arms); a second Esc leaves the column
     press(&mut s, "escape", 5);
-    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
-    assert_eq!(s.armed_until, 5 + ARM_MS);
+    assert_eq!(s.ask.picker.as_ref().unwrap().cursor(), None);
+    assert_eq!(s.ask.armed_until, 5 + ARM_MS);
     press(&mut s, "escape", 5);
     assert_eq!(s.pane, Pane::List);
 }
@@ -98,6 +108,7 @@ fn numbers_and_arrows_move_only_the_cursor_and_out_of_range_changes_nothing() {
 fn the_fixed_answers_follow_the_alternatives_in_order() {
     let s = decisions();
     let ids: Vec<_> = s
+        .ask
         .picker
         .as_ref()
         .unwrap()
@@ -121,23 +132,27 @@ fn the_fixed_answers_follow_the_alternatives_in_order() {
 fn a_card_that_changed_is_shown_again_with_nothing_chosen() {
     let mut s = decisions();
     press(&mut s, "2", 0);
-    assert!(s.picker.as_ref().unwrap().choice().is_some());
+    assert!(s.ask.picker.as_ref().unwrap().choice().is_some());
     let items = s.items.clone();
     let mut d = s.detail.clone().unwrap();
     // the same card and revision again (a refresh): the choice stands
     s.apply_snapshot(items.clone(), None, Some(d.clone()), None, 1000);
     assert_eq!(
-        s.picker.as_ref().unwrap().choice(),
+        s.ask.picker.as_ref().unwrap().choice(),
         Some("approve_without_c3")
     );
-    assert_eq!(s.armed_until, ARM_MS, "not armed again for the same brief");
+    assert_eq!(
+        s.ask.armed_until, ARM_MS,
+        "not armed again for the same brief"
+    );
     // a new revision (or a new brief hash) is another card: cursor on nothing, armed again, and it says so
     d.cards.as_mut().unwrap()[0].revision = 5;
     s.apply_snapshot(items.clone(), None, Some(d.clone()), None, 2000);
-    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
-    assert_eq!(s.armed_until, 2000 + ARM_MS);
+    assert_eq!(s.ask.picker.as_ref().unwrap().cursor(), None);
+    assert_eq!(s.ask.armed_until, 2000 + ARM_MS);
     assert!(
-        s.notice
+        s.ask
+            .notice
             .as_deref()
             .unwrap()
             .contains("changed since you saw it")
@@ -147,7 +162,7 @@ fn a_card_that_changed_is_shown_again_with_nothing_chosen() {
     press(&mut s, "1", 3000);
     d.cards.as_mut().unwrap()[0].brief_sha256 = "b".repeat(64);
     s.apply_snapshot(items, None, Some(d), None, 4000);
-    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
+    assert_eq!(s.ask.picker.as_ref().unwrap().cursor(), None);
 }
 
 #[test]
@@ -156,7 +171,7 @@ fn only_a_pending_decision_can_be_answered() {
     // the third card of the sample is approved
     s.show_card(2, 0);
     assert_eq!(s.active_card().unwrap().state, "approved");
-    assert!(s.picker.is_none());
+    assert!(s.ask.picker.is_none());
     for key in ["down", "1", "enter"] {
         assert!(press(&mut s, key, 10_000).is_empty(), "{key}");
     }
@@ -167,7 +182,7 @@ fn only_a_pending_decision_can_be_answered() {
     let mut d = s.detail.clone().unwrap();
     d.cards.as_mut().unwrap()[0].state = "expired".into();
     s.apply_snapshot(s.items.clone(), None, Some(d), None, 9);
-    assert!(s.picker.is_none());
+    assert!(s.ask.picker.is_none());
 }
 
 #[test]
@@ -200,7 +215,7 @@ fn selecting_an_outcome_drops_the_old_detail_and_asks_for_the_new_one() {
         press(&mut s, "down", 0),
         vec![Effect::Select("o_ci".into())]
     );
-    assert!(s.detail.is_none() && s.picker.is_none() && s.inspector.is_none());
+    assert!(s.detail.is_none() && s.ask.picker.is_none() && s.inspector.is_none());
     // already selected, or past the end: nothing
     assert!(s.select(1).is_empty() && s.select(99).is_empty());
     assert_eq!(
@@ -287,12 +302,15 @@ fn an_answer_ends_the_send_and_the_next_one_is_a_new_choice() {
     press(&mut s, "1", 0);
     assert_eq!(press(&mut s, "enter", 10_000).len(), 1);
     s.answered("Answer approve_with_w5: done".into());
-    assert!(!s.sending);
+    assert!(!s.ask.sending);
     // the refetch of the card the answer changed is not shown as "a card that changed"
     let (items, d) = (s.items.clone(), s.detail.clone());
     s.apply_snapshot(items, None, d, None, 20_000);
-    assert_eq!(s.notice.as_deref(), Some("Answer approve_with_w5: done"));
-    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
+    assert_eq!(
+        s.ask.notice.as_deref(),
+        Some("Answer approve_with_w5: done")
+    );
+    assert_eq!(s.ask.picker.as_ref().unwrap().cursor(), None);
 }
 
 #[test]
@@ -305,7 +323,7 @@ fn a_brief_that_names_a_preferred_option_is_never_made_answerable() {
     let mut d = s.detail.clone().unwrap();
     d.cards = Err("the decision brief carries a \"recommended\" field".into());
     s.apply_snapshot(s.items.clone(), None, Some(d), None, 0);
-    assert!(s.picker.is_none() && s.active_card().is_none());
+    assert!(s.ask.picker.is_none() && s.active_card().is_none());
     assert!(press(&mut s, "enter", 10_000).is_empty());
 }
 
@@ -314,17 +332,17 @@ fn a_link_that_dies_mid_send_does_not_leave_send_stuck_and_nothing_is_resent() {
     let mut s = decisions();
     press(&mut s, "1", 0);
     assert_eq!(press(&mut s, "enter", 10_000).len(), 1);
-    assert!(s.sending);
+    assert!(s.ask.sending);
     // the link ended before the answer came back
     s.set_screen(Screen::Unreachable("closed".into()));
-    assert!(!s.sending);
+    assert!(!s.ask.sending);
     // r retries the connection and nothing else: no automatic resend of the old request
     assert_eq!(press(&mut s, "r", 10_000), vec![Effect::Retry]);
     // reconnected: a fresh snapshot, a new choice, and the card can be answered again
     let (items, d) = (s.items.clone(), s.detail.clone());
     s.apply_snapshot(items, None, d, None, 20_000);
     assert_eq!(s.screen, Screen::Ready);
-    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
+    assert_eq!(s.ask.picker.as_ref().unwrap().cursor(), None);
     assert!(press(&mut s, "enter", 30_000).is_empty());
     press(&mut s, "2", 30_000);
     assert_eq!(press(&mut s, "enter", 30_000).len(), 1);
@@ -364,7 +382,13 @@ fn revise_starts_from_the_current_contract_and_the_revision_that_is_shown() {
     s.detail.as_mut().unwrap().current = None;
     press(&mut s, "v", 0);
     assert!(s.form.is_none());
-    assert!(s.notice.as_deref().unwrap().contains("cannot be revised"));
+    assert!(
+        s.ask
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("cannot be revised")
+    );
 }
 
 #[test]
@@ -405,7 +429,7 @@ fn what_the_worker_says_reaches_an_open_form_and_an_approval_closes_it() {
     );
     s.apply_form(FormMsg::Approved("Contract v1: done".into()));
     assert!(s.form.is_none());
-    assert_eq!(s.notice.as_deref(), Some("Contract v1: done"));
+    assert_eq!(s.ask.notice.as_deref(), Some("Contract v1: done"));
     // a reply for a form that was closed is dropped
     s.apply_form(FormMsg::Failed {
         text: "late".into(),
