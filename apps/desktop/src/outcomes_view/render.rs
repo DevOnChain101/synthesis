@@ -511,7 +511,7 @@ impl OutcomesView {
                 .text_color(dim())
                 .mt(px(4.)),
         );
-        let Some(p) = &s.picker else {
+        let Some(p) = &s.ask.picker else {
             return d.child(div().text_color(hsla(t::WARN)).child(format!(
                 "This decision cannot be answered: it is {}.",
                 c.state
@@ -576,12 +576,12 @@ impl OutcomesView {
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .text_color(if s.notice.is_some() {
+                        .text_color(if s.ask.notice.is_some() {
                             hsla(t::WARN)
                         } else {
                             dim()
                         })
-                        .child(s.notice.clone().unwrap_or_else(|| {
+                        .child(s.ask.notice.clone().unwrap_or_else(|| {
                             "Step 2: press Enter or Send answer. Esc clears the choice.".into()
                         })),
                 )

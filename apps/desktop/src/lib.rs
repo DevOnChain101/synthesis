@@ -1,6 +1,7 @@
 //! Synthesis desktop app (docs/specs/desktop.md). Everything except `ui` painting is plain Rust and
 //! unit-tested without a window.
 
+pub mod approvals;
 pub mod brand;
 pub mod clean;
 pub mod close_ws;

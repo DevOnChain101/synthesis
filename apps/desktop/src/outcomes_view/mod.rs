@@ -21,6 +21,7 @@ use form::{FormText, Stage};
 use link::{Link, Msg, Req};
 use model::{Effect, Key, Pane, Screen, State};
 
+pub mod ask;
 pub mod form;
 mod form_view;
 pub mod link;

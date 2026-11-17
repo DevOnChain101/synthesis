@@ -74,7 +74,7 @@ fn the_decision_card_starts_with_no_answer_chosen_and_a_click_chooses_without_se
     let (shell, v) = open(cx, 1400., 900.);
     let o = view(&shell, v);
     assert_eq!(
-        o.read_with(v, |o, _| o.state.picker.as_ref().unwrap().cursor()),
+        o.read_with(v, |o, _| o.state.ask.picker.as_ref().unwrap().cursor()),
         None
     );
     assert!(v.debug_bounds("out-opt-0").is_some() && v.debug_bounds("out-opt-4").is_some());
@@ -83,8 +83,14 @@ fn the_decision_card_starts_with_no_answer_chosen_and_a_click_chooses_without_se
     v.simulate_click(b.center(), Default::default());
     assert_eq!(
         o.read_with(v, |o, _| (
-            o.state.picker.as_ref().unwrap().choice().map(String::from),
-            o.state.sending
+            o.state
+                .ask
+                .picker
+                .as_ref()
+                .unwrap()
+                .choice()
+                .map(String::from),
+            o.state.ask.sending
         )),
         (Some("approve_without_c3".into()), false)
     );
@@ -100,6 +106,7 @@ fn the_decision_card_starts_with_no_answer_chosen_and_a_click_chooses_without_se
     v.simulate_click(b.center(), Default::default());
     assert!(o.read_with(v, |o, _| {
         o.state
+            .ask
             .notice
             .clone()
             .unwrap()
@@ -119,6 +126,7 @@ fn the_keyboard_alone_reaches_every_column_and_answers_in_two_steps(cx: &mut Tes
     assert_eq!(
         o.read_with(v, |o, _| o
             .state
+            .ask
             .picker
             .as_ref()
             .unwrap()
@@ -128,7 +136,7 @@ fn the_keyboard_alone_reaches_every_column_and_answers_in_two_steps(cx: &mut Tes
     );
     v.simulate_keystrokes("enter");
     assert!(o.read_with(v, |o, _| {
-        o.state.notice.clone().unwrap().contains("Sample data")
+        o.state.ask.notice.clone().unwrap().contains("Sample data")
     }));
     v.simulate_keystrokes("tab");
     assert_eq!(o.read_with(v, |o, _| o.state.pane), Pane::Inspector);

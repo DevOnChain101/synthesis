@@ -152,7 +152,9 @@ fn synt_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     std::fs::symlink_metadata(&p).ok()?.is_file().then_some(p)
 }
 
-fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Screen> {
+/// The synchronous check before anything starts: the platform supports outcomes and `synt.orchestrator.enabled`
+/// is true. `Ok` is the synt home; `Err` is the screen that says why not (no thread, socket or poll is made).
+pub fn gate(env: &Env) -> Result<std::path::PathBuf, Screen> {
     if cfg!(windows) {
         return Err(Screen::Windows);
     }
@@ -161,7 +163,12 @@ fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Scree
     if !synthesis_app::outcome_policy::outcome_policy(&st.synthesis.orchestrator).enabled {
         return Err(Screen::Off);
     }
-    let link = connect_started(&h.synthesis);
+    Ok(h.synthesis)
+}
+
+fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Screen> {
+    let home = gate(env)?;
+    let link = connect_started(&home);
     link.map_err(|e| {
         let hint = if synt_exe().is_none() {
             " Start it with `synt outcome list` in a terminal, then press r."
