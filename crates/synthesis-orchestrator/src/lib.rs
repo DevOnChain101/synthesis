@@ -42,18 +42,19 @@ pub use gitsafe::{
 };
 pub use grants::{
     DecisionDriver, GRANT_TTL_HOURS, answered_plans, answered_waiting, awaiting_rebrief,
-    current_binding_for, decided_choices, decision_binding, plan_binding_for,
+    carried_commit, current_binding_for, decided_choices, decision_binding, plan_binding_for,
 };
 pub use host::{PLAN_TEXT_BEGIN, PLAN_TEXT_END, PLAN_TEXT_LABEL, ProcessHost, plan_text_block};
 pub use model_plan::{
     DEFAULT_MAX_ITEMS, MAX_PLAN_DEPTH, ModelPlanLimits, ReasonCode, ValidatedPlan,
     install_approved_plan, plan_hash, record_plan_approval, record_stub_fallback,
-    validate_model_plan,
+    validate_model_plan, validate_replan,
 };
 pub use planner::{ModelPlanner, Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
 pub use planrun::{
     PLAN_MAX_TURNS, PLAN_WALL_SECS, PlanCfg, PlanRun, PlanSpawn, PlanWait, PlannerProfile,
-    needs_model_plan, plan_wait, recover_plan_runs, start_plan_run,
+    needs_model_plan, plan_wait, plan_wait_of, record_planner_failed, recover_plan_runs,
+    replan_open, replan_trigger, start_plan_run,
 };
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};

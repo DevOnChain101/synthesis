@@ -629,6 +629,7 @@ impl Reader {
                     trust_class: r.fact.trust,
                     result: r.fact.result,
                     flags: r.flags,
+                    fence_current: r.fact.fence_current,
                 })
             })
             .collect()
@@ -2468,6 +2469,9 @@ pub struct AuthenticEvidence {
     pub trust_class: TrustClass,
     pub result: String,
     pub flags: Vec<String>,
+    /// The row belongs to the newest attempt of its work item: evidence of an earlier attempt
+    /// (even for the same commit) does not count for a later one.
+    pub fence_current: bool,
 }
 
 fn authentic_evidence(
@@ -4407,6 +4411,9 @@ pub const PLAN_CHOICES: [(&str, &str); 2] = [
     ("approve_model_plan", "plan"),
     ("use_stub_plan", "stub_plan"),
 ];
+/// The answer of a replan decision that installs nothing: the current plan stays as it is. Offered
+/// only when a plan of the current contract exists.
+pub const KEEP_CURRENT_PLAN: &str = "keep_current_plan";
 
 /// One planning run (ADR-017 P-B). `cost_usd` is `None` until settled; until then, and for a run
 /// settled without a cost (a lost one), the reservation counts as spent.
@@ -4690,11 +4697,27 @@ impl OutcomeTx<'_, '_> {
         }
         for a in alts.iter_mut() {
             let id = a.get("id").and_then(Value::as_str).unwrap_or_default();
+            if id == KEEP_CURRENT_PLAN {
+                // nothing to install: it names the plan that stays, which must be a plan of this contract
+                let stays = match o.plan_version {
+                    Some(v) => self.plan_contract(v)?.version == o.contract_version,
+                    None => false,
+                };
+                if !stays {
+                    return Err(bad(
+                        "offers keep_current_plan only with a current plan of the current contract",
+                    ));
+                }
+                a["label"] = Value::String("keep the current plan; nothing changes".into());
+                continue;
+            }
             let field = PLAN_CHOICES
                 .iter()
                 .find(|(c, _)| *c == id)
                 .map(|(_, f)| *f)
-                .ok_or_else(|| bad("offers only approve_model_plan and use_stub_plan"))?;
+                .ok_or_else(|| {
+                    bad("offers only approve_model_plan, use_stub_plan and keep_current_plan")
+                })?;
             let plan: Plan = action
                 .get(field)
                 .cloned()

@@ -22,7 +22,9 @@ use serde_json::Value;
 use synthesis_core::outcome::{DecisionState, OutcomeId, WorkItemId, WorkItemState};
 use synthesis_session::Error as StoreError;
 use synthesis_session::Reader;
-use synthesis_session::outcome::{DecisionRecord, Effects, OutcomeWriter, WorkItemRecord};
+use synthesis_session::outcome::{
+    DecisionRecord, Effects, KEEP_CURRENT_PLAN, OutcomeWriter, WorkItemRecord,
+};
 use time::OffsetDateTime;
 
 use crate::compile_envelope;
@@ -127,6 +129,43 @@ pub fn current_binding_for(
             &item,
         ),
     )))
+}
+
+/// The commit attempt `ordinal` of `item` starts from (B9, ADR-019 G-3): the `subject_commit` of the
+/// attempt before it when a person ANSWERED (approved, MAC verified) a decision that this attempt
+/// bound itself to (the same work item, attempt ordinal and commit), so the work is not redone.
+/// `None`: the outcome's base commit. A retry after a failure, an expired or rejected decision
+/// carries nothing. The scope of the final commit is still judged against the BASE commit (the
+/// verifier diffs `base..commit`), so a carried commit cannot hide a change outside the envelope,
+/// and evidence of the earlier attempt does not count for the new one (stale fence).
+pub fn carried_commit(
+    w: &OutcomeWriter,
+    item: &WorkItemId,
+    ordinal: u32,
+) -> Result<Option<String>, StoreError> {
+    let Some(prev) = w
+        .list_attempts(item)?
+        .into_iter()
+        .filter(|a| a.ordinal < ordinal)
+        .max_by_key(|a| a.ordinal)
+    else {
+        return Ok(None);
+    };
+    let Some(commit) = prev.subject_commit else {
+        return Ok(None);
+    };
+    for d in w.list_decisions(w.id())? {
+        let b = &d.binding;
+        if b.get("work_item_id").and_then(Value::as_str) == Some(item.as_str())
+            && b.get("attempt_ordinal").and_then(Value::as_u64) == Some(u64::from(prev.ordinal))
+            && b.get("subject_commit").and_then(Value::as_str) == Some(commit.as_str())
+            && w.decision_state(&d.id)? == DecisionState::Approved
+            && w.verified_resolution(&d.id)?.is_some()
+        {
+            return Ok(Some(commit));
+        }
+    }
+    Ok(None)
 }
 
 /// The choices a person made for `item`'s earlier decisions (ambiguities), as quoted DATA for the
@@ -246,6 +285,12 @@ impl DecisionDriver {
                 }
             }
             DecisionState::Approved if w.binding_is_current(d, &current)? => {
+                // `keep_current_plan` installs nothing: the answer is that the plan stays
+                if w.verified_resolution(&d.id)?
+                    .is_some_and(|r| r.choice == KEEP_CURRENT_PLAN)
+                {
+                    return Ok(());
+                }
                 match install_approved_plan(w, d, &current, self.max_items) {
                     Ok(v) => notes.push(format!("plan v{v} installed from decision {id}")),
                     Err(
@@ -260,6 +305,14 @@ impl DecisionDriver {
                                 "deny",
                                 serde_json::json!({"decision_id": d.id, "reason": e.to_string()}),
                             )?;
+                            // persisted for `plan_wait`: an approved plan that cannot be installed is not `Open`
+                            w.atomically(|tx| {
+                                tx.emit(
+                                    "outcome.plan_install_refused",
+                                    serde_json::json!({"decision_id": d.id, "reason": e.to_string()}),
+                                )?;
+                                Ok(())
+                            })?;
                             notes.push(format!("plan decision {id}: not installed ({e})"));
                         }
                     }
@@ -561,11 +614,15 @@ pub fn answered_plans(w: &OutcomeWriter) -> Result<Vec<String>, StoreError> {
     }
     let mut out = vec![];
     for d in w.list_decisions(w.id())? {
+        // the decision that installed the CURRENT plan: it was made for the plan before it
         if d.kind == "plan_approval"
             && d.binding.get("contract_version").and_then(Value::as_u64)
                 == Some(u64::from(o.contract_version))
+            && d.binding.get("plan_version").and_then(Value::as_u64)
+                == pv.checked_sub(1).map(u64::from).filter(|p| *p > 0)
             && w.decision_state(&d.id)? == DecisionState::Approved
-            && w.verified_resolution(&d.id)?.is_some()
+            && w.verified_resolution(&d.id)?
+                .is_some_and(|r| r.choice != KEEP_CURRENT_PLAN)
         {
             out.push(d.id.to_string());
         }

@@ -31,8 +31,8 @@ use synthesis_orchestrator::{
     PlanWait, Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig,
     Scheduler, Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
     apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan, plan_wait,
-    recover_attempts, recover_plan_runs, replan_after_revise, restore_pause, start_plan_run,
-    wall_secs,
+    record_planner_failed, recover_attempts, recover_plan_runs, replan_after_revise, replan_open,
+    restore_pause, start_plan_run, wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -160,8 +160,8 @@ pub struct Owner<'a> {
     pub planner: Option<PlannerCtx>,
     /// `synt.orchestrator.planner.max_items` of this cycle: a model plan is installed within it.
     pub max_items: usize,
-    /// `(outcome, contract version)` the model planner could not even start for (said once).
-    plan_failed: BTreeSet<(String, u32)>,
+    /// `(outcome, contract version, plan version)` the model planner could not even start for (said once).
+    plan_failed: BTreeSet<(String, u32, Option<u32>)>,
     #[cfg(feature = "test-provider")]
     pub test: TestHooks,
 }
@@ -272,7 +272,9 @@ impl<'a> Owner<'a> {
                     || has_work(&r, &o.id).map_err(s)?
                     || awaiting_rebrief(&r, &o.id).unwrap_or(false)
                     || (awaiting_replan(&r, &o.id).unwrap_or(false)
-                        && !self.replan_given_up(&id, o.contract_version)))
+                        && !self.replan_given_up(&id, o.contract_version))
+                    // a model replan is wanted or waits for the person's answer
+                    || (self.planner.is_some() && replan_open(&r, &o.id).unwrap_or(false)))
             {
                 continue;
             }
@@ -447,7 +449,7 @@ impl<'a> Owner<'a> {
         if !needs_model_plan(&ow.w).unwrap_or(false)
             || self
                 .plan_failed
-                .contains(&(id.to_string(), o.contract_version))
+                .contains(&(id.to_string(), o.contract_version, o.plan_version))
         {
             return;
         }
@@ -471,13 +473,25 @@ impl<'a> Owner<'a> {
                     && plan_wait(&ow.w).map_or(true, |w| w == PlanWait::NotStarted)
                 {
                     self.plan_failed
-                        .insert((id.to_string(), o.contract_version));
+                        .insert((id.to_string(), o.contract_version, o.plan_version));
+                    if let Err(x) = record_planner_failed(&mut ow.w, ReasonCode::PlannerFailed) {
+                        log(&format!(
+                            "outcome {id}: cannot record the planner failure: {x}"
+                        ));
+                    }
                 }
             }
             Err(e) => {
                 log(&format!("outcome {id}: planning run not started: {e}"));
                 self.plan_failed
-                    .insert((id.to_string(), o.contract_version));
+                    .insert((id.to_string(), o.contract_version, o.plan_version));
+                // persisted, not only remembered: a queued `outcome.start` ends with a message
+                // (revise the contract) instead of waiting for ever, and a restart does not retry
+                if let Err(x) = record_planner_failed(&mut ow.w, ReasonCode::PlannerFailed) {
+                    log(&format!(
+                        "outcome {id}: cannot record the planner failure: {x}"
+                    ));
+                }
             }
         }
     }
@@ -524,8 +538,10 @@ impl<'a> Owner<'a> {
         // `running` once per answer and the scheduler re-checks everything, so anything else that
         // still blocks (a cap, another item) blocks it again with its own reason (fail closed). A
         // paused or cancelled outcome is left alone: only `resume` undoes a person's pause.
-        if o.state == OutcomeState::Blocked
-            && !ow.control.is_paused()
+        if matches!(
+            o.state,
+            OutcomeState::Blocked | OutcomeState::ReworkRequired
+        ) && !ow.control.is_paused()
             && !ow.control.cancel.is_set()
         {
             let fresh: Vec<String> = answered_waiting(&mut ow.w)
@@ -619,7 +635,8 @@ impl<'a> Owner<'a> {
             // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
             || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false)
             || (awaiting_replan(&ow.w, ow.w.id()).unwrap_or(false)
-                && !self.replan_given_up(&id, o.contract_version));
+                && !self.replan_given_up(&id, o.contract_version))
+            || (self.planner.is_some() && replan_open(&ow.w, ow.w.id()).unwrap_or(false));
         if !keep {
             if let Some(sc) = ow.sched.as_mut() {
                 sc.shutdown(&mut ow.w, "the outcome is no longer running");

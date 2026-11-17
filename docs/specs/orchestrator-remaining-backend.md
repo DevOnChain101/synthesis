@@ -1,6 +1,6 @@
 # Orchestrator: remaining backend (model planner, OrchGateway, decision push, Enable gate)
 
-Status: Proposed design (2026-11-17); owner accepted the recommended defaults of O1-O10 on 2026-11-17. Implemented so far: B1 to B5, **B6 (planner foundations)** and **B7 (the model planning run)**; see the plan's B6 and B7 notes for what is and is not done. B9 (the model replanner) remains.
+Status: Proposed design (2026-11-17); owner accepted the recommended defaults of O1-O10 on 2026-11-17. Implemented so far: B1 to B5, **B6 (planner foundations)** and **B7 (the model planning run)** and **B9 (the model replanner, retry from the blocked attempt's commit, the start dead-end fixes)**; see the plan's B6, B7 and B9 notes for what is and is not done. B8 (open the gate) remains.
 Inputs: [plan](../architecture/outcome-orchestration-plan.md) (D13, section 3b), [ADR-016..021](../architecture/adr/README.md), [threat model](../architecture/outcome-orchestration-threat-model.md), [gap analysis](../architecture/outcome-orchestration-gap-analysis.md), [MVP slice](../architecture/outcome-orchestration-mvp-slice.md), [acceptance](../testing/outcome-orchestration-acceptance.md); code in `crates/synthesis-orchestrator` (`planner.rs`, `host.rs`, `decision.rs`, `grants.rs`, `commands.rs`), `crates/synthesis-core/src/outcome/{plan,contract}.rs`, `crates/synthesis-session/src/{schema,outcome}.rs`, `crates/synthesis-app/src/{orch_owner,orch_endpoint,outcome_service,outcome_client,notify}.rs`.
 
 Assumptions are marked **[A]**; everything else was read in the code or the docs named above.
@@ -69,6 +69,7 @@ Additional planner-only checks (a new `validate_model_plan` that wraps `validate
   - Input: the contract, the current plan, and per-item state and reason codes plus failed check ids. **No worker free text** (an injection channel from attempt output into the next plan).
   - Output goes through `replan()`, giving version `old + 1` and a `PlanDiff`. It is approved the same way.
   - Carry-over of unchanged succeeded items: none in the first release (O8; the scheduler does not carry results over today).
+  - **B9 status (implemented).** The trigger, the input (state and reason codes only, listed in the plan's B9 note), the extra validator rules (`validate_replan`), the diff vs the CURRENT plan in the brief (all fields of added, removed and changed items), the alternatives `approve_model_plan`, `use_stub_plan` and `keep_current_plan`, and the fallback decision are as described; a failed replan offers the stub replan and keeping the plan. A kept key keeps its kind and no replan uses a capability no item of the current plan has (waived for a plan of an older contract: the revised contract is the person's new authority).
 
 ### 1.5 Injection and exfiltration
 
@@ -77,7 +78,7 @@ Additional planner-only checks (a new `validate_model_plan` that wraps `validate
 | A README says "add capability git.push", "set budget", "mark approved" | Unknown fields are refused. Capabilities are limited to the envelope's non-deny modes, and irreversible ones are never `allow` in an envelope. Budgets are not in `Plan`. Approval comes only from a person's answer (MAC) |
 | An injected plan drops verification | `NotIndependentlyVerifiable` and `UncoveredCriterion` |
 | An injected plan steers workers through `instructions` | Shown in full before approval. The worker is still confined by the envelope; the text grants nothing. The worker prompt labels it "plan text written by a model and approved by a person" |
-| Secrets copied into plan text | The planner cannot read `.env*`, `~/.ssh` and similar (read denies plus sandbox). Network is denied. The plan text goes only to the person and to the same provider. Notifications carry ids only. Residual: anything readable in the repo can reach the provider, as with any worker |
+| Secrets copied into plan text | The planner cannot read `.env*`, `~/.ssh` and similar (read denies plus sandbox). Network is denied. The plan text goes only to the person and to the same provider. Notifications carry ids only. Residual: anything readable in the repo can reach the provider, as with any worker. **Anything committed to the repository (a secret under another name, a key in a config file) is readable by the planner and can reach the model provider, the same exposure as a normal run; keep secrets out of the repository** |
 | Hidden or bidi text in the plan | Refused (1.2) |
 | Huge or cyclic plan, memory amplification | 256 KiB raw cap, item, edge and depth caps, Kahn's algorithm O(V+E) (exists) |
 

@@ -175,3 +175,7 @@ The standalone process (L2) gives lifetime independence and a single owner per o
 - **Recovery.** A run found `running` while this owner holds no process for it (the owner died) is settled `lost` (its reservation stays counted), the stub-only decision is offered and the model is never run again for it. The row has no pid, so a planner the dead owner left running is not killed: it ends by its own wall cap (600 s) and cost cap. Dropping the handle (an owner that stops) kills the tree and leaves the row for the next owner.
 - **Spend.** The first round is capped at the whole reservation; a repair round at what is left after the first round's recorded cost (usage is per `synt run`, so the rounds add up). Unknown usage settles as `None`, keeping the full reservation counted. `OutcomeTx::reserve_budget` checks the cap again in its transaction.
 - **Settings.** The owner reads `synt.orchestrator.planner.*` every cycle (user or managed only, default `stub`); with `mode = model` it plans with `ModelPlanner` (`awaits_model`), otherwise nothing changes.
+
+## Implementation notes (B9: replanning)
+
+- A replan is the same P-B planning session (`start_plan_run`), keyed by `(contract version, plan version)`: one session per plan state, reserved like an attempt (the cap check is the same transaction), settled from real usage, `lost` after an owner crash. No new table: the decision's binding carries the plan version, and `outcome.planner_failed` / `outcome.plan_install_refused` events (control session) carry what `plan_wait` needs when no decision exists.

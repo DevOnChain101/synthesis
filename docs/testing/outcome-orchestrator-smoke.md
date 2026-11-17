@@ -110,3 +110,10 @@ cargo test -p synthesis-cli --features test-provider --test outcome_e2e    # rea
 - Windows (named pipe, native or WSL) and Linux with bubblewrap for the process tests: written, not run by the author. CI will compile them; the process and endpoint tests are unix-only.
 - A worker run by the orchestrator with a real model, and the live policy gateway (not built). `outcome_e2e` runs real workers against a scripted model (`SYNT_TEST_ORCH_SCRIPT`, builds with `test-provider` only), so create, verification, verdict, ack, a real decision and the kill matrix are automated; what it does not cover is listed in the acceptance doc (section 3c). `outcome_cmds` still seeds its decision in the store because it also runs in builds without `test-provider`, where no worker can be given a model.
 - The notify command through the confined `Notifier` against a real sandbox: the payload and delivery are unit tested without a sandbox.
+
+## Model planner and replanner (B7, B9): what to know before you turn it on
+
+- With `synt.orchestrator.planner.mode = model` (user or managed settings only) a read-only planning session reads the repository at the outcome's base commit and the model provider receives what it reads. **Anything committed to the repository, including a secret under another name or in a config file, is readable by the planner and can reach the model provider; this is the same exposure as a normal run.** The planner cannot read `.env*`, `~/.ssh`, `~/.aws` and `~/.gnupg`, and it has no network.
+- A model plan or replan is only a proposal. The card shows every item (and, for a replan, what was added, removed and changed against the current plan); nothing runs until you choose `approve_model_plan`, `use_stub_plan` or, for a replan, `keep_current_plan`.
+- A replan is proposed once per plan state after a work item failed or ended blocked, after a rework verdict, or after a revised contract was approved. Its input is state and reason codes only, never what a worker wrote.
+- After you answer a blocked worker's decision, the next attempt starts from that worker's commit. The final check still compares everything against the base commit.

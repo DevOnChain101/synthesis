@@ -85,13 +85,16 @@ impl WorkerHost for ProcessHost<'_> {
         spent_usd: f64,
         share: u32,
     ) -> Result<Running, SchedError> {
+        // after a person's answer to a blocked attempt, the work of that attempt is the start
+        let start = crate::carried_commit(w, &item.id, ordinal)?
+            .unwrap_or_else(|| self.base_commit.clone());
         let env = self.allocator.allocate(
             w,
             &AllocSpec {
                 item: &item.id,
                 ordinal,
                 source: &self.source,
-                base_commit: &self.base_commit,
+                base_commit: &start,
                 worker_kind: self.worker_kind,
             },
             OffsetDateTime::now_utc(),

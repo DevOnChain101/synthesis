@@ -77,7 +77,8 @@ pub struct AllocSpec<'a> {
     pub ordinal: u32,
     /// The outcome's folder (its recorded `repo_root`): where the worktree is made from.
     pub source: &'a Path,
-    /// The outcome's recorded base commit (full id); every attempt starts here.
+    /// The commit the worktree starts at (full id): the outcome's recorded base commit, or the
+    /// commit of the blocked attempt a person answered (`carried_commit`).
     pub base_commit: &'a str,
     /// `local-inproc` or `local-engine`.
     pub worker_kind: &'a str,

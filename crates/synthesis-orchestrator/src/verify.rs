@@ -559,8 +559,14 @@ impl IndependentVerifier {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));
         };
         self.drop_stale(&item.id, &commit);
-        // already judged (a restart, a retry): decide from the authentic row
-        if let Some(row) = self.rows_for(w, item, &commit, SCOPE_CHECK)?.first() {
+        // already judged (a restart): decide from the authentic row of THIS attempt. A row of an
+        // earlier attempt, even for the same commit (one carried over from a blocked attempt), does
+        // not count: the commit is inspected again against the base commit.
+        if let Some(row) = self
+            .rows_for(w, item, &commit, SCOPE_CHECK)?
+            .iter()
+            .find(|e| e.fence_current)
+        {
             return Ok(if row.result == "passed" && row.flags.is_empty() {
                 Verdict::Passed
             } else {
