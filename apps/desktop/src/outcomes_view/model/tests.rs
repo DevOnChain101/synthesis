@@ -308,3 +308,24 @@ fn a_brief_that_names_a_preferred_option_is_never_made_answerable() {
     assert!(s.picker.is_none() && s.active_card().is_none());
     assert!(press(&mut s, "enter", 10_000).is_empty());
 }
+
+#[test]
+fn a_link_that_dies_mid_send_does_not_leave_send_stuck_and_nothing_is_resent() {
+    let mut s = decisions();
+    press(&mut s, "1", 0);
+    assert_eq!(press(&mut s, "enter", 10_000).len(), 1);
+    assert!(s.sending);
+    // the link ended before the answer came back
+    s.set_screen(Screen::Unreachable("closed".into()));
+    assert!(!s.sending);
+    // r retries the connection and nothing else: no automatic resend of the old request
+    assert_eq!(press(&mut s, "r", 10_000), vec![Effect::Retry]);
+    // reconnected: a fresh snapshot, a new choice, and the card can be answered again
+    let (items, d) = (s.items.clone(), s.detail.clone());
+    s.apply_snapshot(items, None, d, None, 20_000);
+    assert_eq!(s.screen, Screen::Ready);
+    assert_eq!(s.picker.as_ref().unwrap().cursor(), None);
+    assert!(press(&mut s, "enter", 30_000).is_empty());
+    press(&mut s, "2", 30_000);
+    assert_eq!(press(&mut s, "enter", 30_000).len(), 1);
+}

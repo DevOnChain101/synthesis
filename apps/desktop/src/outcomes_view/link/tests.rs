@@ -19,9 +19,30 @@ struct Fake {
     revision: Rc<RefCell<i64>>,
     resolved: Rc<RefCell<Vec<Value>>>,
     hostile: bool,
+    /// Hints still to give, and the request sender dropped when they are used up (ends the loop).
+    hints: Rc<RefCell<u32>>,
+    end: Rc<RefCell<Option<std::sync::mpsc::Sender<Req>>>>,
 }
 
 impl Transport for Fake {
+    fn next_hint(
+        &mut self,
+        _: Duration,
+    ) -> Result<Option<synthesis_app::proto::DecisionHint>, ClientError> {
+        let mut n = self.hints.borrow_mut();
+        if *n == 0 {
+            self.end.borrow_mut().take();
+            return Ok(None);
+        }
+        *n -= 1;
+        Ok(Some(synthesis_app::proto::DecisionHint {
+            outcome: "o_auth".into(),
+            id: "d_7f3a".into(),
+            revision: 5,
+            state: "pending".into(),
+        }))
+    }
+
     fn call(&mut self, call: Call) -> Result<Value, ClientError> {
         let v = serde_json::to_value(&call).unwrap();
         let m = v["method"].as_str().unwrap().to_string();
@@ -248,4 +269,43 @@ fn a_failed_link_ends_the_loop_with_its_text() {
         Duration::ZERO,
     );
     assert_eq!(r, Err("the orchestrator closed the link".into()));
+}
+
+#[test]
+fn a_flood_of_hints_is_one_refetch_not_one_per_hint() {
+    let f = fake();
+    *f.hints.borrow_mut() = 500;
+    let (tx, rx) = channel::<Req>();
+    *f.end.borrow_mut() = Some(tx);
+    let (out, _orx) = unbounded();
+    serve(&mut client(&f), &rx, &out, Duration::ZERO).unwrap();
+    let lists = f
+        .log
+        .borrow()
+        .iter()
+        .filter(|m| *m == "outcome.list")
+        .count();
+    assert!(lists <= 2, "{lists} refetches for 500 hints");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (real, user) = (root.join("real"), root.join("user"));
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(real.join("app"), "x").unwrap();
+    std::os::unix::fs::symlink(real.join("app"), user.join("app")).unwrap();
+    // a `synt` planted beside the symlink, in the folder the user can write, is not used
+    std::fs::write(user.join("synt"), "evil").unwrap();
+    assert_eq!(synt_beside(&user.join("app")), None);
+    // beside the real app it is; a symlink named synt there is not
+    std::fs::write(real.join("elsewhere"), "x").unwrap();
+    std::os::unix::fs::symlink(real.join("elsewhere"), real.join("synt")).unwrap();
+    assert_eq!(synt_beside(&user.join("app")), None);
+    std::fs::remove_file(real.join("synt")).unwrap();
+    std::fs::write(real.join("synt"), "ok").unwrap();
+    assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
 }

@@ -24,6 +24,8 @@ use super::model::{Detail, Item, Screen};
 
 /// How long without a hint before the worker looks again.
 const POLL: Duration = Duration::from_secs(20);
+/// Hints are coalesced: at most one refetch per this long, however many hints come.
+const MIN_REFETCH: Duration = Duration::from_secs(1);
 /// How long one wait for a hint lasts: the longest a request can sit unread.
 const HINT_WAIT: Duration = Duration::from_millis(200);
 /// Outcomes whose budget is fetched for the list (one call each).
@@ -85,11 +87,18 @@ impl Link {
 /// `synt` next to this app (a packaged install): the orchestrator is started with it. Without one the app only
 /// connects to a running orchestrator (it never starts itself, which would open a second window).
 fn synt_exe() -> Option<std::path::PathBuf> {
-    let p = std::env::current_exe()
+    synt_beside(&std::env::current_exe().ok()?)
+}
+
+/// The `synt` in the folder `exe` really is in: the path is resolved first, so a symlink to the app from a
+/// folder the user can write does not pick a `synt` that sits beside the link. A regular file, never a
+/// symlink, never a PATH search.
+fn synt_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let p = std::fs::canonicalize(exe)
         .ok()?
         .parent()?
         .join(if cfg!(windows) { "synt.exe" } else { "synt" });
-    p.is_file().then_some(p)
+    std::fs::symlink_metadata(&p).ok()?.is_file().then_some(p)
 }
 
 fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Screen> {
@@ -184,6 +193,8 @@ pub(super) fn serve<T: Transport>(
     };
     refresh(c, &mut w, out)?;
     let mut last = Instant::now();
+    // a hint came while the last refetch was too recent: look once the interval is over
+    let mut dirty = false;
     loop {
         loop {
             match rx.try_recv() {
@@ -216,8 +227,9 @@ pub(super) fn serve<T: Transport>(
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
         }
-        let hint = c.next_hint(wait).map_err(|e| e.to_string())?;
-        if hint.is_some() || last.elapsed() >= POLL {
+        dirty |= c.next_hint(wait).map_err(|e| e.to_string())?.is_some();
+        if (dirty && last.elapsed() >= MIN_REFETCH) || last.elapsed() >= POLL {
+            dirty = false;
             refresh(c, &mut w, out)?;
             last = Instant::now();
         }

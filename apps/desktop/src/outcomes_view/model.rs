@@ -220,6 +220,15 @@ impl State {
         }
     }
 
+    /// A screen other than the list (the link ended, a retry, a recheck). An answer that was in flight is
+    /// not resent and not waited for: the send flag goes, and the person looks at the fresh card first.
+    pub fn set_screen(&mut self, screen: Screen) {
+        self.sending = false;
+        // the choice made before is gone: after a reconnect the card is a fresh one
+        self.seen = None;
+        self.screen = screen;
+    }
+
     pub fn answered(&mut self, note: String) {
         self.sending = false;
         // whatever came of it, the next answer is a new choice (and the refetch is not "a card that changed")

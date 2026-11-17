@@ -91,7 +91,7 @@ impl OutcomesView {
         let now = now_ms();
         for m in batch {
             match m {
-                Msg::Screen(s) => self.state.screen = s,
+                Msg::Screen(s) => self.state.set_screen(s),
                 Msg::Snapshot {
                     items,
                     selected,
@@ -138,7 +138,7 @@ impl OutcomesView {
                 (Effect::Refresh | Effect::Retry, None) => {}
                 (Effect::Refresh, Some(l)) => l.send(Req::Refresh),
                 (Effect::Retry, Some(l)) => {
-                    self.state.screen = Screen::Loading;
+                    self.state.set_screen(Screen::Loading);
                     l.send(Req::Retry);
                 }
                 (Effect::Select(id), Some(l)) => l.send(Req::Select(id)),
