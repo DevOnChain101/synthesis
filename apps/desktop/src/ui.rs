@@ -1,4 +1,4 @@
-//! The window: a title bar with the view icons (TUI, Super Agent, Settings) over the content of the active view.
+//! The window: a title bar with the view icons (TUI, Outcomes, Settings) over the content of the active view.
 //!
 //! The title bar follows the design's chrome (`index.html` `#chrome`): a 30px row above the content,
 //! the icon group (`.cb` 26x22, radius 6, hover and pressed backgrounds) at the right, the gear after it. macOS
@@ -15,6 +15,7 @@ use gpui::{
     prelude::*, px,
 };
 
+use crate::outcomes_view::OutcomesView;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
@@ -28,7 +29,7 @@ pub const ICONS: [&str; 2] = ["square-terminal", "undo-2"];
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Tui,
-    SuperAgent,
+    Outcomes,
     Settings,
 }
 
@@ -36,14 +37,14 @@ impl View {
     fn label(self) -> &'static str {
         match self {
             View::Tui => "TUI",
-            View::SuperAgent => "Super Agent (coming soon)",
+            View::Outcomes => "Outcomes",
             View::Settings => "Settings",
         }
     }
     fn icon(self) -> &'static str {
         match self {
             View::Tui => "tui",
-            View::SuperAgent => "super-agent",
+            View::Outcomes => "super-agent",
             View::Settings => "gear",
         }
     }
@@ -51,7 +52,7 @@ impl View {
     fn keys(self) -> &'static str {
         match self {
             View::Tui => "1",
-            View::SuperAgent => "2",
+            View::Outcomes => "2",
             View::Settings => ",",
         }
     }
@@ -86,6 +87,7 @@ pub struct Shell {
     back: View,
     tui: Entity<TuiView>,
     settings: Entity<SettingsView>,
+    outcomes: Entity<OutcomesView>,
     /// A restart was asked from Settings and the new session is not live yet.
     restarting: bool,
     /// The timer of the next frame of the title bar's blinking red (see `chrome::next_frame`).
@@ -110,6 +112,9 @@ impl Shell {
             });
         }
         self.view = v;
+        if v == View::Outcomes {
+            self.outcomes.update(cx, |o, cx| o.shown(window, cx));
+        }
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
         self.tui.update(cx, |t, cx| {
             let was = t.active;
@@ -120,6 +125,12 @@ impl Shell {
             }
         });
         cx.notify();
+    }
+
+    /// The Outcomes tab (the offscreen shots seed it).
+    #[cfg(any(test, feature = "shot"))]
+    pub(crate) fn outcomes(&self) -> &Entity<OutcomesView> {
+        &self.outcomes
     }
 
     /// The Settings popup (the offscreen shots seed it).
@@ -311,7 +322,7 @@ impl Shell {
                     .rounded(px(8.))
                     .bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.07))
                     .child(self.icon_button(View::Tui, cx))
-                    .child(self.icon_button(View::SuperAgent, cx)),
+                    .child(self.icon_button(View::Outcomes, cx)),
             )
             .child(self.icon_button(View::Settings, cx))
             .when(!mac, |d| {
@@ -320,35 +331,6 @@ impl Shell {
                     .child(Self::window_button(WindowControlArea::Max))
                     .child(Self::window_button(WindowControlArea::Close))
             })
-    }
-
-    /// The Super Agent page: not built yet (a different design is planned).
-    fn coming_soon() -> impl IntoElement {
-        div()
-            .debug_selector(|| "coming-soon".to_string())
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(10.))
-            .child(gpui::img(brand::mark()).size(px(72.)))
-            .child(tracked(
-                "SUPER AGENT",
-                16.,
-                0.32,
-                theme::hsla(t::TEXT_STRONG),
-            ))
-            .child(
-                div()
-                    .px(px(10.))
-                    .py(px(2.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(theme::hsla(t::BORDER))
-                    .text_color(theme::hsla(t::TEXT))
-                    .child("Coming soon"),
-            )
     }
 }
 
@@ -360,11 +342,11 @@ impl Render for Shell {
         }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
-            View::SuperAgent => div().size_full().child(Self::coming_soon()),
+            View::Outcomes => div().size_full().child(self.outcomes.clone()),
             // the panel slides over the view it was opened from
             View::Settings => {
                 let under = match self.back {
-                    View::SuperAgent => div().size_full().child(Self::coming_soon()),
+                    View::Outcomes => div().size_full().child(self.outcomes.clone()),
                     _ => div().size_full().child(self.tui.clone()),
                 };
                 div()
@@ -390,7 +372,7 @@ impl Render for Shell {
                     "," if s.view == View::Settings => s.go(s.back, window, cx),
                     "," => s.go(View::Settings, window, cx),
                     "1" => s.go(View::Tui, window, cx),
-                    "2" => s.go(View::SuperAgent, window, cx),
+                    "2" => s.go(View::Outcomes, window, cx),
                     // the collapsed side columns of the TUI view (narrow windows): sidebar, inspector
                     "b" | "i" if s.view == View::Tui => {
                         let side = if k.key == "b" {
@@ -496,20 +478,37 @@ impl Shell {
         hidden: layout::Hidden,
         settings_cfg: Result<settings_view::model::Cfg, String>,
     ) -> Self {
+        let env = live.as_ref().map(|c| c.env.clone());
         let tui = cx.new(|cx| match live {
             Some(cfg) => TuiView::live(window, cx, cfg, hidden, 0.),
             None => TuiView::new(0., hidden),
         });
-        Self::around(window, cx, tui, settings_cfg)
+        Self::with_outcomes(window, cx, tui, settings_cfg, env)
     }
 
-    /// The shell over a TUI view the caller built (the offscreen shots fill it before it is drawn).
+    /// The shell over a TUI view the caller built (the offscreen shots fill it before it is drawn); the
+    /// Outcomes tab shows its sample.
     pub fn around(
         window: &mut Window,
         cx: &mut Context<Self>,
         tui: Entity<TuiView>,
         settings_cfg: Result<settings_view::model::Cfg, String>,
     ) -> Self {
+        Self::with_outcomes(window, cx, tui, settings_cfg, None)
+    }
+
+    /// `outcomes_env`: the environment the live Outcomes tab reads its setting and home from; `None` is the sample.
+    fn with_outcomes(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        tui: Entity<TuiView>,
+        settings_cfg: Result<settings_view::model::Cfg, String>,
+        outcomes_env: Option<synthesis_config::Env>,
+    ) -> Self {
+        let outcomes = cx.new(|cx| match outcomes_env {
+            Some(env) => OutcomesView::live(env, cx),
+            None => OutcomesView::sample(cx),
+        });
         tui.update(cx, |t, cx| {
             t.set_top_inset(TITLEBAR_H);
             t.start(window, cx)
@@ -567,6 +566,7 @@ impl Shell {
             back: View::Tui,
             tui,
             settings,
+            outcomes,
             restarting: false,
             anim_tick: None,
         }
@@ -616,19 +616,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_icons_switch_views_and_agent_is_coming_soon(cx: &mut TestAppContext) {
+    fn the_icons_switch_views_and_outcomes_is_a_view_of_its_own(cx: &mut TestAppContext) {
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 930.);
         shell.update(v, |s, cx| {
             assert_eq!(s.view, View::Tui);
             let _ = cx;
         });
-        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        shell.update_in(v, |s, window, cx| s.go(View::Outcomes, window, cx));
         v.run_until_parked();
         assert!(
             v.debug_bounds("header").is_none(),
-            "the TUI view is not drawn on the Super Agent page"
+            "the TUI view is not drawn on the Outcomes page"
         );
+        assert!(v.debug_bounds("outcomes").is_some(), "the Outcomes view is");
         assert!(v.debug_bounds("titlebar").is_some(), "the title bar stays");
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
         v.run_until_parked();
@@ -719,7 +720,7 @@ mod tests {
     fn leaving_settings_by_any_route_undoes_an_unreleased_opacity_drag(cx: &mut TestAppContext) {
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1000., 800.);
-        for leave in [View::Tui, View::SuperAgent] {
+        for leave in [View::Tui, View::Outcomes] {
             theme::set_opacity(100);
             shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
             // a drag in progress (the preview reaches the shell as `Applied`), never released

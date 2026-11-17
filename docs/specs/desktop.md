@@ -10,7 +10,7 @@ A native GPUI app (no webview) for macOS, Linux and Windows that is the desktop 
 of the TUI design, in this repo, running the Rust engine in process.
 
 - One interface, plus a placeholder and Settings: **TUI** (the terminal-style tab, drawn natively from engine
-  data, `cli.html` exactly), **Super Agent** (a different design, later: the page says "Coming soon") and **Settings**
+  data, `cli.html` exactly), **Outcomes** (the former "Super Agent" tab, renamed 2026-11-17; section "Outcomes tab") and **Settings**
   (a centred popup over the TUI view, section 6). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
   palette (`docs/cli-palette.md`), not its blue/green. The first Super Agent view (`agent_view/`, built on `#view2`) was
   removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
@@ -51,7 +51,7 @@ of the TUI design, in this repo, running the Rust engine in process.
   the bounded process runner `imgclip::RealExec` that `project` runs git with) and on
   `synthesis-harness` (only `sanitize_for_display`); moving both into a small base crate is follow-up.
 - `theme.rs` reads the CLI's own tokens (`synthesis-cli-ui-render::theme`), so palette changes land in
-  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Super Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
+  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Outcomes views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
   `apps/desktop/assets/fonts/*-OFL.txt`; icons: Lucide through `gpui-kit-assets`.
 - Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
   `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
@@ -87,7 +87,7 @@ of the TUI design, in this repo, running the Rust engine in process.
 
 ## 4. Phases
 
-0. Shell (done): window, title bar (TUI, Super Agent, Settings icons), placeholders, palette, fonts, `Front::Native`,
+0. Shell (done): window, title bar (TUI, Outcomes, Settings icons), placeholders, palette, fonts, `Front::Native`,
    engine and reducer restored and green against the current crates.
 1. Super Agent view on `engine` + `synthesis_view::convo` (send, stream, approve/deny), then TUI view panels from the same state.
 2. Settings from `synthesis-settings` (model, permissions, appearance), stored-session resume.
@@ -213,7 +213,7 @@ Not ported: topology mode L (tall and narrow falls back to T). The "Latest user 
 
 Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the design's chrome (`index.html` `#chrome`)
 (`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
-the TUI and Super Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
+the TUI and Outcomes icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
 Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
 without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
 native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
@@ -304,9 +304,20 @@ tools and skills, conversation. Not done, with where the data would come from:
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: reversed 2026-11-16 (was: not wanted): native embedded terminal, see `terminal-browser.md`.
 
+### Outcomes tab (step 1)
+
+Owner decision 2026-11-17: the tab is **Outcomes** (not the Conductor, `conductor.md`); the TUI view is unchanged. Code: `apps/desktop/src/outcomes_view/` (`model.rs` state and keys with no window, `link.rs` the worker thread, `render.rs`, `sample.rs`, `shot.rs`). It is a surface in the sense of ADR-021: it talks to the orchestrator only through `OutcomeClient` over `LocalSocket` (surface `superagent`), renders only `synthesis_view::outcomes` models, and `apps/desktop` does not depend on `synthesis-orchestrator` (test `deps_surfaces_do_not_import_orchestrator`).
+
+- **States.** Off (`synt.orchestrator.enabled` false: the screen says how to enable it, the setting and `synt outcome enable`; the window never enables anything), Windows native (`WSL2_REFUSAL`), not ready (store not migrated), unreachable or failed link (the error text, `r` retries), loading. Nothing connects at launch: the first time the tab is opened the worker checks the setting and platform, then connects. It starts the orchestrator only with a `synt` binary next to the app; otherwise it connects to a running one and tells the person to run `synt outcome list`.
+- **Layout** (wireframe `synthesis-compare/mockups/super-agent.png`): left list (goal, state, needs-you badges, budget from `outcome.budget`), centre tabs Goal (read-only goal and contract, creating and editing come in step 2) | Decisions | History (events), right inspector Overview | Workers | Activity | Diff | Evidence from `InspectorContent` (Diff through `attempt.diff` of the newest attempt with a candidate commit; the sandbox of an attempt is shown "server-reported, not verified").
+- **Decisions.** Every non-empty brief field in the server's order (`card_layout`, tested with `uncovered()`), the server's state and expiry, the revision and the whole brief hash the answer carries. Answers: the brief's alternatives, then Reject, Request evidence, Edit scope (the fixed answers of `Picker`; "Defer" of the wireframe is not in the shared model and is not offered). Nothing is preselected; choosing (arrows, 1-9 or a click) and sending (Enter or Send answer) are two steps; Enter does nothing for `ARM_MS` after a card appears and for a card that is not `pending`. A new revision or brief hash is a new card (cursor on nothing, armed again, a notice). The worker looks at the decision again before sending and sends the card's own revision and hash; the server checks both again. An answer needs no text input in step 1, so the dock's "empty input" rule is trivially met.
+- **Refresh.** The worker attaches with `push:["decision"]`; a hint, a request or 20 s without one triggers a refetch. The UI thread never waits on a socket.
+- **Keys.** Tab/Shift+Tab columns, arrows, Enter, Esc, 1-9, `[` `]` between cards, `r` refresh; the mouse does the same and nothing is mouse-only.
+- **Shots.** `--shot out.png --view outcomes --sample [--size WxH] [--screen ready|off|windows|unreachable|notready] [--centre goal|decisions|history] [--inspector overview|workers|activity|diff|evidence] [--pane list|centre|inspector] [--outcome ID] [--card N] [--choose N]` (feature `shot`).
+
 ### Super Agent view (removed)
 
-The first Super Agent view (phase 3) is gone; the Super Agent page is "Coming soon". What it built on `synthesis_view::agent`
+The first Super Agent view (phase 3) is gone; its tab is now the Outcomes tab (below), a different design. What it built on `synthesis_view::agent`
 (`AgentPanes`: sub-agents, commands, verification, browser calls and frames, changed files) is used by the TUI view's
 tabs and its sub-agent transcript (the `* main / developer` switch under the prompt opens a transcript beside the chat).
 Known gaps: browser events carry no image bytes (screenshots are the saved artifacts, no live stream); concurrent
@@ -547,7 +558,7 @@ The engine inside WSL2 runs commands only under bubblewrap plus a seccomp filter
 
 ## 9. Agent inside WSL2 (Windows, ADR-015)
 
-Setting (the user AND the managed settings files, managed wins; never a project, local or `--settings` file; Settings > Execution > WSL): `synt.desktop.wsl.enabled` (bool, default false) and `synt.desktop.wsl.distro` (text; empty is WSL's default distro). The engine is started as `synt engine --stdio --host desktop --max-cost-usd N`: `N` is `synt.desktop.max_cost_usd` (number > 0, default 10, per task) and `synt.desktop.no_cost_cap: true` is the explicit way to run without one (docs/UNATTENDED.md); `--host desktop` keeps the interactive behaviour (edits land in the opened folder, no worktree, no default wall cap). The toggle exists on every OS and is shown disabled with "Windows only" on macOS and Linux; on Windows it is disabled with the reason when `wsl.exe --status` fails. Code: `apps/desktop/src/wsl.rs` (pure logic over an injected `wsl.exe` runner), started from `tui_view/driver.rs` through `Engine::start_remote` (the same seam the Super Agent tab will use).
+Setting (the user AND the managed settings files, managed wins; never a project, local or `--settings` file; Settings > Execution > WSL): `synt.desktop.wsl.enabled` (bool, default false) and `synt.desktop.wsl.distro` (text; empty is WSL's default distro). The engine is started as `synt engine --stdio --host desktop --max-cost-usd N`: `N` is `synt.desktop.max_cost_usd` (number > 0, default 10, per task) and `synt.desktop.no_cost_cap: true` is the explicit way to run without one (docs/UNATTENDED.md); `--host desktop` keeps the interactive behaviour (edits land in the opened folder, no worktree, no default wall cap). The toggle exists on every OS and is shown disabled with "Windows only" on macOS and Linux; on Windows it is disabled with the reason when `wsl.exe --status` fails. Code: `apps/desktop/src/wsl.rs` (pure logic over an injected `wsl.exe` runner), started from `tui_view/driver.rs` through `Engine::start_remote` (the same seam a later in-WSL Outcomes link can use).
 
 - **Command.** `C:\Windows\System32\wsl.exe -d <distro> --cd <linux cwd> --exec <synt> engine --stdio` (the path comes from `SystemRoot`, never from `PATH`). wsl.exe gets the allowlisted environment without any `SYNT_*`, and nothing is exported into the distro (no `WSLENV`). Hello may take 60 s (cold distro, "starting distro"); every other call is bounded.
 - **Distro.** `wsl.exe -l -v` (UTF-16LE, BOM or none, CRLF; `*` marks the default; Running/Stopped; VERSION). WSL1 is refused with the `--set-version` hint. Stopped is not an error: wsl.exe boots it.
