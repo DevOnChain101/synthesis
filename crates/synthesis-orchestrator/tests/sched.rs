@@ -1255,6 +1255,8 @@ struct FakeRunner {
     fail_first: Option<String>,
     /// A check has begun to run (set before its delay): tests wait on it, not on a clock.
     started: std::sync::atomic::AtomicBool,
+    /// While set the check does not finish: a test gates it instead of timing it.
+    hold: AtomicBool,
 }
 
 impl FakeRunner {
@@ -1270,6 +1272,7 @@ impl FakeRunner {
             ids: Mutex::new(vec![]),
             fail_first: None,
             started: Default::default(),
+            hold: Default::default(),
         })
     }
 }
@@ -1294,7 +1297,10 @@ impl CheckRunner for FakeRunner {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let until = std::time::Instant::now() + self.delay;
-        while std::time::Instant::now() < until && !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        while (std::time::Instant::now() < until
+            || self.hold.load(std::sync::atomic::Ordering::SeqCst))
+            && !stop.load(std::sync::atomic::Ordering::SeqCst)
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
         if stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1522,6 +1528,7 @@ fn a_failing_or_stuck_check_and_a_forged_report_never_verify() {
             ids: Mutex::new(vec![]),
             fail_first: None,
             started: Default::default(),
+            hold: Default::default(),
         });
         let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
         let (stop, _) = sched
@@ -1558,6 +1565,7 @@ fn without_an_enforcing_sandbox_no_independent_evidence_is_produced() {
         ids: Mutex::new(vec![]),
         fail_first: None,
         started: Default::default(),
+        hold: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
@@ -1591,35 +1599,58 @@ fn verification_runs_off_thread_and_the_walk_keeps_ticking() {
         exit: Some(0),
         problem: None,
         enforcing: true,
-        delay: Duration::from_secs(2),
+        delay: Duration::ZERO,
         output: b"check output\n".to_vec(),
         base_output: None,
         ran_in: Mutex::new(vec![]),
         ids: Mutex::new(vec![]),
         fail_first: None,
         started: Default::default(),
+        hold: Default::default(),
     });
-    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner), cfg());
-    let mut slowest = Duration::ZERO;
-    let mut waiting_ticks = 0;
+    runner.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
+    // safety net only: if a tick blocks on the gated check the test fails instead of hanging
+    let done = Arc::new(AtomicBool::new(false));
+    let wd = std::thread::spawn({
+        let (runner, done) = (runner.clone(), done.clone());
+        move || {
+            for _ in 0..1200 {
+                if done.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            runner
+                .hold
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let mut gated_ticks = 0;
     let stop = loop {
-        let t = std::time::Instant::now();
         let rep = sched.tick(&mut w, clock()).unwrap();
-        slowest = slowest.max(t.elapsed());
         if let Some(s) = rep.stop {
             break s;
         }
-        waiting_ticks += 1;
-        std::thread::sleep(Duration::from_millis(25));
+        // a tick that returned while the check is started and still held did not wait for it
+        if runner.started.load(std::sync::atomic::Ordering::SeqCst)
+            && runner.hold.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            gated_ticks += 1;
+            if gated_ticks == 6 {
+                runner
+                    .hold
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
     };
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    wd.join().unwrap();
     assert_eq!(stop, Stop::Succeeded);
     assert!(
-        waiting_ticks > 5,
-        "the walk ticked while the check ran ({waiting_ticks})"
-    );
-    assert!(
-        slowest < Duration::from_secs(2),
-        "no tick waited for the check: {slowest:?}"
+        gated_ticks >= 6,
+        "the walk kept ticking while the check was held ({gated_ticks})"
     );
 }
 
@@ -1640,6 +1671,7 @@ fn runner_printing(candidate: Vec<u8>, base: Option<Vec<u8>>) -> Arc<FakeRunner>
         ids: Mutex::new(vec![]),
         fail_first: None,
         started: Default::default(),
+        hold: Default::default(),
     })
 }
 
@@ -1756,6 +1788,7 @@ fn cancelling_stops_a_running_verification_promptly() {
         ids: Mutex::new(vec![]),
         fail_first: None,
         started: Default::default(),
+        hold: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     // wait until the check itself runs (not just the scope pass before it); under load that takes long
@@ -1815,6 +1848,7 @@ fn a_retry_after_a_partial_failure_runs_and_records_only_the_missing_checks() {
         ids: Mutex::new(vec![]),
         fail_first: Some("beta".into()),
         started: Default::default(),
+        hold: Default::default(),
     });
     let mut sched = Scheduler::new(host(&r, &s), real_verifier(&w, &r, runner.clone()), cfg());
     let (stop, reports) = sched
