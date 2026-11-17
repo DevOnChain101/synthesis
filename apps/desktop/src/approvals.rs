@@ -173,13 +173,14 @@ impl Popup {
         self.card = card;
     }
 
-    /// `held`: the key is an auto-repeat (a held Enter never answers).
-    pub fn key(&mut self, name: &str, held: bool, now: i64) -> Out {
+    /// A key while the popup has the keys. No held-key test: the keys come to the popup only after the person
+    /// moved them there (Alt+A or a click), which re-arms Enter for ARM_MS, so a key still held from typing is
+    /// over before it can answer.
+    pub fn key(&mut self, name: &str, now: i64) -> Out {
         match name {
             "up" | "down" => self.ask.step(name == "down"),
             "tab" => self.full = !self.full,
             "escape" => return Out::Later,
-            "enter" if held => {}
             "enter" => {
                 return match self.ask.send(&self.outcome, &self.card, now) {
                     Some(e) => Out::Send(e),
@@ -277,7 +278,7 @@ mod tests {
             "no preselection"
         );
         // Enter with nothing chosen sends nothing
-        assert_eq!(p.key("enter", false, 10_000), Out::Handled);
+        assert_eq!(p.key("enter", 10_000), Out::Handled);
         assert!(
             p.ask
                 .notice
@@ -286,16 +287,13 @@ mod tests {
                 .contains("Nothing is chosen")
         );
         // step 1: the arrow (or a number) moves the cursor and sends nothing
-        assert_eq!(p.key("down", false, 0), Out::Handled);
+        assert_eq!(p.key("down", 0), Out::Handled);
         assert!(p.ask.picker.as_ref().unwrap().choice().is_some());
         // step 2 inside the arming delay: nothing is sent
-        assert_eq!(p.key("enter", false, ARM_MS - 1), Out::Handled);
-        assert!(!p.ask.sending);
-        // a held Enter never answers, even armed
-        assert_eq!(p.key("enter", true, 10_000), Out::Handled);
+        assert_eq!(p.key("enter", ARM_MS - 1), Out::Handled);
         assert!(!p.ask.sending);
         // a deliberate Enter sends the card's own revision and hash, once
-        let Out::Send(Effect::Resolve { card: c, .. }) = p.key("enter", false, 10_000) else {
+        let Out::Send(Effect::Resolve { card: c, .. }) = p.key("enter", 10_000) else {
             panic!("not sent")
         };
         assert_eq!(
@@ -303,7 +301,7 @@ mod tests {
             (p.card.revision, p.card.brief_sha256.clone())
         );
         assert_eq!(
-            p.key("enter", false, 20_000),
+            p.key("enter", 20_000),
             Out::Handled,
             "no second answer in flight"
         );
@@ -312,27 +310,27 @@ mod tests {
     #[test]
     fn digits_choose_and_other_keys_are_not_the_popups() {
         let mut p = Popup::new("o".into(), card(), 0);
-        assert_eq!(p.key("2", false, 0), Out::Handled);
+        assert_eq!(p.key("2", 0), Out::Handled);
         assert_eq!(p.ask.picker.as_ref().unwrap().cursor(), Some(1));
-        assert_eq!(p.key("a", false, 0), Out::Pass);
-        assert_eq!(p.key("0", false, 0), Out::Pass);
+        assert_eq!(p.key("a", 0), Out::Pass);
+        assert_eq!(p.key("0", 0), Out::Pass);
     }
 
     #[test]
     fn esc_is_later_and_tab_is_the_full_brief() {
         let mut p = Popup::new("o".into(), card(), 0);
         assert!(!p.full);
-        assert_eq!(p.key("tab", false, 0), Out::Handled);
+        assert_eq!(p.key("tab", 0), Out::Handled);
         assert!(p.full);
-        assert_eq!(p.key("escape", false, 0), Out::Later);
+        assert_eq!(p.key("escape", 0), Out::Later);
         assert!(!p.ask.sending);
     }
 
     #[test]
     fn a_new_revision_is_a_new_card_with_a_notice_and_nothing_chosen() {
         let mut p = Popup::new("o".into(), card(), 0);
-        p.key("1", false, 0);
-        p.key("tab", false, 0);
+        p.key("1", 0);
+        p.key("tab", 0);
         // the same card again (a refresh) changes nothing
         p.update(card(), 5000);
         assert!(p.ask.picker.as_ref().unwrap().choice().is_some() && p.full);
@@ -349,7 +347,7 @@ mod tests {
                 .unwrap()
                 .contains("changed since you saw it")
         );
-        assert_eq!(p.key("enter", false, 6000), Out::Handled);
+        assert_eq!(p.key("enter", 6000), Out::Handled);
         assert!(!p.ask.sending, "nothing was sent for the old choice");
     }
 

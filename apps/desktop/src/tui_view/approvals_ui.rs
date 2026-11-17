@@ -26,21 +26,28 @@ pub struct OpenOutcome(pub String);
 
 impl gpui::EventEmitter<OpenOutcome> for TuiView {}
 
-fn is_digit(k: &str) -> bool {
-    matches!(k.as_bytes(), [b'0'..=b'9'])
+/// Which brief a card is: a new id, revision or brief hash is a new card (what "later" is remembered for).
+type CardKey = (String, i64, String);
+
+fn card_key(c: &synthesis_view::outcomes::DecisionCard) -> CardKey {
+    (c.id.clone(), c.revision, c.brief_sha256.clone())
 }
+
+/// A second Esc this soon after the one that gave the keys back dismisses the popup.
+const DOUBLE_ESC_MS: i64 = 700;
 
 /// Rows the Approvals panel shows before it scrolls.
 const PANEL_ROWS: f32 = 5.;
-/// Two Enter presses closer than this are one held key (the keystroke hook has no `is_held`).
-const HELD_MS: i64 = 150;
 
 /// The sample states of the shots (`--outcomes`): one approval, three (mixed), the decision popup, the tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutShot {
     Approvals1,
     Approvals3,
+    /// The popup open by itself, the prompt keeping the keys.
     Decision,
+    /// The popup with the keys (after Alt+A).
+    DecisionFocused,
     Tab,
 }
 
@@ -50,6 +57,7 @@ impl OutShot {
             "approvals-1" => Self::Approvals1,
             "approvals-3" => Self::Approvals3,
             "decision" => Self::Decision,
+            "decision-focus" => Self::DecisionFocused,
             "tab" => Self::Tab,
             _ => return None,
         })
@@ -80,7 +88,13 @@ pub struct Wire {
     cursor: Option<String>,
     /// The row of the outcomes tab Up/Down moved to.
     list_sel: usize,
-    last_enter: i64,
+    /// The popup has the keys (Alt+A or a click): only then do plain keys act on it. Otherwise the prompt and
+    /// the engine get every key, as without outcomes.
+    pub focus: bool,
+    /// The card the person put off ("later"): it stays closed until a new card, revision or Alt+A.
+    dismissed: Option<CardKey>,
+    /// When Esc last gave the keys back (a second one soon after dismisses the popup).
+    esc_at: i64,
     _sub: gpui::Subscription,
 }
 
@@ -112,7 +126,9 @@ impl TuiView {
             shown: None,
             cursor: None,
             list_sel: 0,
-            last_enter: 0,
+            focus: false,
+            dismissed: None,
+            esc_at: i64::MIN / 2,
             _sub: sub,
         });
         cx.notify();
@@ -132,10 +148,17 @@ impl TuiView {
         };
         w.fixed_now = Some(NOW);
         w.seed_outcome("o_auth", NOW - 9 * 60_000);
+        // the popup opens by itself on the selected outcome's pending card: the states that show something else
+        // have it put off
+        if !matches!(what, OutShot::Decision | OutShot::DecisionFocused) {
+            let st = &w.view.read(cx).state;
+            w.dismissed = st.cards().iter().find(|c| c.resolvable()).map(card_key);
+        }
         match what {
             OutShot::Approvals1 => {}
             OutShot::Approvals3 => approval_tools().into_iter().for_each(|r| w.seed_tool(r)),
-            OutShot::Decision => {
+            OutShot::Decision => {}
+            OutShot::DecisionFocused => {
                 let goal = w
                     .view
                     .read(cx)
@@ -184,9 +207,13 @@ impl TuiView {
         let Some(w) = self.outcomes.as_mut() else {
             return;
         };
-        // a tool dialog on screen keeps the popup's Enter inert; it stays so for ARM_MS after the dialog closes
-        if dialogs && let Some(Shown::Card(p, _)) = w.shown.as_mut() {
-            p.rearm(now);
+        // a tool dialog on screen owns the keyboard: the popup loses the focus and its Enter stays inert for
+        // ARM_MS after the dialog closes
+        if dialogs {
+            w.focus = false;
+            if let Some(Shown::Card(p, _)) = w.shown.as_mut() {
+                p.rearm(now);
+            }
         }
         let st = &w.view.read(cx).state;
         let ready = st.screen == Screen::Ready;
@@ -207,23 +234,40 @@ impl TuiView {
                 .chain(w.extra_tools.iter().map(|r| r.key.as_str())),
             now,
         );
-        let Some(shown) = w.shown.take() else { return };
+        let goal_of = |id: &str| {
+            st.items
+                .iter()
+                .find(|i| i.row.id == id)
+                .map(|i| i.row.goal.clone())
+        };
+        let card = st.cards().iter().find(|c| c.resolvable()).cloned();
+        let Some(shown) = w.shown.take() else {
+            // a decision of the selected outcome is pending and nothing else is up: the popup opens by itself, on
+            // the card, WITHOUT the keys (the prompt keeps them); a card the person put off stays off until it changes
+            let sel = st
+                .selected
+                .clone()
+                .filter(|s| st.detail.as_ref().is_some_and(|d| &d.outcome == s));
+            if let (true, Some(o), Some(c)) = (ready && !dialogs, sel, card)
+                && w.dismissed.as_ref() != Some(&card_key(&c))
+                && let Some(goal) = goal_of(&o)
+            {
+                w.shown = Some(Shown::Card(Box::new(Popup::new(o, c, now)), goal));
+            }
+            w.focus = false;
+            return;
+        };
         let outcome = match &shown {
             Shown::Loading { outcome, .. } => outcome.clone(),
             Shown::Card(p, _) => p.outcome.clone(),
         };
-        let goal = st
-            .items
-            .iter()
-            .find(|i| i.row.id == outcome)
-            .map(|i| i.row.goal.clone());
-        let Some(goal) = goal.filter(|_| ready) else {
+        let Some(goal) = goal_of(&outcome).filter(|_| ready) else {
             // the outcome is gone, or the link ended: nothing to answer
+            w.focus = false;
             return;
         };
         let landed = st.selected.as_deref() == Some(outcome.as_str())
             && st.detail.as_ref().is_some_and(|d| d.outcome == outcome);
-        let card = st.cards().iter().find(|c| c.resolvable()).cloned();
         w.shown = match (shown, landed) {
             (Shown::Loading { .. }, false) => Some(Shown::Loading { outcome, goal }),
             // its detail landed: the card, or nothing when nothing is pending any more
@@ -247,6 +291,10 @@ impl TuiView {
                 Shown::Card(p, goal)
             }),
         };
+        // nothing shown any more (answered, or nothing pending): no focus either
+        if w.shown.is_none() {
+            w.focus = false;
+        }
     }
 
     /// A tool-permission (or other) dialog of the open session is up: it owns the keyboard.
@@ -347,6 +395,9 @@ impl TuiView {
                 st.cards().iter().find(|c| c.resolvable()).cloned(),
             )
         };
+        // asked for on purpose (a click on the row, Alt+A): the popup takes the keys, Enter inert for ARM_MS
+        w.dismissed = None;
+        w.focus = true;
         w.shown = Some(match (landed, card) {
             (true, Some(c)) => Shown::Card(Box::new(Popup::new(id.into(), c, now)), goal.into()),
             _ => {
@@ -374,7 +425,7 @@ impl TuiView {
                     return true;
                 }
                 "a" => {
-                    self.next_approval(cx);
+                    self.alt_a(cx);
                     return true;
                 }
                 _ => {}
@@ -387,9 +438,13 @@ impl TuiView {
         }
         let now = self.now();
         if self.dialogs_open() {
-            // the dialog owns the keyboard; the popup's Enter stays inert until ARM_MS after it closes
-            if let Some(Shown::Card(p, _)) = self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
-                p.rearm(now);
+            // the dialog owns the keyboard (the sync also drops the focus); the popup's Enter stays inert until
+            // ARM_MS after it closes
+            if let Some(w) = self.outcomes.as_mut() {
+                w.focus = false;
+                if let Some(Shown::Card(p, _)) = w.shown.as_mut() {
+                    p.rearm(now);
+                }
             }
             return false;
         }
@@ -402,53 +457,103 @@ impl TuiView {
             return false;
         }
         let key = ks.key.as_str();
-        let prompt_empty = self
-            .live
-            .as_ref()
-            .is_none_or(|l| l.prompt.read(cx).value().is_empty());
-        // digits, Enter and the arrows are the popup's only while nothing is typed: with text in the prompt they are
-        // the prompt's (a digit is text, Enter sends the message, the arrows move the cursor)
-        if !prompt_empty && (matches!(key, "enter" | "up" | "down") || is_digit(key)) {
+        let Some(w) = self.outcomes.as_mut() else {
+            return false;
+        };
+        let focused = w.focus && matches!(w.shown, Some(Shown::Card(..)));
+        if focused {
+            // the popup has the keys: Esc gives them back (the popup stays), the rest is its own
+            if key == "escape" {
+                w.focus = false;
+                w.esc_at = now;
+                cx.notify();
+                return true;
+            }
+            let out = match w.shown.as_mut() {
+                Some(Shown::Card(p, _)) => p.key(key, now),
+                _ => Out::Pass,
+            };
+            if out != Out::Pass {
+                self.popup_out(out, cx);
+                return true;
+            }
             return false;
         }
-        let held = {
-            let Some(w) = self.outcomes.as_mut() else {
-                return false;
-            };
-            let held = key == "enter" && now - w.last_enter < HELD_MS;
-            if key == "enter" {
-                w.last_enter = now;
-            }
-            held
-        };
-        // the popup
-        let out = match self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
-            Some(Shown::Card(p, _)) => p.key(key, held, now),
-            // while the card loads only Esc acts
-            Some(Shown::Loading { .. }) if key == "escape" => Out::Later,
-            Some(Shown::Loading { .. }) => Out::Pass,
-            _ => Out::Pass,
-        };
-        if out != Out::Pass {
-            self.popup_out(out, cx);
+        // the prompt has the keys: nothing goes to the popup. The one thing taken is a second Esc soon after the
+        // one that gave the keys back: "later"
+        if key == "escape" && w.shown.is_some() && now - w.esc_at < DOUBLE_ESC_MS {
+            self.dismiss_popup();
+            cx.notify();
             return true;
         }
         // the outcome list of the tab, while the prompt is empty
         if self.ts.tab == ChatTab::Outcomes
-            && prompt_empty
             && matches!(key, "up" | "down" | "enter")
+            && self
+                .live
+                .as_ref()
+                .is_none_or(|l| l.prompt.read(cx).value().is_empty())
         {
             return self.list_key(key, cx);
         }
         false
     }
 
+    /// Alt+A: with a popup it moves the keys into it, or back to the prompt when it has them (the popup stays);
+    /// without one it goes to the next approval, which opens a decision's popup with the keys.
+    fn alt_a(&mut self, cx: &mut Context<Self>) {
+        let now = self.now();
+        let Some(w) = self.outcomes.as_mut() else {
+            return;
+        };
+        if matches!(w.shown, Some(Shown::Card(..))) {
+            if w.focus {
+                w.focus = false;
+            } else {
+                self.focus_popup(now);
+            }
+            cx.notify();
+        } else {
+            w.dismissed = None;
+            self.next_approval(cx);
+        }
+    }
+
+    /// The popup takes the keys. Enter is inert for ARM_MS from now, so a key still held from typing cannot answer.
+    fn focus_popup(&mut self, now: i64) {
+        let Some(w) = self.outcomes.as_mut() else {
+            return;
+        };
+        if !w.focus {
+            w.focus = true;
+            if let Some(Shown::Card(p, _)) = w.shown.as_mut() {
+                p.rearm(now);
+            }
+        }
+    }
+
+    /// "Later": the popup closes and stays closed until a new card or revision, or Alt+A.
+    fn dismiss_popup(&mut self) {
+        let Some(w) = self.outcomes.as_mut() else {
+            return;
+        };
+        if let Some(Shown::Card(p, _)) = &w.shown {
+            w.dismissed = Some(card_key(&p.card));
+        }
+        w.shown = None;
+        w.focus = false;
+    }
+
     fn popup_out(&mut self, out: Out, cx: &mut Context<Self>) {
+        if out == Out::Later {
+            self.dismiss_popup();
+            cx.notify();
+            return;
+        }
         let Some(w) = self.outcomes.as_mut() else {
             return;
         };
         match out {
-            Out::Later => w.shown = None,
             Out::Send(e) => {
                 let busy = w.view.read(cx).state.ask.sending;
                 match w.shown.as_mut() {
@@ -464,7 +569,7 @@ impl TuiView {
                     _ => {}
                 }
             }
-            Out::Handled | Out::Pass => {}
+            Out::Later | Out::Handled | Out::Pass => {}
         }
         cx.notify();
     }
@@ -642,7 +747,10 @@ impl TuiView {
     /// The decision popup above the prompt: a cream border (the Synthesis accent), not the amber of a tool
     /// permission. Full brief in the server's order, nothing preselected, two steps (choose, then Enter).
     pub(super) fn decision_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown = self.outcomes.as_ref()?.shown.as_ref()?;
+        let w = self.outcomes.as_ref()?;
+        let shown = w.shown.as_ref()?;
+        // the keys are in the popup (a bright border) or in the prompt (a dim one): never both, always visible
+        let focused = w.focus && matches!(shown, Shown::Card(..));
         let card = div()
             .debug_selector(|| "decision".to_string())
             .id("decision")
@@ -657,8 +765,21 @@ impl TuiView {
             .p(px(12.))
             .bg(crate::theme::solid(t::SURFACE))
             .border_2()
-            .border_color(hsla(t::ACCENT))
-            .rounded(px(10.));
+            .border_color(if focused {
+                hsla(t::ACCENT)
+            } else {
+                with_alpha(hsla(t::ACCENT), 0.35)
+            })
+            .rounded(px(10.))
+            // a press on the card gives it the keys (Enter inert for ARM_MS from then)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    let now = this.now();
+                    this.focus_popup(now);
+                    cx.notify();
+                }),
+            );
         let head = |goal: &str, sub: String| {
             div()
                 .flex()
@@ -686,7 +807,7 @@ impl TuiView {
                 Shown::Loading { goal, .. } => card
                     .child(head(goal, "Loading the decision...".into()))
                     .child(div().text_color(text()).child(
-                        "This outcome is now selected in the Outcomes tab too. The decision appears here when it arrives. Esc closes.",
+                        "This outcome is now selected in the Outcomes tab too. The decision appears here when it arrives.",
                     )),
                 Shown::Card(p, goal) => {
                     let c = &p.card;
@@ -759,6 +880,8 @@ impl TuiView {
                                         .when(on, |d| d.bg(hsla(t::ELEVATED)))
                                         .hover(|d| d.bg(hsla(t::ELEVATED)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
+                                            let now = this.now();
+                                            this.focus_popup(now);
                                             if let Some(Shown::Card(p, _)) =
                                                 this.outcomes.as_mut().and_then(|w| w.shown.as_mut())
                                             {
@@ -787,7 +910,7 @@ impl TuiView {
                     let send: OnClick = Box::new(cx.listener(|this, _, _, cx| {
                         let now = this.now();
                         let out = match this.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
-                            Some(Shown::Card(p, _)) => p.key("enter", false, now),
+                            Some(Shown::Card(p, _)) => p.key("enter", now),
                             _ => Out::Pass,
                         };
                         this.popup_out(out, cx);
@@ -812,9 +935,37 @@ impl TuiView {
                                     .on_click(move |e, w, cx| send(e, w, cx))
                                     .child("Send answer"),
                             )
-                            .child(div().text_color(dim()).child(
-                                "↑↓ or 1-9 choose, then Enter · Tab full brief · Esc later · Alt+A next",
-                            )),
+                            .child(
+                                div()
+                                    .id("decision-later")
+                                    .debug_selector(|| "decision-later".to_string())
+                                    .cursor_pointer()
+                                    .px(px(10.))
+                                    .py(px(3.))
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(hsla(t::BORDER))
+                                    .text_color(text())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.dismiss_popup();
+                                        cx.notify();
+                                    }))
+                                    .child("Later"),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "decision-hint".to_string())
+                                    .text_color(if focused {
+                                        hsla(t::ACCENT_LIGHT)
+                                    } else {
+                                        dim()
+                                    })
+                                    .child(if focused {
+                                        "approval focused: Esc back to input · 1-9 choose · Enter send"
+                                    } else {
+                                        "Alt+A to answer (your typing is untouched)"
+                                    }),
+                            ),
                     )
                     .children(p.ask.notice.clone().map(|n| {
                         div().text_color(hsla(t::ACCENT_LIGHT)).child(n)
