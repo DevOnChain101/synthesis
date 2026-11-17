@@ -883,6 +883,17 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let (Some(n), Some(tui)) = (a.perf, tui_slot.borrow().clone()) {
         perf_run(&mut cx, win.into(), &tui, n)?;
     }
+    // the popup holds the window's focus (set after the prompt took it above, as the keys are in the popup then)
+    if let (Some(super::approvals_ui::OutShot::DecisionFocused), Some(tui)) =
+        (a.outcomes, tui_slot.borrow().clone())
+    {
+        win.update(&mut cx, |_, window, cx| {
+            tui.update(cx, |t, cx| t.focus_decision(window, cx))
+        })?;
+        cx.run_until_parked();
+        win.update(&mut cx, |_, _, cx| tui.update(cx, |_, cx| cx.notify()))?;
+        cx.run_until_parked();
+    }
     let img = cx.capture_screenshot(win.into())?;
     img.save(&a.path)?;
     if a.check {

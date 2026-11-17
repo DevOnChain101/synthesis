@@ -114,7 +114,7 @@ fn the_approvals_panel_can_be_switched_off_and_is_a_drawer_on_a_narrow_window(
 }
 
 fn focus_of(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> bool {
-    t.read_with(v, |t, _| t.outcomes.as_ref().unwrap().focus)
+    t.update_in(v, |t, window, _| t.popup_has_keys(window))
 }
 
 fn popup_cursor(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> Option<Option<usize>> {
@@ -184,6 +184,8 @@ fn the_focused_and_the_unfocused_popup_differ_in_the_hint_and_say_which_keys_are
     assert!(v.debug_bounds("decision-hint").is_some());
     assert!(!focus_of(&t, v));
     let (t2, v2) = open(cx, BIG, Some(OutShot::DecisionFocused), Hidden::default());
+    t2.update_in(v2, |t, window, cx| t.focus_decision(window, cx));
+    v2.run_until_parked();
     assert!(focus_of(&t2, v2));
     assert!(v2.debug_bounds("decision").is_some());
 }
@@ -296,6 +298,10 @@ fn a_second_esc_or_later_dismisses_it_until_a_new_card_or_alt_a(cx: &mut TestApp
     assert!(press(&t, v, "alt-a"));
     assert!(press(&t, v, "escape"));
     assert!(shown(&t, v));
+    // an immediate second Esc is the first one auto-repeating: swallowed, nothing dismissed
+    assert!(press(&t, v, "escape"));
+    assert!(shown(&t, v), "a held Esc does not dismiss");
+    tick(&t, v, 200);
     assert!(press(&t, v, "escape"));
     assert!(!shown(&t, v) && !focus_of(&t, v));
     assert!(v.debug_bounds("decision").is_none());
@@ -483,7 +489,9 @@ fn alt_a_goes_to_the_next_approval_and_alt_0_to_the_outcomes_tab(cx: &mut TestAp
     assert!(v.debug_bounds("decision").is_none());
     assert!(press(&t, v, "alt-a"));
     assert!(v.debug_bounds("decision").is_some() && focus_of(&t, v));
-    assert!(press(&t, v, "escape") && press(&t, v, "escape"));
+    assert!(press(&t, v, "escape"));
+    tick(&t, v, 200);
+    assert!(press(&t, v, "escape"));
     assert!(press(&t, v, "alt-0"));
     assert!(t.read_with(v, |t, _| t.ts.tab == super::ChatTab::Outcomes));
     assert!(v.debug_bounds("tab-5").is_some());
@@ -523,4 +531,104 @@ fn bidi_controls_in_what_waits_for_you_are_shown_escaped(cx: &mut TestAppContext
         }
         assert!(rows.iter().any(|r| r.subject.contains("\\u{202e}")));
     });
+}
+
+// ------------------------------------------------------------------ the keys never stay in the popup by accident
+
+/// The prompt's own bounds, for a click that goes to type there.
+fn click_prompt(v: &mut VisualTestContext) {
+    let c = b(v, "prompt").center();
+    v.simulate_click(c, Default::default());
+    v.run_until_parked();
+}
+
+/// What the popup must not have done: chosen, sent, or kept the keys.
+fn assert_prompt_has_the_keys(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext, why: &str) {
+    assert!(!focus_of(t, v), "{why}: the popup still has the keys");
+    for k in ["1", "enter", "down"] {
+        press(t, v, k);
+        assert_eq!(popup_cursor(t, v), Some(None), "{why}: {k} chose an option");
+        assert_eq!(answers(t, v), 0, "{why}: {k} sent an answer");
+    }
+}
+
+#[gpui::test]
+fn a_click_in_the_prompt_takes_the_keys_back_so_typing_never_answers(cx: &mut TestAppContext) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    tick(&t, v, ARM_MS + 100);
+    click_prompt(v);
+    assert!(shown(&t, v), "the popup stays");
+    tick(&t, v, ARM_MS + 100);
+    assert_prompt_has_the_keys(&t, v, "after a click in the prompt");
+}
+
+#[gpui::test]
+fn a_click_elsewhere_in_the_view_and_the_window_going_to_the_background_do_too(
+    cx: &mut TestAppContext,
+) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    // a press outside the popup (the chat area above it)
+    let chat = b(v, "p-chat");
+    v.simulate_click(
+        gpui::point(chat.origin.x + px(40.), chat.origin.y + px(60.)),
+        Default::default(),
+    );
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert_prompt_has_the_keys(&t, v, "after a click outside the popup");
+    // the window deactivating (or activating) gives them back as well
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    t.update_in(v, |t, window, cx| t.window_activation_changed(window, cx));
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert_prompt_has_the_keys(&t, v, "after the window changed activation");
+}
+
+#[gpui::test]
+fn a_session_or_tab_switch_gives_the_keys_back(cx: &mut TestAppContext) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    t.update(v, |t, cx| {
+        t.live.as_mut().unwrap().live.sid = "another-session".into();
+        cx.notify();
+    });
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert_prompt_has_the_keys(&t, v, "after a session switch");
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    t.update(v, |t, cx| t.select_tab(super::ChatTab::Diff, cx));
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert_prompt_has_the_keys(&t, v, "after a tab switch");
+}
+
+#[gpui::test]
+fn a_different_card_drops_the_keys_but_a_new_revision_of_the_same_one_keeps_them(
+    cx: &mut TestAppContext,
+) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "alt-a") && focus_of(&t, v));
+    let bump = |t: &gpui::Entity<TuiView>, v: &mut VisualTestContext, id: Option<&'static str>| {
+        t.update(v, |t, cx| {
+            t.outcomes.as_ref().unwrap().view.update(cx, |o, cx| {
+                if let Some(d) = o.state.detail.as_mut()
+                    && let Ok(cards) = d.cards.as_mut()
+                {
+                    match id {
+                        Some(id) => cards[0].id = id.into(),
+                        None => cards[0].revision += 1,
+                    }
+                }
+                cx.notify();
+            })
+        });
+        v.run_until_parked();
+    };
+    bump(&t, v, None);
+    assert!(focus_of(&t, v), "same card, new revision: keeps the keys");
+    bump(&t, v, Some("another_card"));
+    assert!(shown(&t, v));
+    assert_prompt_has_the_keys(&t, v, "after a different card arrived");
 }

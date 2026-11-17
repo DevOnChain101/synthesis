@@ -1107,7 +1107,7 @@ impl Render for TuiView {
             chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
         self.refresh(window, cx);
-        self.sync_outcomes(cx);
+        self.sync_outcomes(window, cx);
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);

@@ -337,6 +337,14 @@ impl TuiView {
             }
         });
         lu.add_sub(key_sub);
+        // the window going to the background or coming back gives the keys to the prompt (the outcome popup)
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.window_activation_changed(window, cx)
+        });
+        if let Some(lu) = &mut self.live {
+            lu.add_sub(activation);
+        }
+        let Some(lu) = &mut self.live else { return };
         let quit_sub = cx.on_app_quit(|this, _| {
             this.shutdown_engine();
             async {}
@@ -931,7 +939,7 @@ impl TuiView {
         if !self.active {
             return false;
         }
-        if self.outcome_key(ks, cx) {
+        if self.outcome_key(ks, window, cx) {
             return true;
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
