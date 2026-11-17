@@ -50,6 +50,8 @@ pub enum OutShot {
     Decision,
     /// The popup with the keys (after Alt+A).
     DecisionFocused,
+    /// The popup with the keys and the whole brief (after Alt+A, Tab).
+    DecisionExpanded,
     Tab,
 }
 
@@ -60,6 +62,7 @@ impl OutShot {
             "approvals-3" => Self::Approvals3,
             "decision" => Self::Decision,
             "decision-focus" => Self::DecisionFocused,
+            "decision-expanded" => Self::DecisionExpanded,
             "tab" => Self::Tab,
             _ => return None,
         })
@@ -166,7 +169,10 @@ impl TuiView {
         w.seed_outcome("o_auth", NOW - 9 * 60_000);
         // the popup opens by itself on the selected outcome's pending card: the states that show something else
         // have it put off
-        if !matches!(what, OutShot::Decision | OutShot::DecisionFocused) {
+        if !matches!(
+            what,
+            OutShot::Decision | OutShot::DecisionFocused | OutShot::DecisionExpanded
+        ) {
             let st = &w.view.read(cx).state;
             w.dismissed = st.cards().iter().find(|c| c.resolvable()).map(card_key);
         }
@@ -175,7 +181,7 @@ impl TuiView {
             OutShot::Approvals3 => approval_tools().into_iter().for_each(|r| w.seed_tool(r)),
             OutShot::Decision => {}
             // the window's own focus is needed for this one: `focus_decision`, once the first frame is drawn
-            OutShot::DecisionFocused => {}
+            OutShot::DecisionFocused | OutShot::DecisionExpanded => {}
             OutShot::Tab => self.ts.tab = ChatTab::Outcomes,
         }
     }
@@ -185,6 +191,14 @@ impl TuiView {
         self.outcomes
             .as_ref()
             .is_some_and(|w| w.focus && w.handle.is_focused(window))
+    }
+
+    /// The whole brief is shown (what Tab does in the focused popup), for the shots.
+    pub fn expand_decision(&mut self, cx: &mut Context<Self>) {
+        if let Some(Shown::Card(p, _)) = self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
+            p.full = true;
+        }
+        cx.notify();
     }
 
     /// The popup takes the keys (what Alt+A does), for the shots and tests of the focused state.
@@ -840,6 +854,14 @@ impl TuiView {
         body.children(rows).into_any_element()
     }
 
+    /// Tallest the popup may be: about 40% of the chat column collapsed, 60% expanded, and never less than the
+    /// answers, buttons and hint need (the brief is the part that gives way).
+    fn popup_max_h(&self, expanded: bool) -> f32 {
+        use super::layout::{FOOTER_H, HEADER_H, PAD};
+        let chat_h = (self.win_h - self.top - HEADER_H - FOOTER_H - 2. * PAD).max(300.);
+        (chat_h * if expanded { 0.6 } else { 0.42 }).max(if expanded { 360. } else { 330. })
+    }
+
     /// The decision popup above the prompt: a cream border (the Synthesis accent), not the amber of a tool
     /// permission. Full brief in the server's order, nothing preselected, two steps (choose, then Enter).
     pub(super) fn decision_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -851,14 +873,19 @@ impl TuiView {
             .debug_selector(|| "decision".to_string())
             .id("decision")
             .min_h(px(0.))
-            .max_h(px((self.win_h * 0.55).clamp(200., 520.)))
+            // collapsed: about 40% of the chat column; expanded (Tab): about 60%, the brief scrolls inside and the
+            // answers and buttons stay pinned. Never less than what the pinned parts need.
+            .max_h(px(
+                self.popup_max_h(matches!(shown, Shown::Card(p, _) if p.full))
+            ))
             .overflow_hidden()
             .mx(px(12.))
             .mb(px(8.))
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .p(px(12.))
+            .gap(px(4.))
+            .px(px(12.))
+            .py(px(8.))
             .bg(crate::theme::solid(t::SURFACE))
             .border_2()
             .border_color(if focused {
@@ -927,37 +954,74 @@ impl TuiView {
                             }
                         ),
                     ));
-                    // every brief field, in the server's order; Tab shows each one whole
-                    // in a box of its own, so the answers and the keys below it never scroll out of sight
+                    // Collapsed (the default, also for a new card or revision): only the first field the server lists,
+                    // in two lines at most, and a visible line saying what is not shown. Expanded (Tab, or a click on
+                    // that line): every field in the server's order, scrolling inside its own box so the answers and
+                    // buttons below stay in sight. Nothing is ever only reachable some other way.
+                    let hidden = c.rows.len().saturating_sub(1);
+                    let first_cut = c.rows.first().is_some_and(|r| {
+                        r.text.lines().count() > 2 || r.text.chars().count() > 150
+                    });
                     let mut brief = div()
                         .id("decision-brief")
                         .debug_selector(|| "decision-brief".to_string())
-                        .flex_shrink(1.)
+                        // collapsed it is two lines and never squeezed; expanded it is the part that gives way
+                        .flex_shrink(if p.full { 1. } else { 0. })
                         .min_h(px(0.))
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
-                        .gap(px(6.));
-                    for r in &c.rows {
-                        let body = if p.full {
-                            r.text.clone()
-                        } else {
-                            r.text.lines().next().unwrap_or("").to_string()
-                        };
-                        let more = !p.full && r.text.lines().count() > 1;
+                        .gap(px(5.));
+                    for (i, r) in c
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .take(if p.full { usize::MAX } else { 1 })
+                    {
                         brief = brief.child(
                             div()
+                                .debug_selector(move || format!("decision-field-{i}"))
                                 .flex()
                                 .flex_col()
                                 .child(div().text_size(px(11.)).text_color(dim()).child(r.label.clone()))
-                                .child(div().text_color(text()).child(if more {
-                                    format!("{body} ...")
-                                } else {
-                                    body
-                                })),
+                                .child({
+                                    let b = div().text_color(text()).child(r.text.clone());
+                                    if p.full { b } else { b.line_clamp(2) }
+                                }),
                         );
                     }
                     card = card.child(brief);
+                    if hidden > 0 || first_cut || p.full {
+                        let toggle = cx.listener(|this, _, window, cx| {
+                            let now = this.now();
+                            this.focus_popup(now, window, cx);
+                            if let Some(Shown::Card(p, _)) =
+                                this.outcomes.as_mut().and_then(|w| w.shown.as_mut())
+                            {
+                                p.full = !p.full;
+                            }
+                            cx.notify();
+                        });
+                        card = card.child(
+                            div()
+                                .id("decision-more")
+                                .debug_selector(|| "decision-more".to_string())
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(hsla(t::ACCENT_LIGHT))
+                                .on_click(toggle)
+                                .child(if p.full {
+                                    "Tab: show less".to_string()
+                                } else if hidden > 0 {
+                                    format!(
+                                        "{hidden} more section{} not shown: Tab for the full brief",
+                                        if hidden == 1 { "" } else { "s" }
+                                    )
+                                } else {
+                                    "Tab: full brief".to_string()
+                                }),
+                        );
+                    }
                     match &p.ask.picker {
                         Some(pk) => {
                             for (i, o) in pk.options.iter().enumerate() {
@@ -970,7 +1034,7 @@ impl TuiView {
                                         .flex()
                                         .gap(px(8.))
                                         .px(px(8.))
-                                        .py(px(2.))
+                                        .py(px(0.))
                                         .rounded(px(6.))
                                         .cursor_pointer()
                                         .border_1()

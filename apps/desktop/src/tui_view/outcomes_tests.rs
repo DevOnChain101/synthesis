@@ -632,3 +632,129 @@ fn a_different_card_drops_the_keys_but_a_new_revision_of_the_same_one_keeps_them
     assert!(shown(&t, v));
     assert_prompt_has_the_keys(&t, v, "after a different card arrived");
 }
+
+// ------------------------------------------------------------------------------ collapsed and expanded popup
+
+/// The sample popup open by itself, with the keys, collapsed or expanded.
+fn open_popup(
+    cx: &mut TestAppContext,
+    size: (f32, f32),
+    expanded: bool,
+) -> (gpui::Entity<TuiView>, &mut VisualTestContext) {
+    let (t, v) = open(cx, size, Some(OutShot::Decision), Hidden::default());
+    if expanded {
+        t.update_in(v, |t, window, cx| {
+            t.focus_decision(window, cx);
+            t.expand_decision(cx);
+        });
+        v.run_until_parked();
+    }
+    (t, v)
+}
+
+fn field_count(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> usize {
+    t.read_with(v, |t, _| {
+        match t.outcomes.as_ref().and_then(|w| w.shown.as_ref()) {
+            Some(Shown::Card(p, _)) => p.card.rows.len(),
+            _ => 0,
+        }
+    })
+}
+
+#[gpui::test]
+fn collapsed_shows_the_first_field_and_says_how_many_are_not_shown(cx: &mut TestAppContext) {
+    for size in [BIG, SMALL] {
+        let (t, v) = open_popup(cx, size, false);
+        let n = field_count(&t, v);
+        assert!(n > 1, "the sample has several sections");
+        assert!(v.debug_bounds("decision-field-0").is_some());
+        assert!(
+            v.debug_bounds("decision-field-1").is_none(),
+            "only the first field when collapsed"
+        );
+        assert!(
+            v.debug_bounds("decision-more").is_some(),
+            "the hidden sections are announced next to the answers"
+        );
+        // the answers and buttons are all inside the card
+        let d = b(v, "decision");
+        for sel in [
+            "decision-opt-0",
+            "decision-opt-4",
+            "decision-send",
+            "decision-later",
+            "decision-hint",
+        ] {
+            assert!(b(v, sel).bottom() <= d.bottom(), "{sel} is inside");
+        }
+    }
+}
+
+#[gpui::test]
+fn expanding_shows_every_field_in_order_scrolling_inside_with_the_answers_pinned(
+    cx: &mut TestAppContext,
+) {
+    for size in [BIG, SMALL] {
+        let (t, v) = open_popup(cx, size, true);
+        let n = field_count(&t, v);
+        let (d, brief, prompt) = (b(v, "decision"), b(v, "decision-brief"), b(v, "prompt"));
+        // every field exists in the brief box (laid out, scrolled inside it), in the server's order
+        let mut last_y = f32::MIN;
+        for i in 0..n {
+            let sel: &'static str = Box::leak(format!("decision-field-{i}").into_boxed_str());
+            let f = v.debug_bounds(sel);
+            assert!(f.is_some(), "field {i} of {n} is in the brief");
+            let y = f32::from(f.unwrap().origin.y);
+            assert!(y >= last_y, "server order at {i}");
+            last_y = y;
+        }
+        // the box is inside the card, the card above the prompt and under the tab strip, and the answers stay put
+        assert!(brief.bottom() <= d.bottom());
+        assert!(d.bottom() <= prompt.origin.y, "never over the prompt");
+        assert!(
+            d.origin.y >= b(v, "tabs").bottom(),
+            "never over the tab strip"
+        );
+        assert!(b(v, "decision-opt-4").bottom() <= d.bottom());
+        assert!(b(v, "decision-send").bottom() <= d.bottom());
+        // Tab (the popup has the keys) collapses it again
+        assert!(press(&t, v, "tab"));
+        assert!(v.debug_bounds("decision-field-1").is_none());
+    }
+}
+
+#[gpui::test]
+fn the_popup_height_is_capped_to_a_share_of_the_chat_column(cx: &mut TestAppContext) {
+    let (_, v) = open_popup(cx, BIG, false);
+    let (d, chat) = (
+        f32::from(b(v, "decision").size.height),
+        f32::from(b(v, "p-chat").size.height),
+    );
+    assert!(d <= chat * 0.42 + 2., "collapsed: {d} of {chat}");
+    assert!(d >= chat * 0.25, "and not tiny: {d} of {chat}");
+    let (_, v) = open_popup(cx, BIG, true);
+    let d = f32::from(b(v, "decision").size.height);
+    assert!(d <= chat * 0.6 + 2., "expanded: {d} of {chat}");
+    assert!(d > chat * 0.42, "expanded is taller than collapsed: {d}");
+}
+
+#[gpui::test]
+fn a_new_revision_collapses_the_brief_again(cx: &mut TestAppContext) {
+    let (t, v) = open_popup(cx, BIG, true);
+    assert!(v.debug_bounds("decision-field-1").is_some());
+    t.update(v, |t, cx| {
+        t.outcomes.as_ref().unwrap().view.update(cx, |o, cx| {
+            if let Some(d) = o.state.detail.as_mut()
+                && let Ok(cards) = d.cards.as_mut()
+            {
+                cards[0].revision += 1;
+            }
+            cx.notify();
+        })
+    });
+    v.run_until_parked();
+    assert!(
+        v.debug_bounds("decision-field-1").is_none(),
+        "collapsed again"
+    );
+}
