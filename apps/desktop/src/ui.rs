@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::outcomes_view::OutcomesView;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
+use crate::tui_view::approvals_ui::OpenOutcome;
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{self, icon, tracked, with_alpha};
@@ -507,10 +508,40 @@ impl Shell {
         settings_cfg: Result<settings_view::model::Cfg, String>,
         outcomes_env: Option<(synthesis_config::Env, String)>,
     ) -> Self {
-        let outcomes = cx.new(|cx| match outcomes_env {
+        let outcomes = cx.new(|cx| match outcomes_env.clone() {
             Some((env, ws)) => OutcomesView::live(env, ws, cx),
             None => OutcomesView::sample(cx),
         });
+        // outcomes in the TUI view (tab, Approvals, popup): only a live app whose gate says yes, checked once here;
+        // otherwise nothing of it exists (no thread, no poll, no panel). A later explicit retry in the Outcomes
+        // tab that reaches the orchestrator connects it (below).
+        let live_outcomes = outcomes_env.is_some();
+        if outcomes_env
+            .as_ref()
+            .is_some_and(|(env, _)| crate::approvals::gate(env).is_ok())
+        {
+            outcomes.update(cx, |o, cx| o.connect(cx));
+            tui.update(cx, |t, cx| t.set_outcomes(outcomes.clone(), cx));
+        }
+        if live_outcomes {
+            cx.observe(&outcomes, |s: &mut Shell, o, cx| {
+                if o.read(cx).state.screen == crate::outcomes_view::model::Screen::Ready
+                    && s.tui.read(cx).outcomes.is_none()
+                {
+                    s.tui.update(cx, |t, cx| t.set_outcomes(o.clone(), cx));
+                }
+            })
+            .detach();
+        }
+        cx.subscribe_in(
+            &tui,
+            window,
+            |s: &mut Shell, _, e: &OpenOutcome, window, cx| {
+                s.outcomes.update(cx, |o, cx| o.select_id(&e.0, cx));
+                s.go(View::Outcomes, window, cx);
+            },
+        )
+        .detach();
         tui.update(cx, |t, cx| {
             t.set_top_inset(TITLEBAR_H);
             t.start(window, cx)

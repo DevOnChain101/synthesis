@@ -931,6 +931,9 @@ impl TuiView {
         if !self.active {
             return false;
         }
+        if self.outcome_key(ks, cx) {
+            return true;
+        }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {
             return false;
@@ -1806,11 +1809,17 @@ impl TuiView {
             .into_iter()
             .filter(|(k, off)| self.hidden.is_hidden(k) != *off)
             .collect();
-        let saved = if changes.is_empty() {
+        // `approvals` is not a settings key: it applies to this run only
+        let to_save: Vec<_> = changes
+            .iter()
+            .filter(|(k, _)| *k != "approvals")
+            .copied()
+            .collect();
+        let saved = if to_save.is_empty() {
             Ok(())
         } else {
             let (home, cwd) = (&lu.cfg.synthesis_home, &lu.cfg.project);
-            save_panels(home, cwd, &changes)
+            save_panels(home, cwd, &to_save)
         };
         let mut warn = false;
         if let Err(e) = &saved {
@@ -1834,6 +1843,12 @@ impl TuiView {
                     "on "
                 };
                 t += &format!("\n  {on}  {k:<9} {name}");
+            }
+            if self.outcomes.is_some() {
+                let on = if self.hidden.approvals { "off" } else { "on " };
+                t += &format!(
+                    "\n  {on}  approvals Approvals (this run only; shown while something waits for you)"
+                );
             }
             for (name, why) in ALWAYS {
                 t += &format!("\n  on   {name}: {why}");

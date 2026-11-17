@@ -26,10 +26,13 @@ pub mod form;
 mod form_view;
 pub mod link;
 pub mod model;
-mod render;
+pub(crate) mod render;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
+
+/// The notice while an answer of the TUI view's popup is on its way.
+pub const SENDING: &str = "Sending the answer...";
 
 pub struct OutcomesView {
     pub state: State,
@@ -102,6 +105,29 @@ impl OutcomesView {
             (Some(l), _) if self.state.screen == Screen::Ready => l.send(Req::Refresh),
             _ => {}
         }
+    }
+
+    /// The TUI view's Approvals and tab need the list without this tab being opened: it connects now. Only called
+    /// after `approvals::gate` said outcomes are on and supported.
+    pub fn connect(&mut self, cx: &mut Context<Self>) {
+        if !self.started {
+            self.start(cx);
+        }
+    }
+
+    /// Selects outcome `id` (what the TUI view's rows open); the tab shows it from then on.
+    pub fn select_id(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(i) = self.state.items.iter().position(|i| i.row.id == id) {
+            let e = self.state.select(i);
+            self.run(e, cx);
+        }
+    }
+
+    /// Sends an effect the TUI view's decision popup made (the same worker path as this tab's own answer).
+    pub fn send_effect(&mut self, e: Effect, cx: &mut Context<Self>) {
+        // the reply (`Msg::Answered`) replaces this line: that is how the popup sees the answer came back
+        self.state.ask.notice = Some(SENDING.into());
+        self.run(vec![e], cx);
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {

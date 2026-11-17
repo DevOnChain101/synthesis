@@ -125,7 +125,15 @@ fn money(a: Option<f64>) -> String {
     a.map_or_else(|| "unknown".into(), |v| format!("${v:.2}"))
 }
 
-fn needs_badges(n: &NeedsYou) -> Vec<AnyElement> {
+/// "$1.20 of $5.00", or "budget unknown" when the server gave neither (the list's line, here and in the TUI view).
+pub(crate) fn budget_line(b: &BudgetView) -> String {
+    match (b.cost_usd.spent, b.cost_usd.limit) {
+        (None, None) => "budget unknown".to_string(),
+        (s, l) => format!("{} of {}", money(s), money(l)),
+    }
+}
+
+pub(crate) fn needs_badges(n: &NeedsYou) -> Vec<AnyElement> {
     let mut v = vec![];
     if n.decisions_pending > 0 {
         v.push(
@@ -236,11 +244,7 @@ impl OutcomesView {
 
     fn list_row(&self, i: usize, it: &Item, cx: &Context<Self>) -> impl IntoElement {
         let on = self.state.selected.as_deref() == Some(it.row.id.as_str());
-        let cost = &it.budget.cost_usd;
-        let budget = match (cost.spent, cost.limit) {
-            (None, None) => "budget unknown".to_string(),
-            _ => format!("{} of {}", money(cost.spent), money(cost.limit)),
-        };
+        let budget = budget_line(&it.budget);
         div()
             .id(("out", i))
             .debug_selector(move || format!("out-row-{i}"))

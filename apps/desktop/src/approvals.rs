@@ -35,6 +35,11 @@ impl Ages {
         }
     }
 
+    /// Sets a first-seen time (the sample data, so a shot shows fixed ages).
+    pub fn seed(&mut self, key: &str, since: i64) {
+        self.0.insert(key.to_string(), since);
+    }
+
     pub fn since(&self, key: &str) -> Option<i64> {
         self.0.get(key).copied()
     }

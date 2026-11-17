@@ -183,6 +183,9 @@ pub struct Hidden {
     pub usage: bool,
     /// `status`: the Mission panel (it also needs a task list to show).
     pub status: bool,
+    /// `/panels approvals off`: the Approvals panel (outcome decisions and waiting sessions) is left out. Runtime
+    /// only: it is not a settings key, so it is never saved and is on again at the next start.
+    pub approvals: bool,
     /// `synt.tui.focus_mode`: ON. Every column is left out, the chat (with its sub-agent view, roster and mode
     /// bar) keeps the window. The flags above stay as they were, so turning it off restores them.
     pub focus: bool,
@@ -224,6 +227,7 @@ impl Hidden {
             "topology" => &mut self.topology,
             "usage" => &mut self.usage,
             "status" | "mission" => &mut self.status,
+            "approvals" => &mut self.approvals,
             "focus" => &mut self.focus,
             "header" => &mut self.header,
             "footer" => &mut self.footer,
@@ -273,6 +277,7 @@ impl Hidden {
             topology: self.topology || o.topology,
             usage: self.usage || o.usage,
             status: self.status || o.status,
+            approvals: self.approvals || o.approvals,
             focus: self.focus || o.focus,
             header: self.header || o.header,
             footer: self.footer || o.footer,
@@ -354,6 +359,7 @@ pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
             if *bar == "header" { "header" } else { "footer" },
             *state == "off",
         )),
+        ["approvals", state @ ("on" | "off")] => Ok(PanelsCmd::Set("approvals", *state == "off")),
         [name, state @ ("on" | "off")] => {
             let key = HIDEABLE.iter().find(|(k, _)| k == name).map(|(k, _)| *k);
             match (key, *name) {
