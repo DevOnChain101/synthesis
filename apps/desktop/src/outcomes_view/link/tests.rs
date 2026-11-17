@@ -800,7 +800,7 @@ fn enable_run(
     drop(out);
     let res = std::iter::from_fn(|| orx.try_recv().ok())
         .filter_map(|m| match m {
-            Msg::Enabled(r) => Some(r),
+            Msg::Enabled(_, r) => Some(r),
             _ => None,
         })
         .collect();
@@ -822,7 +822,7 @@ fn the_store_is_migrated_only_on_the_explicit_request_then_the_worker_reconnects
     // other requests are ignored; a retry only looks again
     let (calls, _, reconnect) = enable_run(Ok(good()), vec![Req::Refresh, Req::Retry]);
     assert!(calls.is_empty() && reconnect);
-    let (calls, res, reconnect) = enable_run(Ok(good()), vec![Req::Enable]);
+    let (calls, res, reconnect) = enable_run(Ok(good()), vec![Req::Enable(1)]);
     assert_eq!(calls, ["orchestrator.enable"]);
     assert_eq!(res, vec![Ok(())]);
     assert!(reconnect);
@@ -835,7 +835,7 @@ fn a_disclosure_that_is_not_this_builds_is_refused_and_reported() {
         json!({"disclosure": {"id": "integrity-v0", "text": synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE}}),
         json!({"disclosure": {"id": synthesis_app::outcome_policy::DISCLOSURE_ID, "text": "another wording"}}),
     ] {
-        let (calls, res, reconnect) = enable_run(Ok(bad), vec![Req::Enable]);
+        let (calls, res, reconnect) = enable_run(Ok(bad), vec![Req::Enable(1)]);
         assert_eq!(calls.len(), 1);
         let [Err(why)] = res.as_slice() else {
             panic!("{res:?}")
@@ -852,12 +852,13 @@ fn a_disclosure_that_is_not_this_builds_is_refused_and_reported() {
 fn a_refusal_is_reported_and_a_lost_link_reconnects() {
     let (_, res, reconnect) = enable_run(
         Err(ClientError::Refused("set the setting first".into())),
-        vec![Req::Enable],
+        vec![Req::Enable(1)],
     );
     assert!(
         matches!(res.as_slice(), [Err(w)] if w.contains("set the setting first")) && !reconnect
     );
-    let (_, res, reconnect) = enable_run(Err(ClientError::Io("closed".into())), vec![Req::Enable]);
+    let (_, res, reconnect) =
+        enable_run(Err(ClientError::Io("closed".into())), vec![Req::Enable(1)]);
     assert!(matches!(res.as_slice(), [Err(_)]) && reconnect);
 }
 
@@ -955,10 +956,10 @@ use super::Sibling;
 
 #[test]
 fn a_migration_confirm_that_comes_late_is_answered_not_dropped() {
-    let msgs = run(&fake(), vec![Req::Enable]);
+    let msgs = run(&fake(), vec![Req::Enable(1)]);
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Msg::Enabled(Err(e)) if e.contains("already migrated")))
+            .any(|m| matches!(m, Msg::Enabled(_, Err(e)) if e.contains("already migrated")))
     );
 }
 
@@ -973,5 +974,5 @@ fn a_worker_that_ended_makes_send_report_it() {
     };
     assert!(l.try_send(Req::Refresh));
     drop(rx);
-    assert!(!l.try_send(Req::Enable));
+    assert!(!l.try_send(Req::Enable(1)));
 }

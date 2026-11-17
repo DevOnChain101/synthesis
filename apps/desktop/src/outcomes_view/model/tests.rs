@@ -472,7 +472,8 @@ fn off_to_disclosure_to_setting_needs_an_explicit_confirm_and_esc_cancels() {
             step: Step::Setting,
             focus: None,
             busy: false,
-            error: None
+            error: None,
+            seq: 0
         })
     );
     // no default focus: Enter, other keys and a held Enter do nothing
@@ -523,7 +524,7 @@ fn the_migration_is_its_own_step_with_its_own_confirm() {
     assert_eq!(s.guide.as_ref().unwrap().step, Step::Migrate);
     press(&mut s, "tab", 0);
     press(&mut s, "tab", 0);
-    assert_eq!(press(&mut s, "enter", 0), vec![Effect::Migrate]);
+    assert_eq!(press(&mut s, "enter", 0), vec![Effect::Migrate(1)]);
     // the reply that migrated closes it; a refused one keeps it open
     s.guide_failed("enable reply without this build's integrity disclosure (id and text)".into());
     assert!(s.guide.as_ref().unwrap().error.is_some());
@@ -553,7 +554,7 @@ fn esc_and_cancel_close_the_dialog_even_while_a_step_is_on_its_way() {
     for close in [0, 1] {
         let mut s = State::new(Screen::NotReady("x".into()));
         s.open_guide();
-        assert_eq!(s.confirm_guide(), vec![Effect::Migrate]);
+        assert_eq!(s.confirm_guide(), vec![Effect::Migrate(1)]);
         assert!(
             press(&mut s, "enter", 0).is_empty() && s.guide.is_some(),
             "other keys wait"
@@ -568,4 +569,30 @@ fn esc_and_cancel_close_the_dialog_even_while_a_step_is_on_its_way() {
         s.guide_failed("late".into());
         assert!(s.guide.is_none());
     }
+}
+
+#[test]
+fn a_late_migration_reply_is_said_on_the_screen_and_never_lands_in_a_newer_dialog() {
+    let mut s = State::new(Screen::NotReady("x".into()));
+    s.open_guide();
+    assert_eq!(s.confirm_guide(), vec![Effect::Migrate(1)]);
+    press(&mut s, "escape", 0);
+    // the reply of confirm 1 arrives with no dialog open: a notice, the screen looks again
+    s.enabled(1, Ok(()));
+    assert!(s.notice.as_deref().unwrap().contains("completed"));
+    assert_eq!(s.screen, Screen::Loading);
+    // a failure of an older confirm does not land in a dialog opened since
+    s.set_screen(Screen::NotReady("x".into()));
+    s.open_guide();
+    assert_eq!(s.notice, None, "a new dialog starts clean");
+    assert_eq!(s.confirm_guide(), vec![Effect::Migrate(2)]);
+    s.enabled(1, Err("old failure".into()));
+    let g = s.guide.clone().unwrap();
+    assert!(g.busy && g.error.is_none(), "{g:?}");
+    assert!(s.notice.as_deref().unwrap().contains("old failure"));
+    // the reply of the open one is its own
+    s.enabled(2, Err("this one".into()));
+    assert_eq!(s.guide.as_ref().unwrap().error.as_deref(), Some("this one"));
+    s.enabled(2, Ok(()));
+    assert!(s.guide.is_none() && s.screen == Screen::Loading);
 }

@@ -169,11 +169,7 @@ impl OutcomesView {
                 }
                 Msg::Answered(note) => self.state.answered(note),
                 Msg::Form(m) => self.state.apply_form(m),
-                Msg::Enabled(Ok(())) => {
-                    self.state.guide_done();
-                    self.state.set_screen(Screen::Loading);
-                }
-                Msg::Enabled(Err(e)) => self.state.guide_failed(e),
+                Msg::Enabled(n, r) => self.state.enabled(n, r),
             }
         }
         cx.notify();
@@ -249,11 +245,11 @@ impl OutcomesView {
                         self.state.inspector = Some(sample::inspector(t, &item));
                     }
                 }
-                (Effect::Migrate, None) => self
+                (Effect::Migrate(_), None) => self
                     .state
                     .guide_failed("Sample data: nothing was sent.".into()),
-                (Effect::Migrate, Some(l)) => {
-                    if !l.try_send(Req::Enable) {
+                (Effect::Migrate(n), Some(l)) => {
+                    if !l.try_send(Req::Enable(n)) {
                         self.state.guide_failed(
                             "The link to the orchestrator has ended. Close this window and press r."
                                 .into(),

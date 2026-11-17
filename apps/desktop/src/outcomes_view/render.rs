@@ -739,6 +739,15 @@ impl OutcomesView {
             ),
             _ => ("Connecting to the orchestrator", vec![]),
         };
+        let body: Vec<String> = body
+            .into_iter()
+            .chain(
+                self.state
+                    .notice
+                    .iter()
+                    .map(|n| synthesis_harness::sanitize_for_display(n)),
+            )
+            .collect();
         div()
             .size_full()
             .flex()

@@ -53,6 +53,8 @@ pub struct Guide {
     /// The confirmed step is on its way (a migration waits for the orchestrator): no key or click acts.
     pub busy: bool,
     pub error: Option<String>,
+    /// The number of the confirm this dialog sent (0: none yet).
+    pub seq: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -143,6 +145,10 @@ pub struct State {
     pub form: Option<Form>,
     /// The open disclosure of the Off / not-migrated screens.
     pub guide: Option<Guide>,
+    /// Migrations the person has confirmed so far (the tag of the next one).
+    pub migrations: u64,
+    /// What the screen says about a migration whose dialog is gone (a late reply).
+    pub notice: Option<String>,
 }
 
 /// A key, with the modifiers that matter (any other modifier means it is not ours).
@@ -180,8 +186,9 @@ pub enum Effect {
     Review(String),
     /// The person confirmed the disclosure: write `synt.orchestrator.enabled` (user settings).
     EnableSetting,
-    /// The person confirmed the disclosure: migrate the store (`OutcomeClient::enable`).
-    Migrate,
+    /// The person confirmed the disclosure: migrate the store (`OutcomeClient::enable`); the number tags the
+    /// request, so a reply of an older confirm is never taken for the open dialog's.
+    Migrate(u64),
 }
 
 impl State {
@@ -201,6 +208,8 @@ impl State {
             workspace: String::new(),
             form: None,
             guide: None,
+            migrations: 0,
+            notice: None,
         }
     }
 
@@ -239,6 +248,7 @@ impl State {
         now: i64,
     ) {
         self.screen = Screen::Ready;
+        self.notice = None;
         self.items = items;
         // the person's selection stands while the outcome exists; else the server's pick
         if !self
@@ -483,7 +493,9 @@ impl State {
             focus: None,
             busy: false,
             error: None,
+            seq: 0,
         });
+        self.notice = None;
     }
 
     /// Esc, Cancel: closes the dialog, also while a confirmed step is on its way (that request is not recalled;
@@ -500,10 +512,37 @@ impl State {
                 g.error = None;
                 vec![match g.step {
                     Step::Setting => Effect::EnableSetting,
-                    Step::Migrate => Effect::Migrate,
+                    Step::Migrate => {
+                        self.migrations += 1;
+                        g.seq = self.migrations;
+                        Effect::Migrate(g.seq)
+                    }
                 }]
             }
             _ => vec![],
+        }
+    }
+
+    /// The reply of confirm `seq`. For the open dialog it ends or fails the step; with no dialog (closed
+    /// meanwhile) or a newer one open, it only says on the screen what happened, never in that dialog.
+    pub fn enabled(&mut self, seq: u64, r: Result<(), String>) {
+        let live = self
+            .guide
+            .as_ref()
+            .is_some_and(|g| g.step == Step::Migrate && g.seq == seq);
+        match (live, r) {
+            (true, Ok(())) => {
+                self.guide = None;
+                self.set_screen(Screen::Loading);
+            }
+            (true, Err(e)) => self.guide_failed(e),
+            (false, Ok(())) => {
+                self.notice = Some("Migration was started and completed; checking...".into());
+                self.set_screen(Screen::Loading);
+            }
+            (false, Err(e)) => {
+                self.notice = Some(format!("Migration was started and reported: {e}"))
+            }
         }
     }
 

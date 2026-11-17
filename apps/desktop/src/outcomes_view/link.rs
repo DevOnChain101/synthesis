@@ -61,7 +61,8 @@ pub enum Req {
     Review(String),
     /// The explicit store migration, after the person confirmed the disclosure. Only served while the
     /// orchestrator says the store is not migrated; never sent by itself.
-    Enable,
+    /// The number of the person's confirm (`State::migrations`): the reply carries it back.
+    Enable(u64),
 }
 
 /// What the worker says to the open form.
@@ -102,7 +103,7 @@ pub enum Msg {
     Answered(String),
     Form(FormMsg),
     /// The migration's result (`Err` is the reason; the worker reconnects itself after an `Ok`).
-    Enabled(Result<(), String>),
+    Enabled(u64, Result<(), String>),
 }
 
 pub struct Link {
@@ -309,10 +310,11 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
             match rx.recv() {
                 Ok(Req::Retry) => break,
                 // not connected: a migration request is answered, never left waiting
-                Ok(Req::Enable) => {
-                    let _ = out.unbounded_send(Msg::Enabled(Err(
-                        "not connected to the orchestrator; press r to check again".into(),
-                    )));
+                Ok(Req::Enable(n)) => {
+                    let _ = out.unbounded_send(Msg::Enabled(
+                        n,
+                        Err("not connected to the orchestrator; press r to check again".into()),
+                    ));
                 }
                 Ok(_) => {}
                 Err(_) => return,
@@ -333,13 +335,13 @@ fn await_enable<T: Transport>(
     loop {
         match rx.recv() {
             Ok(Req::Retry) => return true,
-            Ok(Req::Enable) => match c.enable() {
+            Ok(Req::Enable(n)) => match c.enable() {
                 Ok(_) => {
-                    let _ = out.unbounded_send(Msg::Enabled(Ok(())));
+                    let _ = out.unbounded_send(Msg::Enabled(n, Ok(())));
                     return true;
                 }
                 Err(e) => {
-                    let _ = out.unbounded_send(Msg::Enabled(Err(e.to_string())));
+                    let _ = out.unbounded_send(Msg::Enabled(n, Err(e.to_string())));
                     if matches!(e, ClientError::Io(_)) {
                         return true;
                     }
@@ -421,10 +423,11 @@ pub(super) fn serve<T: Transport>(
                     let _ = out.unbounded_send(Msg::Form(m));
                 }
                 // the store is migrated already (the person's confirm came late): say so, look again
-                Ok(Req::Enable) => {
-                    let _ = out.unbounded_send(Msg::Enabled(Err(
-                        "already migrated; checking again".into(),
-                    )));
+                Ok(Req::Enable(n)) => {
+                    let _ = out.unbounded_send(Msg::Enabled(
+                        n,
+                        Err("already migrated; checking again".into()),
+                    ));
                     refresh(c, &mut w, out)?;
                     last = Instant::now();
                 }
