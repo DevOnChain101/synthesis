@@ -404,7 +404,9 @@ pub fn record_blocked_decision(
             let text = format!("{t}: {i}");
             clean(&text).chars().count() != text.chars().count()
         });
-    let brief = serde_json::json!({
+    // an answer other than `retry` starts the next attempt from the worker's commit: say which
+    let carries = matches!(kind, "ambiguity" | "approval_needed");
+    let mut brief = serde_json::json!({
         "why": why,
         "delta_from_contract": delta,
         "alternatives": alternatives,
@@ -415,6 +417,10 @@ pub fn record_blocked_decision(
         "unknowns": [],
         "safe_default": "HOLD",
     });
+    if let (true, Some(c)) = (carries, subject_commit) {
+        brief["evidence"]["next_attempt_starts_from"] =
+            serde_json::json!(c.chars().take(12).collect::<String>());
+    }
     // `action_hash` is the store's: it overwrites this placeholder with the hash of the stored action
     let binding = crate::grants::decision_binding(
         contract_version,

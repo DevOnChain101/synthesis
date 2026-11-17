@@ -59,6 +59,41 @@ pub fn plan_text_block(spec: &Value) -> Option<String> {
     Some(out)
 }
 
+/// The commit attempt `ordinal` starts from: the carried commit of a person's answer, if it still
+/// exists in the repository; one that no longer resolves (its branch or worktree was cleaned)
+/// falls back to the base commit and says so once (`outcome.carry_dropped`), never an error that
+/// repeats every tick.
+pub fn start_commit(
+    w: &mut OutcomeWriter,
+    item: &synthesis_core::outcome::WorkItemId,
+    ordinal: u32,
+    source: &std::path::Path,
+    base: &str,
+) -> Result<String, SchedError> {
+    let Some(c) = crate::carried_commit(w, item, ordinal)? else {
+        return Ok(base.to_owned());
+    };
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(source)
+        .args(["cat-file", "-e", &format!("{c}^{{commit}}")])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if ok {
+        return Ok(c);
+    }
+    w.atomically(|tx| {
+        tx.emit(
+            "outcome.carry_dropped",
+            serde_json::json!({"work_item_id": item, "ordinal": ordinal,
+                               "reason": "the commit of the blocked attempt no longer exists"}),
+        )?;
+        Ok(())
+    })?;
+    Ok(base.to_owned())
+}
+
 pub struct ProcessHost<'a> {
     pub allocator: Allocator<'a>,
     pub runner: Runner<'a>,
@@ -85,13 +120,15 @@ impl WorkerHost for ProcessHost<'_> {
         spent_usd: f64,
         share: u32,
     ) -> Result<Running, SchedError> {
+        // after a person's answer to a blocked attempt, the work of that attempt is the start
+        let start = start_commit(w, &item.id, ordinal, &self.source, &self.base_commit)?;
         let env = self.allocator.allocate(
             w,
             &AllocSpec {
                 item: &item.id,
                 ordinal,
                 source: &self.source,
-                base_commit: &self.base_commit,
+                base_commit: &start,
                 worker_kind: self.worker_kind,
             },
             OffsetDateTime::now_utc(),

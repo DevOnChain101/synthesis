@@ -1478,3 +1478,182 @@ fn kill9_during_the_planning_run_keeps_the_reservation_offers_the_stub_once_and_
     r.wait_state(&id, "verified", 120);
     assert_one_verdict(&r, &id);
 }
+
+// ---------------------------------------------------------------- the model replanner and retry from commit (B9)
+
+/// The stored brief of a decision card.
+fn brief_of(r: &Rig, card: &Value) -> Value {
+    r.reader()
+        .list_decisions(&r.oid())
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id.as_str() == card["id"].as_str().unwrap())
+        .unwrap()
+        .brief
+}
+
+fn pending_plan_card(r: &Rig, id: &str) -> Option<Value> {
+    plan_cards(r, id)
+        .into_iter()
+        .find(|c| c["state"] == "pending")
+}
+
+#[test]
+fn a_failed_outcome_gets_a_model_replan_as_a_diff_and_runs_it_only_after_the_approval() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    model_mode(&r, true);
+    r.set_script(&json!([{"text": good_plan().to_string()}, {"text": good_plan().to_string()}]));
+    let id = go_model(&r);
+    let card = r.wait("the plan approval card", 120, || pending_plan_card(&r, &id));
+    // from now on every model process answers with the replan: the workers (which therefore write
+    // nothing and fail the frozen check) and, later, the replanning session
+    let replan = json!({"version": 2, "contract_version": 1, "items": [
+        {"key": "implement", "kind": "agent", "capabilities": ["repo.read", "repo.write"],
+         "title": "Write the file", "instructions": "Create src/hello.txt."},
+        {"key": "test", "kind": "verify", "requires": ["implement"], "covers": ["c1"]}]});
+    let text = replan.to_string();
+    r.set_script(&json!([{"text": text}, {"text": text}, {"text": text}, {"text": text}]));
+    answer_plan(&r, &id, &card, "approve_model_plan");
+    // the check fails: the outcome is blocked and, in model mode, a replan is PROPOSED (never applied)
+    let card2 = r.wait("the replan card", 240, || pending_plan_card(&r, &id));
+    assert_ne!(card2["id"], card["id"]);
+    assert_eq!(
+        alternatives(&card2),
+        ["approve_model_plan", "use_stub_plan", "keep_current_plan"]
+    );
+    let b = brief_of(&r, &card2);
+    assert_eq!(b["plan"]["diff_vs_current_plan"]["current_plan_version"], 1);
+    assert_eq!(
+        b["plan"]["diff_vs_current_plan"]["diff"]["removed"],
+        json!(["inspect"])
+    );
+    assert!(b["trigger"].is_string(), "{b}");
+    assert_eq!(
+        plans_stored(&r, &id),
+        1,
+        "nothing is installed while it waits"
+    );
+    assert_eq!(r.state(&id), "blocked");
+    let runs = r.reader().list_plan_runs(&r.oid()).unwrap();
+    assert_eq!(
+        runs.len(),
+        2,
+        "one planning run, one replanning run: {runs:?}"
+    );
+    assert!(runs.iter().all(|x| x.state == "finished"), "{runs:?}");
+    let spent = r.reader().outcome_usage(&r.oid()).unwrap().planner_usd;
+    assert!(spent > 0.0, "the replanner's cost is counted: {spent}");
+    // the person approves exactly the replan; the new plan runs and is verified
+    r.set_script(&writes(None));
+    answer_plan(&r, &id, &card2, "approve_model_plan");
+    r.wait_state(&id, "verified", 240);
+    assert_eq!(plans_stored(&r, &id), 2);
+    let passed = r
+        .evidence()
+        .iter()
+        .filter(|e| e.check_id == "t" && e.result == "passed")
+        .count();
+    assert_eq!(passed, 1);
+    assert_eq!(
+        r.reader().list_plan_runs(&r.oid()).unwrap().len(),
+        2,
+        "not asked again"
+    );
+}
+
+#[test]
+fn the_attempt_after_a_persons_answer_starts_from_the_blocked_attempts_commit() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    model_mode(&r, true);
+    // one writing item and the check: the first attempt writes the file, then asks and is blocked
+    let single = json!({"version": 1, "contract_version": 1, "items": [
+        {"key": "implement", "kind": "agent", "capabilities": ["repo.read", "repo.write"]},
+        {"key": "test", "kind": "verify", "requires": ["implement"], "covers": ["c1"]}]});
+    r.set_script(&json!([{"text": single.to_string()}, {"text": single.to_string()}]));
+    let id = go_model(&r);
+    let plan_card = r.wait("the plan approval card", 120, || pending_plan_card(&r, &id));
+    r.set_script(&json!([{"text": "writing and asking", "tools": [
+        {"id": "w1", "name": "Write", "input": {"file_path": "src/hello.txt", "content": "hi\n"}},
+        {"id": "q1", "name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which API shape?", "options": [{"label": "REST"}, {"label": "gRPC"}]}]}}]},
+        {"text": "done"}, {"text": "done"}]));
+    answer_plan(&r, &id, &plan_card, "approve_model_plan");
+    let card = r.wait("a pending decision of the worker", 180, || {
+        r.json(&["decisions", &id])["decisions"]
+            .as_array()?
+            .iter()
+            .find(|d| d["state"] == "pending" && d["kind"] != "plan_approval")
+            .cloned()
+    });
+    let first = r.attempts(&id, "implement");
+    let blocked_commit = first[0]
+        .subject_commit
+        .clone()
+        .expect("the blocked attempt's commit");
+    assert_ne!(
+        blocked_commit, r.head,
+        "the blocked attempt committed its file"
+    );
+    // the answer: the next attempt does NOT write anything, so the check can only pass if it
+    // started from the commit that already has the file
+    r.set_script(&json!([{"text": "done"}, {"text": "done"}, {"text": "done"}]));
+    r.ok(&[
+        "resolve",
+        &id,
+        card["id"].as_str().unwrap(),
+        "--choice",
+        "REST",
+        "--revision",
+        &card["revision"].as_i64().unwrap().to_string(),
+        "--brief-hash",
+        card["brief_sha256"].as_str().unwrap(),
+    ]);
+    r.wait_state(&id, "verified", 240);
+    let a = r.attempts(&id, "implement");
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert_eq!(
+        a[1].subject_commit.as_deref(),
+        Some(blocked_commit.as_str()),
+        "the new attempt started from the carried commit and added nothing"
+    );
+    // judged against the base commit: the evidence names the carried commit and the user's repository is untouched
+    assert!(
+        r.evidence().iter().any(|e| e.check_id == "t"
+            && e.result == "passed"
+            && e.subject_commit == blocked_commit)
+    );
+    assert_eq!(g(&r.repo, &["rev-parse", "HEAD"]), r.head);
+}
+
+#[test]
+fn a_start_whose_planner_model_is_unusable_and_whose_decision_was_rejected_ends_with_a_message() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    model_mode(&r, false);
+    let id = go_model(&r);
+    let card = r.wait("the stub-only card", 90, || pending_plan_card(&r, &id));
+    answer_plan(&r, &id, &card, "reject");
+    // nothing is queued for ever: the start is denied with the way out
+    r.wait("the start command to end", 60, || {
+        r.reader()
+            .queued_commands(&r.oid())
+            .ok()?
+            .is_empty()
+            .then_some(())
+    });
+    let finished = r.events(&id, "outcome.command_finished");
+    let start = finished
+        .iter()
+        .find(|e| e["payload"]["kind"] == "outcome.start")
+        .expect("the start ended");
+    assert_eq!(start["payload"]["state"], "denied", "{start}");
+    assert_eq!(plans_stored(&r, &id), 0);
+}

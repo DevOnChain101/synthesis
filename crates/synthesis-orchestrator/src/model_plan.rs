@@ -22,7 +22,7 @@ use synthesis_core::outcome::{
     MAX_TITLE_CHARS, Plan, PlanDiff, PlanError, ValidPlan, WorkItemKind, diff_plans, validate_plan,
 };
 use synthesis_session::Error as StoreError;
-use synthesis_session::outcome::{DecisionRecord, NewDecision, OutcomeWriter};
+use synthesis_session::outcome::{DecisionRecord, KEEP_CURRENT_PLAN, NewDecision, OutcomeWriter};
 use time::OffsetDateTime;
 
 use crate::gateway::{Action, Principal, audit, authorize};
@@ -81,6 +81,9 @@ pub enum ReasonCode {
     /// The owner died while the run was going; it is never run again.
     Lost,
     Cancelled,
+    /// A replan that edits the current plan in a way a replan may not (changes the kind of a kept
+    /// item, or uses a capability no item of the current plan has).
+    ReplanEdit,
 }
 
 impl ReasonCode {
@@ -113,6 +116,7 @@ impl ReasonCode {
             Self::NoBudget => "no_budget",
             Self::Lost => "lost",
             Self::Cancelled => "cancelled",
+            Self::ReplanEdit => "replan_edit",
         }
     }
 
@@ -151,6 +155,9 @@ impl ReasonCode {
             }
             Self::TextTooLong => "a title or instructions text is over its length limit",
             Self::HiddenText => "a title or instructions text has a hidden or control character",
+            Self::ReplanEdit => {
+                "a replan may keep, drop or add items and re-order requires, but a kept key keeps its kind and no item may use a capability that no item of the current plan has"
+            }
             Self::PlannerFailed
             | Self::Timeout
             | Self::NoOutput
@@ -271,6 +278,82 @@ pub fn validate_model_plan(
     Ok(ValidatedPlan { plan, valid, hash })
 }
 
+/// [`validate_model_plan`] for a plan that replaces `current`: the same checks, plus the edits a
+/// replan may make. It may keep, drop or add items and re-order `requires`; a kept key (same key)
+/// keeps its kind, and the capabilities it uses are among those the current plan already used (a
+/// replan never widens what the person approved in the plan it replaces). The second rule is
+/// skipped when `current` is a plan of an older contract: a revised, re-approved contract is the
+/// person's own new authority. Mandatory coverage is the core validator's rule, for every plan.
+pub fn validate_replan(
+    plan_json: &str,
+    contract: &Contract,
+    current: &Plan,
+    limits: &ModelPlanLimits,
+) -> Result<ValidatedPlan, ReasonCode> {
+    let v = validate_model_plan(plan_json, contract, limits)?;
+    if current.contract_version != contract.version {
+        return Ok(v);
+    }
+    let known: std::collections::BTreeSet<&str> = current
+        .items
+        .iter()
+        .flat_map(|i| i.capabilities.iter().map(String::as_str))
+        .collect();
+    for it in &v.plan.items {
+        let kind_moved = current
+            .items
+            .iter()
+            .any(|o| o.key == it.key && o.kind != it.kind);
+        if kind_moved || it.capabilities.iter().any(|c| !known.contains(c.as_str())) {
+            return Err(ReasonCode::ReplanEdit);
+        }
+    }
+    Ok(v)
+}
+
+/// The validator for the plan that is next: a replan when the outcome has a plan, else a first plan.
+pub(crate) fn validate_next(
+    plan_json: &str,
+    contract: &Contract,
+    current: Option<&Plan>,
+    limits: &ModelPlanLimits,
+) -> Result<ValidatedPlan, ReasonCode> {
+    match current {
+        Some(c) => validate_replan(plan_json, contract, c, limits),
+        None => validate_model_plan(plan_json, contract, limits),
+    }
+}
+
+/// The outcome's current plan, if it has one.
+pub(crate) fn current_plan(w: &OutcomeWriter) -> Result<Option<Plan>, StoreError> {
+    match w.get_outcome(w.id())?.plan_version {
+        Some(v) => Ok(Some(w.get_plan(w.id(), v)?)),
+        None => Ok(None),
+    }
+}
+
+fn item_json(i: &synthesis_core::outcome::PlanItem) -> Value {
+    json!({"key": i.key, "kind": i.kind, "requires": i.requires,
+           "capabilities": i.capabilities, "covers": i.covers,
+           "title": i.title, "instructions": i.instructions})
+}
+
+/// The diff of a replan with every field of every item that moved: added and removed items whole,
+/// changed items as before and after.
+fn diff_detail(old: &Plan, new: &Plan) -> Value {
+    let d = diff_plans(old, new);
+    let find = |p: &Plan, k: &str| p.items.iter().find(|i| i.key == k).map(item_json);
+    let mut v = diff_json(&d);
+    v["added_items"] = d.added.iter().filter_map(|k| find(new, k)).collect();
+    v["removed_items"] = d.removed.iter().filter_map(|k| find(old, k)).collect();
+    v["changed_items"] = d
+        .changed
+        .iter()
+        .map(|k| json!({"key": k, "before": find(old, k), "after": find(new, k)}))
+        .collect();
+    v
+}
+
 fn diff_json(d: &PlanDiff) -> Value {
     json!({"added": d.added, "removed": d.removed, "changed": d.changed,
            "unchanged": d.unchanged, "rerun": d.rerun})
@@ -278,14 +361,7 @@ fn diff_json(d: &PlanDiff) -> Value {
 
 /// Every field of every item, as the person will see it (no preselection, nothing left out).
 fn items_json(p: &Plan) -> Value {
-    p.items
-        .iter()
-        .map(|i| {
-            json!({"key": i.key, "kind": i.kind, "requires": i.requires,
-                   "capabilities": i.capabilities, "covers": i.covers,
-                   "title": i.title, "instructions": i.instructions})
-        })
-        .collect()
+    p.items.iter().map(item_json).collect()
 }
 
 /// Creates the `plan_approval` decision for a validated model plan and opens it (`pending`).
@@ -311,10 +387,7 @@ pub fn record_plan_approval(
             "a plan approval needs the approved current contract and the next plan version".into(),
         ));
     }
-    let current = match o.plan_version {
-        Some(v) => Some(w.get_plan(w.id(), v)?),
-        None => None,
-    };
+    let current = current_plan(w)?;
     let stub = make_plan(&StubPlanner, &contract, next)
         .ok()
         .map(|(p, _)| p);
@@ -325,6 +398,10 @@ pub fn record_plan_approval(
         action["stub_plan"] = serde_json::to_value(s)?;
         alternatives.push(json!({"id": "use_stub_plan", "label": ""}));
     }
+    if keep_offered(current.as_ref(), &contract) {
+        alternatives.push(json!({"id": KEEP_CURRENT_PLAN, "label": ""}));
+    }
+    let replan = current.is_some();
     let agents = model
         .plan
         .items
@@ -332,8 +409,9 @@ pub fn record_plan_approval(
         .filter(|i| i.kind == WorkItemKind::Agent)
         .count();
     let brief = json!({
-        "why": "a model wrote this plan; nothing runs until you choose",
-        "why_human": "a model wrote this plan",
+        "why": if replan { "a model proposes to change the current plan; nothing changes until you choose" } else { "a model wrote this plan; nothing runs until you choose" },
+        "why_human": if replan { "a model proposes a new plan to replace the current one" } else { "a model wrote this plan" },
+        "trigger": crate::planrun::replan_trigger(w, w.id())?,
         "delta_from_contract": "none: the plan cannot change the goal, criteria, checks, envelope or budgets",
         "alternatives": alternatives,
         "plan": {
@@ -349,12 +427,17 @@ pub fn record_plan_approval(
                 "stub_plan_hash": plan_hash(s), "stub_items": items_json(s),
                 "diff": diff_json(&diff_plans(s, &model.plan))})),
             "diff_vs_current_plan": current.as_ref().map(|c| json!({
-                "current_plan_version": c.version, "diff": diff_json(&diff_plans(c, &model.plan))})),
+                "current_plan_version": c.version, "diff": diff_detail(c, &model.plan)})),
         },
         "unknowns": [],
         "safe_default": "HOLD",
     });
     open_decision(w, format!("plan:{plan_run_id}"), brief, action, now)
+}
+
+/// May a person keep the current plan? Only a plan made for the current contract is worth keeping.
+fn keep_offered(current: Option<&Plan>, contract: &Contract) -> bool {
+    current.is_some_and(|c| c.contract_version == contract.version)
 }
 
 /// Creates a `plan_approval` decision and opens it (`pending`); the same dedupe key returns the
@@ -416,34 +499,54 @@ pub fn record_stub_fallback(
             "a plan approval needs the approved current contract".into(),
         ));
     }
-    let Ok((stub, _)) = make_plan(&StubPlanner, &contract, next) else {
+    let current = current_plan(w)?;
+    let stub = make_plan(&StubPlanner, &contract, next)
+        .ok()
+        .map(|(p, _)| p);
+    let keep = keep_offered(current.as_ref(), &contract);
+    if stub.is_none() && !keep {
         return Ok(None);
-    };
-    let action = json!({"source": "stub_fallback", "plan_run_id": plan_run_id,
-                        "reason_code": reason.as_str(), "stub_plan": serde_json::to_value(&stub)?});
+    }
+    let mut action = json!({"source": "stub_fallback", "plan_run_id": plan_run_id,
+                            "reason_code": reason.as_str()});
+    let mut alternatives = vec![];
+    if let Some(s) = &stub {
+        action["stub_plan"] = serde_json::to_value(s)?;
+        alternatives.push(json!({"id": "use_stub_plan", "label": ""}));
+    }
+    if keep {
+        alternatives.push(json!({"id": KEEP_CURRENT_PLAN, "label": ""}));
+    }
+    let shown = stub.as_ref().or(current.as_ref());
     let brief = json!({
-        "why": format!("the model planner gave no plan you can use ({}); the deterministic stub plan is offered and nothing runs until you choose", reason.as_str()),
+        "why": format!("the model planner gave no plan you can use ({}); {} and nothing changes until you choose", reason.as_str(),
+            if stub.is_some() { "the deterministic stub plan is offered" } else { "you can keep the current plan" }),
         "why_human": "the model planner failed",
         "reason_code": reason.as_str(),
+        "trigger": crate::planrun::replan_trigger(w, w.id())?,
         "delta_from_contract": "none: the plan cannot change the goal, criteria, checks, envelope or budgets",
-        "alternatives": [{"id": "use_stub_plan", "label": ""}],
+        "alternatives": alternatives,
         "plan": {
             "source": "stub_fallback",
             "plan_run_id": plan_run_id,
             "plan_version": next,
-            "plan_hash": plan_hash(&stub),
-            "items": items_json(&stub),
-            "agent_items": stub.items.iter().filter(|i| i.kind == WorkItemKind::Agent).count(),
+            "plan_hash": shown.map(plan_hash),
+            "items": shown.map(items_json),
+            "agent_items": shown.map(|p| p.items.iter().filter(|i| i.kind == WorkItemKind::Agent).count()),
             "max_attempts_per_work_item": contract.envelope.budgets.max_attempts_per_work_item,
             "outcome_cost_cap_usd": contract.envelope.budgets.max_cost_usd,
+            "diff_vs_current_plan": current.as_ref().zip(stub.as_ref()).map(|(c, s)| json!({
+                "current_plan_version": c.version, "diff": diff_detail(c, s)})),
         },
         "unknowns": [],
         "safe_default": "HOLD",
     });
-    let key = plan_run_id.map_or_else(
-        || format!("plan:v{}", o.contract_version),
-        |r| format!("plan:{r}"),
-    );
+    let key = match (plan_run_id, o.plan_version) {
+        (Some(r), _) => format!("plan:{r}"),
+        (None, None) => format!("plan:v{}", o.contract_version),
+        // a replan under the same contract has its own key per plan version
+        (None, Some(p)) => format!("plan:v{}:p{p}", o.contract_version),
+    };
     open_decision(w, key, brief, action, now).map(Some)
 }
 
@@ -482,6 +585,7 @@ pub fn install_approved_plan(
     let o = w.get_outcome(w.id())?;
     let (contract, ..) = w.get_contract(w.id(), o.contract_version)?;
     if choice == "approve_model_plan" {
+        let current_plan = current_plan(w)?;
         let text = action
             .get("plan")
             .map(Value::to_string)
@@ -490,7 +594,7 @@ pub fn install_approved_plan(
             version: o.plan_version.unwrap_or(0) + 1,
             max_items,
         };
-        validate_model_plan(&text, &contract, &limits).map_err(|c| {
+        validate_next(&text, &contract, current_plan.as_ref(), &limits).map_err(|c| {
             StoreError::Invalid(format!("the stored plan no longer validates: {c}"))
         })?;
     }

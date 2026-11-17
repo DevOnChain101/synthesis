@@ -713,6 +713,14 @@ fn the_store_refuses_a_plan_approval_that_offers_more_than_its_action_holds() {
         )
         .is_err()
     );
+    // keeping the current plan needs a current plan: the outcome has none yet
+    assert!(
+        new(
+            json!([{"id": "approve_model_plan"}, {"id": "keep_current_plan"}]),
+            json!({"plan": plan})
+        )
+        .is_err()
+    );
     // the right shape is accepted
     assert!(new(json!([{"id": "approve_model_plan"}]), json!({"plan": plan})).is_ok());
 }
@@ -744,6 +752,10 @@ fn a_replan_brief_diffs_against_the_current_plan() {
     .unwrap();
     let mut v = good_json();
     v["version"] = json!(2);
+    // the current plan (v1) uses no capability: a replan may not start using one (see validate_replan)
+    for it in v["items"].as_array_mut().unwrap() {
+        it["capabilities"] = json!([]);
+    }
     let l = ModelPlanLimits {
         version: 2,
         max_items: 16,
