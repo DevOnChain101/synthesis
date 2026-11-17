@@ -454,7 +454,7 @@ fn outcome_json(
         .list_decisions(&o.id)
         .map_err(s)?
         .iter()
-        .filter(|d| r.decision_state(&d.id).ok() == Some(DecisionState::Pending))
+        .filter(|d| d.row_state == DecisionState::Pending)
         .count();
     // Derived from rows, so it survives restarts (ADR-021 section 4). There is no `critical` (dropped, ADR-021 B2 notes).
     Ok(
@@ -495,10 +495,111 @@ fn attempts_json(r: &Reader, item: &WorkItemId) -> Result<Value, String> {
 /// The state is the verified one (a resolved row without a valid approval is `unverified`, which
 /// no surface can resolve); the brief is stored data, shown whole.
 fn decision_json(r: &Reader, d: &DecisionRecord) -> Value {
-    let state = r
-        .decision_state(&d.id)
-        .map_or_else(|_| json!("unverified"), |st| json!(st));
+    // An open row's state is the one read with its revision: a second read can see the next
+    // revision's state (preparing -> pending) and show a card whose revision cannot be answered.
+    let state = match d.row_state {
+        DecisionState::Approved | DecisionState::Rejected | DecisionState::NeedsMoreInfo => r
+            .decision_state(&d.id)
+            .map_or_else(|_| json!("unverified"), |st| json!(st)),
+        open => json!(open),
+    };
     json!({"id": d.id, "kind": d.kind, "state": state, "revision": d.revision, "brief": d.brief,
            "brief_sha256": d.brief_sha256, "binding_hash": d.binding_hash, "expires_at": d.expires_at,
            "created_at": d.created_at})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use synthesis_core::WorkspaceContext;
+    use synthesis_core::outcome::*;
+    use synthesis_session::outcome::{Effects, NewDecision, NewOutcome, OutcomePolicy};
+    use synthesis_session::{SCHEMA_VERSION_OUTCOMES, Store, StoreOptions};
+
+    /// A card is listed with the row and its state from the same read: a card read while the
+    /// decision was still `preparing` (revision 1) must not say `pending` because the owner
+    /// committed the next revision a moment later, or its revision could never be answered.
+    #[test]
+    fn a_card_listed_before_the_commit_to_pending_is_not_shown_pending_at_revision_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let home = base.join("home");
+        let store = Store::open(
+            &home,
+            StoreOptions {
+                schema_target: SCHEMA_VERSION_OUTCOMES,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let ws = WorkspaceContext::open("w", &repo, &repo, &[], base.join("cart"), "pg").unwrap();
+        let mut caps = BTreeMap::new();
+        caps.insert(Capability::RepoRead, CapabilityMode::Allow);
+        let contract = Contract {
+            version: 1,
+            goal: "goal".into(),
+            criteria: vec![ContractCriterion {
+                id: "c1".into(),
+                text: "c1".into(),
+                mandatory: true,
+                manual: false,
+                required_trust: TrustClass::IndependentCheck,
+                check_ids: vec![],
+            }],
+            envelope: Envelope {
+                allowed_paths: vec!["src/**".into()],
+                denied_paths: vec![],
+                capabilities: caps,
+                budgets: Budgets::new(5.0),
+                quality_gates: vec![],
+            },
+            checks: vec![],
+        };
+        let mut w = store
+            .create_outcome(NewOutcome {
+                workspace: &ws,
+                base_commit: "c0ffee".into(),
+                contract: &contract,
+                policy: &OutcomePolicy::new(true, 16, 10, 24),
+            })
+            .unwrap();
+        let (d, _) = w
+            .new_decision(&NewDecision {
+                kind: "ambiguity".into(),
+                dedupe_key: "k".into(),
+                brief: json!({"why": "w", "alternatives": [], "unknowns": [], "safe_default": "HOLD"}),
+                binding: json!({}),
+                expires_at: (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+                    .format(time::macros::format_description!(
+                        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+                    ))
+                    .unwrap(),
+                action: None,
+            })
+            .unwrap();
+        let reader = Reader::open(&home).unwrap();
+        // the listing a surface got just before the owner opened the decision
+        let listed = reader.list_decisions(w.id()).unwrap()[0].clone();
+        w.transition_decision(
+            &d.id,
+            1,
+            DecisionState::Pending,
+            &d.binding,
+            &Effects::default(),
+        )
+        .unwrap();
+        let stale = decision_json(&reader, &listed);
+        assert_eq!(
+            (stale["state"].as_str(), stale["revision"].as_i64()),
+            (Some("preparing"), Some(1))
+        );
+        let fresh = decision_json(&reader, &reader.list_decisions(w.id()).unwrap()[0]);
+        assert_eq!(
+            (fresh["state"].as_str(), fresh["revision"].as_i64()),
+            (Some("pending"), Some(2))
+        );
+    }
 }
