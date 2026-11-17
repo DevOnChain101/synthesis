@@ -215,7 +215,7 @@ Not ported: topology mode L (tall and narrow falls back to T). The "Latest user 
 Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the design's chrome (`index.html` `#chrome`)
 (`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
 the TUI and Super Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
-Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
+Cmd/Ctrl+2, Cmd/Ctrl+,). Super Agent v7 (2026-11-17, `super-agent.md` section 2.0, wireframes `super-agent-v7-1.svg`/`-2.svg`): in the Super Agent mode the bar also has three buttons at the left (collapse/expand the rail, back, forward) and a breadcrumb; the `TUI | Super Agent` buttons stay at the right next to the gear, as in the TUI view, and the badge of waiting things is on the Super Agent button. The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
 without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
 native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
 decorations, the bar is the drag region (`WindowControlArea::Drag`) and draws minimise / maximise / close

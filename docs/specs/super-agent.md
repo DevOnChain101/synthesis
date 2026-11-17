@@ -1,64 +1,61 @@
-# Spec: Super Agent (desktop mode: chat with the orchestrator, outcomes, read-only session detail)
+# Spec: Super Agent (desktop mode: chat with the orchestrator, outcomes, the session chats)
 
-Status: Proposed design (2026-11-17). Docs only, no product code. Layout choice A or B is an open owner decision (section 14).
-Inputs: owner mode normalisation 2026-11-17 (binding); wireframes `synthesis-compare/mockups/super-agent-v6-a.svg` (variant A) and `super-agent-v6-b.svg` (variant B); [conductor.md](conductor.md) (the backend and safety design of the chat); [desktop.md](desktop.md) ("Outcomes tab", "TUI view: outcomes (step 3)"); `docs/architecture/outcome-orchestration-plan.md` and ADR-016..021; the GPUI fork `~/Vibe/Legacy/synthesis-gpui-desktop-agent` (read-only reference).
+Status: Proposed design (2026-11-17). Docs only, no product code. Updated 2026-11-17 with the owner's v7 decisions: layout A is the current choice, **temporary, to be revisited**; no "Open in TUI" and no resume mode; mode buttons at the right of the title bar. Wireframes `super-agent-v7-1.svg` (chat) and `super-agent-v7-2.svg` (session view) supersede v6.
+Inputs: owner mode normalisation 2026-11-17 (binding); wireframes `synthesis-compare/mockups/super-agent-v6-a.svg` (variant A) and `super-agent-v6-b.svg` (variant B), superseded by `super-agent-v7-1.svg` and `super-agent-v7-2.svg`; [conductor.md](conductor.md) (the backend and safety design of the chat); [desktop.md](desktop.md) ("Outcomes tab", "TUI view: outcomes (step 3)"); `docs/architecture/outcome-orchestration-plan.md` and ADR-016..021; the GPUI fork `~/Vibe/Legacy/synthesis-gpui-desktop-agent` (read-only reference).
 
 ## 1. Purpose and modes
 
 The desktop app has **only two top-level modes**:
 
-| Mode | What it is | Title-bar tab, shortcut |
+| Mode | What it is | Title-bar button (right, next to the gear), shortcut |
 |---|---|---|
-| **TUI** | The current terminal-style view (`cli.html`), unchanged. | TUI, Cmd/Ctrl+1 |
-| **Super Agent** | The mode with the orchestrator and outcomes: a chat with the orchestrator, the outcomes and their work items, and a read-only view of any session. | Super Agent, Cmd/Ctrl+2 |
+| **TUI** | The current terminal-style view (`cli.html`), unchanged. | TUI button, Cmd/Ctrl+1 |
+| **Super Agent** | The mode with the orchestrator and outcomes: a chat with the orchestrator, the outcomes and their work items, and the chat of any session in the centre. | Super Agent button, Cmd/Ctrl+2 |
 
 Settings stays a popup over the TUI view (gear, Cmd/Ctrl+,), not a mode.
 
-- The desktop tab currently called **Outcomes** is renamed back to **Super Agent** (title-bar tab label, icon tooltip). The shortcut Cmd/Ctrl+2 does not change. "Outcomes" stays as the name of the thing (`synt outcome`, ADR-021, protocol, code `outcomes_view`), not of a tab.
+- The desktop tab currently called **Outcomes** is renamed back to **Super Agent** (mode button label and tooltip, now at the right of the title bar next to the gear, section 2.0). The shortcut Cmd/Ctrl+2 does not change. "Outcomes" stays as the name of the thing (`synt outcome`, ADR-021, protocol, code `outcomes_view`), not of a tab.
 - **Conductor is not a mode.** The orchestrator chat is the Super Agent's chat frame. `conductor.md` is the backend and safety design of that chat (section 4); there is no Chat/Conductor switch in the TUI and no grid of session frames.
 - Terminology: "orchestrator" is the outcome orchestrator (ADR-017); the chat's agent is the orchestrator's conversational face. Code and settings keep the `conductor` names from `conductor.md` (`synt.conductor.*`, tools `conductor_*`); the UI says "orchestrator".
 - Off, Windows native, not enabled and unreachable states: section 9.
 
 ## 2. Layout
 
-Shared parts (both variants), top to bottom:
+**Current choice (owner, 2026-11-17, temporary, to be revisited): layout A = rail left | centre | right context column.** Variant B (section 2.2) stays documented as the alternative.
 
-- **Title bar** (shell, unchanged): TUI and Super Agent icons and the gear. The Super Agent tab carries a badge with the number of things waiting for the person (section 8).
-- **Header strip**: `orchestrator: on . <project> . <branch>` (status of the orchestrator link).
-- **Left rail**: `OUTCOMES` with `+ new`; each outcome expands to its work items (a work item is a worker session of the plan, with state glyphs done / running / waiting / blocked) and shows "N waiting" for needs-you; then `OWN SESSIONS` (sessions the window hosts that belong to no outcome; "needs approval" tag); footer with today's cost and the outcome cap. An amber dot (never colour alone: also a label) marks what needs the person.
-- **Orchestrator chat frame**: transcript, proposal cards (section 4), decision cards (section 5), and the one composer ("Message the orchestrator, or @w3 to message a session"; the target chip says who gets the line).
-- **Session detail** (section 6).
-- **Hint line**: `Ctrl+T new session . Alt+A next decision . Esc back to the input . ? keys`.
+### 2.0 Title bar (v7)
 
-### 2.1 Variant A: rail | chat | detail pane (three columns)
+- **Left, three buttons** where the old text tabs were drawn: collapse/expand the rail, back, forward. Back and forward walk through the frames already viewed (the orchestrator chat and the sessions opened from the rail), like a browser.
+- **Breadcrumb** in the title bar: `Super Agent` in the chat; `Super Agent > Migrate auth > w3 token refresh` in a session.
+- **Right, next to the Settings gear: the `TUI | Super Agent` mode buttons**, exactly where they are in the TUI view today (so the two modes look the same from both). The **badge** (things waiting for the person, section 8) is on the Super Agent button.
+- The right column is collapsible with the rail button.
 
-```
-┌ title bar: TUI | Super Agent [2] | Settings ─────────────────────────────┐
-│ rail (outcomes > work items,  │ orchestrator chat          │ session detail │
-│ own sessions, cost)           │ cards, decisions, composer │ (read-only)    │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-Selecting a rail row fills the right pane (Transcript, Changes, Activity, Evidence tabs; "Read-only, message through the orchestrator (@w3)"; "Open in TUI"). The chat stays visible and keeps its composer.
-
-- Pro: chat and the session are visible together; a card that mentions w3 can be read next to w3's transcript; no mode change to look at something.
-- Con: three columns need width. A diff or a long transcript in a pane of about a third of the window is cramped; below 1100 px the pane overlays the chat (section 10). More chrome on screen at once.
-
-### 2.2 Variant B: chat is home, the detail replaces the centre
+### 2.1 Layout A (current): rail | centre | right context column
 
 ```
-chat home:                          session selected:
-│ rail │ orchestrator chat │        │ rail │ detail (centre, wide)  │ context │
-│      │ composer (bottom) │        │      │ ◂ Chat > outcome > w3  │ column  │
-                                    │      │ composer docked bottom │         │
+┌ [rail] [<] [>]  breadcrumb ........................ [TUI|Super Agent (2)] [gear] ┐
+│ rail (outcomes > work items,  │ centre: orchestrator chat  │ context column      │
+│ own sessions, cost)           │ OR the chat of the clicked │ (selected outcome    │
+│                               │ session; composer at bottom│ or session)          │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Selecting a session replaces the centre with the detail (breadcrumb `Chat > outcome > w3`, "◂ Chat" or Esc returns). The detail has tabs Transcript, Changes, Activity, Evidence, **Contract**, a right context column (this work item in its outcome: criteria, checks, dependencies, write scope, cost, sandbox "server-reported, not verified", the outcome's plan) and the orchestrator composer docked at the bottom with the target pre-filled `@w3`. A pending decision shows as a thin strip "1 decision waiting . Alt+A"; the answer is still given in the card in the chat.
+- **Rail**: `OUTCOMES` with `+ new`; each outcome expands to its work items (a worker session of the plan; glyphs done / running / waiting / blocked), "N waiting" for needs-you; then `OWN SESSIONS` (sessions the window hosts that belong to no outcome); footer with today's cost and the outcome cap. A row `Chat with orchestrator` at the top returns to the chat. An amber dot (and a label, never colour alone) marks what needs the person.
+- **Centre**: by default the **orchestrator chat** (transcript, proposal cards, decision cards, one composer). **Clicking a session in the rail replaces the orchestrator chat with that session's own chat** (section 6); back/forward (`<` `>`, Alt+Left / Alt+Right) move between the orchestrator chat and the sessions viewed.
+- **Right column**: the context of the selected outcome or session. For an outcome: contract version and state, criteria met, cost, plan, recent activity. For a session: **Context** (model, context window, mode, sandbox "server-reported, not verified"), the link to its outcome (criterion, check, dependencies, write scope, cost, Stop this work item) and the **Tasklist**.
+- **Hint line**: `Alt+A next decision . Ctrl+T new session . Alt+Left / Alt+Right back / forward . ? keys`.
 
-- Pro: the full width for diffs and long transcripts; one thing in focus; simpler small-window behaviour (the rail is the only drawer); room for the Contract tab and the context column.
-- Con: the chat is hidden while a session is open, so a decision card is one key away (Alt+A returns to the chat) rather than visible; two centre states to test; a person can forget there is a waiting decision (mitigated by the strip, the badge and the rail dot).
+Trade-offs of A against B: the chat and the context are visible together and navigation is a browser-like history; the cost is width (a diff in the centre is narrower than in B; below 1100 px the right column hides, section 10).
 
-**The choice between A and B is an open owner decision (section 14, Q1).** Everything below is written to hold for both; where they differ it says so. The models, the cards and the chat are the same; only the layout code of S2 differs.
+### 2.2 Variant B (alternative, not chosen now)
+
+Chat is home; selecting a session replaces the centre with a wide detail (breadcrumb `Chat > outcome > w3`, tabs Transcript, Changes, Activity, Evidence, **Contract**), a right context column (this work item in its outcome, the plan) and the orchestrator composer docked at the bottom with `@w3` prefilled. A pending decision shows as a thin strip "1 decision waiting . Alt+A".
+
+- Pro: the full width for diffs and long transcripts; a Contract tab; simpler small windows.
+- Con: the chat is hidden while a session is open, so a decision card is one key away rather than visible.
+
+In v7 A also replaces the centre by the session's chat, so the two variants now differ mainly in the right column and the composer target. **The choice is the owner's and is revisited later (section 14, Q1).**
+
 
 ## 3. Who can do what (summary of the rules)
 
@@ -87,7 +84,7 @@ A card that would exceed a validation rule is shown with the error and without t
 
 ### 4.3 Backend
 
-The chat runs on the Conductor backend plan (`conductor.md` sections 2-3 and PRs C0-C7): the host registry and resolver, the confirmation policy, limits, the restricted tool set. This spec changes only the UI contract: no grid, no per-session frames with docks, the session view is read-only (section 6). Outcome access for the orchestrator is the new `conductor_*` surface for draft creation only (propose outcome), not for approval; this widens `conductor.md` O4 and needs the owner's confirmation (Q4).
+The chat runs on the Conductor backend plan (`conductor.md` sections 2-3 and PRs C0-C7): the host registry and resolver, the confirmation policy, limits, the restricted tool set. This spec changes only the UI contract: no grid, no per-session frames with docks, the session view is the session's own chat (section 6). Outcome access for the orchestrator is the new `conductor_*` surface for draft creation only (propose outcome), not for approval; this widens `conductor.md` O4 and needs the owner's confirmation (Q4).
 
 ## 5. Decision cards inline
 
@@ -99,17 +96,18 @@ The #167 pieces in the TUI (centre tab "outcomes N", Approvals panel, auto-open 
 - **Focus model**: the card opens without taking the keys; the composer keeps focus; plain keys go to the composer; Alt+A or a click gives the card the keys; Esc or Alt+A returns them. While the composer has text, digits, Enter and Up/Down never reach the card; Shift chords always go to the composer (the #167 security review).
 - The answer carries the card's own revision and brief hash; the server checks both again and the worker re-reads the decision before sending.
 - Only a person's input answers. The orchestrator's text next to a card cannot choose or send (chat never shows an answer path of its own).
-- Tool approvals, questions and plans of a **session** are not answered here: they are answered in the session itself (TUI, `Open in TUI`); the session view shows that it waits and since when (section 6).
+- Tool approvals, questions and plans of a **session** are not answered here: they are answered in the session itself (an own session's dock in its view; an outcome worker's through the orchestrator, section 6); the rail dot and the session view show that it waits and since when.
 
-## 6. Session detail (read-only follow)
+## 6. Session view (the centre shows the session's own chat)
 
-The detail follows the owner's GPUI fork layout (MonoCode Native): a transcript with turns and tool-call cards, a diff view, changes, activity, a composer region. In Synthesis the composer region is **not** a writer into the worker:
+Clicking a session in the rail **replaces the orchestrator chat in the centre with that session's own chat**, laid out like the owner's GPUI fork (MonoCode Native): turns and tool-call cards, a diff view, changes, activity. There is **no "Open in TUI" and no read-only resume mode**; the session is followed and used here.
 
-- Tabs: **Transcript** (turns, tool-call cards, markdown), **Changes** (files changed with counts, "open full diff" to the diff view), **Activity** (tool and process timeline), **Evidence** (verifier facts, `event_backed`, "server-reported, not verified" for sandbox), and in B **Contract**.
-- **Read-only follow**: live tail while running (updates throttled to 4 Hz, 30 fps animation cap), no input, no approval dock. For an attempt or a worker session the data comes from the store and events of the orchestrator (`attempt.diff`, `InspectorContent`), for an own session from its view state.
-- **Messaging a worker only through the orchestrator**: the composer target is the orchestrator with `@w3` prefilled; the line goes to the orchestrator as a message (it may propose a send card). Typing directly into a worker is not offered (attempts are unattended, `conductor.md` 4.4).
-- **Open in TUI**: continues the session as a normal TUI session (resume mode, read-only first: the TUI opens it viewing, then the person can continue). Only for sessions the person may resume (own sessions and finished worker sessions); an attempt that is running is not resumable (S3).
-- A session that waits for a tool approval or question shows a banner "waiting for you since 4 min: Open in TUI".
+- Tabs: **Chat** (turns, tool-call cards, markdown), **Changes** (files changed with counts, "open full diff" to the diff view), **Activity** (tool and process timeline), **Evidence** (verifier facts, `event_backed`, sandbox "server-reported, not verified"). Header: state, age, cost, and for a worker "worker of outcome X".
+- Live tail while running (updates throttled to 4 Hz, 30 fps animation cap). For an outcome worker or attempt the data comes from the store and the orchestrator's events (`attempt.diff`, `InspectorContent`); for an own session from its view state.
+- **Own sessions** (not part of an outcome) are typed into **directly, like the TUI**, with the TUI's own approval and question docks (the engagement guard and the rules of `conductor.md` 4.2 apply there).
+- **Outcome workers**: the composer's target chip reads `w3 (via orchestrator)`; the line goes through the orchestrator (`@w3`) and shows a **confirm card** before anything reaches the worker (`conductor.md` 2.4-2.6). Attempts are unattended: a worker's own approvals are not answered from here. **Open question (Q7): may the person type straight into a worker?** Recommended: no, via the orchestrator only.
+- A session that waits for the person shows a banner "waiting for you since 4 min" (own sessions: the dock is right there).
+- Back/forward return to the orchestrator chat; the composer draft of each frame is kept per frame.
 
 ### 6.1 What is reused from the fork (layout only)
 
@@ -141,11 +139,12 @@ Keys already accepted in `conductor.md` (owner clarification b): Tab/Shift+Tab f
 
 | Key | Action | Note |
 |---|---|---|
-| Cmd/Ctrl+2 | Open the Super Agent tab | unchanged shortcut |
-| Alt+A | Next pending decision (oldest first), focuses its card | from #167; works in the chat; in A and B it jumps to the chat if a session is open |
+| Cmd/Ctrl+2 | Open Super Agent | unchanged shortcut |
+| Alt+A | Next pending decision (oldest first), focuses its card | from #167; works in the chat; it returns the centre to the orchestrator chat if a session is open |
 | Ctrl+T | New session (opens a create-session proposal flow) | new, to check (below) |
-| Esc | Back: card -> composer; detail -> chat (B); close pane (A, narrow) | |
-| Tab / Shift+Tab | Next / previous pane (rail, chat, detail) | |
+| Esc | Back: card -> composer; in a session view with an empty composer -> previous frame; closes a drawer | |
+| Alt+Left / Alt+Right | Back / forward through the frames viewed (same as the title-bar `<` `>`) | new, to check |
+| Tab / Shift+Tab | Next / previous pane (rail, centre, context column) | |
 | Up/Down, Enter | In the rail: move, open a row; in a card: move the cursor, Enter only after choosing | |
 | 1-9 | In a card with focus: choose an alternative. In the rail with focus: jump to the Nth row | not while the composer has text |
 | Cmd/Ctrl+L | Focus the orchestrator composer | from `conductor.md` 4.3 |
@@ -156,14 +155,14 @@ Keys already accepted in `conductor.md` (owner clarification b): Tab/Shift+Tab f
 Dropped from `conductor.md` because there is no Conductor mode: Cmd/Ctrl+Shift+M (toggle); Alt+0 and the TUI centre tab "outcomes N". Cmd/Ctrl+J ("frame that waited longest") duplicates Alt+A and is not taken; Alt+A is the one key.
 
 **Conflicts to check before S0/S1 (flagged, not decided):**
-1. **Ctrl+2 on Windows/Linux**: the TUI centre tabs use Ctrl+1..5, and Cmd/Ctrl+2 is the title-bar tab shortcut. On macOS Cmd and Ctrl differ; on Windows and Linux the two collide. Which wins in the TUI view (the existing wiring decides today) needs a check and, if it collides, an owner choice (Q5).
+1. **Ctrl+2 on Windows/Linux**: the TUI centre tabs use Ctrl+1..5, and Cmd/Ctrl+2 is the mode-button shortcut. On macOS Cmd and Ctrl differ; on Windows and Linux the two collide. Which wins in the TUI view (the existing wiring decides today) needs a check and, if it collides, an owner choice (Q5).
 2. **Ctrl+T** may be taken in the TUI view or by the terminal; it is read in `driver.rs` before S1 and a fallback key is chosen if used. In Super Agent only; the TUI keeps its own map.
 3. **Alt+A** keeps working in the TUI view as the "go to the Super Agent decision" key (it switches tab), see section 8.
 4. Cmd/Ctrl+L and `?` are unverified against the existing map (`conductor.md` [A]).
 
 ## 8. The TUI keeps only a badge
 
-After S0 the TUI view has no outcomes tab, no Approvals panel and no decision popup. It keeps one thing: on the **Super Agent tab in the title bar**, a badge with the count of things waiting for the person (decisions, plus orchestrator-reported waits; the same number the old "outcomes N" showed). A click on the tab or on the badge, or Cmd/Ctrl+2, opens Super Agent (with the oldest decision's card focused if the click was on the badge). When outcomes are off the badge and the tab's content follow section 9; nothing is shown in the TUI. The gate (`approvals::gate`) stays the single check; the TUI worker stays inert when off.
+After S0 the TUI view has no outcomes tab, no Approvals panel and no decision popup. It keeps one thing: on the **Super Agent mode button in the title bar** (right side, next to the gear), a badge with the count of things waiting for the person (decisions, plus orchestrator-reported waits; the same number the old "outcomes N" showed). A click on the button or on the badge, or Cmd/Ctrl+2, opens Super Agent (with the oldest decision's card focused if the click was on the badge). When outcomes are off the badge and the tab's content follow section 9; nothing is shown in the TUI. The gate (`approvals::gate`) stays the single check; the TUI worker stays inert when off.
 
 ## 9. States
 
@@ -180,7 +179,7 @@ Nothing connects at launch: the first open of the tab runs the check (setting an
 
 ## 10. Small windows
 
-Below 1100 px the rail becomes a **drawer** (button in the header strip, Esc closes). Variant A: the detail pane slides over the chat (Esc returns); variant B: no change besides the rail. Shots and `design_tests` at 1400x900 and 1100x700, plus 900x600 for the drawer. Minimum composer height is kept; cards scroll inside the chat, never clip their buttons.
+Below 1100 px the rail becomes a **drawer** (the title-bar rail button opens it, Esc closes) and the right context column hides (the rail button's twin or Alt+Right of the column toggles it; it overlays the centre while open). Layout A is the current choice; B differs only in the right column. Shots and `design_tests` at 1400x900 and 1100x700, plus 900x600 for the drawer. Minimum composer height is kept; cards scroll inside the chat, never clip their buttons.
 
 ## 11. What is reused from the existing code
 
@@ -193,14 +192,15 @@ Below 1100 px the rail becomes a **drawer** (button in the header strip, Esc clo
 
 ## 12. Phased implementation plan
 
-Each phase is one PR, shippable alone, with CI (fmt, clippy, tests on 3 OSes); a security review for S0 (moved safety rules) and S1.
+Each phase is one PR, shippable alone, with CI (fmt, clippy, tests on 3 OSes); a security review for S0 (moved safety rules), S1 and S2 (typing into sessions).
 
 | PR | Scope | Acceptance tests | Red-team items |
 |---|---|---|---|
-| **S0** | Rename Outcomes -> Super Agent (title-bar tab, tooltip, UI strings, shot names `--view`, docs). TUI: delete the outcomes centre tab, the Approvals panel and the popup; add the badge. Move the #167 pieces: decision cards inline in the Super Agent centre (a simple card list until the chat exists), the same Ask/Popup logic and rules. | Rename shot and design tests; TUI layout rects unchanged when outcomes are off; badge count equals decisions; click and Cmd/Ctrl+2 open the tab; every #167 safety test is ported and green (nothing preselected, choose then send, brief expanded before Send, engagement guard, focus model, held Enter, Shift chord) | A held Enter reaches no card; a card appearing under typing never takes a digit; a new revision is a new card; the TUI has no answer path any more (grep test) |
+| **S0** | Rename Outcomes -> Super Agent (mode button and tooltip, UI strings, shot names `--view`, docs); title bar of v7: rail / back / forward buttons at the left, breadcrumb, the `TUI | Super Agent` buttons at the right next to the gear (as in the TUI view today), badge on the Super Agent button. TUI: delete the outcomes centre tab, the Approvals panel and the popup; add the badge. Move the #167 pieces: decision cards inline in the Super Agent centre (a simple card list until the chat exists), the same Ask/Popup logic and rules. | Rename shot and design tests; TUI layout rects unchanged when outcomes are off; badge count equals decisions; click and Cmd/Ctrl+2 open the tab; every #167 safety test is ported and green (nothing preselected, choose then send, brief expanded before Send, engagement guard, focus model, held Enter, Shift chord) | A held Enter reaches no card; a card appearing under typing never takes a digit; a new revision is a new card; the TUI has no answer path any more (grep test) |
 | **S1** | The chat frame with proposal cards on the existing C0-C7 conductor backend plan (C0-C3 host and harness, C4 models without the grid, the chat part of C5, C6 WSL, C7 red-team); the draft outcome card with "Create draft" / "Edit in form"; `@w3` direct path; keyboard map. | `conductor.md` section 7 tests for C1-C4; a draft card creates nothing until Create; Create does not approve the contract; ambiguity returns candidates and no card; every card field rendered | `conductor.md` RT1-RT8 plus: the orchestrator cannot call contract approve; a forged decision card in model text is plain text; a draft card with an invalid contract has no Create |
-| **S2** | Session detail from the fork: Transcript, Changes, Activity, Evidence (and Contract, context column in B), read-only; layout A or B per Q1; drawer below 1100 px. | Shots at 1400x900, 1100x700, 900x600; transcript with 5,000 rows scrolls within the frame budget (unverified until measured); no input widget exists in the worker view (test) | A worker line cannot be typed; tool output in the transcript cannot trigger a card; `grep -ri tauri` of the ported code is empty; licence entry exists |
-| **S3** | Read-only resume: "Open in TUI" opens the session viewing, then continues as a normal TUI session. | A running attempt is not resumable; a resumed session lands in the TUI with its history; the person's first line is the first write | Resuming never changes the session's mode or workspace; no sandbox widening |
+| **S2** | Session view from the fork replaces the centre on a rail click: Chat, Changes, Activity, Evidence; right context column (Context, outcome link, Tasklist); back/forward history; own sessions typed into directly, outcome workers via the orchestrator with a confirm card; layout A (B per Q1); drawer below 1100 px. | Shots at 1400x900, 1100x700, 900x600; transcript with 5,000 rows scrolls within the frame budget (unverified until measured); a worker's composer never writes to the worker without a confirm card (test); back/forward return to the same frame and keep drafts | A worker line cannot reach the worker without a card; tool output in the transcript cannot trigger a card; `grep -ri tauri` of the ported code is empty; licence entry exists |
+
+S3 (read-only resume) was removed on 2026-11-17: there is no "Open in TUI".
 
 S1 depends on the orchestrator backend (B3, B8) and, for the live link, the owner's real Windows/WSL run (memory: B8 waits).
 
@@ -213,11 +213,11 @@ S1 depends on the orchestrator backend (B3, B8) and, for the live link, the owne
 
 ## 14. Open questions for the owner
 
-1. **Layout A (three columns) or B (chat is home, detail replaces the centre)?** (Section 2; not chosen.)
+1. **Layout.** A (rail | centre | right context column) is chosen **temporarily** (2026-11-17) and is to be revisited; B stays documented (section 2.2).
 2. Is the badge in the TUI title bar enough, or should the TUI also show a one-line "N decisions" strip above the prompt? (Recommended: badge only, as decided.)
 3. Confirm the orchestrator's name in the UI ("orchestrator") and that `synt.conductor.*` settings and `conductor_*` tools keep their names.
 4. May the orchestrator propose a **draft outcome** (a new narrow tool), given `conductor.md` O4 said no outcome access in v1? Contract approval stays out of reach regardless.
-5. Ctrl+2 collision on Windows and Linux (TUI centre tabs vs the title-bar tab): which wins? Ctrl+T for "new session": acceptable?
+5. Ctrl+2 collision on Windows and Linux (TUI centre tabs vs the mode-button shortcut): which wins? Ctrl+T for "new session": acceptable?
 6. Upstream licence of the fork (MIT per its `Cargo.toml`, no LICENSE file): who confirms, and where is the attribution kept (`NOTICES` file)?
-7. "Open in TUI" for a running worker: refuse (recommended) or allow after pausing the worker?
+7. May the person type **straight into an outcome worker**? Recommended: no, via the orchestrator (`@w3`) with a confirm card. (Own sessions are typed into directly, like the TUI.)
 8. Does the orchestrator chat transcript show in the TUI Workspace list as a "conductor" session (`conductor.md` O10)?
