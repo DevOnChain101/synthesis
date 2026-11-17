@@ -486,11 +486,10 @@ impl State {
         });
     }
 
-    /// Esc, Cancel: nothing was written or sent. Not while a confirmed step is on its way.
+    /// Esc, Cancel: closes the dialog, also while a confirmed step is on its way (that request is not recalled;
+    /// its reply is still applied). So a lost reply can never keep the person in the dialog.
     pub fn close_guide(&mut self) {
-        if self.guide.as_ref().is_some_and(|g| !g.busy) {
-            self.guide = None;
-        }
+        self.guide = None;
     }
 
     /// The Confirm button (a click, or Enter with the button focused): the step's effect, once.
@@ -524,9 +523,16 @@ impl State {
     /// Keys while the disclosure is open: all of them are its own. Tab moves between Cancel and Confirm (the
     /// first Tab lands on Cancel), Enter acts on the focused button only, Esc cancels.
     fn guide_key(&mut self, name: &str) -> Vec<Effect> {
-        let Some(g) = self.guide.as_mut().filter(|g| !g.busy) else {
+        let Some(g) = self.guide.as_mut() else {
             return vec![];
         };
+        if g.busy {
+            // only Esc acts while a step is on its way
+            if name == "escape" {
+                self.guide = None;
+            }
+            return vec![];
+        }
         match (name, g.focus) {
             ("escape", _) => self.guide = None,
             ("tab", Some(Btn::Cancel)) => g.focus = Some(Btn::Confirm),

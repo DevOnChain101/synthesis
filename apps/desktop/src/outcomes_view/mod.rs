@@ -252,7 +252,14 @@ impl OutcomesView {
                 (Effect::Migrate, None) => self
                     .state
                     .guide_failed("Sample data: nothing was sent.".into()),
-                (Effect::Migrate, Some(l)) => l.send(Req::Enable),
+                (Effect::Migrate, Some(l)) => {
+                    if !l.try_send(Req::Enable) {
+                        self.state.guide_failed(
+                            "The link to the orchestrator has ended. Close this window and press r."
+                                .into(),
+                        );
+                    }
+                }
                 (Effect::EnableSetting, _) => {}
                 (Effect::Refresh | Effect::Retry, None) => {}
                 (Effect::Refresh, Some(l)) => l.send(Req::Refresh),

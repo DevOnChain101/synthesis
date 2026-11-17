@@ -49,6 +49,11 @@ pub fn write_orchestrator(env: &Env, on: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Keys whose lock (platform or managed) the model checks itself before asking the store.
+fn guarded(key: &str) -> bool {
+    key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl.") || key == ORCHESTRATOR
+}
+
 /// Everything the model reads from the outside.
 /// Shown instead of the Windows trust store in WSL mode.
 pub const TRUST_IN_ENGINE: &str = "Remembered trust is managed in the engine (WSL): use /trust in the TUI tab. The Windows store is not used for those folders.";
@@ -714,9 +719,7 @@ impl Model {
         let Some(f) = self.store.schema.field(key).cloned() else {
             return Outcome::Rejected;
         };
-        if let Some(why) = self.lock_reason(key).filter(|_| {
-            key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl.") || key == ORCHESTRATOR
-        }) {
+        if let Some(why) = self.lock_reason(key).filter(|_| guarded(key)) {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -791,6 +794,16 @@ impl Model {
         let Some(p) = self.pending.take() else {
             return Outcome::Rejected;
         };
+        // the files may have changed since the dialog opened: a managed value that appeared meanwhile, or the
+        // platform lock, is checked again against what is on disk now
+        self.store.reload();
+        if let Some(why) = self.lock_reason(&p.key).filter(|_| guarded(&p.key)) {
+            self.errors.insert(
+                p.key.clone(),
+                format!("{}: not editable here: {why}", p.key),
+            );
+            return Outcome::Rejected;
+        }
         let r = self.store.set_confirmed(&p.key, p.value);
         self.done(&p.key, r)
     }
@@ -801,9 +814,7 @@ impl Model {
 
     /// Back to the default (or the lower layer): removes the key from the USER file.
     pub fn reset(&mut self, key: &str) -> Outcome {
-        if let Some(why) = self.lock_reason(key).filter(|_| {
-            key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl.") || key == ORCHESTRATOR
-        }) {
+        if let Some(why) = self.lock_reason(key).filter(|_| guarded(key)) {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -1274,6 +1285,27 @@ mod tests {
         assert!(
             matches!(r.control, Control::Switch(false)),
             "the project value does not turn it on"
+        );
+    }
+
+    #[test]
+    fn a_managed_lock_that_appears_after_the_dialog_opened_refuses_the_confirm() {
+        if cfg!(windows) {
+            return;
+        }
+        let (_t, mut m) = model();
+        assert_eq!(m.change(ORCH, Change::Bool(true)), Outcome::NeedsConfirm);
+        // the organisation file appears while the dialog is open
+        std::fs::write(
+            &m.cfg.managed,
+            r#"{"synt":{"orchestrator":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.confirm(), Outcome::Rejected);
+        assert!(m.errors[ORCH].contains("managed"), "{:?}", m.errors);
+        assert!(
+            !m.cfg.home.join("settings.json").exists(),
+            "nothing was written"
         );
     }
 

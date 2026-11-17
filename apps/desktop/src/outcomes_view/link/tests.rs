@@ -368,20 +368,28 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
     std::os::unix::fs::symlink(real.join("app"), user.join("app")).unwrap();
     // a `synt` planted beside the symlink, in the folder the user can write, is not used
     std::fs::write(user.join("synt"), "evil").unwrap();
-    assert_eq!(synt_beside(&user.join("app")), None);
+    assert_eq!(found(&user.join("app")), None);
     // beside the real app it is; a symlink named synt there is not
     std::fs::write(real.join("elsewhere"), "x").unwrap();
     std::os::unix::fs::symlink(real.join("elsewhere"), real.join("synt")).unwrap();
-    assert_eq!(synt_beside(&user.join("app")), None);
+    assert_eq!(found(&user.join("app")), None);
     std::fs::remove_file(real.join("synt")).unwrap();
     std::fs::write(real.join("synt"), "ok").unwrap();
     // not executable: refused; executable: used
-    assert_eq!(synt_beside(&user.join("app")), None);
+    assert_eq!(found(&user.join("app")), None);
     use std::os::unix::fs::PermissionsExt as _;
     for (p, m) in [(real.join("synt"), 0o755), (real.clone(), 0o755)] {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
     }
-    assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
+    assert_eq!(found(&user.join("app")), Some(real.join("synt")));
+}
+
+/// The usable `synt` beside `exe`, if any.
+fn found(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    match synt_beside(exe) {
+        Sibling::Usable(p) => Some(p),
+        _ => None,
+    }
 }
 
 fn ok_head(_: &str) -> Result<String, String> {
@@ -857,7 +865,7 @@ fn a_refusal_is_reported_and_a_lost_link_reconnects() {
 
 #[cfg(unix)]
 mod beside {
-    use super::super::synt_beside;
+    use super::{Sibling, found};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     /// `<tmp>/Synthesis.app/Contents/MacOS/{Synthesis,synt}` with the given mode on synt (None: no synt).
@@ -880,24 +888,48 @@ mod beside {
     #[test]
     fn the_synt_inside_the_app_bundle_is_found_from_the_app_executable() {
         let (_t, macos) = bundle(Some(0o755));
-        assert_eq!(
-            synt_beside(&macos.join("Synthesis")),
-            Some(macos.join("synt"))
-        );
+        assert_eq!(found(&macos.join("Synthesis")), Some(macos.join("synt")));
     }
 
     #[test]
     fn a_missing_non_executable_or_writable_by_others_synt_is_refused() {
         let (_t, macos) = bundle(None);
-        assert_eq!(synt_beside(&macos.join("Synthesis")), None);
+        assert_eq!(found(&macos.join("Synthesis")), None);
         for mode in [0o644, 0o775, 0o757] {
             let (_t, macos) = bundle(Some(mode));
-            assert_eq!(synt_beside(&macos.join("Synthesis")), None, "{mode:o}");
+            assert_eq!(found(&macos.join("Synthesis")), None, "{mode:o}");
         }
         // a folder others can write to: the file could have been swapped
         let (_t, macos) = bundle(Some(0o755));
         std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(synt_beside(&macos.join("Synthesis")), None);
+        assert_eq!(found(&macos.join("Synthesis")), None);
+    }
+
+    #[test]
+    fn a_refused_synt_is_told_apart_from_none_and_a_writable_ancestor_in_the_bundle_refuses() {
+        let (_t, macos) = bundle(None);
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Absent
+        );
+        let (_t, macos) = bundle(Some(0o666));
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Refused
+        );
+        // Contents is writable by others: the folder could have been swapped from above
+        let (_t, macos) = bundle(Some(0o755));
+        let contents = macos.parent().unwrap();
+        std::fs::set_permissions(contents, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Refused
+        );
+        std::fs::set_permissions(contents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Usable(_)
+        ));
     }
 
     #[test]
@@ -907,11 +939,7 @@ mod beside {
         std::fs::write(&elsewhere, b"x").unwrap();
         std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
         symlink(&elsewhere, macos.join("synt")).unwrap();
-        assert_eq!(
-            synt_beside(&macos.join("Synthesis")),
-            None,
-            "never a symlink"
-        );
+        assert_eq!(found(&macos.join("Synthesis")), None, "never a symlink");
         // a link to the app from another folder does not pick the synt that sits beside the link
         let (_t2, real) = bundle(None);
         let dir = t.path().join("links");
@@ -919,6 +947,31 @@ mod beside {
         std::fs::write(dir.join("synt"), b"x").unwrap();
         std::fs::set_permissions(dir.join("synt"), std::fs::Permissions::from_mode(0o755)).unwrap();
         symlink(real.join("Synthesis"), dir.join("Synthesis")).unwrap();
-        assert_eq!(synt_beside(&dir.join("Synthesis")), None);
+        assert_eq!(found(&dir.join("Synthesis")), None);
     }
+}
+
+use super::Sibling;
+
+#[test]
+fn a_migration_confirm_that_comes_late_is_answered_not_dropped() {
+    let msgs = run(&fake(), vec![Req::Enable]);
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Msg::Enabled(Err(e)) if e.contains("already migrated")))
+    );
+}
+
+#[test]
+fn a_worker_that_ended_makes_send_report_it() {
+    let (tx, rx) = channel();
+    let (out, _orx) = unbounded();
+    let l = Link {
+        tx,
+        out,
+        env: Env::default(),
+    };
+    assert!(l.try_send(Req::Refresh));
+    drop(rx);
+    assert!(!l.try_send(Req::Enable));
 }

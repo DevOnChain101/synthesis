@@ -547,3 +547,25 @@ fn no_button_on_windows_ready_loading_or_unreachable() {
         assert!(s.confirm_guide().is_empty());
     }
 }
+
+#[test]
+fn esc_and_cancel_close_the_dialog_even_while_a_step_is_on_its_way() {
+    for close in [0, 1] {
+        let mut s = State::new(Screen::NotReady("x".into()));
+        s.open_guide();
+        assert_eq!(s.confirm_guide(), vec![Effect::Migrate]);
+        assert!(
+            press(&mut s, "enter", 0).is_empty() && s.guide.is_some(),
+            "other keys wait"
+        );
+        if close == 0 {
+            press(&mut s, "escape", 0);
+        } else {
+            s.close_guide();
+        }
+        assert!(s.guide.is_none());
+        // a late failure reply with no dialog open changes nothing
+        s.guide_failed("late".into());
+        assert!(s.guide.is_none());
+    }
+}

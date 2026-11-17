@@ -79,7 +79,11 @@ function run(cmd, args, opts = {}) {
 
 function main() {
   const a = {};
-  for (let i = 2; i < process.argv.length; i += 2) a[process.argv[i].replace(/^--/, "")] = process.argv[i + 1];
+  for (let i = 2; i < process.argv.length; i += 2) {
+    const v = process.argv[i + 1];
+    if (v === undefined || v.startsWith("--")) throw new Error(`missing value for ${process.argv[i]}`);
+    a[process.argv[i].replace(/^--/, "")] = v;
+  }
   const { target, version, bin, out, synt } = a;
   if (!target || !version || !bin || !out) throw new Error("usage: --target T --version V --bin PATH --out DIR");
   if (!/^[0-9A-Za-z.+-]+$/.test(version)) throw new Error(`bad version: ${version}`);

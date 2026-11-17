@@ -51,3 +51,11 @@ test("a missing --synt file is refused before anything is staged", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /synt binary not found/);
 });
+
+test("a flag with no value (a trailing --synt) is an error, not silently ignored", () => {
+  for (const argv of [["--synt"], ["--synt", "--out", "x"]]) {
+    const r = spawnSync("node", [script, "--target", "aarch64-apple-darwin", "--version", "0.0.1", "--bin", script, "--out", tmpdir(), ...argv], { encoding: "utf8" });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /missing value for --synt/);
+  }
+});

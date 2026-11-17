@@ -136,32 +136,56 @@ impl Link {
 
     pub fn send(&self, r: Req) {
         // a worker that ended has said why; nothing more to do
-        let _ = self.tx.send(r);
+        let _ = self.try_send(r);
+    }
+
+    /// `false`: the worker has ended (it has said why), so the request went nowhere.
+    pub fn try_send(&self, r: Req) -> bool {
+        self.tx.send(r).is_ok()
     }
 }
 
 /// `synt` next to this app (a packaged install): the orchestrator is started with it. Without one the app only
 /// connects to a running orchestrator (it never starts itself, which would open a second window).
 fn synt_exe() -> Option<std::path::PathBuf> {
-    synt_beside(&std::env::current_exe().ok()?)
+    match synt_beside(&std::env::current_exe().ok()?) {
+        Sibling::Usable(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// What sits beside the app executable under the name `synt`.
+#[derive(Debug, PartialEq)]
+enum Sibling {
+    Usable(std::path::PathBuf),
+    /// There is one, but it is not what the app may start (not a regular file of the user's, or writable by others).
+    Refused,
+    Absent,
 }
 
 /// The `synt` in the folder `exe` really is in: the path is resolved first, so a symlink to the app from a
 /// folder the user can write does not pick a `synt` that sits beside the link (inside `Synthesis.app` that is
 /// `Contents/MacOS`). A regular file, never a symlink, never a PATH search, and only one `usable_synt` accepts.
-fn synt_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let dir = std::fs::canonicalize(exe).ok()?.parent()?.to_path_buf();
+fn synt_beside(exe: &std::path::Path) -> Sibling {
+    let Some(dir) = std::fs::canonicalize(exe)
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    else {
+        return Sibling::Absent;
+    };
     let p = dir.join(if cfg!(windows) { "synt.exe" } else { "synt" });
-    usable_synt(
-        &std::fs::metadata(&dir).ok()?,
-        &std::fs::symlink_metadata(&p).ok()?,
-    )
-    .then_some(p)
+    match std::fs::symlink_metadata(&p) {
+        Err(_) => Sibling::Absent,
+        Ok(m) if usable_synt(&dir, &m) => Sibling::Usable(p),
+        Ok(_) => Sibling::Refused,
+    }
 }
 
 /// A regular file (a symlink is not one). On unix also: the user's own, executable, and neither it nor its
-/// folder writable by group or others, so nobody else can have put it there or swapped it.
-fn usable_synt(dir: &std::fs::Metadata, file: &std::fs::Metadata) -> bool {
+/// folder, nor any folder above it up to the `.app` bundle (or just the folder, outside a bundle), writable
+/// by group or others; the folder belongs to the user or root. So nobody else can have put it there or
+/// swapped it.
+fn usable_synt(dir: &std::path::Path, file: &std::fs::Metadata) -> bool {
     if !file.is_file() {
         return false;
     }
@@ -169,7 +193,29 @@ fn usable_synt(dir: &std::fs::Metadata, file: &std::fs::Metadata) -> bool {
     {
         use std::os::unix::fs::MetadataExt as _;
         let me = rustix::process::geteuid().as_raw();
-        file.uid() == me && file.mode() & 0o111 != 0 && (file.mode() | dir.mode()) & 0o022 == 0
+        let Ok(d) = std::fs::metadata(dir) else {
+            return false;
+        };
+        if file.uid() != me || file.mode() & 0o111 == 0 || file.mode() & 0o022 != 0 {
+            return false;
+        }
+        if ![me, 0].contains(&d.uid()) {
+            return false;
+        }
+        let in_bundle = dir
+            .ancestors()
+            .any(|a| a.extension().is_some_and(|e| e == "app"));
+        for a in dir.ancestors() {
+            match std::fs::metadata(a) {
+                Ok(m) if m.mode() & 0o022 == 0 => {}
+                _ => return false,
+            }
+            // the bundle root ends the walk; outside a bundle only the folder itself counts
+            if !in_bundle || a.extension().is_some_and(|e| e == "app") {
+                break;
+            }
+        }
+        true
     }
     #[cfg(not(unix))]
     {
@@ -196,10 +242,12 @@ fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Scree
     let home = gate(env)?;
     let link = connect_started(&home);
     link.map_err(|e| {
-        let hint = if synt_exe().is_none() {
-            " Start it with `synt outcome list` in a terminal, then press r."
-        } else {
-            ""
+        let hint = match std::env::current_exe().ok().map(|e| synt_beside(&e)) {
+            Some(Sibling::Usable(_)) => "",
+            Some(Sibling::Refused) => {
+                " The synt next to the app is not a regular executable file owned by you, or it or its folder is writable by others: reinstall the app."
+            }
+            _ => " Start it with `synt outcome list` in a terminal, then press r.",
         };
         Screen::Unreachable(format!("{e}.{hint}"))
     })
@@ -260,6 +308,12 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
         loop {
             match rx.recv() {
                 Ok(Req::Retry) => break,
+                // not connected: a migration request is answered, never left waiting
+                Ok(Req::Enable) => {
+                    let _ = out.unbounded_send(Msg::Enabled(Err(
+                        "not connected to the orchestrator; press r to check again".into(),
+                    )));
+                }
                 Ok(_) => {}
                 Err(_) => return,
             }
@@ -366,8 +420,14 @@ pub(super) fn serve<T: Transport>(
                     let m = review_draft(c, &id)?;
                     let _ = out.unbounded_send(Msg::Form(m));
                 }
-                // the migration is only served while the store is not migrated (`await_enable`)
-                Ok(Req::Enable) => {}
+                // the store is migrated already (the person's confirm came late): say so, look again
+                Ok(Req::Enable) => {
+                    let _ = out.unbounded_send(Msg::Enabled(Err(
+                        "already migrated; checking again".into(),
+                    )));
+                    refresh(c, &mut w, out)?;
+                    last = Instant::now();
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
