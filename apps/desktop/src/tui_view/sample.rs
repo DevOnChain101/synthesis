@@ -568,3 +568,21 @@ pub fn sample() -> Snapshot {
         pulses: Default::default(),
     }
 }
+
+/// The clock of the outcome shots and design tests (ms): ages are fixed so the frames do not move.
+pub const OUTCOMES_NOW: i64 = 1_700_000_000_000;
+
+/// Two sessions waiting for a tool permission, for the mixed Approvals sample (the outcome decision of the
+/// Outcomes sample is the third row). Oldest first.
+pub fn approval_tools() -> Vec<crate::approvals::Row> {
+    let row = |key: &str, subject: &str, mins: i64| crate::approvals::Row {
+        key: key.into(),
+        kind: crate::approvals::Kind::Tool,
+        subject: subject.into(),
+        since: OUTCOMES_NOW - mins * 60_000,
+    };
+    vec![
+        row("#s1", "refactor-auth: Bash cargo test -p auth", 14),
+        row("#s2", "docs-links: Edit docs/README.md", 2),
+    ]
+}

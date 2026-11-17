@@ -573,6 +573,12 @@ mod tests {
         assert_eq!(parse_panels("usage off"), Ok(Set("usage", true)));
         assert_eq!(parse_panels("tokens  on"), Ok(Set("tokens", false)));
         assert_eq!(parse_panels("status off"), Ok(Set("status", true)));
+        // Approvals: a runtime flag, not one of the saved panels (hide-all and show-all leave it alone)
+        assert_eq!(parse_panels("approvals off"), Ok(Set("approvals", true)));
+        assert!(!HIDEABLE.iter().any(|(k, _)| *k == "approvals"));
+        let mut all = Hidden::default();
+        HIDEABLE.iter().for_each(|(k, _)| _ = all.hide(k));
+        assert!(!all.approvals, "hide-all does not hide what waits for you");
         assert!(
             parse_panels("running off")
                 .unwrap_err()

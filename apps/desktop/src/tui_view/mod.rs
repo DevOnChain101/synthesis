@@ -16,6 +16,8 @@ pub mod dialog;
 pub mod driver;
 mod filesel;
 pub mod layout;
+#[cfg(test)]
+mod outcomes_tests;
 pub mod panels;
 mod quote;
 mod rewind;

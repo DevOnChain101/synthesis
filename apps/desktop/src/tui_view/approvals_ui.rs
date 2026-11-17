@@ -31,6 +31,27 @@ const PANEL_ROWS: f32 = 5.;
 /// Two Enter presses closer than this are one held key (the keystroke hook has no `is_held`).
 const HELD_MS: i64 = 150;
 
+/// The sample states of the shots (`--outcomes`): one approval, three (mixed), the decision popup, the tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutShot {
+    Approvals1,
+    Approvals3,
+    Decision,
+    Tab,
+}
+
+impl OutShot {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "approvals-1" => Self::Approvals1,
+            "approvals-3" => Self::Approvals3,
+            "decision" => Self::Decision,
+            "tab" => Self::Tab,
+            _ => return None,
+        })
+    }
+}
+
 /// What the popup shows.
 pub enum Shown {
     /// The outcome was asked for and its card has not come yet.
@@ -91,6 +112,37 @@ impl TuiView {
             _sub: sub,
         });
         cx.notify();
+    }
+
+    /// The sample states of the shots and design tests (`--outcomes NAME`): the Outcomes sample behind a fixed clock.
+    pub fn seed_sample(
+        &mut self,
+        what: OutShot,
+        view: Entity<OutcomesView>,
+        cx: &mut Context<Self>,
+    ) {
+        use super::sample::{OUTCOMES_NOW as NOW, approval_tools};
+        self.set_outcomes(view, cx);
+        let Some(w) = self.outcomes.as_mut() else {
+            return;
+        };
+        w.fixed_now = Some(NOW);
+        w.seed_outcome("o_auth", NOW - 9 * 60_000);
+        match what {
+            OutShot::Approvals1 => {}
+            OutShot::Approvals3 => approval_tools().into_iter().for_each(|r| w.seed_tool(r)),
+            OutShot::Decision => {
+                let goal = w
+                    .view
+                    .read(cx)
+                    .state
+                    .selected_item()
+                    .map(|i| i.row.goal.clone())
+                    .unwrap_or_default();
+                self.open_decision("o_auth", &goal, cx);
+            }
+            OutShot::Tab => self.ts.tab = ChatTab::Outcomes,
+        }
     }
 
     fn now(&self) -> i64 {
@@ -174,7 +226,7 @@ impl TuiView {
                     p.ask.notice = st.ask.notice.clone();
                 }
                 if p.card.id != c.id {
-                    p = Box::new(Popup::new(outcome, c, now));
+                    *p = Popup::new(outcome, c, now);
                 } else {
                     p.update(c, now);
                 }
@@ -544,8 +596,8 @@ impl TuiView {
             .debug_selector(|| "decision".to_string())
             .id("decision")
             .min_h(px(0.))
-            .max_h(px((self.win_h * 0.5).clamp(160., 460.)))
-            .overflow_y_scroll()
+            .max_h(px((self.win_h * 0.55).clamp(200., 520.)))
+            .overflow_hidden()
             .mx(px(12.))
             .mb(px(8.))
             .flex()
@@ -602,6 +654,16 @@ impl TuiView {
                         ),
                     ));
                     // every brief field, in the server's order; Tab shows each one whole
+                    // in a box of its own, so the answers and the keys below it never scroll out of sight
+                    let mut brief = div()
+                        .id("decision-brief")
+                        .debug_selector(|| "decision-brief".to_string())
+                        .flex_shrink(1.)
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.));
                     for r in &c.rows {
                         let body = if p.full {
                             r.text.clone()
@@ -609,7 +671,7 @@ impl TuiView {
                             r.text.lines().next().unwrap_or("").to_string()
                         };
                         let more = !p.full && r.text.lines().count() > 1;
-                        card = card.child(
+                        brief = brief.child(
                             div()
                                 .flex()
                                 .flex_col()
@@ -621,6 +683,7 @@ impl TuiView {
                                 })),
                         );
                     }
+                    card = card.child(brief);
                     match &p.ask.picker {
                         Some(pk) => {
                             for (i, o) in pk.options.iter().enumerate() {
@@ -629,6 +692,7 @@ impl TuiView {
                                     div()
                                         .id(("decision-opt", i))
                                         .debug_selector(move || format!("decision-opt-{i}"))
+                                        .flex_none()
                                         .flex()
                                         .gap(px(8.))
                                         .px(px(8.))
@@ -679,6 +743,7 @@ impl TuiView {
                     }));
                     card.child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(10.))
