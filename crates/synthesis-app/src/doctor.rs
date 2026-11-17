@@ -566,7 +566,7 @@ fn planner_row(p: &synthesis_settings::PlannerSettings) -> String {
             "orchestrator planner: stub (the deterministic plan, the default)".into()
         }
         PlannerMode::Model => format!(
-            "orchestrator planner: model {}, at most {} USD per run and {} items; a model plan always needs your approval. The planning run is not in this build yet, so the stub plan is used",
+            "orchestrator planner: model {}, at most {} USD per run and {} items; a read-only sandboxed planning run proposes it, a model plan always needs your approval, a model with no synt.pricing entry is refused, and on any failure the stub plan is only offered, never used by itself",
             p.model.as_deref().unwrap_or("(your default model)"),
             p.max_cost_usd,
             p.max_items

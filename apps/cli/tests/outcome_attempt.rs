@@ -542,6 +542,46 @@ fn the_worker_cannot_be_given_a_weaker_profile() {
     );
 }
 
+/// The planning run's flag is internal and narrow: it needs `--resume` and is no attempt.
+#[test]
+fn plan_session_needs_resume_and_is_not_an_attempt_or_unattended() {
+    for bad in [
+        vec!["run", "--plan-session", "--prompt", "x"],
+        vec![
+            "run",
+            "--plan-session",
+            "--resume",
+            "x",
+            "--attempt-session",
+            "--prompt",
+            "x",
+        ],
+        vec![
+            "run",
+            "--plan-session",
+            "--resume",
+            "x",
+            "--unattended",
+            "--prompt",
+            "x",
+        ],
+    ] {
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(&bad)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{bad:?}");
+        // a clap refusal that names the flag or the one it needs
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains("--plan-session") || err.contains("--resume"),
+            "{bad:?}: {err}"
+        );
+    }
+}
+
 // ---- the gateway: the envelope's rules, non-interactive attempts, the closed bypass paths ----
 
 /// Contract that allows writing only under `src/`.

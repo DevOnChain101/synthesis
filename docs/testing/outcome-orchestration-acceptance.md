@@ -202,4 +202,24 @@ Not covered: a live attempt at approval time through the owner (store level only
 | `planner_row_names_the_mode_and_limits` | `doctor.rs` | doctor row |
 | `title_and_instructions_are_capped_and_never_hidden_and_an_empty_one_is_not_stored` | `synthesis-core` | the stub plan hash is unchanged (empty fields are not stored) |
 
-Not covered (B7): the planning run itself, the prompt, the repair round, the read-only profile, `plan-readme-injection-widen`, `plan-secret-not-readable`, `plan-run-network-denied`, kill -9 of a planning run, `unpriced_model_falls_back`, the stub-only decision after a failed run.
+## B7 tests (implemented: the model planning run)
+
+| Test | File | What it proves |
+|---|---|---|
+| `the_profile_is_read_only_sandboxed_capped_and_fixed` | `synthesis-orchestrator/tests/planrun.rs` | the planner argv: `--plan-session`, sandbox enforce, network deny, `dontAsk`, cost cap = the reservation, wall and turn caps, deny rules, no `--allow`/`--trust-project`/MCP/worktree flags; reserved before it ran, audited `planner.spawn`, plain checkout without `.git` |
+| `a_valid_model_plan_becomes_a_decision_and_installs_nothing` | same | a fenced valid answer is a pending `plan_approval`; nothing installed; run `finished` with its real cost and hashes |
+| `invalid_json_repairs_once_then_stub_only_decision`, `a_repaired_plan_is_proposed_like_any_other`, `a_plan_that_drops_verification_is_refused_and_cycles_and_giants_too` (`cycle_and_oversize_refused`, `plan-drops-verify`) | same | exactly one repair round, whose text is a fixed sentence (a marker the model wrote is not echoed), capped at what is left; the second refusal gives a stub-only decision with the code |
+| `an_unpriced_model_is_refused_before_anything_is_reserved` (`unpriced_model_falls_back`) | same | no reservation, no process, stub-only decision `unpriced_model` |
+| `a_failed_run_keeps_its_whole_reservation_when_its_usage_is_unknown` (AC-15 planner-call variant: a planner that errors or ends without output never installs a plan, relaxes no policy and offers only the stub), `a_cancelled_outcome_kills_the_planner_and_offers_nothing` | same | unknown usage never settles as zero; cancel kills the process and offers nothing |
+| `a_run_found_running_after_an_owner_crash_is_lost_once_and_never_rerun` (`plan_run_kill9_keeps_reservation_and_no_duplicate_decision`) | same | `lost`, reservation counted, one decision however often recovery runs, the model is not run again |
+| `the_start_command_waits_for_the_planning_decision_and_runs_only_after_an_approved_install`, `a_rejected_plan_decision_ends_the_start_instead_of_asking_the_model_again` | same | `outcome.start` semantics with the model planner |
+| `a_plan_over_the_users_max_items_now_is_not_installed` | same | B6 review item d |
+| `plan_text_reaches_a_worker_only_in_a_labelled_delimited_block` | same | B6 review item a: label, delimiters, a text cannot close the block, hidden characters dropped |
+| `attempt_and_planning_reservations_together_never_pass_the_cap`, `randomised_interleavings_of_attempt_and_planning_reservations_stay_under_the_cap` | same | B6 review item b: a stale caller amount is refused, any interleaving stays under the cap |
+| `a_model_plan_waits_for_the_person_and_only_then_is_installed_and_run` | `apps/cli/tests/outcome_e2e.rs` | the real owner, a real sandboxed planner process on the scripted model: pending card, nothing installed or running, `planner_usd` > 0, approve, runs to verified |
+| `a_malicious_plan_and_a_readme_that_asks_for_approval_end_in_a_refusal_and_the_stub_offer` (`plan-readme-injection-widen`) | same | the model read the injected README, its plan (unknown fields, `git.push`) is refused, only the stub is offered and installs only on the person's choice, the contract hash is unchanged |
+| `the_planner_cannot_read_secrets_write_or_run_commands` (`plan-secret-not-readable`, `plan-run-network-denied`) | same | `.env` marker absent from the card and the planner transcript; Write, Bash and WebFetch do not exist in the process; nothing was created |
+| `an_unpriced_planner_model_is_refused_before_a_run_is_reserved_and_offers_the_stub` | same | end to end |
+| `kill9_during_the_planning_run_keeps_the_reservation_offers_the_stub_once_and_never_reruns` | same | kill -9 of the owner mid-run (AC-04 style) |
+
+Not covered (B7): Linux and Windows runs of the e2e; a planning run on native Windows (no enforcing sandbox: it fails closed); the model replanner (B9); a surface render of `plan_approval`; a planner timeout at its real 600 s cap (the wall branch is the same kill path as the cancel test); the project-setting refusal is the B6 settings test `a_project_or_local_file_cannot_turn_the_model_planner_on_or_change_its_budget`.

@@ -27,10 +27,12 @@ use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
-    Allocator, Control, DecisionDriver, IndependentVerifier, Platform, ProcessHost, Runner,
-    SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, answered_waiting,
-    apply_lifecycle, apply_queued, awaiting_rebrief, awaiting_replan, conclude, recover_attempts,
-    replan_after_revise, restore_pause, wall_secs,
+    Allocator, Control, DecisionDriver, IndependentVerifier, ModelPlanner, PlanCfg, PlanRun,
+    Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig, Scheduler,
+    Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
+    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan,
+    recover_attempts, recover_plan_runs, replan_after_revise, restore_pause, start_plan_run,
+    wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -41,6 +43,7 @@ use synthesis_session::outcome::{
 use synthesis_session::{
     Error as StoreError, OsProbe, Reader, SCHEMA_VERSION_OUTCOMES, Store, StoreOptions,
 };
+use synthesis_settings::{PlannerMode, PlannerSettings};
 use synthesis_workspace::WorktreeManager;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -123,6 +126,18 @@ struct Owned<'a> {
     unblocked_for: BTreeSet<String>,
     /// `decision id -> (revision, state)` as last published to push links.
     pushed: BTreeMap<String, (i64, String)>,
+    /// The model planning run of this outcome that this process is watching.
+    planning: Option<PlanRun>,
+    /// Keeps what the driver already refused (said once) and the user's `max_items`.
+    driver: DecisionDriver,
+}
+
+/// What the owner needs to plan with a model (`synt.orchestrator.planner.mode = model`): the
+/// settings of this cycle, and where a model is resolved and priced.
+pub struct PlannerCtx {
+    pub settings: PlannerSettings,
+    pub env: Env,
+    pub homes: crate::Homes,
 }
 
 pub struct Owner<'a> {
@@ -140,8 +155,52 @@ pub struct Owner<'a> {
     created: VecDeque<(String, String, Value)>,
     /// `(outcome, contract version)` -> failed replans of a revised contract (this process only).
     replan_failed: BTreeMap<(String, u32), u32>,
+    /// Set (by the loop, every cycle) only while `planner.mode` is `model`; `None` plans with the
+    /// deterministic stub.
+    pub planner: Option<PlannerCtx>,
+    /// `synt.orchestrator.planner.max_items` of this cycle: a model plan is installed within it.
+    pub max_items: usize,
+    /// `(outcome, contract version)` the model planner could not even start for (said once).
+    plan_failed: BTreeSet<(String, u32)>,
     #[cfg(feature = "test-provider")]
     pub test: TestHooks,
+}
+
+/// The planner model: its label and the options to start it with, or why it cannot be used. An
+/// unpriced model is refused HERE, before anything is reserved (a cost cap needs a price).
+fn planner_model(
+    ctx: &PlannerCtx,
+    provider: Option<String>,
+) -> Result<(String, Vec<String>), ReasonCode> {
+    let cfg = crate::load_config(
+        &ctx.env,
+        &ctx.homes,
+        None,
+        synthesis_config::ProjectTrust::Untrusted,
+    )
+    .map_err(|_| ReasonCode::PlannerFailed)?;
+    let res = crate::run::resolve_provider(
+        provider.as_deref(),
+        ctx.settings.model.as_deref(),
+        &cfg,
+        &ctx.homes.synthesis,
+        &ctx.env,
+    )
+    .map_err(|_| ReasonCode::PlannerFailed)?;
+    crate::run::pricing(
+        &ctx.homes.synthesis.join("settings.json"),
+        &res.label,
+        &res.model,
+    )
+    .ok_or(ReasonCode::UnpricedModel)?;
+    let mut extra = vec![];
+    if let Some(p) = provider {
+        extra.extend(["--provider".to_string(), p]);
+    }
+    if let Some(m) = &ctx.settings.model {
+        extra.extend(["--model".to_string(), m.clone()]);
+    }
+    Ok((res.label, extra))
 }
 
 /// `decision id -> (revision, verified state word)`; a row whose state cannot be verified is left
@@ -184,6 +243,9 @@ impl<'a> Owner<'a> {
             push: None,
             created: VecDeque::new(),
             replan_failed: BTreeMap::new(),
+            planner: None,
+            max_items: synthesis_core::outcome::MAX_PLAN_ITEMS,
+            plan_failed: BTreeSet::new(),
             #[cfg(feature = "test-provider")]
             test: TestHooks::default(),
         }
@@ -229,6 +291,8 @@ impl<'a> Owner<'a> {
                             refused: None,
                             unblocked_for: BTreeSet::new(),
                             pushed,
+                            planning: None,
+                            driver: DecisionDriver::with_max_items(self.max_items),
                         },
                     );
                 }
@@ -311,7 +375,7 @@ impl<'a> Owner<'a> {
     /// owner lets the outcome go: it stays `blocked` (a new `outcome revise` is queued as any command
     /// and is adopted again), and this process does not adopt it again for that version (a restart
     /// tries again).
-    fn replan(&mut self, ow: &mut Owned<'a>, id: &str) {
+    fn replan(&mut self, ow: &mut Owned<'a>, id: &str, planner: &dyn Planner) {
         let key = (
             id.to_string(),
             ow.w.get_outcome(ow.w.id())
@@ -320,7 +384,7 @@ impl<'a> Owner<'a> {
         if self.replan_given_up(id, key.1) {
             return;
         }
-        match replan_after_revise(&mut ow.w, &StubPlanner) {
+        match replan_after_revise(&mut ow.w, planner) {
             Ok(_) => {
                 self.replan_failed.remove(&key);
             }
@@ -346,18 +410,103 @@ impl<'a> Owner<'a> {
         }
     }
 
+    /// The model planning run (B7): watches the one this process started, settles one a dead owner
+    /// left (`lost`, never rerun, the stub plan offered), and starts one when the outcome needs a
+    /// plan and `planner.mode` is `model`. Every failure ends in a decision that offers only the
+    /// stub plan; the owner never switches to it by itself.
+    fn plan_step(&mut self, ow: &mut Owned<'a>, id: &str, now: OffsetDateTime) {
+        if let Some(run) = ow.planning.as_mut() {
+            let cancel = ow.control.cancel.is_set()
+                || ow
+                    .w
+                    .get_outcome(ow.w.id())
+                    .is_ok_and(|o| o.state.is_terminal());
+            match run.poll(&mut ow.w, self.store, self.spawn, cancel, now) {
+                Ok(true) => ow.planning = None,
+                Ok(false) => {}
+                Err(e) => {
+                    // dropping the run kills its process; the row stays `running` and the next step settles it `lost`
+                    log(&format!("outcome {id}: planning run: {e}"));
+                    ow.planning = None;
+                }
+            }
+            return;
+        }
+        match recover_plan_runs(&mut ow.w, &self.home, now) {
+            Ok(done) => done
+                .iter()
+                .for_each(|r| log(&format!("outcome {id}: planning run {r} was lost with its owner; the stub plan is offered"))),
+            Err(e) => log(&format!("outcome {id}: planning run recovery: {e}")),
+        }
+        let Some(ctx) = &self.planner else {
+            return;
+        };
+        let Ok(o) = ow.w.get_outcome(ow.w.id()) else {
+            return;
+        };
+        if !needs_model_plan(&ow.w).unwrap_or(false)
+            || self
+                .plan_failed
+                .contains(&(id.to_string(), o.contract_version))
+        {
+            return;
+        }
+        let (model, extra) = match planner_model(ctx, self.provider_arg()) {
+            Ok((label, extra)) => (Ok(label), extra),
+            Err(why) => (Err(why), vec![]),
+        };
+        let cfg = PlanCfg {
+            program: self.program.clone(),
+            home: self.home.clone(),
+            extra,
+            max_cost_usd: ctx.settings.max_cost_usd,
+            max_items: ctx.settings.max_items as usize,
+        };
+        match start_plan_run(&mut ow.w, self.store, self.spawn, &cfg, model, now) {
+            Ok(run) => ow.planning = run,
+            Err(e) => {
+                log(&format!("outcome {id}: planning run not started: {e}"));
+                self.plan_failed
+                    .insert((id.to_string(), o.contract_version));
+            }
+        }
+    }
+
+    /// The `--provider` a test build starts every model process with (`fake:<script>`); none in a release.
+    fn provider_arg(&self) -> Option<String> {
+        #[cfg(feature = "test-provider")]
+        let found = {
+            let a = &self.test.worker_args;
+            a.iter()
+                .position(|x| x == "--provider")
+                .and_then(|i| a.get(i + 1))
+                .cloned()
+        };
+        #[cfg(not(feature = "test-provider"))]
+        let found = None;
+        found
+    }
+
     /// Returns whether the outcome stays owned.
     fn step(&mut self, ow: &mut Owned<'a>, pol: &OutcomePolicy) -> bool {
         let now = OffsetDateTime::now_utc();
         let id = ow.w.id().to_string();
-        if let Err(e) = apply_queued(&mut ow.w, now) {
+        ow.driver.set_max_items(self.max_items);
+        if let Err(e) = apply_queued_with(&mut ow.w, now, &mut ow.driver) {
             log(&format!("outcome {id}: commands: {e}"));
         }
-        if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, &StubPlanner) {
+        // with a model planner the plan comes from a planning run and the person's approval
+        let planner: &dyn Planner = if self.planner.is_some() {
+            &ModelPlanner
+        } else {
+            &StubPlanner
+        };
+        if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, planner) {
             log(&format!("outcome {id}: commands: {e}"));
         }
+        self.plan_step(ow, &id, now);
         // a revised contract was approved: its plan is stored and the outcome runs again (retried each step until it works)
-        self.replan(ow, &id);
+        self.replan(ow, &id, planner);
         let Ok(mut o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
@@ -372,6 +521,7 @@ impl<'a> Owner<'a> {
             let fresh: Vec<String> = answered_waiting(&mut ow.w)
                 .unwrap_or_default()
                 .into_iter()
+                .chain(answered_plans(&ow.w).unwrap_or_default())
                 .filter(|d| !ow.unblocked_for.contains(d))
                 .collect();
             if !fresh.is_empty() {
@@ -402,7 +552,8 @@ impl<'a> Owner<'a> {
                     match self.build(&ow.w, &o, pol) {
                         Ok(mut sc) => {
                             sc.control = ow.control.clone();
-                            sc.decisions = Some(Box::new(DecisionDriver::default()));
+                            sc.decisions =
+                                Some(Box::new(DecisionDriver::with_max_items(self.max_items)));
                             ow.sched = Some(sc);
                         }
                         Err(e) => {
@@ -453,6 +604,7 @@ impl<'a> Owner<'a> {
         self.notices(&mut ow.w, &o);
         self.publish(ow);
         let keep = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying)
+            || ow.planning.is_some()
             || has_work(&ow.w, ow.w.id()).unwrap_or(true)
             // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
             || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false)
@@ -1043,6 +1195,16 @@ fn run_loop(
             log("outcomes were turned off: stopping");
             return Ok(());
         }
+        // the planner settings of this cycle (user or managed only); `None` keeps the stub plan
+        owner.max_items = orch.planner.max_items as usize;
+        owner.planner = (orch.planner.mode == PlannerMode::Model).then(|| PlannerCtx {
+            settings: orch.planner.clone(),
+            env: env.clone(),
+            homes: crate::Homes {
+                user: h.user.clone(),
+                synthesis: h.synthesis.clone(),
+            },
+        });
         // a job wakes the loop early; the rest of the cycle is the same
         match rx.recv_timeout(TICK) {
             Ok((call, reply)) => {

@@ -18,6 +18,7 @@ mod grants;
 mod host;
 mod model_plan;
 mod planner;
+mod planrun;
 mod proc;
 mod profile;
 mod recover;
@@ -28,7 +29,8 @@ mod verify;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
 pub use commands::{
-    apply_lifecycle, apply_queued, awaiting_replan, conclude, replan_after_revise, restore_pause,
+    apply_lifecycle, apply_queued, apply_queued_with, awaiting_replan, conclude,
+    replan_after_revise, restore_pause,
 };
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
@@ -39,15 +41,20 @@ pub use gitsafe::{
     temp_scratch,
 };
 pub use grants::{
-    DecisionDriver, GRANT_TTL_HOURS, answered_waiting, awaiting_rebrief, current_binding_for,
-    decided_choices, decision_binding, plan_binding_for,
+    DecisionDriver, GRANT_TTL_HOURS, answered_plans, answered_waiting, awaiting_rebrief,
+    current_binding_for, decided_choices, decision_binding, plan_binding_for,
 };
-pub use host::ProcessHost;
+pub use host::{PLAN_TEXT_BEGIN, PLAN_TEXT_END, PLAN_TEXT_LABEL, ProcessHost, plan_text_block};
 pub use model_plan::{
     DEFAULT_MAX_ITEMS, MAX_PLAN_DEPTH, ModelPlanLimits, ReasonCode, ValidatedPlan,
-    install_approved_plan, plan_hash, record_plan_approval, validate_model_plan,
+    install_approved_plan, plan_hash, record_plan_approval, record_stub_fallback,
+    validate_model_plan,
 };
-pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
+pub use planner::{ModelPlanner, Planner, PlannerError, Replan, StubPlanner, make_plan, replan};
+pub use planrun::{
+    PLAN_MAX_TURNS, PLAN_WALL_SECS, PlanCfg, PlanRun, PlanSpawn, PlanWait, PlannerProfile,
+    needs_model_plan, plan_wait, recover_plan_runs, start_plan_run,
+};
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};
 pub use recover::{RecoveryReport, recover_attempts, recover_item};

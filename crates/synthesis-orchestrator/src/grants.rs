@@ -176,9 +176,30 @@ pub fn decided_choices(
 /// Runs the decision lifecycle on every tick; see the module comment.
 /// The refusals already audited in this process (a decision that stays refused is reported once,
 /// not on every tick).
-#[derive(Default)]
 pub struct DecisionDriver {
     refused: std::collections::BTreeSet<String>,
+    /// `synt.orchestrator.planner.max_items` as of now: a model plan is installed only within it.
+    max_items: usize,
+}
+
+impl Default for DecisionDriver {
+    fn default() -> Self {
+        Self::with_max_items(synthesis_core::outcome::MAX_PLAN_ITEMS)
+    }
+}
+
+impl DecisionDriver {
+    /// The user's `planner.max_items` of this cycle (settings can change while the owner runs).
+    pub fn set_max_items(&mut self, max_items: usize) {
+        self.max_items = max_items;
+    }
+
+    pub fn with_max_items(max_items: usize) -> Self {
+        Self {
+            refused: Default::default(),
+            max_items,
+        }
+    }
 }
 
 fn go(w: &mut OutcomeWriter, id: &WorkItemId, to: WorkItemState) -> Result<(), StoreError> {
@@ -225,7 +246,7 @@ impl DecisionDriver {
                 }
             }
             DecisionState::Approved if w.binding_is_current(d, &current)? => {
-                match install_approved_plan(w, d, &current) {
+                match install_approved_plan(w, d, &current, self.max_items) {
                     Ok(v) => notes.push(format!("plan v{v} installed from decision {id}")),
                     Err(
                         e @ (StoreError::Sqlite(_) | StoreError::Io(_) | StoreError::Locked(_)),
@@ -519,6 +540,31 @@ pub fn answered_waiting(w: &mut OutcomeWriter) -> Result<Vec<String>, StoreError
         if w.decision_state(&d.id)? == DecisionState::Approved
             && binding_matches(w, &d, &current)?
             && w.get_work_item(&item_id)?.state == WorkItemState::WaitingDecision
+            && w.verified_resolution(&d.id)?.is_some()
+        {
+            out.push(d.id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Ids of the `plan_approval` decisions of the CURRENT contract that a person approved and whose
+/// plan is installed (the plan names the current contract): the owner moves a `blocked` outcome
+/// that waited for its replan back to `running` once per answer, like [`answered_waiting`].
+pub fn answered_plans(w: &OutcomeWriter) -> Result<Vec<String>, StoreError> {
+    let o = w.get_outcome(w.id())?;
+    let Some(pv) = o.plan_version else {
+        return Ok(vec![]);
+    };
+    if w.get_plan(w.id(), pv)?.contract_version != o.contract_version {
+        return Ok(vec![]);
+    }
+    let mut out = vec![];
+    for d in w.list_decisions(w.id())? {
+        if d.kind == "plan_approval"
+            && d.binding.get("contract_version").and_then(Value::as_u64)
+                == Some(u64::from(o.contract_version))
+            && w.decision_state(&d.id)? == DecisionState::Approved
             && w.verified_resolution(&d.id)?.is_some()
         {
             out.push(d.id.to_string());

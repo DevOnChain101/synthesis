@@ -265,6 +265,8 @@ fn budget_reports_what_the_store_has_and_reservations_apart() {
         assert_eq!(b["wall_secs"], json!({"spent": 12.5}));
         // the attempt has a final usage, so its reservation is no longer outstanding
         assert_eq!(b["reserved_usd"], 0.0);
+        // no planning run: nothing was spent on planning
+        assert_eq!(b["planner_spent_usd"], 0.0);
         assert!(b.get("tokens").is_none() && b["cost_usd"].get("remaining").is_none());
         let view = synthesis_view::outcomes::BudgetView::from_json(&b);
         assert_eq!(view.cost_usd.spent, Some(0.25));
