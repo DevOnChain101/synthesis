@@ -48,8 +48,10 @@ use time::format_description::well_known::Rfc3339;
 use crate::notify::{Notifier, outcome_payload};
 use crate::orch_endpoint::{self as ep, Ctx, Job};
 use crate::outcome_policy::{DISCLOSURE_ID, INTEGRITY_DISCLOSURE, outcome_policy};
-use crate::outcome_service::settings_of;
+use crate::outcome_service::{gateway_allows, settings_of};
 use crate::proto::{Call, DecisionHint};
+use synthesis_orchestrator::gateway::audit;
+use synthesis_orchestrator::{Action, Principal};
 
 /// Pause between cycles of the owner loop (a job wakes it earlier).
 const TICK: Duration = Duration::from_millis(500);
@@ -525,6 +527,15 @@ impl<'a> Owner<'a> {
 
     /// The calls that need the owner itself: they take control-session locks.
     pub fn job(&mut self, call: Call, pol: &OutcomePolicy) -> Result<Value, String> {
+        // the endpoint verified the call's surface is the link's; the gateway decides here again
+        // (defence in depth) and writes the allowed create into the new outcome's chain
+        let by = call
+            .surface()
+            .map(Principal::User)
+            .unwrap_or(Principal::Engine);
+        if !call.action().is_some_and(|a| gateway_allows(by, a)) {
+            return Err("the owner's policy table does not allow this call".into());
+        }
         match call {
             Call::OutcomeCreate {
                 workspace,
@@ -532,7 +543,7 @@ impl<'a> Owner<'a> {
                 contract,
                 idempotency_key,
                 ..
-            } => self.create(&workspace, base_commit, &contract, idempotency_key, pol),
+            } => self.create(&workspace, base_commit, &contract, idempotency_key, pol, by),
             Call::OrchestratorEnable { .. } => self.enable(pol),
             _ => Err("not an owner call".into()),
         }
@@ -548,9 +559,10 @@ impl<'a> Owner<'a> {
         contract: &Contract,
         key: Option<String>,
         pol: &OutcomePolicy,
+        by: Principal,
     ) -> Result<Value, String> {
         let Some(key) = key else {
-            return self.make(workspace, base_commit, contract, pol);
+            return self.make(workspace, base_commit, contract, pol, by);
         };
         if !(8..=128).contains(&key.len())
             || !key
@@ -572,7 +584,7 @@ impl<'a> Owner<'a> {
                 Err("the idempotency key was already used by a different request".into())
             };
         }
-        let reply = self.make(workspace, base_commit, contract, pol)?;
+        let reply = self.make(workspace, base_commit, contract, pol, by)?;
         if self.created.len() >= KEPT_CREATES {
             self.created.pop_front();
         }
@@ -586,6 +598,7 @@ impl<'a> Owner<'a> {
         base_commit: String,
         contract: &Contract,
         pol: &OutcomePolicy,
+        by: Principal,
     ) -> Result<Value, String> {
         if !commit_id(&base_commit) {
             return Err("base_commit must be a full lowercase commit id".into());
@@ -620,6 +633,9 @@ impl<'a> Owner<'a> {
             &Effects::default(),
         )
         .map_err(s)?;
+        let a = audit(by, Some(Action::CreateOutcome));
+        w.audit_policy("outcome.create", "allow", a["detail"].clone())
+            .map_err(s)?;
         let (_, hash, _) = w.get_contract(w.id(), contract.version).map_err(s)?;
         Ok(
             json!({"id": w.id(), "state": "contract_pending", "contract_version": contract.version,
