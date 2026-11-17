@@ -556,3 +556,270 @@ fn a_live_unused_grant_moves_a_waiting_item_to_ready_on_the_next_tick() {
     assert_eq!(w.get_work_item(&it).unwrap().state, WorkItemState::Ready);
     assert_eq!(w.list_grants(w.id()).unwrap().len(), 1, "no second grant");
 }
+
+// ---- re-briefing after `request_evidence` (ADR-019 section 4a)
+
+fn find(w: &OutcomeWriter, id: &DecisionId) -> DecisionRecord {
+    w.list_decisions(w.id())
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == *id)
+        .unwrap()
+}
+
+fn open_of(w: &OutcomeWriter) -> Option<DecisionRecord> {
+    w.list_decisions(w.id())
+        .unwrap()
+        .into_iter()
+        .find(|d| d.row_state == DecisionState::Pending)
+}
+
+#[test]
+fn rebrief_keeps_action_hash_and_grant_rules() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "g",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/src/new.txt)"]),
+        2,
+    );
+    answer(&mut w, &d, "request_evidence");
+    assert_eq!(state(&w, &d), DecisionState::NeedsMoreInfo);
+    let mut driver = DecisionDriver::default();
+    let notes = driver.drive(&mut w, OffsetDateTime::now_utc()).unwrap();
+    assert!(notes.iter().any(|n| n.contains("re-briefed")), "{notes:?}");
+    // idempotent: another tick (or a restart's fresh driver) adds nothing
+    DecisionDriver::default()
+        .drive(&mut w, OffsetDateTime::now_utc())
+        .unwrap();
+    assert_eq!(w.list_decisions(w.id()).unwrap().len(), 2);
+    assert_eq!(state(&w, &d), DecisionState::Invalidated);
+    let n = open_of(&w).unwrap();
+    assert_eq!(n.brief["supersedes"], json!(d.id));
+    assert_eq!(n.brief["rebrief"], 1);
+    assert_eq!(n.brief["evidence_summary"]["rows"], json!([]));
+    assert_eq!(
+        n.binding_hash, d.binding_hash,
+        "same stored action, same binding"
+    );
+    assert_eq!(n.binding["action_hash"], d.binding["action_hash"]);
+    assert_eq!(
+        n.expires_at, d.expires_at,
+        "the expiry is carried over, not extended"
+    );
+    assert_ne!(n.brief_sha256, d.brief_sha256);
+    assert_eq!(
+        n.brief["alternatives"], d.brief["alternatives"],
+        "dec-rebrief-cannot-widen"
+    );
+    assert_eq!(
+        w.decision_action(&n.id).unwrap(),
+        w.decision_action(&d.id).unwrap()
+    );
+    // the old card cannot be answered (nor re-briefed again); the answer to the new one grants the same rules
+    assert!(
+        w.resolve_decision(
+            &Resolution {
+                decision_id: d.id.clone(),
+                decision_revision: d.revision,
+                approver: "user:cli".into(),
+                choice: "grant_once".into(),
+                brief_sha256: d.brief_sha256.clone(),
+            },
+            &d.binding,
+        )
+        .is_err()
+    );
+    assert!(
+        w.rebrief_decision(&d.id, d.revision + 1, &d.binding, &json!({}))
+            .is_err()
+    );
+    assert!(w.list_grants(w.id()).unwrap().is_empty());
+    answer(&mut w, &n, "grant_once");
+    driver.drive(&mut w, OffsetDateTime::now_utc()).unwrap();
+    let grants = w.list_grants(w.id()).unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].rules, ["Edit(/src/new.txt)"]);
+    assert_eq!(
+        grants[0].action_hash,
+        d.binding["action_hash"].as_str().unwrap()
+    );
+    assert_eq!(grants[0].decision_id, n.id);
+}
+
+#[test]
+fn rebrief_shows_only_event_backed_evidence_rows_of_the_item() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    w.record_evidence(&NewEvidence {
+        work_item_id: it.clone(),
+        attempt_id: None,
+        trust_class: TrustClass::IndependentCheck,
+        producer: "independent_runner".into(),
+        subject_commit: "abc".into(),
+        check_id: "unit".into(),
+        command_hash: None,
+        criteria_ids: vec![],
+        result: "failed".into(),
+        exit_code: Some(1),
+        env_fingerprint: "e".into(),
+        artifact: None,
+        fence: 1,
+        flags: vec![],
+    })
+    .unwrap();
+    let d = decide(
+        &mut w,
+        &it,
+        "b",
+        "blocked",
+        binding(&ctx, &it, |_| {}),
+        action(&[]),
+        2,
+    );
+    answer(&mut w, &d, "request_evidence");
+    DecisionDriver::default()
+        .drive(&mut w, OffsetDateTime::now_utc())
+        .unwrap();
+    let rows = &open_of(&w).unwrap().brief["evidence_summary"]["rows"];
+    assert_eq!(rows[0]["check"], "unit");
+    assert_eq!(rows[0]["result"], "failed");
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn request_evidence_is_bounded_and_the_last_card_must_be_answered() {
+    need_git!();
+    let r = rig();
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let mut d = decide(
+        &mut w,
+        &it,
+        "g",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/a)"]),
+        2,
+    );
+    for i in 1..=MAX_REBRIEFS {
+        answer(&mut w, &d, "request_evidence");
+        DecisionDriver::default()
+            .drive(&mut w, OffsetDateTime::now_utc())
+            .unwrap();
+        d = open_of(&w).unwrap();
+        assert_eq!(d.brief["rebrief"], i);
+    }
+    assert_eq!(d.brief["rebriefs_left"], 0);
+    let refused = w.resolve_decision(
+        &Resolution {
+            decision_id: d.id.clone(),
+            decision_revision: d.revision,
+            approver: "user:cli".into(),
+            choice: "request_evidence".into(),
+            brief_sha256: d.brief_sha256.clone(),
+        },
+        &d.binding,
+    );
+    assert!(
+        matches!(refused, Err(synthesis_session::Error::Invalid(_))),
+        "{refused:?}"
+    );
+    assert_eq!(state(&w, &d), DecisionState::Pending, "nothing was written");
+    assert_eq!(w.decision_approvals(&d.id).unwrap().len(), 0);
+}
+
+// answer vs supersede vs expiry vs invalidation: one of them commits first, the others are refused
+#[test]
+fn rebrief_loses_to_expiry_and_to_invalidation_and_to_a_lost_revision_race() {
+    need_git!();
+    let r = rig();
+    // expiry first
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "e",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/a)"]),
+        1,
+    );
+    answer(&mut w, &d, "request_evidence");
+    let d = find(&w, &d.id);
+    let mut w = w.with_clock(later);
+    assert!(matches!(
+        w.rebrief_decision(&d.id, d.revision, &d.binding, &json!({})),
+        Err(synthesis_session::Error::Stale(_))
+    ));
+    DecisionDriver::default().drive(&mut w, later()).unwrap();
+    assert_eq!(state(&w, &d), DecisionState::Expired);
+    assert_eq!(
+        w.list_decisions(w.id()).unwrap().len(),
+        1,
+        "no successor, HOLD"
+    );
+
+    // invalidation first: the stored binding no longer matches the outcome
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "i",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/a)"]),
+        2,
+    );
+    answer(&mut w, &d, "request_evidence");
+    e_rewrite_binding(&r, &w, &d);
+    DecisionDriver::default()
+        .drive(&mut w, OffsetDateTime::now_utc())
+        .unwrap();
+    assert_eq!(state(&w, &d), DecisionState::Invalidated);
+    assert_eq!(w.list_decisions(w.id()).unwrap().len(), 1, "no successor");
+
+    // a stale revision loses; a decision nobody asked evidence for is not re-briefed
+    let (mut w, it) = waiting(&r, &contract());
+    let ctx = ctx_of(&w);
+    let d = decide(
+        &mut w,
+        &it,
+        "c",
+        "approval_needed",
+        binding(&ctx, &it, |_| {}),
+        action(&["Edit(/a)"]),
+        2,
+    );
+    assert!(
+        w.rebrief_decision(&d.id, d.revision, &d.binding, &json!({}))
+            .is_err(),
+        "pending"
+    );
+    answer(&mut w, &d, "edit_scope");
+    let d = find(&w, &d.id);
+    assert!(
+        w.rebrief_decision(&d.id, d.revision, &d.binding, &json!({}))
+            .is_err(),
+        "edit_scope"
+    );
+    DecisionDriver::default()
+        .drive(&mut w, OffsetDateTime::now_utc())
+        .unwrap();
+    assert_eq!(
+        state(&w, &d),
+        DecisionState::NeedsMoreInfo,
+        "edit_scope is left as it is"
+    );
+    assert_eq!(w.list_decisions(w.id()).unwrap().len(), 1);
+}

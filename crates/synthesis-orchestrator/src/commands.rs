@@ -104,10 +104,21 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
     };
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
         let to = tx.resolve_decision(&r, &current)?;
-        Ok((
-            CommandState::Applied,
-            json!({"decision_id": r.decision_id, "state": to, "revision": r.decision_revision + 1}),
-        ))
+        let mut body =
+            json!({"decision_id": r.decision_id, "state": to, "revision": r.decision_revision + 1});
+        let note = match r.choice.as_str() {
+            "request_evidence" => Some(
+                "evidence requested: this decision is closed and a new one with the stored evidence replaces it; answer the new one (list the decisions)",
+            ),
+            "edit_scope" => Some(
+                "edit_scope is not available yet: nothing was changed and no new decision follows; this decision stays needs_more_info until it expires, so reject it or change the contract with a new version",
+            ),
+            _ => None,
+        };
+        if let Some(n) = note {
+            body["note"] = json!(n);
+        }
+        Ok((CommandState::Applied, body))
     });
     match run {
         Err(e) if refused(&e) => deny(w, c, e),

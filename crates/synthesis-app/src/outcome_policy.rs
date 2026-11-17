@@ -43,6 +43,25 @@ mod tests {
         );
     }
 
+    /// Changing the text without a new `DISCLOSURE_ID` would let a surface keep "the person saw it":
+    /// this fails until the id is bumped and the pinned pair is updated with it.
+    #[test]
+    fn a_changed_disclosure_text_needs_a_new_disclosure_id() {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(INTEGRITY_DISCLOSURE.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            (DISCLOSURE_ID, hash.as_str()),
+            (
+                "integrity-v1",
+                "ee5ce515ec13695d334e5c8639f6c588d29ded353b8aacf50e72dc19e4c47bf0"
+            ),
+            "bump DISCLOSURE_ID, then pin the new pair here"
+        );
+    }
+
     #[test]
     fn off_by_default_and_ceilings_follow_the_settings() {
         let d = outcome_policy(&OrchestratorSettings::default());

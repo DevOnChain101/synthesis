@@ -606,6 +606,94 @@ fn a_decision_a_blocked_worker_made_is_answered_only_with_an_explicit_choice() {
     assert_eq!(r.attempts(&id, "inspect").len(), 2);
 }
 
+#[test]
+fn request_evidence_gets_a_new_card_that_names_the_old_one_and_only_it_can_be_answered() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    r.set_script(&json!([{"text": "asking", "tools": [{"id": "q1", "name": "AskUserQuestion", "input": {"questions": [
+        {"question": "Which API shape?", "options": [{"label": "REST"}, {"label": "gRPC"}]}]}}]},
+        {"text": "done"}, {"text": "done"}]));
+    let id = go(&r);
+    let old = r.wait("a pending decision", 90, || {
+        r.json(&["decisions", &id])["decisions"]
+            .as_array()?
+            .first()
+            .cloned()
+    });
+    let (did, rev, hash) = (
+        old["id"].as_str().unwrap().to_string(),
+        old["revision"].as_i64().unwrap().to_string(),
+        old["brief_sha256"].as_str().unwrap().to_string(),
+    );
+    let out = r.ok(&[
+        "resolve",
+        &id,
+        &did,
+        "--choice",
+        "request_evidence",
+        "--revision",
+        &rev,
+        "--brief-hash",
+        &hash,
+    ]);
+    assert!(
+        out.contains("new one"),
+        "the reply says a new decision follows: {out}"
+    );
+    // the owner closes the old card and stores a new one (no model runs for it)
+    let new = r.wait("the new card", 90, || {
+        r.json(&["decisions", &id])["decisions"]
+            .as_array()?
+            .iter()
+            .find(|d| d["state"] == "pending" && d["id"] != old["id"])
+            .cloned()
+    });
+    let text = new["rows"].to_string();
+    assert!(text.contains(&did) && text.contains("supersedes"), "{text}");
+    let all = r.json(&["decisions", &id]);
+    let states: Vec<_> = all["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["state"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(states, ["invalidated", "pending"], "{all}");
+    // the old card cannot be answered any more
+    let (code, ..) = r.synt(&[
+        "resolve",
+        &id,
+        &did,
+        "--choice",
+        "REST",
+        "--revision",
+        &rev,
+        "--brief-hash",
+        &hash,
+    ]);
+    assert_ne!(code, 0);
+    // the person answers the new card and the work goes on
+    r.set_script(&writes(None));
+    let (nid, nrev, nhash) = (
+        new["id"].as_str().unwrap().to_string(),
+        new["revision"].as_i64().unwrap().to_string(),
+        new["brief_sha256"].as_str().unwrap().to_string(),
+    );
+    r.ok(&[
+        "resolve",
+        &id,
+        &nid,
+        "--choice",
+        "REST",
+        "--revision",
+        &nrev,
+        "--brief-hash",
+        &nhash,
+    ]);
+    r.wait_state(&id, "verified", 90);
+}
+
 // ------------------------------------------------------------ AC-04: kill -9 at each point
 
 /// Brings the outcome to its end after the owner was killed: the next command starts a new owner,

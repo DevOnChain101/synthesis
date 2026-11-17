@@ -146,3 +146,19 @@ No new job is created. New Rust tests run in `test` (macOS, Ubuntu, Windows) and
 | `watch_refetches_on_a_hint_for_its_outcome_and_shows_a_card_only_when_it_changed` | `outcome_cmd` tests | `--watch` renders refetched cards, not hints |
 
 Not covered: the end-to-end path owner decision change -> hint on a real socket (the owner publishes in `Owner::publish`; only the endpoint and client halves are tested apart); a push link on Windows.
+
+## B3 tests (implemented)
+
+| Test | Where | Proves |
+|---|---|---|
+| `rebrief_keeps_action_hash_and_grant_rules` (also `dec-rebrief-cannot-widen`, idempotent on a second tick or a fresh driver) | `synthesis-orchestrator/tests/decisions.rs` | the successor has the same stored action, binding hash and alternatives, supersedes the old row, keeps its expiry; the old card cannot be answered; the grant comes from the new card with the same rules |
+| `rebrief_shows_only_event_backed_evidence_rows_of_the_item` | same | the summary is the stored rows, as data |
+| `request_evidence_is_bounded_and_the_last_card_must_be_answered` | same | 3 re-briefs, the fourth `request_evidence` is refused and writes nothing |
+| `rebrief_loses_to_expiry_and_to_invalidation_and_to_a_lost_revision_race` | same | no successor after expiry or a moved binding; pending and `edit_scope` rows are not re-briefed |
+| `proto_request_evidence_closes_the_old_card_and_a_new_one_supersedes_it`, `proto_request_evidence_is_bounded_*`, `proto_request_evidence_vs_expiry_*`, `proto_edit_scope_says_plainly_*` | `synthesis-app/tests/outcome_proto.rs` | protocol level: two surfaces, `already_resolved`, one successor however often the owner ticks, hostile-looking check text shown as data with no new choice, the reply notes |
+| `a_rebriefed_card_shows_its_supersedes_link_and_the_old_card_cannot_be_answered` | `outcome_cmd` tests | CLI golden |
+| `request_evidence_gets_a_new_card_that_names_the_old_one_and_only_it_can_be_answered` | `apps/cli/tests/outcome_e2e.rs` | the real owner process, no model for the re-brief |
+| `enable_refuses_a_disclosure_that_is_not_this_builds_id_and_text`, `a_changed_disclosure_text_needs_a_new_disclosure_id` | `synthesis-app` lib | the review lows of #148 |
+| `sql_inserted_evidence_never_passes` (EVENT_BACKED part), `inj-readme-approve-decision` (attack-output check) | `outcome_store.rs`, redteam | a row with a valid MAC and no chained event never counts; the attack output is a refusal |
+
+Not covered: hostile text with hidden or control characters in the evidence summary (a check id is ASCII graphic by the store's own rule, so only the cleaning helper, unit-tested elsewhere, would see it); the independent verifier run for the blocked commit; a re-brief after a restart of a real owner process (the transaction and the replay rule are tested at store level).

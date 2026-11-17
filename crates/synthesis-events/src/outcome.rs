@@ -13,6 +13,8 @@ pub const PLAN_CREATED: &str = "plan.created";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";
 pub const DECISION_RESOLVED: &str = "decision.resolved";
+/// A `request_evidence` answer closed a decision and the orchestrator stored its successor (`supersedes`).
+pub const DECISION_REBRIEFED: &str = "decision.rebriefed";
 pub const GRANT_CREATED: &str = "grant.created";
 pub const GRANT_CONSUMED: &str = "grant.consumed";
 pub const GRANT_REVOKED: &str = "grant.revoked";

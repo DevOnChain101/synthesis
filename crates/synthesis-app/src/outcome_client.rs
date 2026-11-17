@@ -245,20 +245,24 @@ impl<T: Transport> OutcomeClient<T> {
 
     /// The explicit migration to schema v5 (a backup first); the setting must already be on. The
     /// reply carries the integrity disclosure (`disclosure: {id, text}`) the surface must show; a
-    /// reply without it is refused (fail closed).
+    /// reply without it, or with an id or text other than this build's, is refused (fail closed).
     pub fn enable(&mut self) -> Result<Value, ClientError> {
         let v = self.t.call(Call::OrchestratorEnable {
             surface: self.surface,
         })?;
-        let shown = |k: &str| {
+        // the disclosure must be this build's own, id and text: an owner that words it differently
+        // (an older or another build) is refused, not shown
+        let is = |k: &str, want: &str| {
             v.pointer(&format!("/disclosure/{k}"))
                 .and_then(Value::as_str)
-                .is_some_and(|t| !t.is_empty())
+                == Some(want)
         };
-        if shown("id") && shown("text") {
+        if is("id", crate::outcome_policy::DISCLOSURE_ID)
+            && is("text", crate::outcome_policy::INTEGRITY_DISCLOSURE)
+        {
             Ok(v)
         } else {
-            malformed("enable reply without its disclosure")
+            malformed("enable reply without this build's integrity disclosure (id and text)")
         }
     }
 

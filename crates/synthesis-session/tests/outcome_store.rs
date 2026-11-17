@@ -2900,6 +2900,43 @@ fn sql_inserted_evidence_never_passes() {
     .unwrap();
     w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
         .unwrap();
+
+    // EVENT_BACKED alone: the MAC key and `EvMac` are not reachable from here, so a forged row cannot
+    // carry a valid MAC. A genuine row does: its chained event is hidden (retyped) and put back. While
+    // it is hidden the row has its valid MAC and no event, and the verdict refuses it; with the event
+    // back the very same row passes, so the MAC was never what stopped it.
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    finish_items_with(&e, &store, &mut w, &items, &|ev| NewEvidence {
+        criteria_ids: vec![],
+        ..ev
+    });
+    let test = item(&items, "test").clone();
+    w.record_evidence(&NewEvidence {
+        check_id: "unit-real".into(),
+        ..evidence(&test, None, "cafe01", &["c1", "c2"])
+    })
+    .unwrap();
+    let hide = |from: &str, to: &str| {
+        e.db()
+            .execute(
+                "UPDATE events SET type=?2 WHERE type=?1 AND json_extract(payload,'$.check_id')='unit-real'",
+                [from, to],
+            )
+            .unwrap()
+    };
+    assert_eq!(hide("evidence.recorded", "evidence.recorded.hidden"), 1);
+    assert!(
+        w.list_evidence(w.id())
+            .unwrap()
+            .iter()
+            .any(|r| r.check_id == "unit-real" && !r.event_backed)
+    );
+    assert!(try_verify(&mut w).unwrap_err().contains("verdict"));
+    assert_eq!(hide("evidence.recorded.hidden", "evidence.recorded"), 1);
+    w.transition_outcome(rev_of(&w), OutcomeState::Verified, None, NONE)
+        .unwrap();
 }
 
 /// A genuine row altered afterwards (the trigger dropped by a writer with file access) fails its

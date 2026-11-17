@@ -129,6 +129,66 @@ fn decisions_rig() -> (OutcomeClient<Fake>, Seen) {
     )])
 }
 
+// after `request_evidence`: the old card is closed, the new one names it and shows the evidence
+#[test]
+fn a_rebriefed_card_shows_its_supersedes_link_and_the_old_card_cannot_be_answered() {
+    let old = {
+        let mut d = decision("invalidated");
+        d["revision"] = json!(3);
+        d["brief_sha256"] = json!("b".repeat(64));
+        d
+    };
+    let new = {
+        let mut d = decision("pending");
+        d["id"] = json!("d2");
+        d["revision"] = json!(2);
+        d["brief_sha256"] = json!("c".repeat(64));
+        d["brief"]["supersedes"] = json!("d1");
+        d["brief"]["rebriefs_left"] = json!(2);
+        d["brief"]["evidence_summary"] = json!({"rows": [{"check": "unit", "result": "failed"}], "source": "stored rows; no model ran"});
+        d
+    };
+    let (mut c, seen) = rig(vec![(
+        "decision.list",
+        json!({"decisions": [old, new.clone()]}),
+    )]);
+    let list = OutcomeCmd::Decisions {
+        id: "o1".into(),
+        decision: None,
+        watch: false,
+    };
+    let (r, out) = run(&mut c, list, false, "", false);
+    assert_eq!(r, Ok(0));
+    assert!(
+        out.contains("Decision d2") && out.contains("pending"),
+        "{out}"
+    );
+    assert!(out.contains("supersedes:\nd1"), "{out}");
+    assert!(
+        out.contains("rebriefs_left") && out.contains("unit") && out.contains("no model ran"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Decision d1") && out.contains("invalidated"),
+        "{out}"
+    );
+    assert_eq!(
+        uncovered(&new["brief"], &out),
+        Vec::<String>::new(),
+        "{out}"
+    );
+    // the old card refuses an answer and nothing is sent
+    let (r, _) = run(
+        &mut c,
+        resolve(Some("REST"), Some(3), Some("b".repeat(64))),
+        false,
+        "",
+        false,
+    );
+    assert!(r.unwrap_err().contains("does not offer"), "stale old card");
+    assert!(!methods(&seen).contains(&"decision.resolve".to_string()));
+}
+
 // surface-brief-all-fields-shown: the CLI's own layout drops no field of the brief
 #[test]
 fn every_non_empty_brief_field_is_printed_in_server_order_with_the_revision_and_hash() {
@@ -687,4 +747,24 @@ fn watch_refetches_on_a_hint_for_its_outcome_and_shows_a_card_only_when_it_chang
 #[test]
 fn the_enable_notice_starts_with_the_integrity_disclosure() {
     assert!(ENABLE_NOTICE.starts_with(crate::outcome_policy::INTEGRITY_DISCLOSURE));
+}
+
+#[test]
+fn enable_refuses_a_disclosure_that_is_not_this_builds_id_and_text() {
+    use crate::outcome_policy::{DISCLOSURE_ID, INTEGRITY_DISCLOSURE};
+    let reply = |id: &str, text: &str| json!({"schema": 5, "backups": "b", "disclosure": {"id": id, "text": text}});
+    for (id, text) in [
+        ("integrity-v0", INTEGRITY_DISCLOSURE),
+        (DISCLOSURE_ID, "an older, shorter text"),
+        (DISCLOSURE_ID, ""),
+    ] {
+        let (mut c, _) = rig(vec![("orchestrator.enable", reply(id, text))]);
+        let err = c.enable().unwrap_err().to_string();
+        assert!(err.contains("integrity disclosure"), "{err}");
+    }
+    let (mut c, _) = rig(vec![(
+        "orchestrator.enable",
+        reply(DISCLOSURE_ID, INTEGRITY_DISCLOSURE),
+    )]);
+    assert!(c.enable().is_ok());
 }
