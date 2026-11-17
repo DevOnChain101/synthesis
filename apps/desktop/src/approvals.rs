@@ -183,9 +183,19 @@ impl Popup {
         self.card.rows.len().saturating_sub(1)
     }
 
-    /// Send is not allowed yet: sections are hidden and the whole brief has not been shown for this card.
+    /// The first field is longer than the collapsed view shows (more than 2 lines or 150 characters): it is cut.
+    /// One definition for the view (its "Tab: full brief" cue) and the Send rule.
+    pub fn first_cut(&self) -> bool {
+        self.card
+            .rows
+            .first()
+            .is_some_and(|r| r.text.lines().count() > 2 || r.text.chars().count() > 150)
+    }
+
+    /// Send is not allowed yet: sections are hidden, or the first one is cut, and the whole brief has not been
+    /// shown for this card.
     pub fn send_blocked(&self) -> bool {
-        !self.full && !self.seen_all && self.hidden_sections() > 0
+        !self.full && !self.seen_all && (self.hidden_sections() > 0 || self.first_cut())
     }
 
     /// Tab, or a click on the "more sections" line. Showing the whole brief counts as having seen it.
@@ -208,10 +218,14 @@ impl Popup {
                     && self.ask.picker.as_ref().and_then(|p| p.choice()).is_some()
                 {
                     let n = self.hidden_sections();
-                    self.ask.notice = Some(format!(
-                        "Expand the brief first (Tab): {n} section{} not shown",
-                        if n == 1 { "" } else { "s" }
-                    ));
+                    self.ask.notice = Some(if n == 0 {
+                        "Expand the brief first (Tab): text is cut".to_string()
+                    } else {
+                        format!(
+                            "Expand the brief first (Tab): {n} section{} not shown",
+                            if n == 1 { "" } else { "s" }
+                        )
+                    });
                     return Out::Handled;
                 }
                 return match self.ask.send(&self.outcome, &self.card, now) {
@@ -361,6 +375,39 @@ mod tests {
         one.rows.truncate(1);
         let p = Popup::new("o".into(), one, 0);
         assert!(!p.send_blocked(), "nothing hidden");
+    }
+
+    #[test]
+    fn a_single_cut_field_needs_the_expand_too_but_a_short_one_does_not() {
+        let one = |text: &str| {
+            let mut c = card();
+            c.rows.truncate(1);
+            c.rows[0].text = text.to_string();
+            c
+        };
+        let mut p = Popup::new("o".into(), one(&"x".repeat(200)), 0);
+        assert!(p.first_cut() && p.hidden_sections() == 0 && p.send_blocked());
+        p.key("down", 0);
+        assert_eq!(p.key("enter", 10_000), Out::Handled);
+        assert_eq!(
+            p.ask.notice.as_deref(),
+            Some("Expand the brief first (Tab): text is cut")
+        );
+        p.key("tab", 0);
+        assert!(!p.send_blocked());
+        let mut multi = one("a\nb\nc");
+        assert!(
+            Popup::new("o".into(), multi.clone(), 0).first_cut(),
+            "three lines"
+        );
+        multi.revision += 1;
+        p.update(multi, 20_000);
+        assert!(
+            p.send_blocked(),
+            "a new revision needs the brief shown again"
+        );
+        let p = Popup::new("o".into(), one("short"), 0);
+        assert!(!p.first_cut() && !p.send_blocked());
     }
 
     #[test]

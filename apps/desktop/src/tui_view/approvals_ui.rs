@@ -961,9 +961,7 @@ impl TuiView {
                     // that line): every field in the server's order, scrolling inside its own box so the answers and
                     // buttons below stay in sight. Nothing is ever only reachable some other way.
                     let hidden = c.rows.len().saturating_sub(1);
-                    let first_cut = c.rows.first().is_some_and(|r| {
-                        r.text.lines().count() > 2 || r.text.chars().count() > 150
-                    });
+                    let first_cut = p.first_cut();
                     let mut brief = div()
                         .id("decision-brief")
                         .debug_selector(|| "decision-brief".to_string())

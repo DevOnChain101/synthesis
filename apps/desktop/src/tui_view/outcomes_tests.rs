@@ -841,3 +841,39 @@ fn send_needs_the_whole_brief_shown_once_per_card_and_revision(cx: &mut TestAppC
     assert!(press(&t, v, "enter"));
     assert_eq!(answers(&t, v), 2, "nothing hidden: no expand needed");
 }
+
+#[gpui::test]
+fn a_single_long_field_is_cut_so_it_needs_the_expand_before_send(cx: &mut TestAppContext) {
+    let (t, v) = open_live(cx);
+    // one section only, but longer than the collapsed view shows
+    t.update(v, |t, cx| {
+        t.outcomes.as_ref().unwrap().view.update(cx, |o, cx| {
+            if let Some(d) = o.state.detail.as_mut()
+                && let Ok(cards) = d.cards.as_mut()
+            {
+                cards[0].rows.truncate(1);
+                cards[0].rows[0].text = "long ".repeat(60);
+                cards[0].revision += 1;
+            }
+            cx.notify();
+        })
+    });
+    v.run_until_parked();
+    assert!(press(&t, v, "alt-a"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "2"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 0, "the cut field blocks Enter");
+    assert_eq!(
+        notice_of(&t, v).as_deref(),
+        Some("Expand the brief first (Tab): text is cut")
+    );
+    let send = b(v, "decision-send").center();
+    v.simulate_click(send, Default::default());
+    assert_eq!(answers(&t, v), 0, "and the Send button");
+    assert!(press(&t, v, "tab"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 1, "sent after the field was shown whole");
+}
