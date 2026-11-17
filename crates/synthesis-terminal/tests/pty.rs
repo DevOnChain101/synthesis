@@ -64,6 +64,16 @@ fn wait_line(p: &Pty, want: impl Fn(&str) -> bool, within: Duration) -> bool {
     }
 }
 
+/// A line that ENDS with `marker` and is not the echoed command: dash prints its prompt (`$ `)
+/// and cmd its (`C:\dir>`) on the same line as the output, and the typed command is echoed.
+fn wait_out(p: &Pty, marker: &str, within: Duration) -> bool {
+    wait_line(
+        p,
+        |l| l.trim_end().ends_with(marker) && !l.contains("echo"),
+        within,
+    )
+}
+
 /// `echo synt-42` whose typed form differs from its output (POSIX arithmetic, cmd literal).
 fn echo_cmd(rt: &TerminalRuntime) -> &'static str {
     match rt.shell().kind {
@@ -80,7 +90,7 @@ fn spawn_echo_resize() {
     assert!(p.pid.is_some() && p.unsandboxed_by_request());
     p.write_input(echo_cmd(&rt).as_bytes()).unwrap();
     assert!(
-        wait_line(&p, |l| l == "synt-42", Duration::from_secs(20)),
+        wait_out(&p, "synt-42", Duration::from_secs(20)),
         "{}",
         p.screen_text(50)
     );
@@ -88,7 +98,9 @@ fn spawn_echo_resize() {
     p.resize(120, 40).unwrap();
     assert!(p.resize(0, 40).is_err() && p.resize(120, 501).is_err());
     let (cmd, ok): (&str, fn(&str) -> bool) = match rt.shell().kind {
-        ShellKind::Posix => ("stty size\r", |l| l == "40 120"),
+        ShellKind::Posix => ("stty size\r", |l| {
+            l.trim_end().ends_with("40 120") && !l.contains("stty")
+        }),
         ShellKind::Cmd => ("mode con\r", |l| {
             l.trim().starts_with("Columns:") && l.trim().ends_with("120")
         }),
@@ -118,7 +130,11 @@ fn child_env_has_no_synt_or_secret_names() {
         ShellKind::Cmd => "set & echo done-42\r",
     };
     p.write_input(cmd.as_bytes()).unwrap();
-    assert!(wait_line(&p, |l| l == "done-42", Duration::from_secs(20)));
+    assert!(
+        wait_out(&p, "done-42", Duration::from_secs(20)),
+        "{}",
+        p.screen_text(50)
+    );
     let text = p.screen_text(5000);
     for bad in [
         "SYNT_API_KEY",
@@ -213,15 +229,19 @@ mod unix {
         });
         let p = rt.open_pty(SID, spec).unwrap();
         assert!(!p.unsandboxed_by_request());
-        assert!(wait_line(
-            &p,
-            |l| l == "wrapped-42",
-            Duration::from_secs(20)
-        ));
+        assert!(wait_out(&p, "wrapped-42", Duration::from_secs(20)));
         // the wrapped command still runs in the session cwd with the scrubbed env
         p.write_input(b"pwd\r").unwrap();
         let root = fx.root.to_string_lossy().into_owned();
-        assert!(wait_line(&p, |l| l == root, Duration::from_secs(20)));
+        assert!(
+            wait_line(
+                &p,
+                |l| l.trim_end().ends_with(&root) && !l.contains("pwd"),
+                Duration::from_secs(20)
+            ),
+            "{}",
+            p.screen_text(50)
+        );
     }
 
     fn pid_alive(pid: &str) -> bool {
@@ -249,6 +269,38 @@ mod unix {
             assert!(Instant::now() < end, "{}", p.screen_text(50));
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    /// Exited PTYs stay registered (each holds a screen) until closed: open-exit-repeat is capped.
+    #[test]
+    fn exited_ptys_still_count_against_the_cap() {
+        let rt = rt_off();
+        let _fx = open(&rt);
+        let mut ptys = vec![];
+        for _ in 0..synthesis_terminal::MAX_PTYS {
+            let p = rt.open_pty(SID, PtySpec::new(80, 24)).unwrap();
+            p.write_input(b"exit\r").unwrap();
+            ptys.push(p);
+        }
+        let end = Instant::now() + Duration::from_secs(20);
+        while ptys.iter().any(|p| p.exit_code().is_none()) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(ptys.iter().all(|p| p.exit_code().is_some()));
+        let e = rt.open_pty(SID, PtySpec::new(80, 24)).err().unwrap();
+        assert!(matches!(e, Error::LimitExceeded(_)), "{e}");
+        rt.close_pty(SID, &ptys[0].id).unwrap(); // closing an exited, reaped PTY frees the slot
+        assert!(rt.open_pty(SID, PtySpec::new(80, 24)).is_ok());
+    }
+
+    #[test]
+    fn a_missing_cwd_is_an_error_not_a_home_fallback() {
+        let rt = rt_off();
+        let fx = open(&rt);
+        let mut spec = PtySpec::new(80, 24);
+        spec.cwd = Some(fx.root.join("nope"));
+        let e = rt.open_pty(SID, spec).err().unwrap();
+        assert!(matches!(e, Error::InvalidSpec(_)), "{e}");
     }
 
     fn wait_dead(pid: &str) -> bool {
@@ -303,6 +355,12 @@ mod unix {
         rt.close_pty(SID, &p.id).unwrap();
         assert!(t.elapsed() < Duration::from_secs(5));
         assert!(wait_dead(&shell));
+        // the reader thread ends after close even if a straggler still holds the slave
+        let end = Instant::now() + Duration::from_secs(5);
+        while !p.output_ended() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(p.output_ended(), "reader outlived close");
         let _ = std::process::Command::new("kill")
             .args(["-9", &bg])
             .stderr(std::process::Stdio::null())

@@ -22,8 +22,12 @@ tokio-util = { version = "0.7.20", default-features = false }
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 portable-pty = "=0.9.0"
 
+[target.'cfg(windows)'.dependencies]
+# harden_dll_search: SetDefaultDllDirectories before portable-pty's bare-name LoadLibrary
+synthesis-sandbox-win = { path = "../synthesis-sandbox-win" }
+
 [target.'cfg(unix)'.dependencies]
-# safe kill_process_group (no unsafe in our code)
+# safe kill_process_group and waitid (no unsafe in our code)
 rustix = { version = "1", default-features = false, features = ["process"] }
 
 [dev-dependencies]

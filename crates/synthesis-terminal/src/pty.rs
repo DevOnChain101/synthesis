@@ -9,15 +9,16 @@
 //!   are unacknowledged by the subscriber; past that the reader stops reading the master, so the
 //!   child blocks on write (normal PTY flow control). Nothing in here is an unbounded queue.
 //! - Kill: unix SIGKILL to the shell's process group (portable-pty makes the child a session
-//!   and group leader) and to the current foreground group (a job of the interactive shell); Windows `taskkill /T /F`; both on drop, so closing a session or the
-//!   runtime kills every PTY. Known limit (as `TerminalRuntime`): without a sandbox that
+//!   and group leader) and to the current foreground group (a job of the interactive shell);
+//!   Windows `taskkill /T /F`; both on drop, so closing a session or the runtime kills every
+//!   PTY. The shell's pid is never signalled once it was reaped (it may be recycled). Known limit (as `TerminalRuntime`): without a sandbox that
 //!   confines the process tree (bubblewrap's PID namespace), a process that leaves both groups
 //!   (`setsid`, double fork, a background job `cmd &` of the interactive shell) survives.
 //! - The environment is the session env minus `SYNT_*` (except the `SYNT_AGENT_SESSION`
 //!   marker) and secret-shaped names; `TERM`/`COLORTERM` describe our emulator.
+//! - The engine `Term` answers terminal queries (cursor position report, ...): ConPTY needs it.
 //! - shortcut: no 16 ms chunk coalescing (a chunk is one `read`, at most 64 KiB), no disk-quota
-//!   watcher, the engine `Term` does not answer device queries (the drawing side does); add them
-//!   with the consumers (T2/T4).
+//!   watcher; add them with the consumers (T2/T4).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -28,7 +29,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, Osc52, Term};
@@ -42,9 +43,12 @@ use crate::{Error, Result, ShellKind, TerminalRuntime, create_log, create_privat
 pub const WINDOW: usize = 1 << 20;
 const CHUNK: usize = 64 << 10;
 const SCROLLBACK: usize = 5000;
-/// Shared PTYs per session (they also count in `Limits::max_live_procs`).
+/// Shared PTYs per session, exited ones included until `close_pty` (running ones also count in
+/// `Limits::max_live_procs`).
 pub const MAX_PTYS: usize = 4;
-pub const MAX_COLS: u16 = 1000;
+/// Bounds the Term memory: (5000 scrollback + 500 rows) x 300 cols x ~24 B per cell, about 40 MB
+/// per PTY (scrollback is released when the output ends).
+pub const MAX_COLS: u16 = 300;
 pub const MAX_ROWS: u16 = 500;
 /// One `write_input` call (spec 1.9 `pty.input`).
 pub const MAX_INPUT: usize = 64 << 10;
@@ -58,7 +62,8 @@ pub struct PtySpec {
     /// Relative paths are joined onto the workspace cwd; must stay inside the workspace roots.
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
-    /// Overrides the session's default sandbox policy.
+    /// Overrides the session's default sandbox policy. Trusted code only (settings, the person's
+    /// action), never model-supplied tool arguments; same for `env`.
     pub sandbox: Option<SandboxPolicy>,
 }
 
@@ -146,27 +151,84 @@ struct Ctl {
     pid: Option<u32>,
     /// `None` after the PTY was dropped (closes the pseudo console).
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    /// The shell was reaped, so its pid may be recycled and must never be signalled. Held while
+    /// signalling and while reaping, so a reap cannot slip in between the check and the kill.
+    reaped: Mutex<bool>,
 }
 
 impl Ctl {
     /// SIGKILL to the shell's group and to the foreground group (a job of the interactive
-    /// shell has its own); `taskkill /T /F` on Windows.
+    /// shell has its own); `taskkill /T /F` on Windows (blocks while it runs).
     fn kill_groups(&self) {
+        self.kill_groups_with(kill_group);
+    }
+
+    fn kill_groups_with(&self, kill: impl Fn(u32)) {
+        // the foreground lookup stays after a reap (it simply fails once the session is gone)
         #[cfg(unix)]
         if let Some(fg) = lock(&self.master)
             .as_ref()
             .and_then(|m| m.process_group_leader())
         {
-            kill_group(fg.unsigned_abs());
+            kill(fg.unsigned_abs());
         }
-        if let Some(pid) = self.pid {
-            kill_group(pid);
+        let reaped = lock(&self.reaped);
+        if let (false, Some(pid)) = (*reaped, self.pid) {
+            kill(pid);
+        }
+    }
+
+    /// `try_wait` that records the reap under the `reaped` lock.
+    fn try_wait(&self, child: &mut dyn Child) -> Option<u32> {
+        let mut reaped = lock(&self.reaped);
+        let code = child.try_wait().ok().flatten().map(|s| s.exit_code());
+        *reaped |= code.is_some();
+        code
+    }
+
+    /// The shell has exited but is not reaped yet (its pid is still ours). Does not reap.
+    #[cfg(unix)]
+    fn exited_unreaped(&self) -> bool {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+        let reaped = lock(&self.reaped);
+        let Some(pid) = self
+            .pid
+            .and_then(|p| i32::try_from(p).ok())
+            .and_then(Pid::from_raw)
+        else {
+            return true;
+        };
+        *reaped
+            || waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
+            )
+            .map_or(true, |st| st.is_some())
+    }
+}
+
+type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// Answers the terminal queries the program sends (cursor position report and the like). ConPTY
+/// asks for the cursor position at start-up and does not pass output until it is answered, so
+/// the engine `Term` must reply (the drawing `Term` of a shared PTY must NOT, or the program gets
+/// two answers). A reply is dropped when the writer is busy: the reader thread must never block
+/// on a child that is not reading its input.
+struct Reply(Writer);
+
+impl EventListener for Reply {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event
+            && let Ok(mut w) = self.0.try_lock()
+        {
+            let _ = w.write_all(text.as_bytes());
+            let _ = w.flush();
         }
     }
 }
 
 struct Screen {
-    term: Term<VoidListener>,
+    term: Term<Reply>,
     parser: Processor,
 }
 
@@ -179,6 +241,9 @@ struct Inner {
     eof: AtomicBool,
     /// The PTY was killed or dropped; the reader must not wait for room any more.
     closed: AtomicBool,
+    /// `close` or drop: the reader ends at its next wake-up and stops draining. It holds a dup of
+    /// the master fd, so closing ours does not end it.
+    dropped: AtomicBool,
     log_bytes: AtomicU64,
 }
 
@@ -214,11 +279,13 @@ pub struct Pty {
     pub sandbox: Option<SandboxCapabilities>,
     inner: Arc<Inner>,
     ctl: Arc<Ctl>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Writer,
     child: Mutex<Box<dyn Child + Send + Sync>>,
 }
 
 impl Pty {
+    /// True when no sandbox ran: also for `BestEffort` without a policy. Read `sandbox == None`
+    /// as "unconfined", whatever the name says.
     pub fn unsandboxed_by_request(&self) -> bool {
         self.sandbox.is_none()
     }
@@ -245,11 +312,7 @@ impl Pty {
 
     /// Exit code once the shell has exited (a signal death reports 1, like portable-pty).
     pub fn exit_code(&self) -> Option<u32> {
-        lock(&self.child)
-            .try_wait()
-            .ok()
-            .flatten()
-            .map(|s| s.exit_code())
+        self.ctl.try_wait(&mut **lock(&self.child))
     }
 
     /// Starts forwarding output (from now on) with flow control; replaces an earlier subscriber.
@@ -314,42 +377,52 @@ impl Pty {
     }
 
     /// Kills the shell's whole tree now (SIGKILL to the group; `taskkill /T /F` on Windows).
+    /// Blocks on Windows while `taskkill` runs: call it off an async executor thread.
     pub fn kill_tree(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
         self.ctl.kill_groups();
         let _ = lock(&self.child).kill();
     }
 
-    /// Orderly close: hang up the terminal, give the shell 2 s, then [`Self::kill_tree`].
+    /// Orderly close: hang up the terminal, give the shell 2 s, then [`Self::kill_tree`], then
+    /// reap. The kill goes out BEFORE the reap, while the pid is still ours. Blocks up to 2 s
+    /// (and on `taskkill` on Windows): call it off an async executor thread.
     pub fn close(&self) {
+        self.inner.dropped.store(true, Ordering::Relaxed);
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             use std::time::Instant;
-            signal_group(pid, rustix::process::Signal::HUP);
+            if !*lock(&self.ctl.reaped) {
+                signal_group(pid, rustix::process::Signal::HUP);
+            }
             let end = Instant::now() + Duration::from_secs(2);
-            while Instant::now() < end && self.exit_code().is_none() {
+            while Instant::now() < end && !self.ctl.exited_unreaped() {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
         self.kill_tree();
+        self.exit_code();
     }
 }
 
 impl Drop for Pty {
-    /// Session close and runtime drop end here: kill now, reap off this thread.
+    /// Session close and runtime drop end here: kill now (before any reap), then reap off this
+    /// thread until it succeeds, bounded at 60 s so a stuck child cannot pin a thread forever.
     fn drop(&mut self) {
         self.kill_tree();
-        lock(&self.ctl.master).take(); // closes the pseudo console, which also ends the reader
+        self.inner.dropped.store(true, Ordering::Relaxed);
+        lock(&self.ctl.master).take(); // our fd; the reader's dup closes when it sees `dropped`
         let child = std::mem::replace(&mut self.child, Mutex::new(Box::new(Gone)));
         let mut child = child.into_inner().unwrap_or_else(|e| e.into_inner());
+        let ctl = self.ctl.clone();
         let _ = std::thread::Builder::new()
             .name("synt-pty-reap".into())
             .spawn(move || {
-                for _ in 0..100 {
-                    if child.try_wait().ok().flatten().is_some() {
-                        break;
+                for _ in 0..6000 {
+                    if ctl.try_wait(&mut *child).is_some() {
+                        return;
                     }
-                    std::thread::sleep(Duration::from_millis(5));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             });
     }
@@ -412,18 +485,32 @@ fn kill_group(pid: u32) {
 }
 
 /// The session env without anything a shell the agent can type into must not see: `SYNT_*`
-/// (except the agent marker), secret-shaped names and shell-startup injection; plus the
-/// emulator's `TERM`.
+/// (except the agent marker), secret-shaped names, loader and shell-startup injection (`LD_*`,
+/// `DYLD_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `SHELLOPTS`, `BASHOPTS`, `PS4`); plus the
+/// emulator's `TERM` and no shell history file.
 fn scrub_env(mut vars: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    const INJECT: [&str; 7] = [
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "HISTFILE",
+    ];
     vars.retain(|k, _| {
         k == AGENT_MARKER
             || (!k.starts_with("SYNT_")
                 && !synthesis_config::is_secret_shaped(k)
-                && k != "BASH_ENV"
-                && k != "ENV")
+                && !k.starts_with("LD_")
+                && !k.starts_with("DYLD_")
+                && !INJECT.contains(&k.as_str()))
     });
     vars.insert("TERM".into(), "xterm-256color".into());
     vars.insert("COLORTERM".into(), "truecolor".into());
+    // bash would otherwise write ~/.bash_history: what the agent and the person type stays out
+    vars.insert("HISTFILE".into(), "/dev/null".into());
+    vars.insert("HISTSIZE".into(), "0".into());
     vars
 }
 
@@ -443,6 +530,9 @@ fn read_loop(mut rd: Box<dyn Read + Send>, mut cx: ReaderCtx) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        if cx.inner.dropped.load(Ordering::Relaxed) {
+            break;
+        }
         if cx.inner.output_limit.load(Ordering::Relaxed) {
             continue; // killed over the cap: only drain, a dying tty waits for its output
         }
@@ -471,15 +561,31 @@ fn read_loop(mut rd: Box<dyn Read + Send>, mut cx: ReaderCtx) {
             }
         }
     }
+    // release the scrollback (most of the Term's memory); the screen stays readable
+    lock(&cx.inner.screen).term.grid_mut().clear_history();
     cx.inner.eof.store(true, Ordering::Relaxed);
 }
 
 impl TerminalRuntime {
-    /// Starts an interactive shell on a PTY inside the session. Same gates as a `Bash` launch:
-    /// the sandbox wrap and `SandboxMode` rules (nothing is spawned when it refuses), the
-    /// session log quota and `Limits::max_live_procs`, plus at most [`MAX_PTYS`] live PTYs.
+    /// Starts an interactive shell on a PTY inside the session. `spec.sandbox` and `spec.env`
+    /// come from trusted code only. Same gates as a `Bash` launch: the sandbox wrap and
+    /// `SandboxMode` rules (nothing is spawned when it refuses), the session log quota and
+    /// `Limits::max_live_procs`, plus at most [`MAX_PTYS`] registered PTYs (exited ones count
+    /// until `close_pty`). Windows: the first call hardens the process-wide DLL search path.
     pub fn open_pty(&self, session_id: &str, spec: PtySpec) -> Result<Arc<Pty>> {
         check_size(spec.cols, spec.rows)?;
+        #[cfg(windows)]
+        {
+            // portable-pty loads `conpty.dll` by bare name: without this a planted copy in the
+            // cwd or on PATH would run inside the engine. Process-wide, once.
+            static DLLS: std::sync::OnceLock<std::result::Result<(), String>> =
+                std::sync::OnceLock::new();
+            DLLS.get_or_init(synthesis_sandbox_win::harden_dll_search)
+                .clone()
+                .map_err(|e| {
+                    Error::InvalidSpec(format!("cannot restrict the DLL search path: {e}"))
+                })?;
+        }
         let (ws, mut vars, session_policy, quota) = self.context(session_id)?;
         if quota.used.load(Ordering::Relaxed) >= quota.max {
             return Err(Error::LimitExceeded(format!(
@@ -487,7 +593,7 @@ impl TerminalRuntime {
                 quota.max
             )));
         }
-        let live_ptys = self.live_ptys(session_id)?;
+        let live_ptys = self.count_ptys(session_id)?;
         let live_procs = self
             .procs_of(session_id)?
             .iter()
@@ -495,7 +601,7 @@ impl TerminalRuntime {
             .count();
         if live_ptys >= MAX_PTYS || live_ptys + live_procs >= self.limits.max_live_procs {
             return Err(Error::LimitExceeded(format!(
-                "{live_ptys} live ptys and {live_procs} live processes in session; close one first"
+                "{live_ptys} ptys and {live_procs} live processes in session; close one first"
             )));
         }
         vars.extend(spec.env);
@@ -505,6 +611,12 @@ impl TerminalRuntime {
                 .map_err(|e| Error::InvalidSpec(format!("cwd: {e}")))?,
             None => ws.cwd.clone(),
         };
+        if !cwd.is_dir() {
+            return Err(Error::InvalidSpec(format!(
+                "cwd {} is not a directory",
+                cwd.display()
+            )));
+        }
         let args: Vec<OsString> = match self.shell.kind {
             ShellKind::Posix => vec!["-i".into()],
             ShellKind::Cmd => vec![],
@@ -553,7 +665,7 @@ impl TerminalRuntime {
         let child = pair.slave.spawn_command(b).map_err(io_err)?;
         drop(pair.slave); // else the reader never sees EOF
         let reader = pair.master.try_clone_reader().map_err(io_err)?;
-        let writer = pair.master.take_writer().map_err(io_err)?;
+        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(io_err)?));
 
         let term = Term::new(
             Config {
@@ -565,7 +677,7 @@ impl TerminalRuntime {
                 cols: spec.cols.into(),
                 rows: spec.rows.into(),
             },
-            VoidListener,
+            Reply(writer.clone()),
         );
         let inner = Arc::new(Inner {
             screen: Mutex::new(Screen {
@@ -577,12 +689,14 @@ impl TerminalRuntime {
             output_limit: AtomicBool::new(false),
             eof: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
             log_bytes: AtomicU64::new(0),
         });
         let pid = child.process_id();
         let ctl = Arc::new(Ctl {
             pid,
             master: Mutex::new(Some(pair.master)),
+            reaped: Mutex::new(false),
         });
         let cx = ReaderCtx {
             inner: inner.clone(),
@@ -598,7 +712,7 @@ impl TerminalRuntime {
             sandbox,
             inner,
             ctl,
-            writer: Mutex::new(writer),
+            writer,
             child: Mutex::new(child),
         });
         if let Err(e) = std::thread::Builder::new()
@@ -622,7 +736,7 @@ impl TerminalRuntime {
             .ok_or_else(|| Error::UnknownProcess(pty_id.into()))
     }
 
-    /// Orderly close (hang up, 2 s, kill) and forget the PTY.
+    /// Orderly close (hang up, 2 s, kill) and forget the PTY. Blocks: use `spawn_blocking`.
     pub fn close_pty(&self, session_id: &str, pty_id: &str) -> Result<()> {
         let p = {
             let mut s = lock(&self.sessions);
@@ -637,15 +751,13 @@ impl TerminalRuntime {
         Ok(())
     }
 
-    fn live_ptys(&self, session_id: &str) -> Result<usize> {
-        let ptys: Vec<Arc<Pty>> = {
-            let s = lock(&self.sessions);
-            let s = s
-                .get(session_id)
-                .ok_or_else(|| Error::UnknownSession(session_id.into()))?;
-            s.ptys.values().cloned().collect()
-        };
-        Ok(ptys.iter().filter(|p| p.exit_code().is_none()).count())
+    /// Registered PTYs, exited ones too: each keeps a screen until `close_pty`.
+    fn count_ptys(&self, session_id: &str) -> Result<usize> {
+        let s = lock(&self.sessions);
+        let s = s
+            .get(session_id)
+            .ok_or_else(|| Error::UnknownSession(session_id.into()))?;
+        Ok(s.ptys.len())
     }
 
     fn register_pty(&self, session_id: &str, pty: Arc<Pty>) -> Result<()> {
@@ -653,6 +765,11 @@ impl TerminalRuntime {
         let s = s
             .get_mut(session_id)
             .ok_or_else(|| Error::UnknownSession(session_id.into()))?;
+        // checked again under the lock so concurrent opens cannot pass the cap together (the
+        // loser's `pty` drops and kills its shell)
+        if s.ptys.len() >= MAX_PTYS {
+            return Err(Error::LimitExceeded(format!("{MAX_PTYS} ptys in session")));
+        }
         s.ptys.insert(pty.id.clone(), pty);
         Ok(())
     }
@@ -675,6 +792,12 @@ mod tests {
                 "SSH_AUTH_SOCK",
                 "BASH_ENV",
                 "ENV",
+                "LD_PRELOAD",
+                "DYLD_INSERT_LIBRARIES",
+                "PROMPT_COMMAND",
+                "SHELLOPTS",
+                "PS4",
+                "HISTFILE",
                 "TERM",
             ]
             .map(|k| (k.to_string(), "v".to_string()))
@@ -683,10 +806,33 @@ mod tests {
         let names: Vec<&str> = env.keys().map(String::as_str).collect();
         assert_eq!(
             names,
-            ["COLORTERM", "PATH", "SYNT_AGENT_SESSION", "TERM"],
+            [
+                "COLORTERM",
+                "HISTFILE",
+                "HISTSIZE",
+                "PATH",
+                "SYNT_AGENT_SESSION",
+                "TERM"
+            ],
             "{names:?}"
         );
         assert_eq!(env["TERM"], "xterm-256color");
+        assert_eq!(env["HISTFILE"], "/dev/null");
+    }
+
+    #[test]
+    fn a_reaped_shell_pid_is_never_signalled() {
+        let ctl = |reaped| Ctl {
+            pid: Some(4242),
+            master: Mutex::new(None),
+            reaped: Mutex::new(reaped),
+        };
+        let sent = std::cell::RefCell::new(vec![]);
+        ctl(false).kill_groups_with(|p| sent.borrow_mut().push(p));
+        assert_eq!(*sent.borrow(), [4242]);
+        sent.borrow_mut().clear();
+        ctl(true).kill_groups_with(|p| sent.borrow_mut().push(p));
+        assert!(sent.borrow().is_empty(), "{:?}", sent.borrow());
     }
 
     #[test]

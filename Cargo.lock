@@ -7790,6 +7790,7 @@ dependencies = [
  "synthesis-events",
  "synthesis-platform",
  "synthesis-sandbox",
+ "synthesis-sandbox-win",
  "tempfile",
  "tokio",
  "tokio-util",
