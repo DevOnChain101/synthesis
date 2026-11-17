@@ -209,3 +209,203 @@ fn the_outcomes_tab_lists_every_outcome_with_its_state_and_budget(cx: &mut TestA
     let (tabs, body) = (b(v, "tabs"), b(v, "tab-body"));
     assert!(body.origin.y >= tabs.bottom());
 }
+
+// ------------------------------------------------------------------------------------- key safety
+
+/// A live view (no engine) with the Decision sample open and the clock past the arming delay.
+fn open_live(cx: &mut TestAppContext) -> (gpui::Entity<TuiView>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    let (t, v) = cx.add_window_view(|window, cx| {
+        let mut t = TuiView::live(window, cx, super::tests::live_cfg(), Hidden::default(), 0.);
+        let mut l = crate::live::Live::new();
+        l.starting = false;
+        t.set_live(l);
+        let ov = cx.new(OutcomesView::sample);
+        t.seed_sample(OutShot::Decision, ov, cx);
+        t
+    });
+    v.simulate_resize(size(px(1400.), px(900.)));
+    v.run_until_parked();
+    t.update(v, |t, _| {
+        t.outcomes.as_mut().unwrap().fixed_now = Some(super::sample::OUTCOMES_NOW + 10_000)
+    });
+    (t, v)
+}
+
+fn popup_cursor(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> Option<Option<usize>> {
+    t.read_with(v, |t, _| {
+        match t.outcomes.as_ref().and_then(|w| w.shown.as_ref()) {
+            Some(Shown::Card(p, _)) => p.ask.picker.as_ref().map(|p| p.cursor()),
+            _ => None,
+        }
+    })
+}
+
+/// The clock of the view moves on by `ms`.
+fn tick(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext, ms: i64) {
+    t.update(v, |t, _| {
+        let w = t.outcomes.as_mut().unwrap();
+        w.fixed_now = w.fixed_now.map(|n| n + ms);
+    });
+}
+
+fn answers(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> u64 {
+    t.read_with(v, |t, cx| {
+        t.outcomes.as_ref().unwrap().view.read(cx).state.answers
+    })
+}
+
+fn set_prompt(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext, s: &'static str) {
+    t.update_in(v, |t, window, cx| t.set_prompt(s, window, cx));
+    v.run_until_parked();
+}
+
+#[gpui::test]
+fn typed_text_keeps_digits_enter_arrows_and_shift_chords_for_the_prompt(cx: &mut TestAppContext) {
+    let (t, v) = open_live(cx);
+    set_prompt(&t, v, "half a message");
+    // with text in the prompt none of these is the popup's: not consumed here, nothing chosen, nothing sent
+    for k in [
+        "1",
+        "2",
+        "9",
+        "enter",
+        "shift-enter",
+        "shift-2",
+        "shift-3",
+        "shift-1",
+        "up",
+        "down",
+    ] {
+        set_prompt(&t, v, "half a message");
+        let consumed = press(&t, v, k);
+        // up and down are the engine's (prompt history), the rest is plain text or a submit: never the popup's
+        assert!(
+            !consumed || matches!(k, "up" | "down"),
+            "{k} must reach the prompt"
+        );
+        assert_eq!(popup_cursor(&t, v), Some(None), "{k} chose nothing");
+        assert_eq!(answers(&t, v), 0, "{k} sent nothing");
+    }
+    // Shift+Enter and Shift+digit pass through even with an empty prompt, and even with a choice made
+    set_prompt(&t, v, "");
+    assert!(press(&t, v, "down"));
+    assert_eq!(popup_cursor(&t, v), Some(Some(0)));
+    for k in ["shift-enter", "shift-1", "shift-2"] {
+        assert!(!press(&t, v, k), "{k}");
+        assert_eq!(popup_cursor(&t, v), Some(Some(0)), "{k} moved nothing");
+        assert_eq!(answers(&t, v), 0, "{k} sent nothing");
+    }
+}
+
+#[gpui::test]
+fn an_answer_in_flight_blocks_the_other_surface_and_a_reply_clears_the_choice(
+    cx: &mut TestAppContext,
+) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "down"));
+    // the Outcomes tab has an answer on its way: the popup sends nothing, and says so
+    t.update(v, |t, cx| {
+        t.outcomes
+            .as_ref()
+            .unwrap()
+            .view
+            .update(cx, |o, _| o.state.ask.sending = true)
+    });
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 0);
+    let note = t.read_with(v, |t, _| {
+        match t.outcomes.as_ref().and_then(|w| w.shown.as_ref()) {
+            Some(Shown::Card(p, _)) => (p.ask.sending, p.ask.notice.clone()),
+            _ => panic!("no card"),
+        }
+    });
+    assert_eq!(
+        note,
+        (false, Some("An answer is already on its way.".into()))
+    );
+    t.update(v, |t, cx| {
+        t.outcomes
+            .as_ref()
+            .unwrap()
+            .view
+            .update(cx, |o, _| o.state.ask.sending = false)
+    });
+    // now it sends (the sample answers at once with "nothing was sent", as a failed answer would); a later moment
+    // than the blocked Enter, which a held key would not be
+    tick(&t, v, 1000);
+    assert!(press(&t, v, "enter"));
+    v.run_until_parked();
+    assert_eq!(answers(&t, v), 1);
+    // the reply cleared the choice: one more Enter resends nothing
+    assert_eq!(
+        popup_cursor(&t, v),
+        Some(None),
+        "the choice is gone after the reply"
+    );
+    tick(&t, v, 1000);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 1, "no resend after a reply");
+}
+
+#[gpui::test]
+fn other_overlays_keep_their_keys_and_a_dialog_re_arms_the_popup(cx: &mut TestAppContext) {
+    use crate::live::{Dialog, DialogKind};
+    let (t, v) = open_live(cx);
+    let shown = |t: &gpui::Entity<TuiView>, v: &mut VisualTestContext| {
+        t.read_with(v, |t, _| t.outcomes.as_ref().unwrap().shown.is_some())
+    };
+    // the history search (Ctrl+R) owns Esc while it is open: the popup stays
+    t.update(v, |t, _| {
+        t.live.as_mut().unwrap().search = Some((String::new(), 0))
+    });
+    assert!(press(&t, v, "escape"), "the search took it");
+    assert!(t.read_with(v, |t, _| t.live.as_ref().unwrap().search.is_none()));
+    assert!(shown(&t, v), "Esc closed the search, not the popup");
+    // a tool dialog owns the keyboard: the popup stays, its Enter is inert for ARM_MS from now
+    t.update(v, |t, _| {
+        t.live.as_mut().unwrap().live.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        })
+    });
+    assert!(press(&t, v, "escape"), "the dialog rejected");
+    assert!(t.read_with(v, |t, _| t.live.as_ref().unwrap().live.dialogs.is_empty()));
+    assert!(shown(&t, v), "the dialog's Esc did not close the popup");
+    let armed = t.read_with(v, |t, _| {
+        match t.outcomes.as_ref().and_then(|w| w.shown.as_ref()) {
+            Some(Shown::Card(p, _)) => p.ask.armed_until,
+            _ => 0,
+        }
+    });
+    assert!(armed >= super::sample::OUTCOMES_NOW + 10_000 + crate::live::ARM_MS);
+    // so a choice and an Enter right after the dialog closed send nothing
+    assert!(press(&t, v, "down"));
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 0);
+}
+
+#[gpui::test]
+fn bidi_controls_in_what_waits_for_you_are_shown_escaped(cx: &mut TestAppContext) {
+    let (t, v) = open(cx, BIG, Some(OutShot::Approvals1), Hidden::default());
+    let bidi = "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}";
+    t.update(v, |t, cx| {
+        t.snap.running[0].state = super::activity::RunState::Approval;
+        t.snap.running[0].title = format!("a{bidi}b");
+        let rows = t.approval_rows(cx);
+        for r in &rows {
+            assert!(
+                !r.subject.chars().any(|c| bidi.contains(c)),
+                "raw bidi control in {:?}",
+                r.subject
+            );
+        }
+        assert!(rows.iter().any(|r| r.subject.contains("\\u{202e}")));
+    });
+}

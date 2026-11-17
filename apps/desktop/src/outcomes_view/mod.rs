@@ -126,6 +126,8 @@ impl OutcomesView {
     /// Sends an effect the TUI view's decision popup made (the same worker path as this tab's own answer).
     pub fn send_effect(&mut self, e: Effect, cx: &mut Context<Self>) {
         // the reply (`Msg::Answered`) replaces this line: that is how the popup sees the answer came back
+        // in flight for the tab too: its own Enter sends nothing until the reply (`State::answered`) comes back
+        self.state.ask.sending = true;
         self.state.ask.notice = Some(SENDING.into());
         self.run(vec![e], cx);
     }

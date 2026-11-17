@@ -1230,7 +1230,7 @@ mod tests {
     }
 
     /// A throwaway live view (no engine): the conversation is whatever the test pushes.
-    fn live_cfg() -> driver::LiveCfg {
+    pub(super) fn live_cfg() -> driver::LiveCfg {
         use clap::Parser as _;
         let dir = std::env::temp_dir();
         driver::LiveCfg {

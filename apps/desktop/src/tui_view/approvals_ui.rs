@@ -17,7 +17,7 @@ use super::{ChatTab, TuiView};
 use crate::approvals::{self, Ages, Kind, Out, Popup, Row};
 use crate::live::now_ms;
 use crate::outcomes_view::model::Screen;
-use crate::outcomes_view::{OutcomesView, SENDING, render};
+use crate::outcomes_view::{OutcomesView, render};
 use crate::theme::hsla;
 use crate::widgets::chrome::{Head, Pad, panel};
 
@@ -25,6 +25,10 @@ use crate::widgets::chrome::{Head, Pad, panel};
 pub struct OpenOutcome(pub String);
 
 impl gpui::EventEmitter<OpenOutcome> for TuiView {}
+
+fn is_digit(k: &str) -> bool {
+    matches!(k.as_bytes(), [b'0'..=b'9'])
+}
 
 /// Rows the Approvals panel shows before it scrolls.
 const PANEL_ROWS: f32 = 5.;
@@ -171,11 +175,19 @@ impl TuiView {
     /// Per frame, before drawing: first-seen ages of what waits, and the popup follows the fresh card (a new
     /// revision or brief hash is a new card with a notice; a card no longer pending closes it).
     pub(super) fn sync_outcomes(&mut self, cx: &Context<Self>) {
+        if self.outcomes.is_none() {
+            return;
+        }
         let tools = self.tool_keys();
         let now = self.now();
+        let dialogs = self.dialogs_open();
         let Some(w) = self.outcomes.as_mut() else {
             return;
         };
+        // a tool dialog on screen keeps the popup's Enter inert; it stays so for ARM_MS after the dialog closes
+        if dialogs && let Some(Shown::Card(p, _)) = w.shown.as_mut() {
+            p.rearm(now);
+        }
         let st = &w.view.read(cx).state;
         let ready = st.screen == Screen::Ready;
         let pending: Vec<&str> = if ready {
@@ -220,10 +232,12 @@ impl TuiView {
             }
             (Shown::Card(p, _), false) => Some(Shown::Card(p, goal)),
             (Shown::Card(mut p, _), true) => card.map(|c| {
-                // the answer came back (its reply replaced the "sending" line): the popup may answer again
-                if p.ask.sending && st.ask.notice.as_deref() != Some(SENDING) {
-                    p.ask.sending = false;
-                    p.ask.notice = st.ask.notice.clone();
+                // the reply (`Msg::Answered`, counted by `State::answers`) came back: whatever it said, the choice
+                // is gone and the popup may answer again, only after a new choice
+                // (a link that ended also clears the tab's in-flight flag: that ends the wait too)
+                if p.sent_at.is_some_and(|n| st.answers > n || !st.ask.sending) {
+                    p.sent_at = None;
+                    p.ask.answered(st.ask.notice.clone().unwrap_or_default());
                 }
                 if p.card.id != c.id {
                     *p = Popup::new(outcome, c, now);
@@ -233,6 +247,13 @@ impl TuiView {
                 Shown::Card(p, goal)
             }),
         };
+    }
+
+    /// A tool-permission (or other) dialog of the open session is up: it owns the keyboard.
+    fn dialogs_open(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|l| !l.live.dialogs.is_empty())
     }
 
     /// Sessions waiting for a tool permission (the open one, by its dialog, and the others by their status).
@@ -252,7 +273,7 @@ impl TuiView {
                 } else {
                     r.id.clone()
                 };
-                (key, r.title.clone())
+                (key, synthesis_harness::sanitize_for_display(&r.title))
             })
             .collect()
     }
@@ -359,18 +380,37 @@ impl TuiView {
                 _ => {}
             }
         }
-        if m.control || m.platform || m.alt {
-            return false;
-        }
-        let dialogs = self
-            .live
-            .as_ref()
-            .is_some_and(|l| !l.live.dialogs.is_empty());
-        if dialogs {
+        // Shift (Shift+Enter, Shift+digit = "@" "#", Shift+Tab) and every other chord belong to the prompt and the
+        // engine, never to the popup
+        if m.control || m.platform || m.alt || m.shift {
             return false;
         }
         let now = self.now();
+        if self.dialogs_open() {
+            // the dialog owns the keyboard; the popup's Enter stays inert until ARM_MS after it closes
+            if let Some(Shown::Card(p, _)) = self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
+                p.rearm(now);
+            }
+            return false;
+        }
+        // the completion popup and the history search own Tab, Esc and the arrows while they are open
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| l.comp.is_some() || l.search.is_some())
+        {
+            return false;
+        }
         let key = ks.key.as_str();
+        let prompt_empty = self
+            .live
+            .as_ref()
+            .is_none_or(|l| l.prompt.read(cx).value().is_empty());
+        // digits, Enter and the arrows are the popup's only while nothing is typed: with text in the prompt they are
+        // the prompt's (a digit is text, Enter sends the message, the arrows move the cursor)
+        if !prompt_empty && (matches!(key, "enter" | "up" | "down") || is_digit(key)) {
+            return false;
+        }
         let held = {
             let Some(w) = self.outcomes.as_mut() else {
                 return false;
@@ -383,7 +423,7 @@ impl TuiView {
         };
         // the popup
         let out = match self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
-            Some(Shown::Card(p, _)) if !(key == "tab" && m.shift) => p.key(key, held, now),
+            Some(Shown::Card(p, _)) => p.key(key, held, now),
             // while the card loads only Esc acts
             Some(Shown::Loading { .. }) if key == "escape" => Out::Later,
             Some(Shown::Loading { .. }) => Out::Pass,
@@ -394,14 +434,11 @@ impl TuiView {
             return true;
         }
         // the outcome list of the tab, while the prompt is empty
-        if self.ts.tab == ChatTab::Outcomes && matches!(key, "up" | "down" | "enter") {
-            let empty = self
-                .live
-                .as_ref()
-                .is_none_or(|l| l.prompt.read(cx).value().is_empty());
-            if empty {
-                return self.list_key(key, cx);
-            }
+        if self.ts.tab == ChatTab::Outcomes
+            && prompt_empty
+            && matches!(key, "up" | "down" | "enter")
+        {
+            return self.list_key(key, cx);
         }
         false
     }
@@ -412,7 +449,21 @@ impl TuiView {
         };
         match out {
             Out::Later => w.shown = None,
-            Out::Send(e) => w.view.update(cx, |v, cx| v.send_effect(e, cx)),
+            Out::Send(e) => {
+                let busy = w.view.read(cx).state.ask.sending;
+                match w.shown.as_mut() {
+                    // the Outcomes tab has an answer on its way: no second one from here
+                    Some(Shown::Card(p, _)) if busy => {
+                        p.ask.sending = false;
+                        p.ask.notice = Some("An answer is already on its way.".into());
+                    }
+                    Some(Shown::Card(p, _)) => {
+                        p.sent_at = Some(w.view.read(cx).state.answers);
+                        w.view.update(cx, |v, cx| v.send_effect(e, cx));
+                    }
+                    _ => {}
+                }
+            }
             Out::Handled | Out::Pass => {}
         }
         cx.notify();

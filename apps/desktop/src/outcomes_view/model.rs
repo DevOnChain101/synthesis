@@ -104,6 +104,8 @@ pub struct State {
     pub active: usize,
     /// The answer cursor, arming delay, in-flight flag and footer notice of the expanded card.
     pub ask: Ask,
+    /// Replies to answers so far (`answered` calls): the TUI view's popup waits for this to grow.
+    pub answers: u64,
     /// The folder a new outcome works in by default (the app's workspace).
     pub workspace: String,
     /// The open "New outcome" or "Revise contract" form.
@@ -158,6 +160,7 @@ impl State {
             itab: InspectorTab::Overview,
             active: 0,
             ask: Ask::default(),
+            answers: 0,
             workspace: String::new(),
             form: None,
         }
@@ -231,6 +234,7 @@ impl State {
     }
 
     pub fn answered(&mut self, note: String) {
+        self.answers += 1;
         self.ask.answered(note);
     }
 

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use synthesis_config::Env;
 use synthesis_view::outcomes::DecisionCard;
 
+use crate::live::ARM_MS;
 use crate::outcomes_view::ask::Ask;
 use crate::outcomes_view::link;
 use crate::outcomes_view::model::{Effect, Item, Screen};
@@ -137,6 +138,8 @@ pub struct Popup {
     pub ask: Ask,
     /// Tab: the full brief instead of the first lines.
     pub full: bool,
+    /// `State::answers` when this popup sent an answer: it is waiting for that count to grow (the reply).
+    pub sent_at: Option<u64>,
 }
 
 impl Popup {
@@ -149,7 +152,13 @@ impl Popup {
             card,
             ask,
             full: false,
+            sent_at: None,
         }
+    }
+
+    /// Enter is inert for `ARM_MS` from `now` (a tool dialog is on screen, or has just closed).
+    pub fn rearm(&mut self, now: i64) {
+        self.ask.armed_until = self.ask.armed_until.max(now + ARM_MS);
     }
 
     /// A fresh read of the card. The same revision and brief hash changes nothing; another one is a new card:

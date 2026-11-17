@@ -327,6 +327,8 @@ Wireframe `synthesis-compare/mockups/tui-conductor-v5.svg`. Code: `tui_view/appr
 - **Key map checked** (`driver.rs`): Alt+0 and Alt+A were unused (Alt+V pastes an image). Conflicts and their resolution: Tab (focus cycle, completion) and Esc (leave tab, interrupt) are taken by the popup only while it is open, and never while a tool-permission dialog is up (the dialog wins; only the two Alt keys act then); Shift+Tab (permission mode) is left alone; Up/Down/Enter in the outcomes tab act only with an empty prompt.
 - **Shots.** `--shot out.png --size WxH --outcomes approvals-1|approvals-3|decision|tab` (feature `shot`), fixed clock and ages. Tests: `tui_view/outcomes_tests.rs` (off state, order, drawer, popup geometry and two-step keys, tab) and `approvals.rs`.
 
+- **Popup keys and held Enter** (security review of #167). While the popup is open, digits, Enter and Up/Down reach it only when the prompt is empty; any Shift chord always goes to the prompt; Tab/Esc yield to the completion popup and Ctrl+R search. The held-Enter guard is a time heuristic (two Enters within 150 ms plus the arming window): the keystroke interceptor carries no `is_held` flag, unlike the Outcomes tab's own key handler. An answer in flight on either surface blocks the other; a failed answer clears the popup's choice; a closing tool dialog re-arms Enter.
+
 ### Super Agent view (removed)
 
 The first Super Agent view (phase 3) is gone; its tab is now the Outcomes tab (below), a different design. What it built on `synthesis_view::agent`
