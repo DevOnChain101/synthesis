@@ -1708,6 +1708,23 @@ async fn screencast_body() {
         .unwrap();
     assert!(rt.view(true, 0, 600).await.is_err(), "size is validated");
     let frames = rt.frames();
+    // a static page: the first frame comes right behind the start answer and must not be dropped
+    // (Chrome would send no other until the page repaints)
+    rt.navigate(&format!("{base}/form"), WaitUntil::Load)
+        .await
+        .unwrap();
+    rt.view(true, 640, 480).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(20), frames.next())
+        .await
+        .expect("first frame of a static page")
+        .expect("stream closed");
+    assert_eq!(&first.jpeg[..2], &[0xff, 0xd8]);
+    // a cancelled view() leaves the view off, and the next call works
+    let _ = tokio::time::timeout(Duration::from_millis(1), rt.view(true, 800, 600)).await;
+    rt.view(false, 0, 0).await.unwrap();
+    rt.navigate(&format!("{base}/anim"), WaitUntil::Load)
+        .await
+        .unwrap();
     rt.view(true, 640, 480).await.unwrap();
 
     // frames arrive: JPEG bytes with metadata, increasing seq

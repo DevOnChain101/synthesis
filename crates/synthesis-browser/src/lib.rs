@@ -618,6 +618,16 @@ async fn default_context(cdp: &Cdp) -> Result<(String, Option<String>)> {
     Err(BrowserError::Launch("the browser opened no page".into()))
 }
 
+/// Turns the view off when `view` is cancelled or fails before it completed.
+struct ViewOff<'a>(Option<&'a Arc<screencast::Slot>>);
+impl Drop for ViewOff<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.0 {
+            drop(s.activate(None));
+        }
+    }
+}
+
 impl BrowserRuntime {
     /// Discovers a browser (`SYNT_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
@@ -1524,7 +1534,7 @@ impl BrowserRuntime {
 
     /// `browser.view`: starts (`on`) or stops the live view of the current tab. Frames are read from
     /// [`Self::frames`]; none is produced while the view is off. Calling it with `on` again re-targets the
-    /// view to the tab that is current now (the caller must do so after `select_tab`, `new_tab`, `close_tab`
+    /// view to the tab that is current now (cancelling or failing the call leaves the view off; the caller must call it again after `select_tab`, `new_tab`, `close_tab`
     /// or a popup: the view never follows a tab by itself). It deliberately skips `guard_capture`: the
     /// frames go to the person's own window, never to the model. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
     pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
@@ -1536,25 +1546,33 @@ impl BrowserRuntime {
         }
         let _one_at_a_time = self.view_lock.lock().await;
         let tab = if on { Some(self.current()?) } else { None };
+        // If this future is cancelled (timeout, select) the view ends up off, never half-open.
+        let mut off_on_drop = ViewOff(Some(&self.cdp.screencast));
         // Slot first: a frame already in flight for the old view must not be shown (or acked) as new.
         let (old, generation) = self
             .cdp
             .screencast
             .activate(tab.as_ref().map(|t| t.session.clone()));
-        if let Some(old) = old {
+        // Also stops a cast a cancelled call may have left running (Chrome refuses a second start).
+        for s in old.iter().chain(tab.as_ref().map(|t| &t.session)) {
             let _ = self
                 .cdp
-                .send(Some(&old), "Page.stopScreencast", json!({}))
+                .send(Some(s), "Page.stopScreencast", json!({}))
                 .await;
         }
-        let Some(tab) = tab else { return Ok(()) };
+        let Some(tab) = tab else {
+            off_on_drop.0 = None;
+            return Ok(());
+        };
+        // The pipe is ordered: every frame of the old cast was dispatched before the stop answer came
+        // back, so from here on frames are the new cast's. Opening before `startScreencast` (not after
+        // its answer) keeps a first frame that arrives right behind that answer.
+        self.cdp.screencast.open(generation);
         let params =
             json!({"format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h});
         let r = self.call(&tab, "Page.startScreencast", params).await;
-        match r {
-            // frames after Chrome's answer belong to this cast
-            Ok(_) => self.cdp.screencast.open(generation),
-            Err(_) => drop(self.cdp.screencast.activate(None)),
+        if r.is_ok() {
+            off_on_drop.0 = None; // keep the view on
         }
         r.map(drop)
     }
