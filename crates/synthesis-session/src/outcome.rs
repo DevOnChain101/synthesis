@@ -20,7 +20,7 @@ use sha2::Sha256;
 use synthesis_core::outcome::{
     Actor, AttemptId, AttemptState, CommandId, Contract, DecisionGuards, DecisionId, DecisionState,
     EvidenceId, OutcomeGuards, OutcomeId, OutcomeState, Plan, TrustClass, WorkItemGuards,
-    WorkItemId, WorkItemKind, WorkItemState, validate_contract, validate_plan,
+    WorkItemId, WorkItemKind, WorkItemState, diff_contracts, validate_contract, validate_plan,
 };
 use synthesis_core::{PermissionMode, TaskStatus, WorkspaceContext};
 use synthesis_events::{Budget, outcome as ev};
@@ -452,6 +452,21 @@ impl Reader {
         let key = crate::trust::existing_chain_key(&self.home);
         let approved = contract_authentic(&self.conn, key.as_ref(), id, version)?;
         Ok((serde_json::from_str(&body)?, hash, approved))
+    }
+
+    /// The stored plan of `version`.
+    pub fn get_plan(&self, id: &OutcomeId, version: u32) -> Result<Plan> {
+        need_v5(&self.conn)?;
+        let dag: String = self
+            .conn
+            .query_row(
+                "SELECT dag FROM plans WHERE outcome_id=?1 AND version=?2",
+                params![id.as_str(), version],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("plan v{version}")))?;
+        Ok(serde_json::from_str(&dag)?)
     }
 
     pub fn list_work_items(&self, id: &OutcomeId) -> Result<Vec<WorkItemRecord>> {
@@ -2445,9 +2460,13 @@ fn authentic_evidence(
                 e.env_fingerprint,COALESCE(e.artifact_session_id,'')||'|'||COALESCE(e.artifact_id,''), \
                 COALESCE(e.sha256,''),e.fence,e.captured_at,e.flags,COALESCE(e.mac,''), \
                 e.kind,COALESCE(e.subject_tree,''), {FENCE_CURRENT} \
-         FROM evidence e WHERE e.outcome_id=?1 AND {EVENT_BACKED}"
+         FROM evidence e WHERE e.outcome_id=?1 AND {EVENT_BACKED} \
+           AND EXISTS (SELECT 1 FROM work_items wi JOIN plans p \
+                         ON p.outcome_id=wi.outcome_id AND p.version=wi.plan_version \
+                       WHERE wi.id=e.work_item_id AND p.contract_version=?2)"
     ))?;
-    let rows = st.query_map([id.as_str()], |r| {
+    // evidence of a plan made for another contract version never counts for this one (B4)
+    let rows = st.query_map(params![id.as_str(), contract.version], |r| {
         let mut v: Vec<String> = Vec::with_capacity(20);
         for i in 0..20 {
             // numbers (exit code, fence) and text are all compared as text
@@ -2658,6 +2677,43 @@ impl OutcomeTx<'_, '_> {
                 "contract hash does not match the stored contract".into(),
             ));
         }
+        // A version above the outcome's own is a revision (B4): only a blocked outcome with no live
+        // attempt moves to it, only to the newest version, and only from an approved contract.
+        let o = self.outcome()?;
+        let rebinds = version > o.contract_version;
+        if rebinds {
+            let newest: u32 = self.et.tx.query_row(
+                "SELECT MAX(version) FROM contracts WHERE outcome_id=?1",
+                [self.id.as_str()],
+                |r| r.get(0),
+            )?;
+            let why = if o.state != OutcomeState::Blocked {
+                Some(format!(
+                    "a revised contract is approved while the outcome is blocked, not {}",
+                    enum_str(&o.state)
+                ))
+            } else if version != newest {
+                Some(format!(
+                    "only the newest version (v{newest}) can be approved"
+                ))
+            } else if approved.is_some() {
+                Some("a revision that is already approved cannot be rebound".into())
+            } else if self.has_live_attempt()? {
+                Some("an attempt is still live: approve when it has ended".into())
+            } else if !contract_authentic(
+                self.et.tx,
+                Some(self.et.key()),
+                self.id,
+                o.contract_version,
+            )? {
+                Some("the outcome's current contract does not verify as approved".into())
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(Error::Invalid(why));
+            }
+        }
         if approved.is_some() {
             // an approval that does not verify (a bare UPDATE, a poisoned row) is tampering: it is
             // reported, never accepted as "already approved" and never silently replaced
@@ -2689,6 +2745,23 @@ impl OutcomeTx<'_, '_> {
             "outcome.contract_approved",
             json!({"outcome_id": self.id, "version": version, "hash": hash, "approver": approver}),
         )?;
+        if rebinds {
+            // The outcome now stands on the revision: every decision and grant bound to the old
+            // version no longer matches (the decision driver invalidates and revokes them), and
+            // the old plan no longer fits (a replan is stored before the outcome runs again).
+            let widens =
+                diff_contracts(&self.stored_contract(o.contract_version)?, &contract).widens;
+            let goal = self.et.redact_str(&contract.goal);
+            self.et.tx.execute(
+                "UPDATE outcomes SET contract_version=?2, goal=?4, revision=revision+1, updated_at=?3 WHERE id=?1",
+                params![self.id.as_str(), version, now(), goal],
+            )?;
+            self.et.append(
+                "outcome.contract_rebound",
+                json!({"outcome_id": self.id, "from_version": o.contract_version, "version": version,
+                       "hash": hash, "widens": widens}),
+            )?;
+        }
         Ok(())
     }
 
@@ -2719,15 +2792,7 @@ impl OutcomeTx<'_, '_> {
                 "a contract version must follow the current one".into(),
             ));
         }
-        validate_contract(contract).map_err(refuse)?;
-        self.policy.check(contract)?;
-        let mut body = serde_json::to_value(contract)?;
-        self.et.redact_value(&mut body);
-        let hash = body_hash(&body);
-        self.et.tx.execute(
-            "INSERT INTO contracts(outcome_id,version,hash,body) VALUES (?1,?2,?3,?4)",
-            params![self.id.as_str(), contract.version, hash, body.to_string()],
-        )?;
+        let hash = self.insert_contract(contract)?;
         let goal = self.et.redact_str(&contract.goal);
         self.et.tx.execute(
             "UPDATE outcomes SET contract_version=?2, goal=?4, revision=revision+1, updated_at=?3 WHERE id=?1",
@@ -2738,6 +2803,90 @@ impl OutcomeTx<'_, '_> {
             json!({"outcome_id": self.id, "version": contract.version, "contract_hash": hash}),
         )?;
         Ok(())
+    }
+
+    /// Validates `contract` against the contract rules and the policy ceilings and stores it as an
+    /// unapproved version; returns its hash.
+    fn insert_contract(&mut self, contract: &Contract) -> Result<String> {
+        validate_contract(contract).map_err(refuse)?;
+        self.policy.check(contract)?;
+        let mut body = serde_json::to_value(contract)?;
+        self.et.redact_value(&mut body);
+        let hash = body_hash(&body);
+        self.et.tx.execute(
+            "INSERT INTO contracts(outcome_id,version,hash,body) VALUES (?1,?2,?3,?4)",
+            params![self.id.as_str(), contract.version, hash, body.to_string()],
+        )?;
+        Ok(hash)
+    }
+
+    /// Is an attempt of this outcome still `starting` or `running`?
+    fn has_live_attempt(&self) -> Result<bool> {
+        Ok(self.et.tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attempts a JOIN work_items w ON w.id=a.work_item_id \
+             WHERE w.outcome_id=?1 AND a.state IN ('starting','running'))",
+            [self.id.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// A person's change of scope (`edit_scope`, orchestrator B4): stores `contract` as the next
+    /// version, UNAPPROVED, while the outcome is `blocked` and no attempt is live. The outcome keeps
+    /// pointing at the approved contract it has: nothing runs under the revision, and every decision
+    /// and grant stays bound to the old version, until [`Self::approve_contract`] approves exactly
+    /// this hash and rebinds. The version is numbered here (after the newest stored one), not by the
+    /// caller. A revision that changes nothing is refused. Returns `(version, hash)`.
+    pub fn revise_contract(
+        &mut self,
+        expected_revision: i64,
+        mut contract: Contract,
+    ) -> Result<(u32, String)> {
+        let o = self.outcome()?;
+        self.conflict_or(
+            ev::Aggregate::Outcome,
+            self.id.as_str(),
+            expected_revision,
+            o.revision,
+        )?;
+        if o.state != OutcomeState::Blocked {
+            return Err(Error::Invalid(format!(
+                "a contract is revised while the outcome is blocked, not {}",
+                enum_str(&o.state)
+            )));
+        }
+        if self.has_live_attempt()? {
+            return Err(Error::Invalid(
+                "an attempt is still live: revise the contract when it has ended".into(),
+            ));
+        }
+        if !contract_authentic(self.et.tx, Some(self.et.key()), self.id, o.contract_version)? {
+            return Err(Error::Invalid(
+                "the outcome's current contract does not verify as approved".into(),
+            ));
+        }
+        let newest: u32 = self.et.tx.query_row(
+            "SELECT MAX(version) FROM contracts WHERE outcome_id=?1",
+            [self.id.as_str()],
+            |r| r.get(0),
+        )?;
+        contract.version = newest + 1;
+        let current = self.stored_contract(o.contract_version)?;
+        if diff_contracts(&current, &contract).changes.is_empty() {
+            return Err(Error::Invalid(
+                "the revision changes nothing from the approved contract".into(),
+            ));
+        }
+        let hash = self.insert_contract(&contract)?;
+        self.et.tx.execute(
+            "UPDATE outcomes SET revision=revision+1, updated_at=?2 WHERE id=?1",
+            params![self.id.as_str(), now()],
+        )?;
+        self.et.append(
+            "outcome.contract_revised",
+            json!({"outcome_id": self.id, "version": contract.version, "contract_hash": hash,
+                   "base_version": o.contract_version}),
+        )?;
+        Ok((contract.version, hash))
     }
 
     fn stored_contract(&self, version: u32) -> Result<Contract> {

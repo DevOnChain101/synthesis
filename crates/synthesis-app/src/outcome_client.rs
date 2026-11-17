@@ -412,6 +412,38 @@ impl<T: Transport> OutcomeClient<T> {
         self.reply(v, key, "outcome.contract.approve")
     }
 
+    /// Queues a revised contract (the version inside is ignored: the owner numbers it). The settled
+    /// reply carries `{version, hash}`; approve it with [`Self::approve_contract`] after reading
+    /// [`Self::contract_diff`].
+    pub fn revise_contract(
+        &mut self,
+        id: &str,
+        expected_revision: i64,
+        contract: synthesis_core::outcome::Contract,
+        key: &str,
+    ) -> Result<CommandReply, ClientError> {
+        let v = self.t.call(Call::OutcomeContractRevise {
+            id: id.into(),
+            expected_revision,
+            contract: Box::new(contract),
+            cmd: self.args(key),
+        })?;
+        self.reply(v, key, "outcome.contract.revise")
+    }
+
+    /// What `version` changes against the outcome's approved contract, as the server computed it:
+    /// `{base, version, hash, approved, diff{changes,widens,weakens}, widens_scope}`.
+    pub fn contract_diff(&mut self, id: &str, version: u32) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::OutcomeContractDiff {
+            id: id.into(),
+            version,
+        })?;
+        match (v.get("diff"), v.get("widens_scope")) {
+            (Some(d), Some(Value::Bool(_))) if d.is_object() => Ok(v),
+            _ => malformed("contract diff"),
+        }
+    }
+
     /// `kind`: `start`, `pause`, `resume`, `cancel` or `ack`.
     pub fn command(
         &mut self,

@@ -768,3 +768,151 @@ fn enable_refuses_a_disclosure_that_is_not_this_builds_id_and_text() {
     )]);
     assert!(c.enable().is_ok());
 }
+
+fn revise_rig(state: &str) -> (OutcomeClient<Fake>, Seen, tempfile::TempDir, PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("c.json");
+    std::fs::write(
+        &f,
+        json!({"goal": "g", "criteria": [{"id": "c1", "text": "t"}],
+            "envelope": {"budgets": {"max_cost_usd": 9.0}}})
+        .to_string(),
+    )
+    .unwrap();
+    let hash = "c".repeat(64);
+    let diff = json!({"base": {"version": 1, "hash": "b".repeat(64), "approved": true},
+        "version": 2, "hash": hash, "approved": false, "widens_scope": true,
+        "diff": {"changes": [{"area": "budgets", "key": "max_cost_usd", "old": "5", "new": "9"},
+                             {"area": "allowed_paths", "key": "docs/**", "old": null, "new": "added\u{1b}[31m"}],
+                 "widens": ["budget max_cost_usd is raised or removed"], "weakens": []}});
+    let (c, seen) = rig(vec![
+        (
+            "outcome.get",
+            json!({"id": "o1", "goal": "g", "state": "blocked", "revision": 7,
+            "needs_you": {"decisions_pending": 0, "blocked": true, "verified_awaiting_ack": false}}),
+        ),
+        (
+            "outcome.contract.revise",
+            json!({"kind": "outcome.contract.revise", "state": state,
+            "result": {"version": 2, "hash": hash}}),
+        ),
+        ("outcome.contract.diff", diff),
+    ]);
+    (c, seen, d, f)
+}
+
+fn revise_cmd(f: &std::path::Path, rev: Option<i64>) -> OutcomeCmd {
+    OutcomeCmd::Revise {
+        id: "o1".into(),
+        contract_file: f.to_path_buf(),
+        expected_revision: rev,
+    }
+}
+
+#[test]
+fn revise_sends_the_revision_the_person_saw_and_prints_the_servers_diff_then_the_approve_line() {
+    let (mut c, seen, _d, f) = revise_rig("applied");
+    let (r, out) = run(&mut c, revise_cmd(&f, None), false, "", false);
+    assert_eq!(r, Ok(0), "{out}");
+    // the outcome revision is read first, the contract goes with it, the diff is the server's
+    assert_eq!(
+        methods(&seen),
+        [
+            "outcome.get",
+            "outcome.contract.revise",
+            "outcome.contract.diff"
+        ]
+    );
+    let sent = seen.borrow()[1]["params"].clone();
+    assert_eq!(sent["expected_revision"], 7);
+    assert_eq!(sent["contract"]["goal"], "g");
+    assert_eq!(seen.borrow()[2]["params"]["version"], 2);
+    let hash = "c".repeat(64);
+    assert!(
+        out.contains(&format!("Revised contract v2 {hash} (not approved).")),
+        "{out}"
+    );
+    assert!(out.contains("budgets max_cost_usd: 5 -> 9"), "{out}");
+    assert!(
+        out.contains("allowed_paths docs/**: (none) -> added"),
+        "{out}"
+    );
+    assert!(
+        out.contains("WARNING: this revision gives attempts MORE room"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  budget max_cost_usd is raised or removed"),
+        "{out}"
+    );
+    assert!(!out.contains("lowers the bar"), "{out}");
+    assert!(
+        out.ends_with(&format!(
+            "Approve: synt outcome approve o1 --version 2 --hash {hash}\n"
+        )),
+        "{out}"
+    );
+    assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+    // an explicit revision is used as given and `outcome.get` is not asked
+    let (mut c, seen, _d, f) = revise_rig("applied");
+    run(&mut c, revise_cmd(&f, Some(3)), false, "", false)
+        .0
+        .unwrap();
+    assert_eq!(seen.borrow()[0]["params"]["expected_revision"], 3);
+    assert_eq!(methods(&seen)[0], "outcome.contract.revise");
+}
+
+#[test]
+fn revise_json_has_a_stable_shape_and_a_lost_race_prints_no_diff_and_exits_1() {
+    let (mut c, _seen, _d, f) = revise_rig("applied");
+    let (r, out) = run(&mut c, revise_cmd(&f, Some(7)), true, "", false);
+    assert_eq!(r, Ok(0));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["schema"], 1);
+    assert_eq!(v["version"], 2);
+    assert_eq!(v["approved"], false);
+    assert_eq!(v["widens_scope"], true);
+    assert_eq!(v["diff"]["changes"].as_array().unwrap().len(), 2);
+    let (mut c, seen, _d, f) = revise_rig("stale");
+    let (r, out) = run(&mut c, revise_cmd(&f, Some(7)), false, "", false);
+    assert_eq!(r, Ok(1), "{out}");
+    assert!(!methods(&seen).contains(&"outcome.contract.diff".to_string()));
+    assert!(!out.contains("Approve:"), "{out}");
+}
+
+#[test]
+fn revise_refuses_a_file_that_is_not_a_contract_and_a_shape_the_server_does_not_make() {
+    let (mut c, seen, d, _) = revise_rig("applied");
+    let bad = d.path().join("bad.json");
+    std::fs::write(&bad, r#"{"goal": "g"}"#).unwrap();
+    assert!(
+        run(&mut c, revise_cmd(&bad, Some(1)), false, "", false)
+            .0
+            .is_err()
+    );
+    assert!(seen.borrow().is_empty(), "nothing is sent for a bad file");
+    // a version or hash that is not what the server makes is never printed in a command to paste
+    let (_, _, _d, f) = revise_rig("applied");
+    let mut c = {
+        let seen = Seen::default();
+        OutcomeClient::new(
+            Fake {
+                seen,
+                answers: vec![(
+                    "outcome.contract.revise",
+                    json!({"kind": "outcome.contract.revise", "state": "applied",
+                        "result": {"version": 2, "hash": "x; rm -rf"}}),
+                )],
+                hints: vec![],
+            },
+            Surface::Cli,
+        )
+    };
+    let (r, out) = run(&mut c, revise_cmd(&f, Some(1)), false, "", false);
+    assert!(r.unwrap_err().contains("unexpected shape"));
+    assert!(!out.contains("rm -rf"));
+    assert_eq!(
+        platform_refusal(true, &revise_cmd(&f, None)),
+        Some(WSL2_REFUSAL)
+    );
+}

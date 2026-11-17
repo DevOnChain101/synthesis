@@ -5,15 +5,21 @@
 //! that races either one finds the decision already `expired` or `invalidated` and is `stale`:
 //! an expired decision is never approved. [`apply_lifecycle`] applies `outcome.start|pause|resume|
 //! cancel|ack` the same way; a kind nobody here knows stays `queued`.
+//!
+//! `outcome.contract.revise` (an `edit_scope` answer, B4) stores a revised contract as the next
+//! version, unapproved. Approving it (`outcome.contract.approve`, bound to its hash) is what moves
+//! the outcome: the store rebinds and the decision driver, run right after, invalidates every
+//! decision and revokes every unused grant of the old version; [`replan_after_revise`] then stores
+//! the new plan and the outcome runs again.
 
 use serde_json::{Value, json};
-use synthesis_core::outcome::{DecisionState, OutcomeState};
+use synthesis_core::outcome::{Contract, DecisionState, OutcomeState};
 use synthesis_events::Record;
 use synthesis_session::Error as StoreError;
 use synthesis_session::outcome::{CommandRecord, CommandState, Effects, OutcomeWriter, Resolution};
 use time::OffsetDateTime;
 
-use crate::planner::{Planner, make_plan};
+use crate::planner::{Planner, make_plan, replan};
 use crate::sched::{Control, Decisions, SchedError};
 use crate::{DecisionDriver, current_binding_for};
 
@@ -28,6 +34,7 @@ pub fn apply_queued(
         let run = match c.kind.as_str() {
             "decision.resolve" => resolve(w, &c),
             "outcome.contract.approve" => approve(w, &c),
+            "outcome.contract.revise" => revise(w, &c),
             _ => continue,
         };
         done.push(match run {
@@ -40,6 +47,13 @@ pub fn apply_queued(
             // or path reaches a surface) and go on with the others
             Err(_) => deny(w, &c, "the command could not be applied")?,
         });
+    }
+    // a contract that was just rebound: decisions and grants of the old version die now, not on a later tick
+    if done
+        .iter()
+        .any(|c| c.kind == "outcome.contract.approve" && c.state == CommandState::Applied)
+    {
+        DecisionDriver::default().drive(w, now)?;
     }
     Ok(done)
 }
@@ -111,7 +125,7 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
                 "evidence requested: this decision is closed and a new one with the stored evidence replaces it; answer the new one (list the decisions)",
             ),
             "edit_scope" => Some(
-                "edit_scope is not available yet: nothing was changed and no new decision follows; this decision stays needs_more_info until it expires, so reject it or change the contract with a new version",
+                "scope edit requested: nothing changes yet and the outcome stays blocked. Submit a revised contract (synt outcome revise OUTCOME --contract-file FILE), read the diff, and approve that exact version and hash; approving it closes this decision, revokes its unused grants and replans. Until then the approved contract stays in force",
             ),
             _ => None,
         };
@@ -141,6 +155,37 @@ fn approve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
         tx.approve_contract(version, hash, &approver)?;
         Ok((CommandState::Applied, json!({"version": version})))
+    });
+    match run {
+        Err(e) if refused(&e) => deny(w, c, e),
+        other => other,
+    }
+}
+
+/// `outcome.contract.revise`: the revised contract (same shape as create's) becomes the next
+/// version, unapproved. The version number is the store's; the outcome revision the person saw is
+/// required, and a lost race is `stale`.
+fn revise(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, StoreError> {
+    let Some(contract) = c
+        .params
+        .get("contract")
+        .and_then(|v| serde_json::from_value::<Contract>(v.clone()).ok())
+    else {
+        return deny(
+            w,
+            c,
+            "revising needs a contract of the same shape as create's",
+        );
+    };
+    let Some(rev) = c.expected_revision else {
+        return deny(w, c, "revising needs the outcome revision you saw");
+    };
+    let run = w.apply_command(&c.idempotency_key, |tx, _| {
+        let (version, hash) = tx.revise_contract(rev, contract.clone())?;
+        Ok((
+            CommandState::Applied,
+            json!({"version": version, "hash": hash}),
+        ))
     });
     match run {
         Err(e) if refused(&e) => deny(w, c, e),
@@ -311,6 +356,57 @@ fn ack(w: &mut OutcomeWriter) -> Result<Step, StoreError> {
             name(s)
         ))),
     }
+}
+
+/// Is a `blocked` outcome waiting for a plan made for its (revised, approved) contract? The owner
+/// keeps it until [`replan_after_revise`] has stored one.
+pub fn awaiting_replan(
+    w: &synthesis_session::Reader,
+    id: &synthesis_core::outcome::OutcomeId,
+) -> Result<bool, StoreError> {
+    let o = w.get_outcome(id)?;
+    let Some(pv) = o.plan_version else {
+        return Ok(false);
+    };
+    Ok(o.state == OutcomeState::Blocked
+        && w.get_plan(id, pv)?.contract_version != o.contract_version)
+}
+
+/// After a revised contract was approved and rebound: stores the next plan for it (`replan`: its
+/// diff names what runs again, and with another contract nothing of the old plan is carried over)
+/// and puts the outcome back to `running`, so the scheduler walks the new plan. A plan from the stub
+/// planner is a function of the approved contract, so it needs no approval of its own; a model plan
+/// will go through a `plan_approval` decision (B6). Evidence of the old plan never counts for the new
+/// contract (the store filters it). Returns whether it replanned; each step is skipped when it
+/// already happened, so a crash in between is finished by the next try.
+pub fn replan_after_revise(
+    w: &mut OutcomeWriter,
+    planner: &dyn Planner,
+) -> Result<bool, StoreError> {
+    if !awaiting_replan(w, w.id())? {
+        return Ok(false);
+    }
+    let o = w.get_outcome(w.id())?;
+    let (contract, _, approved) = w.get_contract(w.id(), o.contract_version)?;
+    if !approved {
+        return Ok(false);
+    }
+    let old = w.get_plan(w.id(), o.plan_version.unwrap_or(0))?;
+    let r = replan(planner, &contract, &old)
+        .map_err(|e| StoreError::Invalid(format!("no plan for the revised contract: {e}")))?;
+    let d = &r.diff;
+    w.atomically(|tx| {
+        tx.insert_plan(&r.plan)?;
+        tx.emit(
+            "outcome.replanned",
+            json!({"plan_version": r.plan.version, "contract_version": o.contract_version,
+                   "added": d.added, "removed": d.removed, "changed": d.changed,
+                   "unchanged": d.unchanged, "rerun": d.rerun}),
+        )?;
+        Ok(())
+    })?;
+    go(w, OutcomeState::Running)?;
+    Ok(true)
 }
 
 /// Sets the pause flag when the last `outcome.paused` / `outcome.resumed` event of the control

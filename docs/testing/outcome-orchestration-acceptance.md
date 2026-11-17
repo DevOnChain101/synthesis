@@ -162,3 +162,24 @@ Not covered: the end-to-end path owner decision change -> hint on a real socket 
 | `sql_inserted_evidence_never_passes` (EVENT_BACKED part), `inj-readme-approve-decision` (attack-output check) | `outcome_store.rs`, redteam | a row with a valid MAC and no chained event never counts; the attack output is a refusal |
 
 Not covered: hostile text with hidden or control characters in the evidence summary (a check id is ASCII graphic by the store's own rule, so only the cleaning helper, unit-tested elsewhere, would see it); the independent verifier run for the blocked commit; a re-brief after a restart of a real owner process (the transaction and the replay rule are tested at store level).
+
+## B4 tests (implemented: `edit_scope`, `outcome.contract.revise`)
+
+| Test | Where | Proves |
+|---|---|---|
+| `a_revision_is_stored_unapproved_and_changes_nothing_until_it_is_approved` | `synthesis-orchestrator/tests/revise.rs` | v2 is a draft, the outcome stays on v1, decisions and grants are untouched, the old contract can still run |
+| `approving_the_revision_rebinds_kills_old_decisions_and_grants_and_replans` | same | open decisions `invalidated`, unused grant revoked, `Blocked -> Running` refused until the replan, then plan v2 for contract v2 and `running` (T-08) |
+| `an_answer_to_a_decision_of_the_old_version_is_stale_after_the_rebind` | same | the old action can never be granted |
+| `only_a_blocked_outcome_is_revised_and_a_revision_must_change_something`, `an_invalid_revision_is_refused_and_stores_nothing` | same | state, no-op, stale, missing revision, junk contract |
+| `a_revision_is_approved_only_while_blocked_and_only_the_newest_version` | same | wrong hash, older draft, a running outcome |
+| `the_same_key_revises_once_and_a_cancel_wins_over_a_pending_approval`, `an_expired_edit_scope_decision_does_not_stop_a_revision` | same | races: cancel, expiry, idempotency |
+| `evidence_of_the_old_plan_does_not_count_for_the_new_contract` | same | evidence is not carried over (the row stays listed) |
+| `the_rebind_event_says_whether_the_scope_widened` | same | the audit event carries the server's `widens` |
+| `a_contract_is_revised_only_while_blocked_with_no_live_attempt_and_rebinds_only_on_approval` | `synthesis-session/tests/outcome_store.rs` | running, live attempt, hash-bound approval, old plan no longer runs |
+| `dec_contract_mutate_after_approve_a_bare_new_version_never_runs` (`dec-contract-mutate-after-approve`) | same | in-place edit refused, a bare row is not approved, a moved pointer does not run |
+| `outcome::diff` tests | `synthesis-core` | widen, narrow, attempt cap removed, lowered bar, version ignored |
+| `proto_revise_*`, `proto_edit_scope_says_what_happens_next` | `synthesis-app/tests/outcome_proto.rs` | off refusal, read-only stdio cannot revise, revise -> diff -> approve through the owner, idempotency |
+| `revise_*` | `outcome_cmd` tests | CLI golden: revision sent, server diff, WARNING block, approve line, JSON shape, stale exits 1 |
+| `edit_scope_then_a_revised_contract_approved_again_replans_and_the_old_card_is_dead` | `apps/cli/tests/outcome_e2e.rs` | the real owner process, end to end |
+
+Not covered: a live attempt at approval time through the owner (store level only); a revision of a `paused` outcome (refused by design); Linux and Windows runs of the e2e.

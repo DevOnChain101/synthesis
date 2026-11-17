@@ -87,6 +87,7 @@ synt outcome decisions ID                              # when a decision is pend
 synt outcome decisions ID --watch                      # stays open: shows a card again when it changes (push hint, then refetch); Ctrl-C ends
 synt outcome resolve ID DECISION --choice REST --revision N --brief-hash H
 synt outcome pause ID; synt outcome resume ID; synt outcome cancel ID
+synt outcome revise ID --contract-file revised.json    # after answering a decision with edit_scope: prints the diff and the approve line; approving that version and hash replans
 synt outcome inspect ID --tab evidence; synt outcome events ID
 ```
 

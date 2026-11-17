@@ -25,7 +25,9 @@ mod sched;
 mod verify;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};
-pub use commands::{apply_lifecycle, apply_queued, conclude, restore_pause};
+pub use commands::{
+    apply_lifecycle, apply_queued, awaiting_replan, conclude, replan_after_revise, restore_pause,
+};
 pub use decision::record_blocked_decision;
 pub use envelope::{CompileError, CompiledEnvelope, Network, compile_envelope};
 pub use gitsafe::{

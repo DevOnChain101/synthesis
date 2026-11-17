@@ -8,6 +8,7 @@
 //! Everything here is inert unless `synt.orchestrator.enabled` is on (ADR-017, plan D1).
 
 mod contract;
+mod diff;
 mod ids;
 mod plan;
 mod scope;
@@ -15,6 +16,7 @@ mod state;
 mod verdict;
 
 pub use contract::*;
+pub use diff::*;
 pub use ids::*;
 pub use plan::*;
 pub use scope::*;
