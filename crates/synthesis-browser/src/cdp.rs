@@ -1,6 +1,7 @@
 //! Minimal Chrome DevTools Protocol client over a WebSocket (flat session mode).
 
 use crate::error::{BrowserError, Result};
+use crate::screencast::Slot;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub struct Cdp {
     pending: Pending,
     next_id: AtomicU64,
     events: broadcast::Sender<CdpEvent>,
+    /// Screencast frames go here, never into `events`.
+    pub(crate) screencast: Arc<Slot>,
 }
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -168,6 +171,8 @@ impl Cdp {
         let pending: Pending = Arc::default();
         let (events, _) = broadcast::channel(event_capacity.max(1));
         let (p, ev) = (pending.clone(), events.clone());
+        let screencast = Arc::new(Slot::default());
+        let frames = screencast.clone();
         tokio::spawn(async move {
             while let Some(t) = inc.recv().await {
                 match decode(&t) {
@@ -175,6 +180,9 @@ impl Cdp {
                         if let Some(tx) = p.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
                             let _ = tx.send(result);
                         }
+                    }
+                    Some(Incoming::Event(e)) if e.method == "Page.screencastFrame" => {
+                        frames.push(&e);
                     }
                     Some(Incoming::Event(e)) => {
                         let _ = ev.send(e);
@@ -190,6 +198,7 @@ impl Cdp {
             pending,
             next_id: AtomicU64::new(1),
             events,
+            screencast,
         }
     }
 
@@ -277,6 +286,32 @@ mod tests {
         );
         assert_eq!(decode("not json"), None);
         assert_eq!(decode(r#"{"foo":1}"#), None);
+    }
+
+    #[tokio::test]
+    async fn screencast_frames_bypass_the_event_broadcast() {
+        let (client_r, mut peer_w) = tokio::io::duplex(4096);
+        let (client_w, _peer_r) = tokio::io::duplex(1024);
+        let cdp = Cdp::from_pipe_limited(client_r, client_w, 16, 4096);
+        let mut rx = cdp.subscribe();
+        cdp.screencast.activate(Some("S".into()));
+        let frame = r#"{"method":"Page.screencastFrame","params":{"data":"aGk=","sessionId":1,"metadata":{}},"sessionId":"S"}"#;
+        let other = r#"{"method":"Page.loadEventFired","params":{},"sessionId":"S"}"#;
+        peer_w
+            .write_all(format!("{frame}\0{other}\0").as_bytes())
+            .await
+            .unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev.method, "Page.loadEventFired"); // the frame, sent first, never showed up
+        assert_eq!(
+            cdp.screencast
+                .received
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]

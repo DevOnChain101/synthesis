@@ -385,3 +385,10 @@ programs (vim, pwsh), WSL2 end to end, Linux Wayland input.
   `--host desktop`), because the person cannot see or hold the PTY elsewhere.
 - Q6. `tauri-winrt-notification` is in `Cargo.lock` as a transitive Windows dependency of `notify-rust` 4.18.2 (toast notifications); decision 1 says
   no such crate "anywhere": replace the notification dependency, or accept a transitive crate by that name?
+
+Decided in B1 (screencast in `synthesis-browser`; runtime API `view(on, max_w, max_h)` = the `browser.view` method, `frames()` = the consumer end; protocol messages stay B6):
+- Decided in B1: `Page.screencastFrame` events are intercepted in the CDP dispatcher and never enter the event broadcast, so a frame flood cannot lag the policy listener (which fails closed) and frames cannot reach the capture logs.
+- Decided in B1: the ack is sent when the consumer takes a frame (`FrameStream::next`), together with the ids of frames the slot replaced meanwhile, so a stalled consumer leaves Chrome with its in-flight frames unacked and it stops sending; a resumed consumer is acked for all of them. The 30 fps cap is a 33 ms minimum between takes.
+- Decided in B1: the view is bound to the tab that is current when `view(true)` runs; calling `view(true)` again re-targets it (B2 does so on a tab switch); frames of any other session are dropped. `view(false)` clears the slot and sends `stopScreencast`.
+- Decided in B1: `max_w`/`max_h` outside 1..=4096 are refused (the decode cap of 2.3). The headless viewport stays at the launch size; `device_pixel_ratio` in the frame metadata is 1 until B3 resizes the viewport.
+- Decided in B1: metadata beyond Chrome's own (`deviceWidth/Height`, `pageScaleFactor`, `offsetTop`, scroll offsets, `timestamp`) is only `device_pixel_ratio`; the frame `seq` counts frames received from Chrome, so a gap shows frames the consumer skipped.

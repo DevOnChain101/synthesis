@@ -9,6 +9,7 @@ mod error;
 mod policy;
 pub mod profile;
 mod redact;
+mod screencast;
 pub mod secret;
 mod snapshot;
 mod untrusted;
@@ -18,6 +19,7 @@ pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
 pub use policy::{Resolver, UrlPolicy};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
+pub use screencast::{Frame, FrameMeta, FrameStream};
 pub use untrusted::UntrustedText;
 
 use base64::Engine;
@@ -1513,6 +1515,46 @@ impl BrowserRuntime {
                 return Err(BrowserError::Timeout(format!("wait_for {what:?}")));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// `browser.view`: starts (`on`) or stops the live view of the current tab. Frames are read from
+    /// [`Self::frames`]; none is produced while the view is off. Calling it with `on` again re-targets the
+    /// view to the tab that is current now. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
+    pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
+        let ok = (1..=4096).contains(&max_w) && (1..=4096).contains(&max_h);
+        if on && !ok {
+            return Err(BrowserError::Refused(
+                "view size must be 1..=4096 pixels".into(),
+            ));
+        }
+        let tab = if on { Some(self.current()?) } else { None };
+        // Slot first: a frame already in flight for the old view must not be shown (or acked) as new.
+        let old = self
+            .cdp
+            .screencast
+            .activate(tab.as_ref().map(|t| t.session.clone()));
+        if let Some(old) = old {
+            let _ = self
+                .cdp
+                .send(Some(&old), "Page.stopScreencast", json!({}))
+                .await;
+        }
+        let Some(tab) = tab else { return Ok(()) };
+        let params =
+            json!({"format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h});
+        let r = self.call(&tab, "Page.startScreencast", params).await;
+        if r.is_err() {
+            self.cdp.screencast.activate(None);
+        }
+        r.map(drop)
+    }
+
+    /// The consumer end of the live view (one shared slot; see [`FrameStream::next`]).
+    pub fn frames(&self) -> FrameStream {
+        FrameStream {
+            slot: self.cdp.screencast.clone(),
+            cdp: Arc::downgrade(&self.cdp),
         }
     }
 
