@@ -264,6 +264,8 @@ fn alt_a_gives_the_popup_the_keys_choose_then_enter_sends_and_esc_gives_them_bac
         })
     };
     assert_eq!(text(&t, v), "draft");
+    // the whole brief has to be shown once before an answer can be sent (the sample hides sections when collapsed)
+    assert!(press(&t, v, "tab"));
     // Enter right after the move is inert (ARM_MS), whatever was chosen
     assert!(press(&t, v, "down"));
     assert_eq!(popup_cursor(&t, v), Some(Some(0)));
@@ -277,11 +279,11 @@ fn alt_a_gives_the_popup_the_keys_choose_then_enter_sends_and_esc_gives_them_bac
     assert!(press(&t, v, "enter"));
     assert_eq!(answers(&t, v), 1, "sent after a choice and the window");
     assert_eq!(text(&t, v), "draft", "the draft was never touched");
-    // Tab shows the whole brief while the popup has the keys
+    // Tab again collapses it, and having seen it all once, Send stays allowed for this card
     assert!(press(&t, v, "tab"));
     assert!(t.read_with(v, |t, _| matches!(
         t.outcomes.as_ref().and_then(|w| w.shown.as_ref()),
-        Some(Shown::Card(p, _)) if p.full
+        Some(Shown::Card(p, _)) if !p.full && p.seen_all && !p.send_blocked()
     )));
     // Esc gives the keys back and leaves the popup
     assert!(press(&t, v, "escape"));
@@ -384,6 +386,7 @@ fn an_answer_in_flight_blocks_the_other_surface_and_a_reply_clears_the_choice(
 ) {
     let (t, v) = open_live(cx);
     assert!(press(&t, v, "alt-a"));
+    assert!(press(&t, v, "tab"));
     tick(&t, v, ARM_MS + 100);
     assert!(press(&t, v, "down"));
     // the Outcomes tab has an answer on its way: the popup sends nothing, and says so
@@ -757,4 +760,84 @@ fn a_new_revision_collapses_the_brief_again(cx: &mut TestAppContext) {
         v.debug_bounds("decision-field-1").is_none(),
         "collapsed again"
     );
+}
+
+// ------------------------------------------------------------------ fail closed on hidden sections
+
+fn notice_of(t: &gpui::Entity<TuiView>, v: &mut VisualTestContext) -> Option<String> {
+    t.read_with(v, |t, _| {
+        match t.outcomes.as_ref().and_then(|w| w.shown.as_ref()) {
+            Some(Shown::Card(p, _)) => p.ask.notice.clone(),
+            _ => None,
+        }
+    })
+}
+
+#[gpui::test]
+fn send_needs_the_whole_brief_shown_once_per_card_and_revision(cx: &mut TestAppContext) {
+    let (t, v) = open_live(cx);
+    assert!(press(&t, v, "alt-a"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "2"));
+    // collapsed with sections hidden: Enter sends nothing and says why
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 0);
+    assert_eq!(
+        notice_of(&t, v).as_deref(),
+        Some("Expand the brief first (Tab): 7 sections not shown")
+    );
+    // the button is the same press: inert too, and dim with the reason in its label
+    let send = b(v, "decision-send").center();
+    v.simulate_click(send, Default::default());
+    assert_eq!(answers(&t, v), 0, "the Send button is inert too");
+    // Tab expands: the choice stays; after the window, Enter sends once
+    assert!(press(&t, v, "tab"));
+    assert_eq!(popup_cursor(&t, v), Some(Some(1)));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 1, "sent once after the brief was shown");
+    // a new revision: collapsed again, expand required again
+    t.update(v, |t, cx| {
+        t.outcomes.as_ref().unwrap().view.update(cx, |o, cx| {
+            if let Some(d) = o.state.detail.as_mut()
+                && let Ok(cards) = d.cards.as_mut()
+            {
+                cards[0].revision += 1;
+            }
+            cx.notify();
+        })
+    });
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "2"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(
+        answers(&t, v),
+        1,
+        "the new revision needs the brief shown again"
+    );
+    assert!(
+        notice_of(&t, v)
+            .unwrap()
+            .starts_with("Expand the brief first")
+    );
+    // a card with nothing hidden sends without expanding (one section only)
+    t.update(v, |t, cx| {
+        t.outcomes.as_ref().unwrap().view.update(cx, |o, cx| {
+            if let Some(d) = o.state.detail.as_mut()
+                && let Ok(cards) = d.cards.as_mut()
+            {
+                cards[0].rows.truncate(1);
+                cards[0].revision += 1;
+            }
+            cx.notify();
+        })
+    });
+    v.run_until_parked();
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "2"));
+    tick(&t, v, ARM_MS + 100);
+    assert!(press(&t, v, "enter"));
+    assert_eq!(answers(&t, v), 2, "nothing hidden: no expand needed");
 }

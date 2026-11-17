@@ -195,8 +195,10 @@ impl TuiView {
 
     /// The whole brief is shown (what Tab does in the focused popup), for the shots.
     pub fn expand_decision(&mut self, cx: &mut Context<Self>) {
-        if let Some(Shown::Card(p, _)) = self.outcomes.as_mut().and_then(|w| w.shown.as_mut()) {
-            p.full = true;
+        if let Some(Shown::Card(p, _)) = self.outcomes.as_mut().and_then(|w| w.shown.as_mut())
+            && !p.full
+        {
+            p.toggle_full();
         }
         cx.notify();
     }
@@ -998,7 +1000,7 @@ impl TuiView {
                             if let Some(Shown::Card(p, _)) =
                                 this.outcomes.as_mut().and_then(|w| w.shown.as_mut())
                             {
-                                p.full = !p.full;
+                                p.toggle_full();
                             }
                             cx.notify();
                         });
@@ -1096,10 +1098,19 @@ impl TuiView {
                                     .py(px(3.))
                                     .rounded(px(6.))
                                     .border_1()
-                                    .border_color(hsla(t::ACCENT))
-                                    .text_color(strong())
+                                    // dim while the whole brief has not been shown (the line above the answers says why)
+                                    .border_color(if p.send_blocked() {
+                                        hsla(t::BORDER)
+                                    } else {
+                                        hsla(t::ACCENT)
+                                    })
+                                    .text_color(if p.send_blocked() { dim() } else { strong() })
                                     .on_click(move |e, w, cx| send(e, w, cx))
-                                    .child("Send answer"),
+                                    .child(if p.send_blocked() {
+                                        "Send answer (expand first)"
+                                    } else {
+                                        "Send answer"
+                                    }),
                             )
                             .child(
                                 div()

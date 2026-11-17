@@ -138,6 +138,9 @@ pub struct Popup {
     pub ask: Ask,
     /// Tab: the full brief instead of the first lines.
     pub full: bool,
+    /// Every section of THIS card (revision and brief hash) has been shown at least once: Send is allowed. Collapsing
+    /// again does not take it back; a new revision or hash does.
+    pub seen_all: bool,
     /// `State::answers` when this popup sent an answer: it is waiting for that count to grow (the reply).
     pub sent_at: Option<u64>,
 }
@@ -152,6 +155,7 @@ impl Popup {
             card,
             ask,
             full: false,
+            seen_all: false,
             sent_at: None,
         }
     }
@@ -168,9 +172,26 @@ impl Popup {
             == (&self.card.id, self.card.revision, &self.card.brief_sha256);
         if !same {
             self.full = false;
+            self.seen_all = false;
         }
         self.ask.sync(Some(&card), now);
         self.card = card;
+    }
+
+    /// Brief fields the collapsed view leaves out (all but the first).
+    pub fn hidden_sections(&self) -> usize {
+        self.card.rows.len().saturating_sub(1)
+    }
+
+    /// Send is not allowed yet: sections are hidden and the whole brief has not been shown for this card.
+    pub fn send_blocked(&self) -> bool {
+        !self.full && !self.seen_all && self.hidden_sections() > 0
+    }
+
+    /// Tab, or a click on the "more sections" line. Showing the whole brief counts as having seen it.
+    pub fn toggle_full(&mut self) {
+        self.full = !self.full;
+        self.seen_all |= self.full;
     }
 
     /// A key while the popup has the keys. No held-key test: the keys come to the popup only after the person
@@ -179,9 +200,20 @@ impl Popup {
     pub fn key(&mut self, name: &str, now: i64) -> Out {
         match name {
             "up" | "down" => self.ask.step(name == "down"),
-            "tab" => self.full = !self.full,
+            "tab" => self.toggle_full(),
             "escape" => return Out::Later,
             "enter" => {
+                // fail closed: a choice cannot be sent while sections of the brief were never shown
+                if self.send_blocked()
+                    && self.ask.picker.as_ref().and_then(|p| p.choice()).is_some()
+                {
+                    let n = self.hidden_sections();
+                    self.ask.notice = Some(format!(
+                        "Expand the brief first (Tab): {n} section{} not shown",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    return Out::Handled;
+                }
                 return match self.ask.send(&self.outcome, &self.card, now) {
                     Some(e) => Out::Send(e),
                     None => Out::Handled,
@@ -289,6 +321,10 @@ mod tests {
         // step 1: the arrow (or a number) moves the cursor and sends nothing
         assert_eq!(p.key("down", 0), Out::Handled);
         assert!(p.ask.picker.as_ref().unwrap().choice().is_some());
+        // the sample hides sections when collapsed: the whole brief has to be shown once first
+        assert!(p.send_blocked());
+        assert_eq!(p.key("tab", 0), Out::Handled);
+        assert!(!p.send_blocked());
         // step 2 inside the arming delay: nothing is sent
         assert_eq!(p.key("enter", ARM_MS - 1), Out::Handled);
         assert!(!p.ask.sending);
@@ -305,6 +341,26 @@ mod tests {
             Out::Handled,
             "no second answer in flight"
         );
+    }
+
+    #[test]
+    fn having_seen_the_whole_brief_unblocks_send_until_the_card_changes() {
+        let mut p = Popup::new("o".into(), card(), 0);
+        assert!(p.send_blocked() && p.hidden_sections() > 0);
+        p.key("tab", 0);
+        p.key("tab", 0); // collapsed again: not blocked again
+        assert!(!p.full && !p.send_blocked());
+        let mut c = card();
+        c.revision += 1;
+        p.update(c, 10);
+        assert!(
+            p.send_blocked(),
+            "a new revision needs the brief shown again"
+        );
+        let mut one = card();
+        one.rows.truncate(1);
+        let p = Popup::new("o".into(), one, 0);
+        assert!(!p.send_blocked(), "nothing hidden");
     }
 
     #[test]
