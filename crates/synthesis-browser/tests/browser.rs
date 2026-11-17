@@ -1451,6 +1451,9 @@ async fn rebinding_in_child_targets_body() {
     // Both blind GETs reached the server; the stop is dispatched within milliseconds of the
     // response. Give it a generous margin before the control starts.
     tokio::time::sleep(Duration::from_millis(2000)).await;
+    // The popup took the foreground, so the main tab's `/go` poll timer is throttled (one tick in
+    // ~15 s observed) and the control may not start in time; bring the main tab back first.
+    rt.select_tab(0).await.unwrap();
     go.store(true, std::sync::atomic::Ordering::SeqCst);
     for _ in 0..300 {
         if seen(&beacons, "/beacon-ctl-frame") >= 1 {
