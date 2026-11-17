@@ -29,7 +29,8 @@ use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, Platform, ProcessHost, Runner,
     SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, answered_waiting,
-    apply_lifecycle, apply_queued, conclude, recover_attempts, restore_pause, wall_secs,
+    apply_lifecycle, apply_queued, awaiting_rebrief, conclude, recover_attempts, restore_pause,
+    wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -194,7 +195,12 @@ impl<'a> Owner<'a> {
         for o in r.list_outcomes().map_err(s)? {
             let id = o.id.to_string();
             let active = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying);
-            if self.owned.contains_key(&id) || !(active || has_work(&r, &o.id).map_err(s)?) {
+            // a blocked outcome with an answered request_evidence card is also taken (an owner restart must re-brief it)
+            if self.owned.contains_key(&id)
+                || !(active
+                    || has_work(&r, &o.id).map_err(s)?
+                    || awaiting_rebrief(&r, &o.id).unwrap_or(false))
+            {
                 continue;
             }
             match self.store.open_outcome(&o.id, pol) {
@@ -388,7 +394,9 @@ impl<'a> Owner<'a> {
         self.notices(&mut ow.w, &o);
         self.publish(ow);
         let keep = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying)
-            || has_work(&ow.w, ow.w.id()).unwrap_or(true);
+            || has_work(&ow.w, ow.w.id()).unwrap_or(true)
+            // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
+            || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false);
         if !keep {
             if let Some(sc) = ow.sched.as_mut() {
                 sc.shutdown(&mut ow.w, "the outcome is no longer running");

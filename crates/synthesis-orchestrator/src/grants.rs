@@ -9,15 +9,19 @@
 //! - a decision a person approved with `grant_once` becomes a one-shot grant, derived by the
 //!   store from the action stored with the decision (never from text a caller supplies), after the
 //!   contract is checked again; the work item is then `ready` for a new attempt;
-//! - an approved alternative of an `ambiguity` or `blocked` decision makes the item `ready`.
+//! - an approved alternative of an `ambiguity` or `blocked` decision makes the item `ready`;
+//! - a decision answered with `request_evidence` is closed and replaced by a new card with the
+//!   stored evidence in its brief (no model; at most `MAX_REBRIEFS` times). `edit_scope` stays
+//!   `needs_more_info` until it expires or its binding moves.
 //!
 //! A new attempt of that item uses the grant when it starts ([`crate::ProcessHost`]): the grant is
 //! consumed (once), its rules become `--allow` flags of that attempt only, and every step is a
 //! chained `policy.decision` event.
 
 use serde_json::Value;
-use synthesis_core::outcome::{DecisionState, WorkItemId, WorkItemState};
+use synthesis_core::outcome::{DecisionState, OutcomeId, WorkItemId, WorkItemState};
 use synthesis_session::Error as StoreError;
+use synthesis_session::Reader;
 use synthesis_session::outcome::{DecisionRecord, Effects, OutcomeWriter, WorkItemRecord};
 use time::OffsetDateTime;
 
@@ -175,7 +179,9 @@ impl Decisions for DecisionDriver {
             };
             let state = w.decision_state(&d.id)?;
             match state {
-                DecisionState::Preparing | DecisionState::Pending => {
+                DecisionState::Preparing
+                | DecisionState::Pending
+                | DecisionState::NeedsMoreInfo => {
                     // expiry first: HOLD, never an approval
                     if w.transition_decision(
                         &d.id,
@@ -214,6 +220,40 @@ impl Decisions for DecisionDriver {
                             "deny",
                             serde_json::json!({"decision_id": d.id, "work_item_id": item_id}),
                         )?;
+                    } else if state == DecisionState::NeedsMoreInfo
+                        && w.verified_resolution(&d.id)?
+                            .is_some_and(|r| r.choice == "request_evidence")
+                    {
+                        let summary = evidence_summary(w, &d, &item_id)?;
+                        match w.rebrief_decision(&d.id, d.revision, &current, &summary) {
+                            Ok(n) => {
+                                notes.push(format!("decision {} re-briefed as {}", d.id, n.id));
+                                w.audit_policy(
+                                    "decision.rebrief",
+                                    "allow",
+                                    serde_json::json!({"decision_id": n.id, "supersedes": d.id, "work_item_id": item_id}),
+                                )?;
+                            }
+                            // lost a race with expiry or a move of the binding: the next tick sees the new state
+                            Err(StoreError::Stale(_) | StoreError::RevisionConflict { .. }) => {}
+                            Err(
+                                e @ (StoreError::Sqlite(_)
+                                | StoreError::Io(_)
+                                | StoreError::Locked(_)),
+                            ) => {
+                                return Err(e.into());
+                            }
+                            Err(e) => {
+                                if self.refused.insert(d.id.to_string()) {
+                                    w.audit_policy(
+                                        "decision.rebrief",
+                                        "deny",
+                                        serde_json::json!({"decision_id": d.id, "reason": e.to_string()}),
+                                    )?;
+                                    notes.push(format!("decision {}: no re-brief ({e})", d.id));
+                                }
+                            }
+                        }
                     }
                 }
                 DecisionState::Approved => {
@@ -317,6 +357,53 @@ impl Decisions for DecisionDriver {
     }
 }
 
+/// What a person asked for with `request_evidence`: the item's stored evidence rows, as data. No
+/// model and no new check run; a row without its chained event is only counted, never shown.
+fn evidence_summary(
+    w: &OutcomeWriter,
+    d: &DecisionRecord,
+    item: &WorkItemId,
+) -> Result<Value, StoreError> {
+    let commit = d.binding.get("subject_commit").and_then(Value::as_str);
+    // newest first, a bounded number of short strings per row: the summary always fits the store's cap
+    // by bytes, on a character boundary: 4-byte characters cannot push the summary over the store's cap
+    let short = |t: &str| {
+        let c = clean(t);
+        let mut end = c.len().min(48);
+        while !c.is_char_boundary(end) {
+            end -= 1;
+        }
+        c[..end].to_owned()
+    };
+    let rows: Vec<_> = w
+        .recent_evidence(w.id(), 200)?
+        .into_iter()
+        .filter(|e| e.work_item_id == *item)
+        .collect();
+    let shown: Vec<Value> = rows
+        .iter()
+        .filter(|e| e.event_backed)
+        .take(20)
+        .map(|e| {
+            serde_json::json!({
+                "check": short(&e.check_id), "result": short(&e.result),
+                "trust_class": e.trust_class, "producer": short(&e.producer),
+                "commit": short(&e.subject_commit),
+                "for_blocked_commit": commit == Some(e.subject_commit.as_str()),
+                "flags": e.flags.iter().take(4).map(|f| short(f)).collect::<Vec<_>>(),
+                "captured_at": short(&e.captured_at),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "source": "stored evidence rows of this work item; no model ran and no check was run for this",
+        "rows": shown,
+        "rows_without_chained_event": rows.iter().filter(|e| !e.event_backed).count(),
+        "rows_considered": "the newest 200 of the outcome",
+        "attempt_diff": "read it with the attempt.diff of the attempt named in the evidence field",
+    }))
+}
+
 /// Does the stored binding hash equal the hash of `current` (as the store compares it)?
 fn binding_matches(
     w: &mut OutcomeWriter,
@@ -345,4 +432,18 @@ pub fn answered_waiting(w: &mut OutcomeWriter) -> Result<Vec<String>, StoreError
         }
     }
     Ok(out)
+}
+
+/// Is a decision waiting for its re-brief (a person asked for evidence, no successor yet)? The
+/// owner keeps a `blocked` outcome until the driver has re-briefed or closed it.
+pub fn awaiting_rebrief(w: &Reader, id: &OutcomeId) -> Result<bool, StoreError> {
+    for d in w.list_decisions(id)? {
+        if w.decision_state(&d.id)? == DecisionState::NeedsMoreInfo
+            && w.verified_resolution(&d.id)?
+                .is_some_and(|r| r.choice == "request_evidence")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

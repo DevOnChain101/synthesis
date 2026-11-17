@@ -607,6 +607,19 @@ impl Reader {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The newest `limit` evidence rows of the outcome, newest first (`list_evidence` is the oldest
+    /// rows first and stops at its own limit).
+    pub fn recent_evidence(&self, id: &OutcomeId, limit: usize) -> Result<Vec<EvidenceRecord>> {
+        need_v5(&self.conn)?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {EVIDENCE_COLS},{EVENT_BACKED} FROM evidence e WHERE outcome_id=?1 ORDER BY captured_at DESC, id DESC LIMIT {}",
+            limit.min(LIST_LIMIT)
+        ))?;
+        Ok(st
+            .query_map([id.as_str()], evidence_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn list_outbox(&self, id: &OutcomeId) -> Result<Vec<OutboxRecord>> {
         need_v5(&self.conn)?;
         let mut st = self.conn.prepare(&format!(
@@ -859,6 +872,14 @@ pub struct GrantRecord {
     pub consumed_at: Option<String>,
     pub consumed_by_attempt: Option<String>,
     pub revoked_at: Option<String>,
+}
+
+/// How many times evidence may be requested for one decision (each re-brief is a new card); after
+/// that the person answers or rejects.
+pub const MAX_REBRIEFS: u64 = 3;
+
+fn rebriefs_of(brief: &Value) -> u64 {
+    brief.get("rebrief").and_then(Value::as_u64).unwrap_or(0)
 }
 
 /// A rule a grant may carry: an exact `Edit(/path)` or `Bash(command)` of printable ASCII, no `*`
@@ -1914,6 +1935,39 @@ impl OutcomeWriter {
         current_binding: &Value,
     ) -> Result<DecisionState> {
         self.atomically(|tx| tx.resolve_decision(r, current_binding))
+    }
+
+    /// The orchestrator's answer to `request_evidence`: closes the answered decision and inserts
+    /// its successor in one transaction (see `OutcomeTx::rebrief_decision`). `evidence` is the
+    /// server-made summary; the caller says nothing else about the new brief. Refused as
+    /// [`Error::Stale`] when the decision is not an answered `request_evidence` (already
+    /// re-briefed, expired, moved) and [`Error::RevisionConflict`] on a lost race.
+    pub fn rebrief_decision(
+        &mut self,
+        id: &DecisionId,
+        expected_revision: i64,
+        current_binding: &Value,
+        evidence: &Value,
+    ) -> Result<DecisionRecord> {
+        match self.verified_resolution(id)? {
+            Some(r)
+                if r.state == DecisionState::NeedsMoreInfo && r.choice == "request_evidence" => {}
+            _ => {
+                return Err(Error::Stale(
+                    "the decision is not waiting for evidence".into(),
+                ));
+            }
+        }
+        let action = self.decision_action(id)?;
+        self.atomically(|tx| {
+            tx.rebrief_decision(
+                id,
+                expected_revision,
+                current_binding,
+                evidence,
+                action.clone(),
+            )
+        })
     }
 
     pub fn record_evidence(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
@@ -3727,6 +3781,11 @@ impl OutcomeTx<'_, '_> {
                 ));
             }
         };
+        if r.choice == "request_evidence" && rebriefs_of(&d.brief) >= MAX_REBRIEFS {
+            return Err(Error::Invalid(format!(
+                "evidence was already requested {MAX_REBRIEFS} times for this decision: answer it or reject it"
+            )));
+        }
         let guards = DecisionGuards {
             actor: Actor::User,
             binding_current: true,
@@ -3792,6 +3851,93 @@ impl OutcomeTx<'_, '_> {
                    "brief_sha256": r.brief_sha256, "state": to}),
         )?;
         Ok(to)
+    }
+
+    /// Re-briefs a decision the person answered with `request_evidence` (ADR-019 section 4a): one
+    /// transaction closes the old row (`invalidated`) and inserts a NEW decision whose brief is the
+    /// old one plus `supersedes`, `rebrief`, `rebriefs_left` and `evidence_summary` (server data);
+    /// the alternatives, the stored action and so the binding (action hash included) are the old
+    /// ones, and the expiry is carried over, never extended. The new brief is new content, so its
+    /// hash differs and nothing the person said about the old one carries over.
+    fn rebrief_decision(
+        &mut self,
+        id: &DecisionId,
+        expected_revision: i64,
+        current_binding: &Value,
+        evidence: &Value,
+        action: Option<Value>,
+    ) -> Result<DecisionRecord> {
+        let d = self.load_decision(id)?;
+        self.conflict_or(
+            ev::Aggregate::Decision,
+            id.as_str(),
+            expected_revision,
+            d.revision,
+        )?;
+        let asked: bool = self.et.tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM decision_approvals WHERE decision_id=?1 AND decision_revision=?2 \
+               AND choice='request_evidence')",
+            params![id.as_str(), d.revision - 1],
+            |r| r.get(0),
+        )?;
+        if d.row_state != DecisionState::NeedsMoreInfo || !asked {
+            return Err(Error::Stale(
+                "the decision is not waiting for evidence".into(),
+            ));
+        }
+        if !self.binding_current(&d, current_binding) || self.expired(&d) {
+            return Err(Error::Stale(
+                "the decision expired or its binding moved".into(),
+            ));
+        }
+        let n = rebriefs_of(&d.brief);
+        if n >= MAX_REBRIEFS || evidence.to_string().len() > 16 * 1024 {
+            return Err(Error::Invalid(
+                "the re-brief limit is reached or the evidence is too large".into(),
+            ));
+        }
+        let mut brief = d.brief.clone();
+        if let Some(o) = brief.as_object_mut() {
+            o.insert("supersedes".into(), json!(id));
+            o.insert("rebrief".into(), json!(n + 1));
+            o.insert("rebriefs_left".into(), json!(MAX_REBRIEFS - n - 1));
+            o.insert("evidence_summary".into(), evidence.clone());
+        }
+        // the old card is closed first: the open-decision index and the dedupe check then allow its successor.
+        // A binding that differs from the stored one is what lets the orchestrator close it.
+        self.transition_decision(
+            id,
+            expected_revision,
+            DecisionState::Invalidated,
+            &json!({"rebriefed": id}),
+            &Effects::default(),
+        )?;
+        let (new, fresh) = self.new_decision(&NewDecision {
+            kind: d.kind.clone(),
+            dedupe_key: d.dedupe_key.clone(),
+            brief,
+            binding: d.binding.clone(),
+            expires_at: d.expires_at.clone(),
+            action,
+        })?;
+        if !fresh || new.binding_hash != d.binding_hash {
+            return Err(Error::Invalid(
+                "the re-brief must keep the stored action and binding".into(),
+            ));
+        }
+        self.transition_decision(
+            &new.id,
+            new.revision,
+            DecisionState::Pending,
+            &new.binding,
+            &Effects::default(),
+        )?;
+        self.et.append(
+            ev::DECISION_REBRIEFED,
+            json!({"decision_id": new.id, "supersedes": id, "outcome_id": self.id,
+                   "rebrief": n + 1, "binding_hash": d.binding_hash}),
+        )?;
+        self.load_decision(&new.id)
     }
 
     // ---- evidence

@@ -34,8 +34,8 @@ pub use gitsafe::{
     temp_scratch,
 };
 pub use grants::{
-    DecisionDriver, GRANT_TTL_HOURS, answered_waiting, current_binding_for, decided_choices,
-    decision_binding,
+    DecisionDriver, GRANT_TTL_HOURS, answered_waiting, awaiting_rebrief, current_binding_for,
+    decided_choices, decision_binding,
 };
 pub use host::ProcessHost;
 pub use planner::{Planner, PlannerError, Replan, StubPlanner, make_plan, replan};

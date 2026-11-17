@@ -123,6 +123,8 @@ This is mostly a wrapper around calls that already exist. Its value is one defau
 
 ### 2.3 Re-briefing loop (`request_evidence`, `edit_scope`)
 
+> **B3 status:** `request_evidence` is implemented (ADR-019 B3 notes). Differences from the text below: the old row is `invalidated` without a separate reason column (the `decision.rebriefed` event and `brief.supersedes` carry it); the summary reads stored evidence rows and does not run the verifier; the limit is 3 re-briefs. `edit_scope` is B4.
+
 A brief is immutable (trigger `decisions_immutable`), so a re-brief is a **new decision row**. The old row moves `needs_more_info -> invalidated` with reason `rebriefed` (allowed by the triggers). The new row carries `brief.supersedes = <old id>`, the **same stored action** (so `action_hash` and the derived grant are unchanged), and a binding re-read from the current state. The open unique index `(outcome_id, dedupe_key, binding_hash)` stays satisfied because the old row is closed first, in the same transaction.
 
 - **`request_evidence`** (no model, deterministic):
