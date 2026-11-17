@@ -282,6 +282,25 @@ pub enum Call {
         #[serde(flatten)]
         cmd: CommandArgs,
     },
+    /// An `edit_scope` answer's follow-up: a revised contract (same shape as create's; its `version`
+    /// is ignored, the owner numbers it) is stored as the next version, unapproved, while the outcome
+    /// is blocked. `expected_revision` is the outcome revision the person saw. Approving it is the
+    /// separate, hash-bound `outcome.contract.approve`.
+    #[serde(rename = "outcome.contract.revise")]
+    OutcomeContractRevise {
+        id: String,
+        expected_revision: i64,
+        contract: Box<synthesis_core::outcome::Contract>,
+        #[serde(flatten)]
+        cmd: CommandArgs,
+    },
+    /// What a revised contract version changes against the outcome's approved one (read-only, computed
+    /// by the server from the two stored contracts).
+    #[serde(rename = "outcome.contract.diff")]
+    OutcomeContractDiff {
+        id: String,
+        version: u32,
+    },
     #[serde(rename = "outcome.start")]
     OutcomeStart(OutcomeCommand),
     #[serde(rename = "outcome.pause")]
@@ -395,7 +414,9 @@ impl Call {
                 | Call::OutcomeList { .. }
                 | Call::OutcomeGet { .. }
                 | Call::OutcomeContractGet { .. }
+                | Call::OutcomeContractDiff { .. }
                 | Call::OutcomeContractApprove { .. }
+                | Call::OutcomeContractRevise { .. }
                 | Call::OutcomeStart(_)
                 | Call::OutcomePause(_)
                 | Call::OutcomeResume(_)
@@ -421,9 +442,9 @@ impl Call {
             Call::OutcomeCreate { surface, .. } | Call::OrchestratorEnable { surface } => {
                 Some(*surface)
             }
-            Call::OutcomeContractApprove { cmd, .. } | Call::DecisionResolve { cmd, .. } => {
-                Some(cmd.surface)
-            }
+            Call::OutcomeContractApprove { cmd, .. }
+            | Call::OutcomeContractRevise { cmd, .. }
+            | Call::DecisionResolve { cmd, .. } => Some(cmd.surface),
             Call::OutcomeStart(c)
             | Call::OutcomePause(c)
             | Call::OutcomeResume(c)
@@ -441,6 +462,7 @@ impl Call {
             Call::OutcomeCreate { .. } => Some(Action::CreateOutcome),
             Call::OrchestratorEnable { .. } => Some(Action::Enable),
             Call::OutcomeContractApprove { .. } => Some(Action::ApproveContract),
+            Call::OutcomeContractRevise { .. } => Some(Action::ReviseContract),
             Call::OutcomeStart(_) => Some(Action::Start),
             Call::OutcomePause(_) => Some(Action::Pause),
             Call::OutcomeResume(_) => Some(Action::Resume),
@@ -451,6 +473,7 @@ impl Call {
             | Call::OutcomeList { .. }
             | Call::OutcomeGet { .. }
             | Call::OutcomeContractGet { .. }
+            | Call::OutcomeContractDiff { .. }
             | Call::PlanGet { .. }
             | Call::WorkItemGet { .. }
             | Call::AttemptInspect { .. }
@@ -908,6 +931,25 @@ mod tests {
             Call::DecisionResolve { expected_revision: 2, ref choice, note: None, .. } if choice == "REST"
         ));
         assert_eq!(serde_json::to_string(&r).unwrap(), resolve);
+        // a revision carries the outcome revision the person saw and a whole contract, and the surface
+        let revise = r#"{"id":4,"method":"outcome.contract.revise","params":{"id":"o","expected_revision":5,"contract":{"version":1,"goal":"g","criteria":[],"envelope":{"allowed_paths":[],"denied_paths":[],"capabilities":{},"budgets":{"max_cost_usd":1.0,"max_parallel_workers":2,"max_attempts_per_work_item":3,"attempt_max_cost_usd":null,"attempt_max_wall_secs":null},"quality_gates":[]}},"idempotency_key":"k","surface":"cli"}}"#;
+        let r: Request = serde_json::from_str(revise).unwrap();
+        assert!(r.call.is_outcome() && r.call.surface() == Some(Surface::Cli));
+        assert!(matches!(
+            r.call,
+            Call::OutcomeContractRevise {
+                expected_revision: 5,
+                ..
+            }
+        ));
+        assert_eq!(r.call.action(), Some(Action::ReviseContract));
+        assert_eq!(serde_json::to_string(&r).unwrap(), revise);
+        for drop in [r#""expected_revision":5,"#, r#","idempotency_key":"k""#] {
+            assert!(
+                serde_json::from_str::<Request>(&revise.replace(drop, "")).is_err(),
+                "{drop}"
+            );
+        }
         let start = r#"{"id":1,"method":"outcome.start","params":{"id":"o","expected_revision":3,"idempotency_key":"k","surface":"tui"}}"#;
         let r: Request = serde_json::from_str(start).unwrap();
         assert!(matches!(r.call, Call::OutcomeStart(ref c) if c.expected_revision == Some(3)));
@@ -918,6 +960,7 @@ mod tests {
             r#"{"id":1,"method":"outcome.get","params":{"id":"o"}}"#,
             r#"{"id":1,"method":"outcome.contract.get","params":{"id":"o"}}"#,
             r#"{"id":1,"method":"outcome.contract.approve","params":{"id":"o","version":1,"hash":"h","idempotency_key":"k","surface":"superagent"}}"#,
+            r#"{"id":1,"method":"outcome.contract.diff","params":{"id":"o","version":2}}"#,
             r#"{"id":1,"method":"plan.get","params":{"id":"o"}}"#,
             r#"{"id":1,"method":"work_item.get","params":{"outcome":"o","id":"w"}}"#,
             r#"{"id":1,"method":"attempt.inspect","params":{"outcome":"o","id":"a"}}"#,

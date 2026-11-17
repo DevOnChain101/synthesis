@@ -3540,3 +3540,104 @@ fn a_grant_row_without_a_valid_mac_is_never_used() {
             .is_err()
     );
 }
+
+#[test]
+fn a_contract_is_revised_only_while_blocked_with_no_live_attempt_and_rebinds_only_on_approval() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    go(&mut w, OutcomeState::Running);
+    let it = item(&items, "implement").clone();
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
+        item_to(&mut w, &it, to).unwrap();
+    }
+    e.child(&store, "s1", w.control_session_id());
+    let (a, _) = w.new_attempt(&it, 1, "s1", "local-inproc", NONE).unwrap();
+    let mut wide = contract();
+    wide.envelope.budgets.max_cost_usd = 99.0;
+    let revise = |w: &mut OutcomeWriter| {
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        let c = wide.clone();
+        w.atomically(|tx| tx.revise_contract(rev, c.clone()))
+    };
+    // running: no
+    assert!(revise(&mut w).unwrap_err().to_string().contains("blocked"));
+    go(&mut w, OutcomeState::Blocked);
+    // blocked with a live attempt: no, and approving a version above the outcome's is no either
+    assert!(revise(&mut w).unwrap_err().to_string().contains("live"));
+    // the attempt ends: now it is stored, unapproved, and the outcome still stands on v1
+    w.transition_attempt(
+        &a.id,
+        a.revision,
+        AttemptState::Lost,
+        &AttemptEnd::default(),
+        NONE,
+    )
+    .unwrap();
+    let (v, hash) = revise(&mut w).unwrap();
+    assert_eq!(v, 2);
+    assert!(!w.get_contract(w.id(), 2).unwrap().2);
+    assert_eq!(w.get_outcome(w.id()).unwrap().contract_version, 1);
+    // a bare UPDATE of approved_at does not approve it, and approval is by the stored hash only
+    assert!(w.approve_contract(2, &"0".repeat(64), "user").is_err());
+    w.approve_contract(2, &hash, "user").unwrap();
+    let o = w.get_outcome(w.id()).unwrap();
+    assert_eq!(o.contract_version, 2);
+    assert!(w.get_contract(w.id(), 2).unwrap().2);
+    assert!(kinds(&w).contains(&"outcome.contract_revised".to_string()));
+    assert!(kinds(&w).contains(&"outcome.contract_rebound".to_string()));
+    // the old plan (made for v1) no longer lets it run
+    assert!(
+        w.transition_outcome(o.revision, OutcomeState::Running, None, NONE)
+            .is_err()
+    );
+}
+
+/// `dec-contract-mutate-after-approve` (T-07, B4): a contract changed after approval by anything but
+/// a person's approval of a new version does not run. The approved body cannot be edited, a bare
+/// INSERT of the next version is not approved, and a blocked outcome moved onto it does not run.
+#[test]
+fn dec_contract_mutate_after_approve_a_bare_new_version_never_runs() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, _) = ready_outcome(&e, &store);
+    go(&mut w, OutcomeState::Running);
+    go(&mut w, OutcomeState::Blocked);
+    let db = e.db();
+    assert!(
+        db.execute(
+            "UPDATE contracts SET body=replace(body,'endpoint','evil') WHERE version=1",
+            []
+        )
+        .is_err(),
+        "the approved body is immutable"
+    );
+    let mut wide = contract();
+    wide.version = 2;
+    wide.envelope.budgets.max_cost_usd = 99.0;
+    let body = serde_json::to_value(&wide).unwrap().to_string();
+    let hash = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    db.execute(
+        "INSERT INTO contracts(outcome_id,version,hash,body) SELECT outcome_id,2,?1,?2 FROM contracts WHERE version=1",
+        params![hash, body],
+    )
+    .unwrap();
+    assert!(
+        !w.get_contract(w.id(), 2).unwrap().2,
+        "a bare row is not approved"
+    );
+    // moving the outcome's pointer by hand does not make it run: Blocked -> Running needs the approval
+    if db
+        .execute("UPDATE outcomes SET contract_version=2", [])
+        .is_ok()
+    {
+        let o = w.get_outcome(w.id()).unwrap();
+        assert!(
+            w.transition_outcome(o.revision, OutcomeState::Running, None, NONE)
+                .is_err()
+        );
+    }
+}

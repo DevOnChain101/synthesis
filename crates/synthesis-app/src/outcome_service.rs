@@ -152,6 +152,26 @@ impl Service {
                           "contract": serde_json::to_value(contract).map_err(s)?}),
                 )
             }
+            Call::OutcomeContractDiff { id, version } => {
+                let r = Reader::open(&self.home).map_err(s)?;
+                let id = outcome_id(&id)?;
+                let base = r.get_outcome(&id).map_err(s)?.contract_version;
+                if version <= base {
+                    return Err(format!(
+                        "v{version} is not newer than the outcome's contract v{base}"
+                    ));
+                }
+                let (old, old_hash, old_ok) = r.get_contract(&id, base).map_err(s)?;
+                let (new, hash, approved) = r.get_contract(&id, version).map_err(s)?;
+                let d = synthesis_core::outcome::diff_contracts(&old, &new);
+                // `widens` and `weakens` are the server's reading of the two contracts, never a surface's
+                Ok(
+                    json!({"base": {"version": base, "hash": old_hash, "approved": old_ok},
+                          "version": version, "hash": hash, "approved": approved,
+                          "diff": serde_json::to_value(&d).map_err(s)?,
+                          "widens_scope": !d.widens.is_empty()}),
+                )
+            }
             Call::PlanGet { id } => {
                 let r = Reader::open(&self.home).map_err(s)?;
                 let id = outcome_id(&id)?;
@@ -321,6 +341,18 @@ impl Service {
                 "outcome.contract.approve",
                 json!({"version": version, "hash": hash}),
                 None,
+                &cmd,
+            ),
+            Call::OutcomeContractRevise {
+                id,
+                expected_revision,
+                contract,
+                cmd,
+            } => self.queue(
+                &id,
+                "outcome.contract.revise",
+                json!({"contract": serde_json::to_value(contract).map_err(s)?}),
+                Some(expected_revision),
                 &cmd,
             ),
             Call::OutcomeStart(c) => self.queue_outcome("outcome.start", &c),

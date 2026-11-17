@@ -49,7 +49,7 @@ pub enum Action {
     Cancel,
     Ack,
     ResolveDecision,
-    /// Reserved (B4): denied until it lands.
+    /// A person's revised contract (an `edit_scope` follow-up, B4): stored unapproved.
     ReviseContract,
     PlanInstall,
     Notify,
@@ -132,7 +132,7 @@ pub fn authorize(p: Principal, a: Option<Action>) -> Verdict {
     let Some(a) = a else {
         return no("unknown_action");
     };
-    if matches!(a, Action::ReviseContract | Action::SpawnPlanner) {
+    if matches!(a, Action::SpawnPlanner) {
         return no("not_available");
     }
     match p {
@@ -190,7 +190,7 @@ mod tests {
     fn a_person_may_only_do_person_actions() {
         for s in SURFACES {
             for a in Action::ALL {
-                let want = a.by_person() && !matches!(a, Action::ReviseContract);
+                let want = a.by_person() && !matches!(a, Action::SpawnPlanner);
                 assert_eq!(allowed(Principal::User(s), a), want, "{s:?} {a:?}");
             }
         }
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn reserved_actions_are_denied_for_everyone() {
-        for a in [Action::ReviseContract, Action::SpawnPlanner] {
+        for a in [Action::SpawnPlanner] {
             for p in [
                 Principal::User(Surface::Cli),
                 Principal::Orchestrator,
@@ -215,6 +215,20 @@ mod tests {
             ] {
                 assert_eq!(authorize(p, Some(a)).reason, "not_available");
             }
+        }
+    }
+
+    #[test]
+    fn a_revision_is_a_person_action_only() {
+        for s in SURFACES {
+            assert!(allowed(Principal::User(s), Action::ReviseContract));
+        }
+        for p in [
+            Principal::Engine,
+            Principal::Attempt,
+            Principal::Orchestrator,
+        ] {
+            assert!(!allowed(p, Action::ReviseContract), "{p:?}");
         }
     }
 

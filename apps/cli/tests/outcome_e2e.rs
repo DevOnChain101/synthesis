@@ -700,6 +700,90 @@ fn request_evidence_gets_a_new_card_that_names_the_old_one_and_only_it_can_be_an
 
 /// Brings the outcome to its end after the owner was killed: the next command starts a new owner,
 /// which adopts the outcome. Returns the id once it is `verified`.
+#[test]
+fn edit_scope_then_a_revised_contract_approved_again_replans_and_the_old_card_is_dead() {
+    if !confines() {
+        return;
+    }
+    let r = rig();
+    r.set_script(&json!([{"text": "asking", "tools": [{"id": "q1", "name": "AskUserQuestion", "input": {"questions": [
+        {"question": "Which API shape?", "options": [{"label": "REST"}, {"label": "gRPC"}]}]}}]},
+        {"text": "done"}, {"text": "done"}]));
+    let id = go(&r);
+    let old = r.wait("a pending decision", 90, || {
+        r.json(&["decisions", &id])["decisions"]
+            .as_array()?
+            .first()
+            .cloned()
+    });
+    let (did, rev, hash) = (
+        old["id"].as_str().unwrap().to_string(),
+        old["revision"].as_i64().unwrap().to_string(),
+        old["brief_sha256"].as_str().unwrap().to_string(),
+    );
+    r.wait_state(&id, "blocked", 60);
+    let out = r.ok(&[
+        "resolve",
+        &id,
+        &did,
+        "--choice",
+        "edit_scope",
+        "--revision",
+        &rev,
+        "--brief-hash",
+        &hash,
+    ]);
+    assert!(
+        out.contains("synt outcome revise") && !out.contains("not available"),
+        "{out}"
+    );
+    // the person submits a wider contract: the diff is shown and nothing changes yet
+    let revised = r.file(
+        "revised.json",
+        json!({"goal": "write src/hello.txt",
+            "criteria": [{"id": "c1", "text": "hello.txt exists", "check_ids": ["t"]}],
+            "checks": [{"id": "t", "command": "test -f src/hello.txt"}],
+            "envelope": {"allowed_paths": ["src/**", "docs/**"],
+                "capabilities": {"repo.read": "allow", "repo.write": "allow"},
+                "budgets": {"max_cost_usd": 6.0}}}),
+    );
+    let out = r.ok(&["revise", &id, "--contract-file", &revised]);
+    for want in [
+        "Revised contract v2",
+        "budgets max_cost_usd: 5 -> 6",
+        "WARNING: this revision gives attempts MORE room",
+        "allowed_paths: docs/** added",
+    ] {
+        assert!(out.contains(want), "{want} in {out}");
+    }
+    let line = out.lines().find(|l| l.starts_with("Approve:")).unwrap();
+    let new_hash = line.rsplit(' ').next().unwrap().to_string();
+    assert_eq!(r.state(&id), "blocked");
+    assert_eq!(r.json(&["status", &id])["contract"]["version"], 1);
+    // approving that exact hash rebinds, replans and the outcome runs again to a verdict
+    r.set_script(&writes(None));
+    r.ok(&["approve", &id, "--version", "2", "--hash", &new_hash]);
+    r.wait_state(&id, "verified", 90);
+    assert_eq!(r.json(&["status", &id])["contract"]["version"], 2);
+    assert_eq!(r.events(&id, "outcome.contract_rebound").len(), 1);
+    assert_eq!(r.events(&id, "outcome.replanned").len(), 1);
+    let all = r.json(&["decisions", &id]);
+    assert_eq!(all["decisions"][0]["state"], "invalidated", "{all}");
+    // the old card cannot be answered
+    let (code, ..) = r.synt(&[
+        "resolve",
+        &id,
+        &did,
+        "--choice",
+        "REST",
+        "--revision",
+        &rev,
+        "--brief-hash",
+        &hash,
+    ]);
+    assert_ne!(code, 0);
+}
+
 fn recover_to_verified(r: &Rig, id: &str) {
     let _ = std::fs::remove_file(&r.hold);
     r.wait_state(id, "verified", 120);

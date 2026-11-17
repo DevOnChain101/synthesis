@@ -81,6 +81,18 @@ pub enum OutcomeCmd {
         #[arg(long)]
         hash: String,
     },
+    /// Propose a changed scope for a blocked outcome (after answering a decision with edit_scope):
+    /// a new contract version, shown as a diff against the approved one, that you approve again.
+    Revise {
+        id: String,
+        /// JSON contract of the same shape as `create` builds (`goal`, `criteria`, `envelope`,
+        /// optional `checks`); its `version` is ignored, the server numbers it.
+        #[arg(long, value_name = "FILE")]
+        contract_file: PathBuf,
+        /// Apply only if the outcome is still at this revision (default: the revision it has now).
+        #[arg(long)]
+        expected_revision: Option<i64>,
+    },
     Start(Cmd),
     Pause(Cmd),
     Resume(Cmd),
@@ -269,6 +281,50 @@ fn rows_text(v: &Value) -> String {
         .map(|r| format!("{}:\n{}", r.label, r.text))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The server's contract diff, line by line: every change with its old and new value, then the
+/// warnings the server derived (widening, lowered bar). Nothing is computed or hidden here.
+fn diff_text(d: &Value) -> String {
+    let side = |c: &Value, k: &str| match c.get(k) {
+        Some(Value::String(s)) => clean(s),
+        _ => "(none)".into(),
+    };
+    let list = |k: &str| -> Vec<String> {
+        d.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(clean).collect())
+            .unwrap_or_default()
+    };
+    let mut out = vec!["Changes against the approved contract:".to_string()];
+    for c in d
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        out.push(format!(
+            "  {} {}: {} -> {}",
+            text(c, "area"),
+            text(c, "key"),
+            side(c, "old"),
+            side(c, "new")
+        ));
+    }
+    for (k, head) in [
+        (
+            "widens",
+            "WARNING: this revision gives attempts MORE room than the approved contract",
+        ),
+        ("weakens", "WARNING: this revision lowers the bar for done"),
+    ] {
+        let l = list(k);
+        if !l.is_empty() {
+            out.push(format!("{head}:"));
+            out.extend(l.into_iter().map(|x| format!("  {x}")));
+        }
+    }
+    out.join("\n")
 }
 
 fn row_json(r: &OutcomeRow) -> Value {
@@ -472,6 +528,53 @@ pub fn dispatch<T: Transport>(
             let r = c.approve_contract(&id, version, &hash, &key()).map_err(e)?;
             let r = settle(c, &id, r, wait)?;
             report(&mut p, &r)
+        }
+        OutcomeCmd::Revise {
+            id,
+            contract_file,
+            expected_revision,
+        } => {
+            let mut v: Value = read_json(&contract_file, "contract")?;
+            if let Some(o) = v.as_object_mut() {
+                o.entry("version").or_insert(json!(1));
+            }
+            let contract: Contract = serde_json::from_value(v)
+                .map_err(|x| format!("contract: {}: {x}", contract_file.display()))?;
+            let rev = match expected_revision {
+                Some(r) => r,
+                None => c.outcome(&id).map_err(e)?.revision,
+            };
+            let r = c.revise_contract(&id, rev, contract, &key()).map_err(e)?;
+            let r = settle(c, &id, r, wait)?;
+            if r.state != CommandState::Applied {
+                return report(&mut p, &r);
+            }
+            let version = r
+                .result
+                .get("version")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok());
+            let hash = text(&r.result, "hash");
+            // both are printed in a command to paste: a shape the server does not make is not shown
+            let (Some(version), true) = (version, synthesis_view::outcomes::is_hex(&hash, 64))
+            else {
+                return Err("the orchestrator sent a version or hash of an unexpected shape; nothing is shown".into());
+            };
+            let d = c.contract_diff(&id, version).map_err(e)?;
+            if json {
+                p.json(json!({"version": version, "hash": hash, "approved": false,
+                    "base": d.get("base"), "diff": d.get("diff"), "widens_scope": d.get("widens_scope")}))?;
+                return Ok(0);
+            }
+            p.line(&format!(
+                "Revised contract v{version} {hash} (not approved)."
+            ))?;
+            p.line(&diff_text(&d["diff"]))?;
+            p.line("Nothing changes until you approve this exact version and hash; the approved contract stays in force. Approving closes the open decisions of the old contract and replans.")?;
+            p.line(&format!(
+                "Approve: synt outcome approve {id} --version {version} --hash {hash}"
+            ))?;
+            Ok(0)
         }
         OutcomeCmd::Start(a) => mutate(c, &mut p, "start", a, wait),
         OutcomeCmd::Pause(a) => mutate(c, &mut p, "pause", a, wait),

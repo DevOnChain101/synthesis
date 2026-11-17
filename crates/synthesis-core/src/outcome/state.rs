@@ -125,6 +125,12 @@ impl OutcomeState {
                 g.contract_approved && g.plan_valid,
                 "contract not approved or plan not valid",
             ),
+            // a revised contract moves the outcome's contract while it is blocked: it runs again only
+            // under an approved contract and a plan made for it (B4)
+            (Blocked, Running) => need(
+                g.contract_approved && g.plan_valid,
+                "contract not approved or plan not made for it",
+            ),
             // Verified is set only by the verdict function (ADR-017).
             (Verifying, Verified) => need(g.verdict_verified, "verdict is not Verified"),
             (Verified, Completed) => need(g.delivery_ready, "no delivery condition holds"),

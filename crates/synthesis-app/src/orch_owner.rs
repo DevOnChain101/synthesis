@@ -29,8 +29,8 @@ use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, Platform, ProcessHost, Runner,
     SandboxRunner, SchedConfig, Scheduler, Stop, StubPlanner, SyntSpawn, answered_waiting,
-    apply_lifecycle, apply_queued, awaiting_rebrief, conclude, recover_attempts, restore_pause,
-    wall_secs,
+    apply_lifecycle, apply_queued, awaiting_rebrief, awaiting_replan, conclude, recover_attempts,
+    replan_after_revise, restore_pause, wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -62,15 +62,19 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most `outcome.create` replies kept for a retry with the same key (in memory).
 const KEPT_CREATES: usize = 256;
 /// The command kinds an owner applies; anything else does not make an outcome worth owning.
-const KINDS: [&str; 7] = [
+const KINDS: [&str; 8] = [
     "decision.resolve",
     "outcome.contract.approve",
+    "outcome.contract.revise",
     "outcome.start",
     "outcome.pause",
     "outcome.resume",
     "outcome.cancel",
     "outcome.ack",
 ];
+
+/// Failed replans of one revised contract after which the owner lets the outcome go (about 5 steps).
+const MAX_REPLAN_FAILURES: u32 = 5;
 
 fn s<E: ToString>(e: E) -> String {
     e.to_string()
@@ -134,6 +138,8 @@ pub struct Owner<'a> {
     push: Option<tokio::sync::broadcast::Sender<DecisionHint>>,
     /// `(idempotency key, request fingerprint, reply)` of the latest creates, oldest first.
     created: VecDeque<(String, String, Value)>,
+    /// `(outcome, contract version)` -> failed replans of a revised contract (this process only).
+    replan_failed: BTreeMap<(String, u32), u32>,
     #[cfg(feature = "test-provider")]
     pub test: TestHooks,
 }
@@ -177,6 +183,7 @@ impl<'a> Owner<'a> {
             notifier,
             push: None,
             created: VecDeque::new(),
+            replan_failed: BTreeMap::new(),
             #[cfg(feature = "test-provider")]
             test: TestHooks::default(),
         }
@@ -201,7 +208,9 @@ impl<'a> Owner<'a> {
             if self.owned.contains_key(&id)
                 || !(active
                     || has_work(&r, &o.id).map_err(s)?
-                    || awaiting_rebrief(&r, &o.id).unwrap_or(false))
+                    || awaiting_rebrief(&r, &o.id).unwrap_or(false)
+                    || (awaiting_replan(&r, &o.id).unwrap_or(false)
+                        && !self.replan_given_up(&id, o.contract_version)))
             {
                 continue;
             }
@@ -291,6 +300,52 @@ impl<'a> Owner<'a> {
         }
     }
 
+    fn replan_given_up(&self, id: &str, version: u32) -> bool {
+        self.replan_failed
+            .get(&(id.to_string(), version))
+            .is_some_and(|n| *n >= MAX_REPLAN_FAILURES)
+    }
+
+    /// Stores the plan of a rebound contract. A failure is logged and audited once per (outcome,
+    /// contract version) as `outcome.replan_failed`; after `MAX_REPLAN_FAILURES` tries in a row the
+    /// owner lets the outcome go: it stays `blocked` (a new `outcome revise` is queued as any command
+    /// and is adopted again), and this process does not adopt it again for that version (a restart
+    /// tries again).
+    fn replan(&mut self, ow: &mut Owned<'a>, id: &str) {
+        let key = (
+            id.to_string(),
+            ow.w.get_outcome(ow.w.id())
+                .map_or(0, |o| o.contract_version),
+        );
+        if self.replan_given_up(id, key.1) {
+            return;
+        }
+        match replan_after_revise(&mut ow.w, &StubPlanner) {
+            Ok(_) => {
+                self.replan_failed.remove(&key);
+            }
+            Err(e) => {
+                let n = self.replan_failed.entry(key.clone()).or_insert(0);
+                *n += 1;
+                if *n == 1 || *n == MAX_REPLAN_FAILURES {
+                    log(&format!(
+                        "outcome {id}: replan of contract v{} failed (try {n}): {e}",
+                        key.1
+                    ));
+                    let fact = json!({"contract_version": key.1, "tries": *n,
+                        "gave_up": *n >= MAX_REPLAN_FAILURES, "reason": e.to_string()});
+                    if let Err(x) =
+                        ow.w.atomically(|tx| tx.emit("outcome.replan_failed", fact.clone()))
+                    {
+                        log(&format!(
+                            "outcome {id}: cannot record the failed replan: {x}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns whether the outcome stays owned.
     fn step(&mut self, ow: &mut Owned<'a>, pol: &OutcomePolicy) -> bool {
         let now = OffsetDateTime::now_utc();
@@ -301,6 +356,8 @@ impl<'a> Owner<'a> {
         if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, &StubPlanner) {
             log(&format!("outcome {id}: commands: {e}"));
         }
+        // a revised contract was approved: its plan is stored and the outcome runs again (retried each step until it works)
+        self.replan(ow, &id);
         let Ok(mut o) = ow.w.get_outcome(ow.w.id()) else {
             return true;
         };
@@ -398,7 +455,9 @@ impl<'a> Owner<'a> {
         let keep = matches!(o.state, OutcomeState::Running | OutcomeState::Verifying)
             || has_work(&ow.w, ow.w.id()).unwrap_or(true)
             // evidence was requested: the next step re-briefs (or the decision expires); an error here releases (fail closed)
-            || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false);
+            || awaiting_rebrief(&ow.w, ow.w.id()).unwrap_or(false)
+            || (awaiting_replan(&ow.w, ow.w.id()).unwrap_or(false)
+                && !self.replan_given_up(&id, o.contract_version));
         if !keep {
             if let Some(sc) = ow.sched.as_mut() {
                 sc.shutdown(&mut ow.w, "the outcome is no longer running");

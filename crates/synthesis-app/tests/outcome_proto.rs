@@ -561,7 +561,7 @@ fn proto_request_evidence_on_a_blocked_outcome_is_rebriefed_or_expires_and_the_o
 }
 
 #[test]
-fn proto_edit_scope_says_plainly_that_nothing_follows() {
+fn proto_edit_scope_says_what_happens_next() {
     let mut r = rig();
     r.decide("d", 2, |_| {});
     let mut c = r.client(Surface::Cli);
@@ -571,12 +571,12 @@ fn proto_edit_scope_says_plainly_that_nothing_follows() {
     r.owner();
     r.owner();
     let s = c.command_status(&r.outcome, "k").unwrap();
+    let note = s.result["note"].as_str().unwrap();
+    assert!(!note.contains("not available"), "{note}");
     assert!(
-        s.result["note"]
-            .as_str()
-            .unwrap()
-            .contains("not available yet"),
-        "{s:?}"
+        note.contains("synt outcome revise")
+            && note.contains("approve that exact version and hash"),
+        "{note}"
     );
     let all = c.decisions(&r.outcome).unwrap();
     assert_eq!((all.len(), all[0].state.as_str()), (1, "needs_more_info"));
@@ -863,4 +863,155 @@ fn the_contract_is_approved_by_a_command_the_owner_applies() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn widened() -> Contract {
+    let mut c = contract();
+    c.envelope.allowed_paths.push("docs/**".into());
+    c.envelope.budgets.max_cost_usd = 9.0;
+    c
+}
+
+fn revision(r: &Rig) -> i64 {
+    r.w().get_outcome(r.w().id()).unwrap().revision
+}
+
+fn block(r: &mut Rig) {
+    let rev = revision(r);
+    r.wm()
+        .transition_outcome(rev, OutcomeState::Blocked, Some("t"), &Effects::default())
+        .unwrap();
+}
+
+#[test]
+fn proto_revise_is_off_when_disabled_and_a_read_only_link_cannot_queue_or_revise() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let revise = || Call::OutcomeContractRevise {
+        id: "o".into(),
+        expected_revision: 1,
+        contract: Box::new(contract()),
+        cmd: synthesis_app::proto::CommandArgs {
+            idempotency_key: "k".into(),
+            surface: Surface::Cli,
+        },
+    };
+    let diff = || Call::OutcomeContractDiff {
+        id: "o".into(),
+        version: 2,
+    };
+    for svc in [Service::new(&home, false), Service::read_only(&home, false)] {
+        assert!(svc.handle(revise()).unwrap_err().contains("off"));
+        assert!(svc.handle(diff()).unwrap_err().contains("off"));
+    }
+    assert!(!home.exists());
+    // enabled: the stdio engine (read-only) cannot revise, and the call is not served by a session
+    let r = rig();
+    let ro = Service::read_only(&r.home, true);
+    let mut call = revise();
+    if let Call::OutcomeContractRevise { id, .. } = &mut call {
+        *id = r.outcome.clone();
+    }
+    assert!(call.is_outcome() && call.surface() == Some(Surface::Cli));
+    assert!(ro.handle(call).unwrap_err().contains("read-only"));
+    assert!(
+        r.w().get_contract(r.w().id(), 2).is_err(),
+        "nothing was queued or stored"
+    );
+    assert!(r.w().queued_commands(r.w().id()).unwrap().is_empty());
+}
+
+#[test]
+fn proto_revise_then_diff_then_approve_through_the_owner_rebinds_and_kills_the_old_card() {
+    let mut r = rig();
+    r.decide("d", 2, |_| {});
+    block(&mut r);
+    let mut c = r.client(Surface::Cli);
+    let card = open_card(&r, &mut c).unwrap();
+    c.resolve(&r.outcome, &card, "edit_scope", "k1", None)
+        .unwrap();
+    r.owner();
+    // the person submits the revised contract; the server numbers it v2 and stores it unapproved
+    let q = c
+        .revise_contract(&r.outcome, revision(&r), widened(), "rev")
+        .unwrap();
+    assert_eq!(q.state, CommandState::Queued);
+    r.owner();
+    let s = c.command_status(&r.outcome, "rev").unwrap();
+    assert_eq!(s.state, CommandState::Applied, "{s:?}");
+    assert_eq!(s.result["version"], 2);
+    let hash = s.result["hash"].as_str().unwrap().to_string();
+    // the diff is the server's, from the two stored contracts, with the widening warning
+    let d = c.contract_diff(&r.outcome, 2).unwrap();
+    assert_eq!(d["widens_scope"], true);
+    assert_eq!(d["base"]["version"], 1);
+    assert_eq!(d["hash"], hash);
+    assert_eq!(d["approved"], false);
+    let widens = d["diff"]["widens"].as_array().unwrap();
+    assert!(
+        widens
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("docs/**")),
+        "{widens:?}"
+    );
+    // v1 is not newer than itself
+    assert!(c.contract_diff(&r.outcome, 1).is_err());
+    // nothing changed yet: the outcome stands on v1 and the old card is open
+    let o = c.outcome(&r.outcome).unwrap();
+    assert_eq!(o.state, "blocked");
+    assert_eq!(c.contract(&r.outcome, None).unwrap()["version"], 1);
+    // approval is the person's, bound to this hash: a wrong hash is denied, the right one rebinds
+    c.approve_contract(&r.outcome, 2, &"0".repeat(64), "bad")
+        .unwrap();
+    c.approve_contract(&r.outcome, 2, &hash, "good").unwrap();
+    r.owner();
+    assert_eq!(
+        c.command_status(&r.outcome, "bad").unwrap().state,
+        CommandState::Denied
+    );
+    assert_eq!(
+        c.command_status(&r.outcome, "good").unwrap().state,
+        CommandState::Applied
+    );
+    assert_eq!(c.contract(&r.outcome, None).unwrap()["version"], 2);
+    for card in c.decisions(&r.outcome).unwrap() {
+        assert_eq!(card.state, "invalidated");
+    }
+    // an answer to the old card is stale: nothing is approved
+    c.resolve(&r.outcome, &card, "REST", "late", None).unwrap();
+    r.owner();
+    assert_eq!(
+        c.command_status(&r.outcome, "late").unwrap().state,
+        CommandState::Stale
+    );
+}
+
+#[test]
+fn proto_revise_is_idempotent_and_a_second_request_under_the_same_key_is_refused() {
+    let mut r = rig();
+    block(&mut r);
+    let mut c = r.client(Surface::Cli);
+    let rev = revision(&r);
+    let a = c.revise_contract(&r.outcome, rev, widened(), "k").unwrap();
+    let b = c.revise_contract(&r.outcome, rev, widened(), "k").unwrap();
+    assert_eq!(a.idempotency_key, b.idempotency_key);
+    r.owner();
+    assert_eq!(
+        c.command_status(&r.outcome, "k").unwrap().state,
+        CommandState::Applied
+    );
+    assert!(r.w().get_contract(r.w().id(), 3).is_err(), "one version");
+    let mut other = widened();
+    other.goal = "another".into();
+    assert!(c.revise_contract(&r.outcome, rev, other, "k").is_err());
+    // an unrevised outcome (running) is denied by the owner, with no version stored
+    let mut r2 = rig();
+    let mut c2 = r2.client(Surface::Cli);
+    let rev = revision(&r2);
+    c2.revise_contract(&r2.outcome, rev, widened(), "k")
+        .unwrap();
+    r2.owner();
+    let s = c2.command_status(&r2.outcome, "k").unwrap();
+    assert_eq!(s.state, CommandState::Denied, "{s:?}");
+    assert!(r2.w().get_contract(r2.w().id(), 2).is_err());
 }
