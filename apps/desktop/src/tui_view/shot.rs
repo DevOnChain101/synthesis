@@ -775,6 +775,7 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     title: "Dashboard".into(),
                     tabs: vec!["Dashboard".into(), "Sign in".into(), "Docs".into()],
                     active: 0,
+                    offset: 0,
                 };
                 let jpeg = super::browser_view::sample_jpeg(1280, 800);
                 t.ts.bv

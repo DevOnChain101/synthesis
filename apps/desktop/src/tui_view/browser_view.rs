@@ -51,6 +51,9 @@ pub const MAX_TYPED: usize = 2048;
 const MAX_TABS: usize = 32;
 /// An address offered to the person's own browser is shown whole next to the button, so it must be short.
 const MAX_OPEN: usize = 200;
+/// A failed `view(true)` is tried again after this long, this many times in all.
+const START_RETRY: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 5000 });
+const MAX_STARTS: u32 = 5;
 /// Polls without any frame (the view is on) after which the pane asks the browser to start casting again.
 const REASSERT_POLLS: u32 = 5;
 
@@ -63,7 +66,16 @@ pub fn clip(s: &str, n: usize) -> String {
 fn capped(mut p: PageState) -> PageState {
     p.url = clip(&p.url, MAX_TEXT);
     p.title = clip(&p.title, MAX_TEXT);
-    p.tabs.truncate(MAX_TABS);
+    // at most MAX_TABS tabs, in a window that always holds the active one (it must stay visible and highlighted)
+    if p.tabs.len() > MAX_TABS {
+        let start = p
+            .active
+            .saturating_sub(MAX_TABS - 1)
+            .min(p.tabs.len() - MAX_TABS);
+        p.tabs = p.tabs.split_off(start);
+        p.tabs.truncate(MAX_TABS);
+        p.offset = start;
+    }
     p.tabs.iter_mut().for_each(|t| *t = clip(t, MAX_TEXT));
     p
 }
@@ -136,7 +148,11 @@ pub struct Refusal {
 pub fn refusal(why: String, typed: &str) -> Refusal {
     let open = bar_address(typed).ok().filter(|u| {
         let l = u.to_ascii_lowercase();
+        // plain ASCII that display sanitising leaves alone: no bidi override, zero-width or other invisible character
+        // (and no non-ASCII host), so what is shown is exactly what is opened
         (l.starts_with("http://") || l.starts_with("https://"))
+            && u.is_ascii()
+            && sanitize_for_display(u) == *u
             && !l.contains(char::is_whitespace)
             && l.chars().count() <= MAX_OPEN
     });
@@ -204,7 +220,10 @@ pub struct PageState {
     pub title: String,
     /// Titles (or URLs) of the browser's tabs, oldest first.
     pub tabs: Vec<String>,
+    /// Index (in the browser's tab order) of the active tab.
     pub active: usize,
+    /// Index of `tabs[0]` in the browser's tab order: only [`MAX_TABS`] are kept, a window that holds the active tab.
+    pub offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -305,6 +324,7 @@ impl Source for RuntimeSource {
                     })
                     .collect(),
                 active: at,
+                offset: 0,
             })
         })
     }
@@ -558,16 +578,20 @@ async fn worker(
     retarget: Arc<Notify>,
 ) {
     let mut applied = false;
+    // a start that failed is tried again every START_RETRY, MAX_STARTS times in all
+    let (mut tries, mut retry) = (0u32, false);
     let mut tasks: Vec<AbortHandle> = vec![];
     let stop = |tasks: &mut Vec<AbortHandle>| tasks.drain(..).for_each(|t| t.abort());
     loop {
         let on = *want.borrow_and_update();
         if on != applied {
             applied = on;
+            retry = false;
             stop(&mut tasks);
             if on {
                 match src.view(true).await {
                     Ok(()) => {
+                        tries = 0;
                         lock(&shared).note = None;
                         if let Some(feed) = src.frames() {
                             tasks.push(
@@ -585,7 +609,16 @@ async fn worker(
                             .abort_handle(),
                         );
                     }
-                    Err(e) => lock(&shared).note = Some(e),
+                    Err(e) => {
+                        tries += 1;
+                        retry = tries < MAX_STARTS;
+                        let more = if retry {
+                            "trying again"
+                        } else {
+                            "giving up: hide and show the tab to retry"
+                        };
+                        lock(&shared).note = Some(format!("{e} ({more})"));
+                    }
                 }
                 let _ = wake.try_send(());
             } else {
@@ -599,6 +632,11 @@ async fn worker(
                 if r.is_err() {
                     break;
                 }
+            }
+            _ = tokio::time::sleep(START_RETRY), if retry => {
+                // the start failed: ask again (the wish is still `on`)
+                retry = false;
+                applied = false;
             }
             _ = retarget.notified(), if applied => {
                 if let Err(e) = src.view(true).await {
@@ -643,8 +681,9 @@ async fn poll(
     let mut blank = 0;
     loop {
         if let Ok(p) = src.page().await {
-            let p = capped(p);
+            // the signature is the browser's own, before the strip is bounded
             let sig = (p.active, p.tabs.len());
+            let p = capped(p);
             if last.is_some_and(|l| l != sig) {
                 retarget.notify_one();
             }
@@ -789,7 +828,8 @@ impl TuiView {
         let mut col = div().flex().flex_col().gap(px(8.)).size_full().child(bar);
         if let Some(p) = page.as_ref().filter(|p| p.tabs.len() > 1) {
             col = col.child(div().flex().gap(px(4.)).overflow_hidden().children(
-                p.tabs.iter().enumerate().map(|(i, title)| {
+                p.tabs.iter().enumerate().map(|(n, title)| {
+                    let i = p.offset + n; // the browser's own index
                     let on = i == p.active;
                     div()
                         .id(("bv-tab", i))
@@ -989,6 +1029,8 @@ pub struct FakeSource {
     pub policy: UrlPolicy,
     /// How long `view` takes (to make calls overlap if they could), and (in flight now, most at once).
     pub view_delay: Mutex<Duration>,
+    /// The next this-many `view(true)` calls fail.
+    pub view_fails: std::sync::atomic::AtomicUsize,
     flight: Arc<(
         std::sync::atomic::AtomicUsize,
         std::sync::atomic::AtomicUsize,
@@ -1004,6 +1046,7 @@ impl FakeSource {
             calls: Mutex::default(),
             policy: UrlPolicy::default(),
             view_delay: Mutex::default(),
+            view_fails: Default::default(),
             flight: Arc::default(),
         })
     }
@@ -1049,13 +1092,20 @@ impl Source for FakeSource {
     fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>> {
         use std::sync::atomic::Ordering::SeqCst;
         self.log(format!("view({on})"));
+        // one caller at a time in the tests, so load then subtract is enough
+        let fail =
+            on && self.view_fails.load(SeqCst) > 0 && self.view_fails.fetch_sub(1, SeqCst) > 0;
         let (delay, flight) = (*self.view_delay.lock().unwrap(), self.flight.clone());
         Box::pin(async move {
             let now = flight.0.fetch_add(1, SeqCst) + 1;
             flight.1.fetch_max(now, SeqCst);
             tokio::time::sleep(delay).await;
             flight.0.fetch_sub(1, SeqCst);
-            Ok(())
+            if fail {
+                Err("the browser is busy".to_string())
+            } else {
+                Ok(())
+            }
         })
     }
     fn frames(&self) -> Option<Box<dyn Feed>> {
@@ -1218,6 +1268,7 @@ mod tests {
             title: "A".into(),
             tabs: vec!["A".into(), "B".into()],
             active: 0,
+            offset: 0,
         };
         let fake = FakeSource::new(sample_jpeg(64, 40), page);
         let mut bp = BrowserPane::default();
@@ -1290,6 +1341,7 @@ mod tests {
             title: long.clone(),
             tabs: vec![long; 100],
             active: 0,
+            offset: 0,
         });
         assert_eq!(p.url.chars().count(), MAX_TEXT);
         assert_eq!(p.title.chars().count(), MAX_TEXT);
@@ -1309,6 +1361,7 @@ mod tests {
             title: "t".repeat(50_000),
             tabs: vec!["a".into(), "b".repeat(50_000)],
             active: 0,
+            offset: 0,
         };
         let fake = FakeSource::new(sample_jpeg(8, 8), page);
         let mut bp = BrowserPane::default();
@@ -1390,5 +1443,85 @@ mod tests {
         // editing the bar drops the refusal and with it the button
         bp.bar_edited();
         assert!(bp.refusal.is_none());
+    }
+
+    #[test]
+    fn no_open_button_for_an_address_that_is_not_what_it_looks_like() {
+        for u in [
+            "http://10.0.0.1/\u{202e}gpj.exe",
+            "http://10.0.0.1/a\u{200b}b",
+            "http://10.0.0.1/\u{2066}x",
+            "http://10.0.0.\u{ff11}",
+            "http://b\u{fc}cher.example",
+        ] {
+            assert!(refusal("private".into(), u).open.is_none(), "{u:?}");
+        }
+        assert!(
+            refusal("private".into(), "http://10.0.0.1/a-b?c=d")
+                .open
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_failed_start_is_tried_again_without_hiding_and_showing() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSource::new(sample_jpeg(16, 16), PageState::default());
+        fake.view_fails
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let mut bp = BrowserPane::default();
+        bp.attach(fake.clone(), rt.handle().clone());
+        bp.sync(true);
+        wait("the note of the failed start", || bp.snapshot().3.is_some());
+        assert!(bp.snapshot().3.unwrap().contains("trying again"));
+        wait("the retry to show a frame", || bp.snapshot().0.is_some());
+        assert_eq!(fake.calls(), ["view(true)", "view(true)"]);
+        assert!(bp.snapshot().3.is_none(), "the note stays after recovery");
+        // it gives up after MAX_STARTS and says how to retry
+        let dead = FakeSource::new(sample_jpeg(16, 16), PageState::default());
+        dead.view_fails
+            .store(100, std::sync::atomic::Ordering::SeqCst);
+        let mut bp = BrowserPane::default();
+        bp.attach(dead.clone(), rt.handle().clone());
+        bp.sync(true);
+        wait("giving up", || {
+            bp.snapshot().3.is_some_and(|n| n.contains("giving up"))
+        });
+        assert_eq!(dead.calls().len(), MAX_STARTS as usize);
+    }
+
+    #[test]
+    fn the_active_tab_stays_in_the_strip_and_the_signature_sees_every_tab() {
+        let tabs: Vec<String> = (0..40).map(|i| format!("t{i}")).collect();
+        let at = |active| {
+            capped(PageState {
+                tabs: tabs.clone(),
+                active,
+                ..Default::default()
+            })
+        };
+        let p = at(35);
+        assert_eq!(p.tabs.len(), MAX_TABS);
+        assert!(p.offset <= 35 && 35 < p.offset + MAX_TABS);
+        assert_eq!(p.tabs[35 - p.offset], "t35");
+        let p = at(39);
+        assert_eq!((p.offset, p.tabs[39 - p.offset].as_str()), (8, "t39"));
+        assert_eq!(at(3).offset, 0);
+        // the poll compares the browser's own count and active tab: a 33rd tab changes it although the strip is full
+        let (a, b) = (
+            PageState {
+                tabs: tabs[..32].to_vec(),
+                ..Default::default()
+            },
+            PageState {
+                tabs: tabs[..33].to_vec(),
+                ..Default::default()
+            },
+        );
+        assert_ne!((a.active, a.tabs.len()), (b.active, b.tabs.len()));
     }
 }
