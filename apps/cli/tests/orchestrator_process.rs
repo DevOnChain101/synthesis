@@ -422,3 +422,33 @@ fn notices_are_told_once_across_a_restart_and_a_crash_after_the_mark_loses_one_n
     o2.revision += 1;
     assert!(due_notices(&mut w, &o2, &mut Default::default()).is_empty());
 }
+
+#[test]
+fn a_closed_enable_gate_refuses_the_owner_enable_and_changes_nothing() {
+    let t = tmp();
+    let base = std::fs::canonicalize(t.path()).unwrap();
+    let home = base.join("h");
+    settings(&home, true);
+    // a pre-outcomes store: the migration would back it up first
+    let store = Store::open(&home, StoreOptions::default()).unwrap();
+    let mut o = WorktreeOptions::new(home.join("state"));
+    o.worktrees_dir = Some(home.join("worktrees"));
+    let wm = WorktreeManager::new(&Env::from_process(), o).unwrap();
+    let spawn = SyntSpawn {
+        log: base.join("w.log"),
+        env: None,
+    };
+    let pol = OutcomePolicy::new(true, 16, 10, 24);
+    let enable = || synthesis_app::proto::Call::OrchestratorEnable {
+        surface: Surface::Cli,
+    };
+    let mut ow = Owner::new(&home, &store, &wm, &spawn, PathBuf::from("sh"), None);
+    ow.enable_gate_open = false;
+    let e = ow.job(enable(), &pol).unwrap_err();
+    assert!(e.contains("the release gate is not passed"), "{e}");
+    assert!(!home.join("backups").exists(), "no backup was made");
+    // the gate open (the debug default) migrates as before
+    ow.enable_gate_open = true;
+    assert_eq!(ow.job(enable(), &pol).unwrap()["schema"], 5);
+    assert!(home.join("backups").exists());
+}

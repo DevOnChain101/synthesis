@@ -71,6 +71,8 @@ Set `enabled` to `false` in `settings.json`. Expect: within a second the process
 
 Use a scratch git repository with one commit (`R`) and the scratch home above, with `enabled` true.
 
+Enabling needs a build whose gate is open: a debug build, or a release build made with `cargo build --release --features orchestrator-preview`. An official release build refuses `synt outcome enable` with "the release gate is not passed" and changes nothing.
+
 ```sh
 synt outcome enable            # prints the integrity notice and exits 2: nothing changed
 synt outcome enable --yes      # backup, then schema v5, then the owner's disclosure text (same first paragraph as the notice)
@@ -108,6 +110,7 @@ cargo test -p synthesis-cli --features test-provider --test outcome_e2e    # rea
 ## Not verified
 
 - Windows (named pipe, native or WSL) and Linux with bubblewrap for the process tests: written, not run by the author. CI will compile them; the process and endpoint tests are unix-only.
+- The owner's Windows/WSL run (#177) uses a preview build (`--features orchestrator-preview`): an official release build refuses enabling until B8 flips the gate.
 - A worker run by the orchestrator with a real model, and the live policy gateway (not built). `outcome_e2e` runs real workers against a scripted model (`SYNT_TEST_ORCH_SCRIPT`, builds with `test-provider` only), so create, verification, verdict, ack, a real decision and the kill matrix are automated; what it does not cover is listed in the acceptance doc (section 3c). `outcome_cmds` still seeds its decision in the store because it also runs in builds without `test-provider`, where no worker can be given a model.
 - The notify command through the confined `Notifier` against a real sandbox: the payload and delivery are unit tested without a sandbox.
 

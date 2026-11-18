@@ -15,7 +15,7 @@ use synthesis_view::outcomes::{
 
 use super::OutcomesView;
 use super::form_view::small_button;
-use super::model::{CentreTab, Item, OFF_LINES, Pane, Screen};
+use super::model::{CentreTab, Item, Pane, Screen, off_lines};
 use crate::live::now_ms;
 use crate::theme::{self, hsla};
 use crate::widgets::chrome::{self, Chip, dim, rule, strong, text, tracked, with_alpha};
@@ -706,7 +706,7 @@ impl OutcomesView {
         let (title, body): (&str, Vec<String>) = match &self.state.screen {
             Screen::Off => (
                 "Outcomes are off",
-                OFF_LINES.iter().map(|l| l.to_string()).collect(),
+                off_lines(synthesis_app::outcome_policy::gate_refusal()),
             ),
             Screen::Windows => (
                 "Outcomes need WSL2 on Windows",

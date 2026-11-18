@@ -24,6 +24,18 @@ pub const OFF_LINES: [&str; 4] = [
     "Then press r here. This window does not turn outcomes on.",
 ];
 
+/// The Off screen's lines; a build whose enable gate is closed says so instead of offering the enable step.
+pub fn off_lines(gate_refusal: Option<&str>) -> Vec<String> {
+    let mut v: Vec<String> = OFF_LINES.iter().map(|l| l.to_string()).collect();
+    if let Some(why) = gate_refusal {
+        v.splice(
+            1..3,
+            [format!("Turning outcomes on is not offered: {why}.")],
+        );
+    }
+    v
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
     List,

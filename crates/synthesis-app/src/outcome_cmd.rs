@@ -178,6 +178,12 @@ pub fn platform_refusal(native_windows: bool, cmd: &OutcomeCmd) -> Option<&'stat
     (native_windows && cmd.mutates()).then_some(WSL2_REFUSAL)
 }
 
+/// The refusal of a closed enable gate (the owner enforces it too; this one stops before the notice).
+pub fn gate_refusal(gate_open: bool, cmd: &OutcomeCmd) -> Option<&'static str> {
+    (!gate_open && matches!(cmd, OutcomeCmd::Enable { .. }))
+        .then_some(synthesis_orchestrator::GATE_REFUSAL)
+}
+
 pub fn off_text() -> String {
     "outcomes are off (synt.orchestrator.enabled is false). Set it to true in your user settings to use them; synt never turns it on by itself".into()
 }
@@ -194,6 +200,9 @@ pub struct Io<'a> {
 
 pub fn run_cmd(env: &Env, a: OutcomeArgs) -> Result<u8, String> {
     if let Some(why) = platform_refusal(cfg!(windows), &a.cmd) {
+        return Err(why.into());
+    }
+    if let Some(why) = gate_refusal(synthesis_orchestrator::enable_gate_open(), &a.cmd) {
         return Err(why.into());
     }
     let h = homes(env)?;

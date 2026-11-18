@@ -2,6 +2,10 @@
 
 Everything here is UNVERIFIED on GitHub: the workflows were validated locally only for YAML syntax and the individual commands (see the end of this file).
 
+## Orchestrator enable gate
+
+Official release builds keep the outcome orchestrator's enable gate CLOSED: `release.yml` never sets the `orchestrator-preview` feature, so `synt outcome enable` and `orchestrator.enable` refuse with "the release gate is not passed" (an already enabled home keeps running). Internal and preview builds open it with `cargo build --release --features orchestrator-preview` (`synthesis-cli`, `synthesis-desktop`); debug builds are always open. Do not add the feature to a release job; flipping the default is B8 (docs/specs/orchestrator-remaining-backend.md section 4).
+
 ## Steps
 
 1. Make sure `main` is green (`ci.yml`, including cargo-deny and cargo-audit).

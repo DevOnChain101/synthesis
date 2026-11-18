@@ -5,7 +5,7 @@ use synthesis_view::outcomes::{DecisionCard, InspectorTab, WSL2_REFUSAL, uncover
 
 use super::form;
 use super::link;
-use super::model::{CentreTab, OFF_LINES, Pane, Screen};
+use super::model::{CentreTab, OFF_LINES, Pane, Screen, off_lines};
 use super::render::{card_layout, state_colour, state_rgb};
 use super::*;
 use crate::theme::{self, hsla};
@@ -205,6 +205,16 @@ fn the_screens_that_are_not_the_list_explain_themselves(cx: &mut TestAppContext)
         "no enabling from the window"
     );
     assert!(WSL2_REFUSAL.contains("WSL2"));
+}
+
+#[test]
+fn a_closed_gate_replaces_the_enable_step_on_the_off_screen() {
+    assert_eq!(off_lines(None).join("\n"), OFF_LINES.join("\n"));
+    let closed = off_lines(Some("the release gate is not passed: x")).join(" ");
+    assert!(closed.contains("the release gate is not passed"));
+    assert!(
+        !closed.contains("synt outcome enable") && !closed.contains("synt.orchestrator.enabled")
+    );
 }
 
 fn briefs() -> Vec<Value> {
