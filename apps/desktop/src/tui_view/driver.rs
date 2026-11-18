@@ -929,7 +929,7 @@ impl TuiView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.active {
+        if !self.active || self.bar_focused(window, cx) {
             return false;
         }
         // the Terminal tab's shell takes every key it can (a dialog still owns the keyboard first)

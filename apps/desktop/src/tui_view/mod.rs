@@ -6,6 +6,7 @@
 //! PTY. Panels hide with the CLI's `panels.*` keys (`layout::Hidden`).
 
 pub mod activity;
+mod browser_view;
 pub mod chat;
 mod chat_sel;
 mod clean;
@@ -323,7 +324,8 @@ impl TuiView {
             let prev = std::mem::replace(&mut self.tab_sid, lu.live.sid.clone());
             // the first session keeps what was set before it existed (a shot's tab); a later one swaps
             if !prev.is_empty() {
-                let old = std::mem::take(&mut self.ts);
+                let mut old = std::mem::take(&mut self.ts);
+                old.bv.sync(false); // the session left stops casting its browser
                 self.tabs_saved.insert(prev, old);
                 self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
                 self.tree.reset();
@@ -1088,6 +1090,7 @@ impl Render for TuiView {
         self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
+        self.browser_tick(window, cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height) - self.top;

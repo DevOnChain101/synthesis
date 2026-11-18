@@ -269,9 +269,19 @@ pub struct Engine {
     pub notes: synthesis_app::memory::Notes,
     /// A `!cmd` ended and the model should read its output (the window starts that turn).
     followup: Arc<std::sync::atomic::AtomicBool>,
+    /// Where the session's browser is found by the Browser tab (empty in remote mode: no pane there yet).
+    browser: Arc<synthesis_tools::BrowserTap>,
 }
 
 impl Engine {
+    /// The Browser tab's way to the session's browser, and the runtime its calls run on (`None` in WSL mode).
+    pub fn browser_access(
+        &self,
+    ) -> Option<(Arc<synthesis_tools::BrowserTap>, tokio::runtime::Handle)> {
+        let h = self.live.as_ref()?.tokio.as_ref()?.handle().clone();
+        Some((self.browser.clone(), h))
+    }
+
     fn live(&self) -> Result<&Live, &'static str> {
         self.live.as_ref().ok_or(NOT_REMOTE)
     }
@@ -400,6 +410,7 @@ impl Engine {
                 long_term: false,
             },
             followup: Arc::default(),
+            browser: Arc::default(),
         }
     }
 
@@ -474,6 +485,7 @@ impl Engine {
                 .is_ok()
             })
         };
+        let browser = Arc::new(synthesis_tools::BrowserTap::default());
         let native = Native {
             out: Box::new(Lines {
                 tx: tx.clone(),
@@ -489,6 +501,7 @@ impl Engine {
             }),
             // `synt stop` on this in-process session: cancel it without exiting the app
             on_stop: Some(stop_callback(tx.clone())),
+            browser_view: Some(browser.clone()),
         };
         let t_prepare = crate::trace::span(
             env,
@@ -605,6 +618,7 @@ impl Engine {
             memory_report: (info.notes.clone().hook().report)(),
             notes: info.notes,
             followup: Arc::default(),
+            browser,
         };
         Ok((engine, rx))
     }
