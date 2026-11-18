@@ -37,8 +37,7 @@ fn variance_of_image_area(size: &str, rect: impl Fn(u32, u32) -> (u32, u32, u32,
 fn the_saved_screenshot_is_drawn_not_blank() {
     // 1400x900 at 2x: the 300 px image box starts below the url bar (about y 430..1130 px; the area below the url bar and above the history rows is blank without it, x 590..1710 px)
     let var = variance_of_image_area("1400x900", |_, _| (700, 700, 600, 300));
-    // a blank area has variance 0; this gradient measures about 74 in the region (the old bound of 100 was above it)
-    assert!(var > 20., "the screenshot area is blank (variance {var})");
+    assert!(var > 100., "the screenshot area is blank (variance {var})");
 }
 
 /// Bounding box (x0, y0, x1, y1) of the saturated pixels: the gradient frame is the only strongly coloured thing in the tab.
