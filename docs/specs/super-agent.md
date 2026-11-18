@@ -25,7 +25,7 @@ Settings stays a popup over the TUI view (gear, Cmd/Ctrl+,), not a mode.
 
 ### 2.0 Title bar (v7)
 
-- **Left, three buttons** where the old text tabs were drawn: collapse/expand the rail, back, forward. Back and forward walk through the frames already viewed (the orchestrator chat and the sessions opened from the rail), like a browser.
+- **Owner decision 2026-11-18 (supersedes the left-side placement):** in the Super Agent tab only (the TUI view gets none of these), the **collapse/expand-rail button sits right after the traffic lights**, and **back and forward chevrons sit at the far right edge**, greyed when there is no history; **no "Super Agent" text** in the bar. Back and forward walk through Super Agent frames only (the orchestrator chat and the session chats opened from the rail), like a browser. Details: [super-agent-s1.md](super-agent-s1.md) section 5.
 - **Breadcrumb** in the title bar: `Super Agent` in the chat; `Super Agent > Migrate auth > w3 token refresh` in a session.
 - **Right, next to the Settings gear: the `TUI | Super Agent` mode buttons**, exactly where they are in the TUI view today (so the two modes look the same from both). The **badge** (things waiting for the person, section 8) is on the Super Agent button.
 - The right column is collapsible with the rail button.
@@ -108,6 +108,7 @@ Clicking a session in the rail **replaces the orchestrator chat in the centre wi
 - **Outcome workers**: the composer's target chip reads `w3 (via orchestrator)`; the line goes through the orchestrator (`@w3`) and shows a **confirm card** before anything reaches the worker (`conductor.md` 2.4-2.6). Attempts are unattended: a worker's own approvals are not answered from here. **Open question (Q7): may the person type straight into a worker?** Recommended: no, via the orchestrator only.
 - A session that waits for the person shows a banner "waiting for you since 4 min" (own sessions: the dock is right there).
 - Back/forward return to the orchestrator chat; the composer draft of each frame is kept per frame.
+- **Owner decision 2026-11-18:** the session view also has **Terminal** and **Browser** tabs (the merged T2 and B2/B6 panes, hosted per session without a second engine or browser; their security rules carry over unchanged; outcome worker sessions get no Terminal tab) and later a read-only **Files** tab; the open tabs of a session show as stacked icon tiles. Plan and phases P0-P8: [super-agent-s1.md](super-agent-s1.md).
 
 ### 6.1 What is reused from the fork (layout only)
 
