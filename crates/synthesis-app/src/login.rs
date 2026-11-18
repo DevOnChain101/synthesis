@@ -555,13 +555,15 @@ impl BrowserHost for CliHost {
     fn confirm_loopback<'a>(
         &'a self,
         target: &'a str,
+        page: &'a str,
         cancel: &'a CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, bool> {
         Box::pin(async move {
             ask_yes(
                 &format!(
-                    "Let the agent browse {} on this machine?",
-                    sanitize_for_display(target)
+                    "Let the agent use {} on this machine (the open page is {})?",
+                    sanitize_for_display(target),
+                    sanitize_for_display(page)
                 ),
                 cancel,
             )
@@ -699,16 +701,18 @@ impl BrowserHost for DialogHost {
     fn confirm_loopback<'a>(
         &'a self,
         target: &'a str,
+        page: &'a str,
         cancel: &'a CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, bool> {
         Box::pin(async move {
             self.ask(
                 "browser_navigate",
                 "browser-host",
-                serde_json::json!({"loopback": target}),
+                serde_json::json!({"loopback": target, "page": page}),
                 format!(
-                    "The agent asks to browse {} on this machine (a local server). Asked once per session and address; private network and metadata addresses are never allowed.",
-                    sanitize_for_display(target)
+                    "The agent asks to browse or read {} on this machine (a local server); the open page is {}. Asked once per session and address; private network and metadata addresses are never allowed.",
+                    sanitize_for_display(target),
+                    sanitize_for_display(page)
                 ),
                 cancel,
             )

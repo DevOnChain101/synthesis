@@ -167,11 +167,13 @@ pub trait BrowserHost: Send + Sync + std::fmt::Debug {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, bool>;
 
-    /// The agent wants to browse the loopback address `target` (`localhost:3000`): return whether the person agrees.
+    /// The agent wants to browse (or, `page` being the same origin, to read the open page at) the loopback address
+    /// `target` (`localhost:3000`) while the tab shows `page` (an origin, or empty): return whether the person agrees.
     /// Asked once per exact host:port and session. The default (no way to ask) refuses.
     fn confirm_loopback<'a>(
         &'a self,
         _target: &'a str,
+        _page: &'a str,
         _cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
@@ -254,8 +256,16 @@ async fn runtime(
     let rt = state
         .browser
         .get_or_try_init(|| async {
+            // one launch at a time with the window's Start: two Chromes cannot both register
+            let _one = match &cfg.view {
+                Some(t) => Some(t.starting.lock().await),
+                None => None,
+            };
             // the person started it from the window: the session uses that browser
             if let Some(rt) = cfg.view.as_ref().and_then(|t| lock(&t.started).clone()) {
+                return Ok(rt);
+            }
+            if let Some(rt) = cfg.view.as_ref().and_then(|t| lock(&t.weak).upgrade()) {
                 return Ok(rt);
             }
             let mut o = BrowserOptions::new(ctx.workspace.artifact_root.join("browser"));
@@ -387,6 +397,13 @@ macro_rules! browser_tool {
                     Ok(rt) => rt,
                     Err(e) => return e,
                 };
+                // a loopback page the person opened is not the agent's to read or act on until the person approves it
+                if $wire != "browser_close"
+                    && let Err(e) =
+                        approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await
+                {
+                    return fail($wire, e.into());
+                }
                 let r = tokio::select! {
                     r = $body(&rt, input, sh) => r,
                     () = ctx.cancel.cancelled() => Err("aborted.".into()),
@@ -419,6 +436,17 @@ pub(crate) fn navigate<'a>(
     })
 }
 
+/// Distinct loopback targets the person may refuse in one session before nobody is asked again.
+const MAX_LOOPBACK_REFUSED: usize = 3;
+
+/// URL of the tab the agent would read or act on.
+async fn current_page(rt: &BrowserRuntime) -> Option<String> {
+    let tabs = rt.tabs().await.ok()?;
+    tabs.iter()
+        .find(|t| t.active)
+        .map(|t| t.page.url.expose().to_owned())
+}
+
 /// The agent's URL policy refuses loopback until the person approves that exact host:port (remembered for the
 /// browser's life). LAN, link-local and metadata addresses have no approval path; nobody to ask (`synt run` without a
 /// terminal) keeps it blocked.
@@ -442,6 +470,11 @@ async fn approve_loopback(
     let key = format!("loopback:{target}");
     let state = sh.session(ctx);
     let host = lock(&sh.browser_cfg).host.clone();
+    // the person is not asked again and again about new targets
+    let refused_targets = lock(&state.refusals)
+        .iter()
+        .filter(|(k, n)| k.starts_with("loopback:") && **n > 0)
+        .count();
     let how = format!(
         "{target} is a loopback address: the agent may browse it only after the person approves it (asked once per session and exact host:port)"
     );
@@ -450,12 +483,16 @@ async fn approve_loopback(
             "{how}; nobody can be asked in this run, so it stays blocked"
         )));
     };
-    if refused_too_often(&state, &key) {
+    if refused_too_often(&state, &key) || refused_targets >= MAX_LOOPBACK_REFUSED {
         return Err(BrowserError::Policy(format!(
-            "{how}; the person already refused it twice"
+            "{how}; the person already refused it (or several loopback addresses) in this session, so it is not asked again"
         )));
     }
-    if !host.confirm_loopback(&target, &ctx.cancel).await {
+    let page = current_page(rt)
+        .await
+        .and_then(|u| url::Url::parse(&u).ok())
+        .map_or(String::new(), |u| u.origin().ascii_serialization());
+    if !host.confirm_loopback(&target, &page, &ctx.cancel).await {
         note_refusal(&state, &key);
         return Err(BrowserError::Policy(format!(
             "{how}; the person did not approve it. Ask the person to approve, then retry"
@@ -598,6 +635,9 @@ pub(crate) fn fill_secret<'a>(
             Ok(rt) => rt,
             Err(e) => return e,
         };
+        if let Err(e) = approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await {
+            return fail("browser_fill_secret", e.into());
+        }
         let r = tokio::select! {
             r = fill_secret_body(&rt, input, sh, ctx) => r,
             () = ctx.cancel.cancelled() => Err("aborted.".into()),

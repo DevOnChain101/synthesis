@@ -1423,7 +1423,7 @@ async fn a_sub_agent_cannot_choose_a_saved_login_and_nobody_is_asked() {
 /// The person for loopback questions: approves only the listed `host:port` targets and records every question.
 #[derive(Debug, Default)]
 struct LoopbackPerson {
-    approve: Vec<String>,
+    approve: Mutex<Vec<String>>,
     asked: Mutex<Vec<String>>,
 }
 
@@ -1454,10 +1454,11 @@ impl BrowserHost for LoopbackPerson {
     fn confirm_loopback<'a>(
         &'a self,
         target: &'a str,
+        _: &'a str,
         _: &'a tokio_util::sync::CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, bool> {
         self.asked.lock().unwrap().push(target.to_owned());
-        Box::pin(async move { self.approve.iter().any(|a| a == target) })
+        Box::pin(async move { self.approve.lock().unwrap().iter().any(|a| a == target) })
     }
 }
 
@@ -1480,7 +1481,7 @@ async fn the_agent_reaches_loopback_only_on_the_target_the_person_approved() {
     let (ta, tb) = (a.replace("http://", ""), b.replace("http://", ""));
     let d = tempfile::tempdir().unwrap();
     let person = Arc::new(LoopbackPerson {
-        approve: vec![ta.clone()],
+        approve: Mutex::new(vec![ta.clone()]),
         ..Default::default()
     });
     let reg = strict_registry(Some(person.clone()));
@@ -1518,4 +1519,47 @@ async fn the_agent_reaches_loopback_only_on_the_target_the_person_approved() {
         "{o:?}"
     );
     reg.close_session("lb2");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loopback_page_the_person_opened_is_not_the_agents_until_approved() {
+    if !have_browser() {
+        return;
+    }
+    let a = serve().await;
+    let ta = a.replace("http://", "");
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson::default());
+    let tap = Arc::new(synthesis_tools::BrowserTap::default());
+    let cfg = BrowserConfig {
+        no_sandbox: no_sandbox(),
+        host: Some(person.clone()),
+        view: Some(tap.clone()),
+        ..Default::default()
+    };
+    tap.enable_start(
+        cfg.clone(),
+        d.path().join("art"),
+        synthesis_config::Env::from_process(),
+    );
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(cfg);
+    // the person starts the browser from the tab and opens the dev server
+    tap.start().await.unwrap();
+    let view = tap.view().unwrap();
+    view.navigate(&format!("{a}/login"), synthesis_browser::WaitUntil::Load)
+        .await
+        .unwrap();
+    // the agent adopts that browser, but may not read or act on the person's loopback page
+    let c = ctx(d.path(), "lb3");
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    assert!(o.is_error && text(&o).contains("approves"), "{o:?}");
+    assert_eq!(*person.asked.lock().unwrap(), vec![ta.clone()]);
+    // after approval the same page works for the agent
+    person.approve.lock().unwrap().push(ta);
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    ok(&o, "snapshot after approval");
+    ok(&reg.execute("browser_tabs", json!({}), &c).await, "tabs");
+    reg.close_session("lb3");
 }

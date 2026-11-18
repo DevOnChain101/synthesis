@@ -17,7 +17,7 @@ mod untrusted;
 pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
-pub use policy::{Resolver, UrlPolicy, loopback_target};
+pub use policy::{Origin, Resolver, UrlPolicy, loopback_target};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use screencast::{Frame, FrameMeta, FrameStream};
 pub use untrusted::UntrustedText;
@@ -301,6 +301,13 @@ fn spawn_events(
                 if let (Some(s), false) = (ev.params["sessionId"].as_str(), own_tab) {
                     children.insert(s.to_owned());
                 }
+                if let (Some(s), Some(t), "page") = (
+                    ev.params["sessionId"].as_str(),
+                    ev.params["targetInfo"]["targetId"].as_str(),
+                    ev.params["targetInfo"]["type"].as_str().unwrap_or(""),
+                ) {
+                    policy.alias(s, t);
+                }
                 if let Some(cdp) = weak.upgrade() {
                     tokio::spawn(secure_child(cdp, ev.params));
                 }
@@ -309,7 +316,8 @@ fn spawn_events(
             if ev.method == "Network.responseReceived" {
                 let remote = ev.params["response"]["remoteIPAddress"].as_str();
                 let url = ev.params["response"]["url"].as_str().unwrap_or("");
-                if remote.is_some_and(|ip| policy.remote_ip_denied(ip, url)) {
+                let origin = policy.origin_for(ev.session_id.as_deref(), p_document(&ev.params));
+                if remote.is_some_and(|ip| policy.remote_ip_denied(ip, url, &origin)) {
                     // Chrome connected to a private address although our DNS check passed
                     // (rebinding / own resolver). The request was already sent; drop the page.
                     if let (Some(cdp), Some(session)) = (weak.upgrade(), ev.session_id.clone()) {
@@ -331,6 +339,13 @@ fn spawn_events(
                     }
                 }
             }
+            // a top-level commit decides whether this tab shows a page the person opened on loopback
+            if ev.method == "Page.frameNavigated"
+                && ev.params["frame"].get("parentId").is_none()
+                && let (Some(s), Some(u)) = (&ev.session_id, ev.params["frame"]["url"].as_str())
+            {
+                policy.committed(s, u);
+            }
             if ev.method != "Fetch.requestPaused" {
                 let child_net = ev.method.starts_with("Network.")
                     && ev.session_id.as_ref().is_some_and(|s| children.contains(s));
@@ -347,9 +362,10 @@ fn spawn_events(
             };
             let document = p["resourceType"] == "Document";
             if let (Some(cdp), Some(session)) = (weak.upgrade(), ev.session_id.clone()) {
+                let origin = policy.origin_for(Some(&session), document);
                 let (rid, url, policy) = (rid.to_owned(), url.to_owned(), policy.clone());
                 tokio::spawn(async move {
-                    let verdict = policy.check_resolved(&url, document).await;
+                    let verdict = policy.check_resolved(&url, document, &origin).await;
                     let _ = match verdict {
                         Ok(()) => {
                             cdp.send(
@@ -372,6 +388,11 @@ fn spawn_events(
             }
         }
     })
+}
+
+/// `Network.responseReceived` of a document (main frame or iframe).
+fn p_document(params: &Value) -> bool {
+    params["type"] == "Document"
 }
 
 /// Schemes the policy refuses outright, blocked at the network layer in every session.
@@ -967,6 +988,7 @@ impl BrowserRuntime {
             .as_str()
             .ok_or(BrowserError::Closed)?
             .to_owned();
+        self.opts.policy.alias(&session, target_id);
         let tab = Arc::new(Tab {
             session,
             refs: Mutex::default(),
@@ -1099,6 +1121,7 @@ impl BrowserRuntime {
     async fn navigate_as(&self, url: &str, until: WaitUntil, person: bool) -> Result<PageInfo> {
         self.nav_allowed(url, person)?;
         let tab = self.current()?;
+        let _nav = self.mark_navigation(&tab, url, person);
         let mut rx = self.cdp.subscribe();
         let r = self
             .call(&tab, "Page.navigate", json!({"url": url}))
@@ -1110,6 +1133,17 @@ impl BrowserRuntime {
             return self.info(&tab).await; // same-document navigation: no load event
         }
         self.finish_load(&mut rx, &tab, until).await
+    }
+
+    /// The person's navigation may reach its loopback target until the guard drops; the agent's navigation takes the
+    /// tab away from the person's page first.
+    fn mark_navigation(&self, tab: &Tab, url: &str, person: bool) -> Option<policy::PersonNav> {
+        if person {
+            self.opts.policy.begin_person(&tab.session, url)
+        } else {
+            self.opts.policy.leave_person_page(&tab.session);
+            None
+        }
     }
 
     fn nav_allowed(&self, url: &str, person: bool) -> Result<()> {
@@ -1131,7 +1165,9 @@ impl BrowserRuntime {
             .ok()
             .and_then(|i| h["entries"].get(i))
             .ok_or_else(|| BrowserError::Page("no history entry in that direction".into()))?;
-        self.nav_allowed(entry["url"].as_str().unwrap_or(""), person)?;
+        let url = entry["url"].as_str().unwrap_or("");
+        self.nav_allowed(url, person)?;
+        let _nav = self.mark_navigation(&tab, url, person);
         let mut rx = self.cdp.subscribe();
         self.call(
             &tab,
@@ -1166,6 +1202,7 @@ impl BrowserRuntime {
             .and_then(|e| e["url"].as_str())
             .unwrap_or("");
         self.nav_allowed(url, person)?;
+        let _nav = self.mark_navigation(&tab, url, person);
         let mut rx = self.cdp.subscribe();
         self.call(&tab, "Page.reload", json!({})).await?;
         self.finish_load(&mut rx, &tab, WaitUntil::Load).await
