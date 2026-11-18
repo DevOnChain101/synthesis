@@ -94,9 +94,11 @@ pub struct TermPane {
     scroll_acc: f32,
     /// A one-line problem (a paste too large, the shell not reading) and the link waiting for a yes.
     notice: Option<String>,
-    link: Option<String>,
+    link: Option<(String, String)>,
     /// A close of a shell with a program running waits for a second click.
     confirm_close: Option<u32>,
+    /// The Terminal tab is on screen: only then does output repaint (a hidden shell only parses).
+    pub shown: bool,
     /// The pane tried to open its first shell (it does not retry by itself).
     pub tried: bool,
     /// Size handed to a new shell: the last drawn grid.
@@ -120,13 +122,30 @@ fn mods(m: &gpui::Modifiers) -> Mods {
     }
 }
 
-/// The part of an http(s) link that may be shown and opened: one line, no controls, clipped.
-fn link_ok(uri: &str) -> Option<String> {
+/// An http(s) link that may be offered: `(url, host)`. What the bar shows is exactly what opens, so the URL
+/// is plain ASCII, one line, at most 200 characters, with no userinfo (`good.com@evil.com`) and a host of
+/// letters, digits, dots and hyphens only (no look-alike letters; an internationalised name must be
+/// written as punycode, which shows as `xn--`).
+fn link_ok(uri: &str) -> Option<(String, String)> {
     let u = uri.trim();
-    ((u.starts_with("https://") || u.starts_with("http://"))
-        && u.len() <= 2048
-        && !u.chars().any(|c| c.is_control() || c.is_whitespace()))
-    .then(|| u.to_string())
+    let rest = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))?;
+    if u.len() > 200 || !u.is_ascii() || u.chars().any(|c| c.is_control() || c == ' ') {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.contains('@') {
+        return None;
+    }
+    let (host, port) = authority.split_once(':').unwrap_or((authority, ""));
+    let host_ok = !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    (host_ok && port.chars().all(|c| c.is_ascii_digit()))
+        .then(|| (u.to_string(), host.to_ascii_lowercase()))
 }
 
 impl TermPane {
@@ -146,6 +165,7 @@ impl TermPane {
             link: None,
             confirm_close: None,
             tried: false,
+            shown: false,
             last_size: (80, 24),
         }
     }
@@ -160,6 +180,25 @@ impl TermPane {
     pub fn grid_size(&self) -> Option<(usize, usize)> {
         let g = self.geo.get();
         (g.cols > 0).then_some((g.cols, g.rows))
+    }
+
+    /// Hangs up every shell, waits at most 1 s for them, then kills what is left: the app is quitting and
+    /// the detached reap threads may not get to run.
+    pub fn shutdown(&mut self) {
+        let live: Vec<Arc<Session>> = self
+            .shells
+            .iter()
+            .filter_map(|s| match &s.state {
+                State::Running(x) => Some(x.clone()),
+                _ => None,
+            })
+            .collect();
+        live.iter().for_each(|s| s.hangup());
+        let end = std::time::Instant::now() + Duration::from_secs(1);
+        while live.iter().any(|s| s.alive()) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        live.iter().for_each(|s| s.kill_now());
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {
@@ -285,7 +324,9 @@ impl TermPane {
     }
 
     fn after_output(&mut self, n: u32, cx: &mut Context<Self>) {
-        cx.notify();
+        if self.shown && !self.agent && self.shells.get(self.cur).is_some_and(|s| s.n == n) {
+            cx.notify();
+        }
         let Some(sh) = self.shells.iter_mut().find(|s| s.n == n) else {
             return;
         };
@@ -311,6 +352,7 @@ impl TermPane {
             seen: Default::default(),
         });
         (self.cur, self.tried, self.agent) = (self.shells.len() - 1, true, false);
+        self.shown = true;
         cx.emit(Changed);
         cx.notify();
     }
@@ -506,7 +548,7 @@ impl TermPane {
             // a link opens only after the person confirms the URL shown
             if let Some(u) = s.link_at(col, row) {
                 match link_ok(&u) {
-                    Some(u) => self.link = Some(u),
+                    Some(l) => self.link = Some(l),
                     None => {
                         self.notice =
                             Some("Only http and https links open from the terminal.".into());
@@ -884,7 +926,7 @@ fn panel(msg: impl Into<String>) -> Div {
         .child(msg.into())
 }
 
-fn bar(text: String, buttons: Vec<gpui::AnyElement>) -> Div {
+fn bar(content: impl IntoElement, buttons: Vec<gpui::AnyElement>) -> Div {
     div()
         .flex()
         .items_center()
@@ -895,7 +937,13 @@ fn bar(text: String, buttons: Vec<gpui::AnyElement>) -> Div {
         .border_color(hsla(t::RULE))
         .bg(hsla(t::SURFACE))
         .text_color(crate::widgets::chrome::strong())
-        .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(text))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .child(content),
+        )
         .children(buttons)
 }
 
@@ -963,7 +1011,7 @@ impl Render for TermPane {
                 col = col
                     .child(panel(format!("The shell could not start: {why}")))
                     .child(bar(
-                        "Enter or the button starts it again.".into(),
+                        "Enter or the button starts it again.",
                         vec![
                             button("term-retry", "retry")
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(Retry)))
@@ -1014,14 +1062,20 @@ impl Render for TermPane {
                 }
             }
         }
-        if let Some(u) = self.link.clone() {
-            let shown: String = synthesis_harness::sanitize_for_display(&u)
-                .chars()
-                .take(200)
-                .collect();
+        if let Some((u, host)) = self.link.clone() {
             let open = u.clone();
+            let what = div()
+                .flex()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(hsla(t::TEXT_STRONG))
+                        .child(format!("Open {host}")),
+                )
+                .child(div().text_color(crate::widgets::chrome::dim()).child(u));
             col = col.child(bar(
-                format!("Open {shown} in your browser?"),
+                what,
                 vec![
                     button("term-link-open", "open")
                         .on_click(cx.listener(move |p, _, _, cx| {
@@ -1120,6 +1174,13 @@ impl TuiView {
         }
         let plan = self.term_launch();
         pane.update(cx, |p, cx| p.open(plan, cx));
+    }
+
+    /// App quit: the shells end now (bounded to about a second in all).
+    pub(super) fn term_shutdown(&mut self, cx: &mut Context<Self>) {
+        if let Some(p) = self.term.clone() {
+            p.update(cx, |p, _| p.shutdown());
+        }
     }
 
     pub(super) fn term_new(&mut self, cx: &mut Context<Self>) {
@@ -1247,5 +1308,40 @@ impl TuiView {
             );
         }
         strip
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::link_ok;
+
+    #[test]
+    fn a_link_is_shown_exactly_as_it_opens_and_tricks_are_refused() {
+        let (u, h) = link_ok("https://Example.com:8443/a?b=1#c").unwrap();
+        assert_eq!(
+            (u.as_str(), h.as_str()),
+            ("https://Example.com:8443/a?b=1#c", "example.com")
+        );
+        assert_eq!(link_ok("http://localhost/x").unwrap().1, "localhost");
+        // userinfo pushes the real host out of view
+        assert!(link_ok("https://good.com:xxxxxxxxxxxxxxxxxxx@evil.com/").is_none());
+        assert!(link_ok("https://good.com@evil.com").is_none());
+        // longer than what the bar shows
+        assert!(link_ok(&format!("https://a.com/{}", "x".repeat(200))).is_none());
+        assert!(link_ok(&format!("https://a.com/{}", "x".repeat(150))).is_some());
+        // look-alike letters, a non-ASCII path, controls, spaces, other schemes, a port that is not one
+        assert!(link_ok("https://\u{0430}pple.com/").is_none());
+        assert!(link_ok("https://a.com/\u{202e}x").is_none());
+        assert!(link_ok("https://a.com/\x1bx").is_none());
+        assert!(link_ok("https://a.com/ x").is_none());
+        assert!(link_ok("file:///etc/passwd").is_none());
+        assert!(link_ok("javascript:alert(1)").is_none());
+        assert!(link_ok("https://a.com:80x/").is_none());
+        assert!(link_ok("https:///x").is_none());
+        // punycode is plain ASCII and shows as such
+        assert_eq!(
+            link_ok("https://xn--pple-43d.com/").unwrap().1,
+            "xn--pple-43d.com"
+        );
     }
 }

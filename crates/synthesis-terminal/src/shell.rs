@@ -60,7 +60,8 @@ pub fn find_git_bash(env: GetEnv, exists: Exists) -> (Option<PathBuf>, usize) {
     }
     let path = env("PATH").or_else(|| env("Path")).unwrap_or_default();
     for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() || check(dir.join("git.exe")).is_none() {
+        // a relative PATH entry would resolve against the current directory
+        if !dir.is_absolute() || check(dir.join("git.exe")).is_none() {
             continue;
         }
         for up in ["..", "../.."] {
@@ -153,7 +154,7 @@ mod tests {
 
     #[test]
     fn windows_finds_bash_next_to_git_on_path() {
-        let dir = PathBuf::from("G").join("cmd");
+        let dir = std::env::temp_dir().join("G").join("cmd");
         let git = dir.join("git.exe");
         let want = dir.join("..").join("bin").join("bash.exe");
         let path = std::env::join_paths([&dir]).unwrap();
@@ -161,6 +162,14 @@ mod tests {
             p == git || p == want
         });
         assert_eq!(s.program, want);
+    }
+
+    #[test]
+    fn a_relative_path_entry_is_never_searched() {
+        let dir = PathBuf::from("rel").join("cmd");
+        let path = std::env::join_paths([&dir]).unwrap();
+        let s = resolve_shell(true, &|k| (k == "PATH").then(|| path.clone()), &|_| true);
+        assert_eq!(s.kind, ShellKind::Cmd);
     }
 
     #[test]

@@ -345,8 +345,9 @@ impl TuiView {
             lu.add_sub(activation);
         }
         let Some(lu) = &mut self.live else { return };
-        let quit_sub = cx.on_app_quit(|this, _| {
+        let quit_sub = cx.on_app_quit(|this, cx| {
             this.shutdown_engine();
+            this.term_shutdown(cx);
             async {}
         });
         lu.add_sub(quit_sub);

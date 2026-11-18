@@ -271,7 +271,12 @@ impl TuiView {
         self.ts.tab = tab;
         if tab == ChatTab::Terminal {
             let p = self.ensure_term(cx);
-            p.update(cx, |p, cx| p.focus(cx));
+            p.update(cx, |p, cx| {
+                p.shown = true;
+                p.focus(cx);
+            });
+        } else if let Some(p) = &self.term {
+            p.update(cx, |p, _| p.shown = false);
         }
         cx.notify();
     }

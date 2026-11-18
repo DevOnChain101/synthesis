@@ -25,6 +25,19 @@ pub enum Where {
     Wsl { distro: String, cwd: String },
 }
 
+/// Names `is_secret_shaped` drops (an AUTH or SESSION segment) that hold no secret, only a socket path or a
+/// session id; without them ssh-agent, git over ssh and the desktop bus break in the person's own shell.
+/// Applied only to these exact names; `SYNT_*` is never kept.
+const KEEP: [&str; 7] = [
+    "SSH_AUTH_SOCK",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_ID",
+    "XDG_SESSION_TYPE",
+    "XDG_RUNTIME_DIR",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+];
+
 /// The person's environment minus every `SYNT_*` name and every secret-shaped name (N3), plus the emulator's
 /// `TERM` and `COLORTERM`. A login shell re-reads the person's profile, which may export their own keys: that
 /// is their shell. `windows` folds the case of names (the environment is case-insensitive there).
@@ -42,7 +55,9 @@ pub fn scrub(env: &Env, windows: bool) -> Vec<(String, String)> {
         .iter()
         .filter(|(k, _)| {
             let up = k.to_ascii_uppercase();
-            !(up.starts_with("SYNT_") || synthesis_config::is_secret_shaped(&up) || ours(k))
+            !(up.starts_with("SYNT_")
+                || (synthesis_config::is_secret_shaped(&up) && !KEEP.contains(&up.as_str()))
+                || ours(k))
         })
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -71,6 +86,14 @@ pub fn plan(
     match at {
         Where::Wsl { distro, cwd } => {
             let exe = wsl_exe.ok_or("wsl.exe was not found")?;
+            // values that wsl.exe would read as options, or that hold control characters, are refused
+            if [distro, cwd]
+                .iter()
+                .any(|v| v.is_empty() || v.starts_with('-') || v.chars().any(char::is_control))
+                || !cwd.starts_with('/')
+            {
+                return Err("the WSL distro or folder is not a usable value".into());
+            }
             // the engine's own allow-list (paths, locale, proxy, TLS roots, temp), no SYNT_*, no WSLENV
             let mut vars: Vec<(String, String)> = crate::remote::allowed_env(env)
                 .into_iter()
@@ -131,6 +154,11 @@ mod tests {
             ("GITHUB_TOKEN", "t"),
             ("AWS_SECRET_ACCESS_KEY", "s"),
             ("synt_lower", "x"),
+            ("SSH_AUTH_SOCK", "/run/agent.sock"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/bus"),
+            ("XDG_SESSION_ID", "2"),
+            ("SYNT_SESSION_ID", "no"),
+            ("SESSION_TOKEN", "no"),
             ("LANG", "C.UTF-8"),
         ])
     }
@@ -151,7 +179,17 @@ mod tests {
             names.sort_unstable();
             assert_eq!(
                 names,
-                ["COLORTERM", "HOME", "LANG", "PATH", "SHELL", "TERM"],
+                [
+                    "COLORTERM",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "HOME",
+                    "LANG",
+                    "PATH",
+                    "SHELL",
+                    "SSH_AUTH_SOCK",
+                    "TERM",
+                    "XDG_SESSION_ID"
+                ],
                 "windows={windows}"
             );
             assert_eq!(
@@ -219,5 +257,20 @@ mod tests {
             "{names:?}"
         );
         assert!(plan(&at, &env(), true, None, None).is_err());
+        let wsl = || Some(PathBuf::from(r"C:\Windows\System32\wsl.exe"));
+        for (d, c) in [
+            ("-e", "/h"),
+            ("Ubuntu", "-x"),
+            ("Ubuntu", "rel"),
+            ("Ub\nuntu", "/h"),
+            ("Ubuntu", "/h\u{7}"),
+            ("", "/h"),
+        ] {
+            let at = Where::Wsl {
+                distro: d.into(),
+                cwd: c.into(),
+            };
+            assert!(plan(&at, &env(), true, wsl(), None).is_err(), "{d:?} {c:?}");
+        }
     }
 }
