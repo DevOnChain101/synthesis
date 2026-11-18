@@ -366,6 +366,9 @@ fn spawn_events(
                 let (rid, url, policy) = (rid.to_owned(), url.to_owned(), policy.clone());
                 tokio::spawn(async move {
                     let verdict = policy.check_resolved(&url, document, &origin).await;
+                    if verdict.is_ok() {
+                        policy.note_reach(&url, &origin);
+                    }
                     let _ = match verdict {
                         Ok(()) => {
                             cdp.send(

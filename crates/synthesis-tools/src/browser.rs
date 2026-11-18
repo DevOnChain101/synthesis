@@ -404,6 +404,14 @@ macro_rules! browser_tool {
                 {
                     return fail($wire, e.into());
                 }
+                // console, network and tab data are browser-wide: every loopback page the person had shown needs approval
+                if matches!(
+                    $wire,
+                    "browser_console" | "browser_network" | "browser_tabs"
+                ) && let Err(e) = approve_taint(sh, ctx, &rt).await
+                {
+                    return fail($wire, e.into());
+                }
                 let r = tokio::select! {
                     r = $body(&rt, input, sh) => r,
                     () = ctx.cancel.cancelled() => Err("aborted.".into()),
@@ -434,6 +442,19 @@ pub(crate) fn navigate<'a>(
         };
         r.unwrap_or_else(|e| fail(wire, e))
     })
+}
+
+/// Approval for every loopback target a person-origin page has shown in this browser that the agent has no approval
+/// for yet; the first refusal fails the call (nothing is redacted silently).
+async fn approve_taint(
+    sh: &Shared,
+    ctx: &ToolContext,
+    rt: &BrowserRuntime,
+) -> Result<(), BrowserError> {
+    for t in rt.policy().unapproved_taint() {
+        approve_loopback(sh, ctx, rt, Some(&format!("http://{t}/"))).await?;
+    }
+    Ok(())
 }
 
 /// Distinct loopback targets the person may refuse in one session before nobody is asked again.

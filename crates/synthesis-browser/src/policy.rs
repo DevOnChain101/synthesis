@@ -167,6 +167,9 @@ pub struct Pages {
     /// Chrome reports one page through several CDP sessions (ours and the browser-level auto-attach one): all
     /// map to the page target, which is what the two sets above are keyed by.
     target_of: std::collections::HashMap<String, String>,
+    /// Loopback targets any person-origin page has shown or reached since the browser started. Console, network and
+    /// tab data are runtime-wide, so the agent needs approval for each of these before reading them. Never shrinks.
+    taint: Vec<String>,
 }
 
 impl Pages {
@@ -355,6 +358,35 @@ impl UrlPolicy {
         let mut p = self.pages();
         let k = p.key(session);
         p.top.remove(&k);
+        p.pending.remove(&k);
+    }
+
+    /// A request judged for `o` was let through: a person-origin request that reached a loopback target taints it.
+    pub fn note_reach(&self, url: &str, o: &Origin) {
+        if *o == Origin::Agent {
+            return;
+        }
+        if let Some(t) = loopback_target(url) {
+            self.taint(t);
+        }
+    }
+
+    fn taint(&self, t: String) {
+        let mut p = self.pages();
+        if !p.taint.contains(&t) {
+            p.taint.push(t);
+        }
+    }
+
+    /// Tainted loopback targets the agent is not approved for (it needs the person's approval to read runtime-wide
+    /// console, network and tab data).
+    pub fn unapproved_taint(&self) -> Vec<String> {
+        let agent = self
+            .agent_loopback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let taint = self.pages().taint.clone();
+        taint.into_iter().filter(|t| !agent.contains(t)).collect()
     }
 
     /// CDP session `session` shows page target `target`.
@@ -382,6 +414,9 @@ impl UrlPolicy {
         if person {
             pages.top.insert(session.to_owned());
             let t = target.expect("person implies a target");
+            if !pages.taint.contains(&t) {
+                pages.taint.push(t.clone());
+            }
             let mut open = self.user_loopback.lock().unwrap_or_else(|e| e.into_inner());
             if !open.contains(&t) {
                 open.push(t);
@@ -1139,5 +1174,54 @@ mod tests {
         assert!(p.remote_ip_denied("127.0.0.1", "http://rebind.test:3000/", &o));
         assert!(!p.remote_ip_denied("127.0.0.1", "http://localhost:3000/", &o));
         assert!(p.remote_ip_denied("10.0.0.5", "http://localhost:3000/", &o));
+    }
+
+    #[test]
+    fn leaving_the_person_page_clears_a_pending_navigation() {
+        let p = UrlPolicy::default();
+        let _nav = p.begin_person("tab1", "http://localhost:3000/").unwrap();
+        assert_eq!(
+            p.origin_for(Some("tab1"), true),
+            Origin::Pending("localhost:3000".into())
+        );
+        p.leave_person_page("tab1");
+        assert_eq!(p.origin_for(Some("tab1"), true), Origin::Agent);
+    }
+
+    #[test]
+    fn a_person_page_or_a_person_redirect_to_loopback_taints_it_and_the_agent_never_does() {
+        let p = UrlPolicy::default();
+        assert!(p.unapproved_taint().is_empty());
+        // the agent's own requests never taint
+        p.approve_loopback("http://localhost:4000/").unwrap();
+        p.note_reach("http://localhost:4000/", &Origin::Agent);
+        assert!(p.unapproved_taint().is_empty());
+        // the person's page commits
+        person_page(&p, "tab1", "http://localhost:3000/");
+        assert_eq!(p.unapproved_taint(), ["localhost:3000"]);
+        // a person-origin page loads or redirects into another person target
+        person_page(&p, "tab2", "http://127.0.0.1:5000/");
+        p.note_reach("http://[::1]:6000/x", &Origin::Person);
+        p.note_reach(
+            "http://localhost:7000/",
+            &Origin::Pending("localhost:7000".into()),
+        );
+        p.note_reach("https://example.com/", &Origin::Person);
+        let mut t = p.unapproved_taint();
+        t.sort();
+        assert_eq!(
+            t,
+            [
+                "127.0.0.1:5000",
+                "[::1]:6000",
+                "localhost:3000",
+                "localhost:7000"
+            ]
+        );
+        // approval removes it from the list; the set itself never shrinks
+        p.approve_loopback("http://localhost:3000/").unwrap();
+        assert!(!p.unapproved_taint().contains(&"localhost:3000".to_string()));
+        p.leave_person_page("tab1");
+        assert_eq!(p.unapproved_taint().len(), 3);
     }
 }
