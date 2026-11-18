@@ -1473,6 +1473,8 @@ mod tests {
         let fake = FakeSource::new(sample_jpeg(16, 16), PageState::default());
         fake.view_fails
             .store(1, std::sync::atomic::Ordering::SeqCst);
+        // the note lives only until the retry succeeds (START_RETRY + this delay): long enough to be seen on a slow runner
+        *fake.view_delay.lock().unwrap() = Duration::from_millis(400);
         let mut bp = BrowserPane::default();
         bp.attach(fake.clone(), rt.handle().clone());
         bp.sync(true);
