@@ -1,4 +1,4 @@
-//! The Outcomes tab's link to the orchestrator: one worker thread that owns the `OutcomeClient` (the only way
+//! The Super Agent view's link to the orchestrator: one worker thread that owns the `OutcomeClient` (the only way
 //! this app talks to outcomes, ADR-021) so the UI thread never waits on a socket. It is a request/reply loop:
 //! the window sends `Req`s, the worker sends `Msg`s back. Between requests it waits for the push line
 //! (`attach push:["decision"]`): a hint only says "look again", so it triggers a refetch, and without any hint

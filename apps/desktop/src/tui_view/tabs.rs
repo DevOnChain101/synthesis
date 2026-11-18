@@ -658,10 +658,6 @@ impl TuiView {
             }
         };
         let tz = self.live.as_ref().map_or(0, |l| l.cfg.tz_min);
-        // the outcome list is not the open session's: it reads the same while another session is previewed
-        if self.ts.tab == ChatTab::Outcomes {
-            return self.outcomes_tab(cx);
-        }
         if self.previewing() && self.ts.tab != ChatTab::Chat {
             return div()
                 .debug_selector(|| "tab-pane".to_string())
@@ -672,7 +668,7 @@ impl TuiView {
                 .into_any_element();
         }
         let inner = match self.ts.tab {
-            ChatTab::Chat | ChatTab::Outcomes => div(),
+            ChatTab::Chat => div(),
             ChatTab::Diff => {
                 let toggle = |path: String| -> OnClick {
                     Box::new(cx.listener(move |this, _, _, cx| {

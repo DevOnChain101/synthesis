@@ -1,5 +1,5 @@
 //! Answering one decision card: the cursor (it starts on nothing), the arming delay, the in-flight flag and the
-//! notice. Shared by the Outcomes tab and the TUI view's decision popup, so both answer by the same rules: a
+//! notice. Shared by the Super Agent view's Decisions tab and its docked decision card, so both answer by the same rules: a
 //! choice is a deliberate act (arrows, a number or a click), Enter sends it only after the arming delay and
 //! never twice, and a card whose revision or brief hash changed is a new card with the cursor on nothing.
 
