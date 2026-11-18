@@ -114,7 +114,7 @@ Node 20 deprecation (bumped 2026-11-01): `checkout`, `setup-node`, `setup-python
 
 None are left unpinned. If one ever is (a new action, a manual edit), `release.yml` fails in `gate` via `scripts/check-action-pins.mjs`; ordinary CI does not. To resolve: `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object` (if `.type` is `tag`, follow `.url` and take `.object.sha`), put `@<sha> # <tag>` in the workflow, rerun the script. `.github/dependabot.yml` (github-actions, cargo) proposes bumps weekly; review each. Dependabot has no npm entry because no npm manifest with dependencies exists.
 
-Also unpinned by design: `rust-toolchain.toml` uses `channel = "stable"`; MSRV is checked separately at 1.89.
+The Rust toolchain is pinned: `rust-toolchain.toml` uses `channel = "1.100.0"` (owner decision 2026-11-18; an unpinned `stable` turned every PR red when Rust 1.100 added a clippy lint). Bump it deliberately in its own PR (fix any new lints there); MSRV is checked separately at 1.89.
 
 ## Rollback
 
