@@ -1347,7 +1347,13 @@ mod tests {
             true,
             Some("the release gate is not passed"),
         );
-        assert!(e.unwrap_err().contains("release gate"));
+        // the platform refusal wins on native Windows (checked first), the gate refusal elsewhere
+        let want = if cfg!(windows) {
+            "WSL2"
+        } else {
+            "release gate"
+        };
+        assert!(e.unwrap_err().contains(want));
         assert!(
             !m.cfg.home.join("settings.json").exists(),
             "nothing was written"
