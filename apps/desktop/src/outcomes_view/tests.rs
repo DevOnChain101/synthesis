@@ -616,3 +616,26 @@ fn the_notice_shown_is_the_builds_own_text_line_for_line(cx: &mut TestAppContext
     assert!(n.starts_with(synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE));
     assert!(n.contains("schema v5") && n.contains("backup"));
 }
+
+#[gpui::test]
+fn a_closed_gate_shows_the_refusal_in_the_dialog_instead_of_the_confirm(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    for screen in [Screen::Off, Screen::NotReady("not migrated".into())] {
+        let (o, v) = guide_view(cx, screen, 1100., 700.);
+        let why = "the release gate is not passed: use a preview build";
+        o.update(v, |o, _| o.state.gate_refusal = Some(why.into()));
+        let b = v.debug_bounds("out-guide-open").unwrap();
+        v.simulate_click(b.center(), Default::default());
+        v.run_until_parked();
+        assert!(v.debug_bounds("out-guide").is_some());
+        assert!(v.debug_bounds("out-guide-confirm").is_none(), "no confirm");
+        assert!(v.debug_bounds("out-guide-cancel").is_some());
+        let g = o.read_with(v, |o, _| o.state.guide.clone().unwrap());
+        assert_eq!(g.error.as_deref(), Some(why));
+        // Tab, Tab, Enter cannot confirm either: nothing is sent
+        v.simulate_keystrokes("tab tab enter");
+        assert!(o.update(v, |o, _| o.state.confirm_guide()).is_empty());
+        v.simulate_keystrokes("escape");
+        assert!(o.read_with(v, |o, _| o.state.guide.is_none()));
+    }
+}

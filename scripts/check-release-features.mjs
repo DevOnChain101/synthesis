@@ -4,6 +4,7 @@
 //                           WSL gate of apps/desktop/src/tui_view/driver.rs
 //   shot                    the offscreen screenshot tool (gpui test-support)
 //   test-provider           the scripted model
+//   orchestrator-preview    opens the outcome orchestrator enable gate in a release build (refused under ANY crate prefix)
 // Each must (1) be defined in the crate's Cargo.toml (a rename would otherwise make this pass vacuously),
 // (2) not be reachable from the `default` feature, (3) not be enabled by a dependency other than a dev one
 // (the crate's own dev-dependency is how the integration tests get `local-engine-for-tests`, and `cargo build`
@@ -17,7 +18,9 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const FEATURES = ["local-engine-for-tests", "shot", "test-provider"];
+export const FEATURES = ["local-engine-for-tests", "shot", "test-provider", "orchestrator-preview"];
+// forwarded by synthesis-app and synthesis-cli too, so a crate prefix does not make it allowed
+const ANY_PREFIX = ["orchestrator-preview"];
 const CRATE = "synthesis-desktop";
 
 /** Reasons (strings) why `meta` (cargo metadata, parsed) lets a guarded feature into a release build. */
@@ -65,7 +68,7 @@ export function mentionedIn(files, features = FEATURES) {
       for (const item of arg.replace(/^["']|["']$/g, "").split(/[\s,]+/).filter(Boolean)) {
         const [pre, f] = item.includes("/") ? item.split("/") : ["", item];
         // `synthesis-cli/test-provider` is another crate's feature: allowed. Unqualified or desktop: not.
-        if (features.includes(f) && (pre === "" || pre === CRATE)) bad.push(`${f} enabled in ${name} (${item})`);
+        if (features.includes(f) && (pre === "" || pre === CRATE || ANY_PREFIX.includes(f))) bad.push(`${f} enabled in ${name} (${item})`);
       }
     }
   }

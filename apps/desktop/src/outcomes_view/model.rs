@@ -145,6 +145,8 @@ pub struct State {
     pub form: Option<Form>,
     /// The open disclosure of the Off / not-migrated screens.
     pub guide: Option<Guide>,
+    /// Why this build cannot turn Super Agent on (the enable gate is closed): the guide then shows it instead of the confirm.
+    pub gate_refusal: Option<String>,
     /// Migrations the person has confirmed so far (the tag of the next one).
     pub migrations: u64,
     /// What the screen says about a migration whose dialog is gone (a late reply).
@@ -208,6 +210,7 @@ impl State {
             workspace: String::new(),
             form: None,
             guide: None,
+            gate_refusal: synthesis_app::outcome_policy::gate_refusal().map(String::from),
             migrations: 0,
             notice: None,
         }
@@ -492,7 +495,8 @@ impl State {
             step,
             focus: None,
             busy: false,
-            error: None,
+            // a closed gate: the dialog says why, and has no confirm
+            error: self.gate_refusal.clone(),
             seq: 0,
         });
         self.notice = None;
@@ -507,7 +511,7 @@ impl State {
     /// The Confirm button (a click, or Enter with the button focused): the step's effect, once.
     pub fn confirm_guide(&mut self) -> Vec<Effect> {
         match self.guide.as_mut() {
-            Some(g) if !g.busy => {
+            Some(g) if !g.busy && self.gate_refusal.is_none() => {
                 g.busy = true;
                 g.error = None;
                 vec![match g.step {

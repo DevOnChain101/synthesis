@@ -13,6 +13,11 @@ pub const DISCLOSURE_ID: &str = "integrity-v1";
 pub const INTEGRITY_DISCLOSURE: &str = "Outcome state is protected from agent attempts by the OS sandbox (platform dependent; native Windows refuses writable attempts). Approvals and events carry HMACs under a per-user key stored next to the data: they detect corruption, old binaries and writers that cannot read the key; they do not detect or prevent changes by any program running as the same user outside the sandbox, and they do not detect a cut-off tail of events. User and managed hooks still run on the host, outside the sandbox. There is no person-present signature yet: a program running as you outside the sandbox can read the key and forge an approval, an event or evidence.";
 
 /// The managed layer already won in `o`; a fail-closed managed value arrives as `enabled = false`.
+/// The refusal shown instead of an enable step when this build's gate is closed (`None`: open).
+pub fn gate_refusal() -> Option<&'static str> {
+    (!synthesis_orchestrator::enable_gate_open()).then_some(synthesis_orchestrator::GATE_REFUSAL)
+}
+
 pub fn outcome_policy(o: &OrchestratorSettings) -> OutcomePolicy {
     let mut p = OutcomePolicy::new(
         o.enabled && !o.fail_closed,

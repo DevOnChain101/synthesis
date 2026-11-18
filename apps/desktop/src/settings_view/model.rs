@@ -25,11 +25,24 @@ fn orchestrator_platform_lock(windows: bool) -> Option<String> {
     windows.then(|| synthesis_view::outcomes::WSL2_REFUSAL.to_string())
 }
 
+/// A closed enable gate locks the switch while it is off (turning it off stays possible).
+fn orchestrator_gate_lock(gate_refusal: Option<&str>, currently_on: bool) -> Option<String> {
+    gate_refusal.filter(|_| !currently_on).map(String::from)
+}
+
 /// Writes `synt.orchestrator.enabled` = `on` to the USER settings file through the same store the Settings rows
 /// use (managed lock, atomic write, other keys kept). The Super Agent tab calls this after its own confirm.
 pub fn write_orchestrator(env: &Env, on: bool) -> Result<(), String> {
+    write_orchestrator_gated(env, on, synthesis_app::outcome_policy::gate_refusal())
+}
+
+fn write_orchestrator_gated(env: &Env, on: bool, gate_refusal: Option<&str>) -> Result<(), String> {
     if let Some(why) = orchestrator_platform_lock(cfg!(windows)) {
         return Err(why);
+    }
+    // a closed enable gate refuses turning it on (turning it off stays possible)
+    if let Some(why) = gate_refusal.filter(|_| on) {
+        return Err(why.into());
     }
     let h = synthesis_app::homes(env)?;
     let none = h.synthesis.join("no-project");
@@ -653,7 +666,13 @@ impl Model {
             "synt.tui.blur" => blur_unsupported().map(Into::into),
             "synt.desktop.wsl.enabled" => self.wsl_lock.clone(),
             "synt.desktop.wsl.distro" => (!cfg!(windows)).then(|| "Windows only".into()),
-            ORCHESTRATOR => orchestrator_platform_lock(cfg!(windows)),
+            ORCHESTRATOR => orchestrator_platform_lock(cfg!(windows)).or_else(|| {
+                let on = self
+                    .store
+                    .entry(key)
+                    .is_some_and(|e| e.value == json!(true));
+                orchestrator_gate_lock(synthesis_app::outcome_policy::gate_refusal(), on)
+            }),
             _ => None,
         })
     }
@@ -1303,6 +1322,38 @@ mod tests {
         .unwrap();
         assert_eq!(m.confirm(), Outcome::Rejected);
         assert!(m.errors[ORCH].contains("managed"), "{:?}", m.errors);
+        assert!(
+            !m.cfg.home.join("settings.json").exists(),
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_closed_gate_locks_the_switch_with_the_refusal_only_while_it_is_off() {
+        let why = "the release gate is not passed: x";
+        assert_eq!(
+            super::orchestrator_gate_lock(Some(why), false).as_deref(),
+            Some(why)
+        );
+        assert!(super::orchestrator_gate_lock(Some(why), true).is_none());
+        assert!(super::orchestrator_gate_lock(None, false).is_none());
+    }
+
+    #[test]
+    fn a_closed_gate_writes_nothing_when_turning_on() {
+        let (_t, m) = model();
+        let e = super::write_orchestrator_gated(
+            &m.cfg.env,
+            true,
+            Some("the release gate is not passed"),
+        );
+        // the platform refusal wins on native Windows (checked first), the gate refusal elsewhere
+        let want = if cfg!(windows) {
+            "WSL2"
+        } else {
+            "release gate"
+        };
+        assert!(e.unwrap_err().contains(want));
         assert!(
             !m.cfg.home.join("settings.json").exists(),
             "nothing was written"
