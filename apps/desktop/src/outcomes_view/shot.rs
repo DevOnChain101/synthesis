@@ -1,5 +1,5 @@
 //! Development only (feature `shot`): `synthesis-desktop --shot out.png --view outcomes --sample [--size WxH]
-//! [--screen ready|off|windows|unreachable|notready] [--centre goal|decisions|history]
+//! [--screen ready|off|windows|unreachable|notready] [--guide] [--focus cancel|confirm] [--centre goal|decisions|history]
 //! [--inspector overview|workers|activity|diff|evidence] [--pane list|centre|inspector] [--outcome ID]
 //! [--card N] [--choose N] [--form new|new-errors|revise|review-new|review-revise|stale]` draws the whole shell with the Outcomes tab on its sample data, offscreen (no
 //! window server), and writes the frame to a PNG. Nothing is read or sent.
@@ -26,6 +26,9 @@ pub struct Args {
     card: usize,
     choose: Option<usize>,
     form: Option<String>,
+    /// The disclosure of the Off / not-migrated screen is open.
+    guide: bool,
+    focus: Option<String>,
 }
 
 /// `None` unless `--shot` comes with `--view outcomes`.
@@ -64,6 +67,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         card: val("--card").and_then(|n| n.parse().ok()).unwrap_or(0),
         choose: val("--choose").and_then(|n| n.parse().ok()),
         form: val("--form").cloned(),
+        guide: args.iter().any(|a| a == "--guide"),
+        focus: val("--focus").cloned(),
     })
 }
 
@@ -92,7 +97,7 @@ pub fn render(a: Args) -> Result<(), Err> {
                     "off" => Screen::Off,
                     "windows" => Screen::Windows,
                     "notready" => Screen::NotReady(
-                        "the orchestrator is on but the store is not migrated: run `synt outcome enable` in a terminal, then press r".into(),
+                        "the orchestrator is on but the session store is not migrated".into(),
                     ),
                     "unreachable" => Screen::Unreachable(
                         "the orchestrator is not running (no endpoint published). Start it with `synt outcome list` in a terminal, then press r.".into(),
@@ -113,6 +118,16 @@ pub fn render(a: Args) -> Result<(), Err> {
                 }
                 if let Some(kind) = a.form.as_deref() {
                     form_state(st, kind);
+                }
+                if a.guide {
+                    st.open_guide();
+                    if let Some(g) = st.guide.as_mut() {
+                        g.focus = match a.focus.as_deref() {
+                            Some("cancel") => Some(super::model::Btn::Cancel),
+                            Some("confirm") => Some(super::model::Btn::Confirm),
+                            _ => None,
+                        };
+                    }
                 }
                 cx.notify();
             });

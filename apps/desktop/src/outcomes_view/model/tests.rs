@@ -458,3 +458,141 @@ fn a_draft_whose_read_failed_can_be_asked_again_or_closed() {
     s.close_form();
     assert!(s.form.is_none());
 }
+
+// ------------------------------------------------------------------------ the guided enable flow
+
+#[test]
+fn off_to_disclosure_to_setting_needs_an_explicit_confirm_and_esc_cancels() {
+    let mut s = State::new(Screen::Off);
+    // Enter on the screen opens the disclosure; nothing is asked of the world
+    assert!(press(&mut s, "enter", 0).is_empty());
+    assert_eq!(
+        s.guide,
+        Some(Guide {
+            step: Step::Setting,
+            focus: None,
+            busy: false,
+            error: None,
+            seq: 0
+        })
+    );
+    // no default focus: Enter, other keys and a held Enter do nothing
+    for key in ["enter", "r", "y", "space"] {
+        assert!(press(&mut s, key, 0).is_empty(), "{key}");
+    }
+    assert_eq!(s.guide.as_ref().unwrap().focus, None);
+    // Esc cancels, nothing was requested
+    assert!(press(&mut s, "escape", 0).is_empty() && s.guide.is_none());
+    // Tab, Tab, Enter: the one way to the effect, once
+    press(&mut s, "enter", 0);
+    press(&mut s, "tab", 0);
+    assert_eq!(s.guide.as_ref().unwrap().focus, Some(Btn::Cancel));
+    press(&mut s, "tab", 0);
+    assert_eq!(s.guide.as_ref().unwrap().focus, Some(Btn::Confirm));
+    assert_eq!(press(&mut s, "enter", 0), vec![Effect::EnableSetting]);
+    assert!(s.guide.as_ref().unwrap().busy);
+    assert!(press(&mut s, "enter", 0).is_empty(), "never twice");
+    assert!(s.confirm_guide().is_empty());
+    // a failure keeps the dialog open with the reason and re-arms nothing by itself
+    s.guide_failed("synt.orchestrator.enabled: set by the managed settings file".into());
+    let g = s.guide.clone().unwrap();
+    assert!(!g.busy && g.error.is_some());
+    // done: the consent is gone
+    s.guide_done();
+    assert!(s.guide.is_none());
+}
+
+#[test]
+fn cancel_closes_without_an_effect_and_the_consent_is_not_kept() {
+    let mut s = State::new(Screen::Off);
+    s.open_guide();
+    press(&mut s, "tab", 0);
+    assert!(press(&mut s, "enter", 0).is_empty() && s.guide.is_none());
+    // reopened: nothing is focused, whatever was before
+    s.open_guide();
+    assert_eq!(s.guide.as_ref().unwrap().focus, None);
+    // a screen that is not the one the disclosure was opened for takes it away
+    s.set_screen(Screen::Ready);
+    assert!(s.guide.is_none());
+}
+
+#[test]
+fn the_migration_is_its_own_step_with_its_own_confirm() {
+    let mut s = State::new(Screen::NotReady("x".into()));
+    // nothing migrates by itself, and the screen's Enter only opens the disclosure
+    assert!(press(&mut s, "enter", 0).is_empty());
+    assert_eq!(s.guide.as_ref().unwrap().step, Step::Migrate);
+    press(&mut s, "tab", 0);
+    press(&mut s, "tab", 0);
+    assert_eq!(press(&mut s, "enter", 0), vec![Effect::Migrate(1)]);
+    // the reply that migrated closes it; a refused one keeps it open
+    s.guide_failed("enable reply without this build's integrity disclosure (id and text)".into());
+    assert!(s.guide.as_ref().unwrap().error.is_some());
+    // the setting step cannot be confirmed from the migration screen and the other way round
+    let mut off = State::new(Screen::Off);
+    off.open_guide();
+    assert_eq!(off.confirm_guide(), vec![Effect::EnableSetting]);
+}
+
+#[test]
+fn no_button_on_windows_ready_loading_or_unreachable() {
+    for screen in [
+        Screen::Windows,
+        Screen::Ready,
+        Screen::Loading,
+        Screen::Unreachable("x".into()),
+    ] {
+        let mut s = State::new(screen);
+        s.open_guide();
+        assert!(s.guide.is_none());
+        assert!(s.confirm_guide().is_empty());
+    }
+}
+
+#[test]
+fn esc_and_cancel_close_the_dialog_even_while_a_step_is_on_its_way() {
+    for close in [0, 1] {
+        let mut s = State::new(Screen::NotReady("x".into()));
+        s.open_guide();
+        assert_eq!(s.confirm_guide(), vec![Effect::Migrate(1)]);
+        assert!(
+            press(&mut s, "enter", 0).is_empty() && s.guide.is_some(),
+            "other keys wait"
+        );
+        if close == 0 {
+            press(&mut s, "escape", 0);
+        } else {
+            s.close_guide();
+        }
+        assert!(s.guide.is_none());
+        // a late failure reply with no dialog open changes nothing
+        s.guide_failed("late".into());
+        assert!(s.guide.is_none());
+    }
+}
+
+#[test]
+fn a_late_migration_reply_is_said_on_the_screen_and_never_lands_in_a_newer_dialog() {
+    let mut s = State::new(Screen::NotReady("x".into()));
+    s.open_guide();
+    assert_eq!(s.confirm_guide(), vec![Effect::Migrate(1)]);
+    press(&mut s, "escape", 0);
+    // the reply of confirm 1 arrives with no dialog open: a notice, the screen looks again
+    s.enabled(1, Ok(()));
+    assert!(s.notice.as_deref().unwrap().contains("completed"));
+    assert_eq!(s.screen, Screen::Loading);
+    // a failure of an older confirm does not land in a dialog opened since
+    s.set_screen(Screen::NotReady("x".into()));
+    s.open_guide();
+    assert_eq!(s.notice, None, "a new dialog starts clean");
+    assert_eq!(s.confirm_guide(), vec![Effect::Migrate(2)]);
+    s.enabled(1, Err("old failure".into()));
+    let g = s.guide.clone().unwrap();
+    assert!(g.busy && g.error.is_none(), "{g:?}");
+    assert!(s.notice.as_deref().unwrap().contains("old failure"));
+    // the reply of the open one is its own
+    s.enabled(2, Err("this one".into()));
+    assert_eq!(s.guide.as_ref().unwrap().error.as_deref(), Some("this one"));
+    s.enabled(2, Ok(()));
+    assert!(s.guide.is_none() && s.screen == Screen::Loading);
+}

@@ -7504,6 +7504,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "synthesis-app",

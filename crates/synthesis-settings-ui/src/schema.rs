@@ -357,6 +357,13 @@ impl SettingsSchema {
                 .scope(Scope::UserManaged)
                 .help("Windows only. Explicitly run WSL sessions without a spend limit (the cost cap above is then not passed). A managed settings file wins."),
         );
+        // ---- OUTCOMES (opt-in; user and managed files only, a project file can never turn it on)
+        f.push(
+            b("synt.orchestrator.enabled", Execution, "Super Agent (orchestrator)", false)
+                .scope(Scope::UserManaged)
+                .help("Experimental. Uses the stub planner; workers run with your configured provider and cost tokens. Turning it on shows the integrity notice first, and the Super Agent tab then asks separately before it migrates the session store. A managed settings file wins.")
+                .edit(Edit::Confirm("outcomes are opt-in: read the integrity notice before turning them on")),
+        );
         // ---- APPEARANCE
         f.push(
             Field::new(
