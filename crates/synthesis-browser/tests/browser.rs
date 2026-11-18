@@ -1749,18 +1749,42 @@ async fn screencast_body() {
     );
     assert!(a.meta.device_pixel_ratio > 0.0);
 
-    // stalled consumer: Chrome stops sending (its in-flight limit), the slot holds the newest frame
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let stalled = frames.received();
+    // Stalled consumer. The product property: frames the consumer never took stay unacked, so Chrome
+    // stops sending (`received` stops growing). How many frames Chrome still sends before it notices is
+    // its own pacing and in-flight limit (differs per platform and version), so measure: wait until
+    // `received` has not grown for a while, then require a small bound and no growth afterwards.
+    const QUIET: Duration = Duration::from_millis(1500);
+    const MAX_EXTRA_AFTER_LAST_TAKE: u64 = 8; // generous; Chrome's own limit is about 2
+    let mut last = frames.received();
+    let mut quiet_since = std::time::Instant::now();
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while quiet_since.elapsed() < QUIET {
+        assert!(
+            std::time::Instant::now() < settle_deadline,
+            "Chrome kept sending to a stalled consumer: received {} (last take seq {})",
+            frames.received(),
+            b.seq
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = frames.received();
+        if now != last {
+            last = now;
+            quiet_since = std::time::Instant::now();
+        }
+    }
+    let stalled = last;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
         frames.received(),
         stalled,
-        "Chrome kept sending to a stalled consumer"
+        "Chrome resumed sending to a stalled consumer (settled at {stalled}, last take seq {})",
+        b.seq
     );
     assert!(
-        stalled <= b.seq + 3,
-        "at most Chrome's in-flight frames after the last ack"
+        stalled <= b.seq + MAX_EXTRA_AFTER_LAST_TAKE,
+        "{} frames after the last take (seq {}, settled at {stalled}); bound {MAX_EXTRA_AFTER_LAST_TAKE}",
+        stalled - b.seq,
+        b.seq
     );
     let held = tokio::time::timeout(t, frames.next())
         .await
