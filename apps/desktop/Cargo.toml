@@ -73,6 +73,9 @@ synthesis-settings = { path = "../../crates/synthesis-settings" }
 synthesis-settings-ui = { path = "../../crates/synthesis-settings-ui" }
 synthesis-platform = { path = "../../crates/synthesis-platform" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
+# the person's own terminal (docs/specs/terminal-browser.md 1.11: same exact pins as synthesis-terminal)
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+portable-pty = "=0.9.0"
 synthesis-cli-ui-base = { path = "../../crates/synthesis-cli-ui-base" }
 time = "0.3"
 serde_json = "1.0.154"
@@ -88,6 +91,10 @@ uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 # the owner check of the `synt` beside the app (same crate and features as synthesis-settings)
 rustix = { version = "1", default-features = false, features = ["process"] }
+
+# portable-pty loads conpty.dll by bare name: the same process-wide DLL search hardening as synthesis-terminal
+[target.'cfg(windows)'.dependencies]
+synthesis-sandbox-win = { path = "../../crates/synthesis-sandbox-win" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }

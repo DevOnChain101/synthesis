@@ -337,8 +337,9 @@ impl TuiView {
             }
         });
         lu.add_sub(key_sub);
-        let quit_sub = cx.on_app_quit(|this, _| {
+        let quit_sub = cx.on_app_quit(|this, cx| {
             this.shutdown_engine();
+            this.term_shutdown(cx);
             async {}
         });
         lu.add_sub(quit_sub);
@@ -930,6 +931,12 @@ impl TuiView {
     ) -> bool {
         if !self.active {
             return false;
+        }
+        // the Terminal tab's shell takes every key it can (a dialog still owns the keyboard first)
+        if self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
+            && let Some(done) = self.term_key(ks, window, cx)
+        {
+            return done;
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {

@@ -23,6 +23,7 @@ pub mod sample;
 pub mod shot;
 pub mod snapshot;
 pub mod tabs;
+mod term_pane;
 pub mod topo;
 
 use gpui::{
@@ -195,6 +196,8 @@ pub struct TuiView {
     input_strip: Option<(bool, bool)>,
     /// `--shot --active-window`: the window counts as active (or not) whatever the platform says.
     pub(crate) window_active: Option<bool>,
+    /// The Terminal tab's personal shells (created on the first look; they outlive session switches).
+    pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
 }
 
 /// A side column of the view.
@@ -262,6 +265,7 @@ impl TuiView {
             folded: Default::default(),
             input_strip: None,
             window_active: None,
+            term: None,
         }
     }
 

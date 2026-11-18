@@ -233,9 +233,20 @@ fn allowed_reply(s: &str) -> bool {
 /// Answers terminal queries from the allow-list, rate limited, into the bounded write queue
 /// with `try_send` (never blocks, drops on overflow). Only the ENGINE `Term` replies: a `Term`
 /// that draws the same PTY elsewhere (T4) must not, or the program gets two answers.
-struct Reply {
+pub struct Reply {
     tx: Writer,
     window: Mutex<(Instant, u32)>,
+}
+
+impl Reply {
+    /// For a `Term` whose PTY is not owned by an engine `Pty` (the desktop's personal shell, which has no
+    /// other `Term`): same allow-list, rate limit and bounded queue.
+    pub fn new(tx: SyncSender<Vec<u8>>) -> Self {
+        Self {
+            tx,
+            window: Mutex::new((Instant::now(), 0)),
+        }
+    }
 }
 
 impl EventListener for Reply {

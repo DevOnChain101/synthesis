@@ -46,6 +46,8 @@ pub struct Args {
     /// true|false` makes the window count as active or in the background (the block caret needs it active).
     focus_at: Option<FocusAt>,
     window_active: Option<bool>,
+    /// `--pty-script FILE`: the Terminal tab shows this byte script (escapes `\\e \\r \\n \\xNN`) instead of a shell.
+    pty_script: Option<PathBuf>,
     /// `--bare`: the Files and Browser tabs get no seeded project or screenshots (their empty states).
     bare: bool,
     /// `--expand`: every tool card open (Ctrl+O).
@@ -343,6 +345,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         attach_image: val("--attach-image").map(PathBuf::from),
         focus_at: val("--focus").and_then(|v| focus_at(v)),
         window_active: val("--active-window").and_then(|v| v.parse().ok()),
+        pty_script: val("--pty-script").map(PathBuf::from),
         bare: args.iter().any(|a| a == "--bare"),
         expand: args.iter().any(|a| a == "--expand"),
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
@@ -740,8 +743,13 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None => TuiView::new(0., hidden),
         });
         let untrusted = a.live.as_ref().is_some_and(|l| l.untrusted);
-        tui.update(cx, |t, _| {
+        tui.update(cx, |t, cx| {
             t.ts.tab = tab;
+            if let Some(f) = &a.pty_script
+                && let Ok(text) = std::fs::read_to_string(f)
+            {
+                t.term_script(&crate::term::unescape(&text), cx);
+            }
             if untrusted && let Some(lu) = &mut t.live {
                 lu.live.ask_trust(
                     crate::live::now_ms(),

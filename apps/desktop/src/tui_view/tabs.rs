@@ -269,6 +269,15 @@ impl TuiView {
     /// they need no trust; the Trust dialog is `/trust ask`.
     pub(super) fn select_tab(&mut self, tab: ChatTab, cx: &mut Context<Self>) {
         self.ts.tab = tab;
+        if tab == ChatTab::Terminal {
+            let p = self.ensure_term(cx);
+            p.update(cx, |p, cx| {
+                p.shown = true;
+                p.focus(cx);
+            });
+        } else if let Some(p) = &self.term {
+            p.update(cx, |p, _| p.shown = false);
+        }
         cx.notify();
     }
 
@@ -309,6 +318,10 @@ impl TuiView {
             self.ts.diff_open.insert(p);
             self.ts.diff_init = true;
         }
+        if self.ts.tab == ChatTab::Terminal {
+            self.term_tick(cx);
+        }
+        let Some(lu) = &self.live else { return };
         if self.ts.tab == ChatTab::Terminal {
             let c = &lu.live.view.panes.commands;
             let sig = (
@@ -683,28 +696,10 @@ impl TuiView {
                 };
                 panes::diff(live, &self.ts.diff_open, &toggle, &jump)
             }
-            ChatTab::Terminal => {
-                let toggle = |id: String| -> OnClick {
-                    Box::new(cx.listener(move |this, _, _, cx| {
-                        if !this.ts.term_open.remove(&id) {
-                            this.ts.term_open.insert(id.clone());
-                        }
-                        cx.notify();
-                    }))
-                };
-                let kill = |id: String| -> OnClick {
-                    Box::new(cx.listener(move |this, _, _, cx| this.kill_process(&id, cx)))
-                };
-                panes::commands(
-                    live,
-                    &panes::TermView {
-                        open: &self.ts.term_open,
-                        killed: &self.ts.killed,
-                        toggle: &toggle,
-                        kill: &kill,
-                    },
-                )
-            }
+            ChatTab::Terminal => match self.term.clone() {
+                Some(p) => return self.term_tab(&p, live, cx),
+                None => self.agent_log(live, cx),
+            },
             ChatTab::Browser => {
                 let home = self.live.as_ref().map(|l| l.cfg.synthesis_home.clone());
                 let pick = |i: usize| -> OnClick {
@@ -735,6 +730,69 @@ impl TuiView {
             .track_scroll(&self.pane_scroll)
             .py(px(10.))
             .child(inner)
+            .into_any_element()
+    }
+
+    /// The agent's commands, in a terminal's order (the body the Terminal tab had before it got shells).
+    pub(super) fn agent_log(&self, live: &crate::live::Live, cx: &mut Context<Self>) -> Div {
+        let toggle = |id: String| -> OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                if !this.ts.term_open.remove(&id) {
+                    this.ts.term_open.insert(id.clone());
+                }
+                cx.notify();
+            }))
+        };
+        let kill = |id: String| -> OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| this.kill_process(&id, cx)))
+        };
+        panes::commands(
+            live,
+            &panes::TermView {
+                open: &self.ts.term_open,
+                killed: &self.ts.killed,
+                toggle: &toggle,
+                kill: &kill,
+            },
+        )
+    }
+
+    /// The Terminal tab: the strip (agent log, shells, +) over the shell, or over the agent's log.
+    fn term_tab(
+        &self,
+        p: &gpui::Entity<super::term_pane::TermPane>,
+        live: &crate::live::Live,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let body = if p.read(cx).agent {
+            div()
+                .id(("pane", self.ts.tab as usize))
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .track_scroll(&self.pane_scroll)
+                .child(self.agent_log(live, cx))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .child(p.clone())
+                .into_any_element()
+        };
+        div()
+            .debug_selector(|| "tab-pane".to_string())
+            .flex_1()
+            .min_h(px(0.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .child(self.term_strip(p, cx))
+            .child(body)
             .into_any_element()
     }
 
