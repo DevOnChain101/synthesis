@@ -452,3 +452,32 @@ fn a_closed_enable_gate_refuses_the_owner_enable_and_changes_nothing() {
     assert_eq!(ow.job(enable(), &pol).unwrap()["schema"], 5);
     assert!(home.join("backups").exists());
 }
+
+#[test]
+fn a_closed_gate_blocks_only_new_enabling_an_enabled_home_still_serves() {
+    let r = rig(); // already migrated to v5, setting on
+    let (w, _) = orphaned(&r);
+    let spawn = SyntSpawn {
+        log: r.base.join("w.log"),
+        env: None,
+    };
+    let pol = OutcomePolicy::new(true, 16, 10, 24);
+    let mut ow = Owner::new(&r.home, &r.store, &r.wm, &spawn, PathBuf::from("sh"), None);
+    ow.enable_gate_open = false;
+    // enabling is refused, but a create (a command) and a cycle (adopting an outcome) still work
+    let en = synthesis_app::proto::Call::OrchestratorEnable {
+        surface: Surface::Cli,
+    };
+    assert!(ow.job(en, &pol).unwrap_err().contains("release gate"));
+    let create = synthesis_app::proto::Call::OutcomeCreate {
+        workspace: r.repo.to_string_lossy().into(),
+        base_commit: r.head.clone(),
+        contract: Box::new(contract()),
+        surface: Surface::Cli,
+        idempotency_key: None,
+    };
+    assert_eq!(ow.job(create, &pol).unwrap()["state"], "contract_pending");
+    drop(w);
+    ow.cycle(&pol).unwrap();
+    assert_eq!(ow.owned_count(), 1);
+}

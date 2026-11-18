@@ -4,7 +4,7 @@ Everything here is UNVERIFIED on GitHub: the workflows were validated locally on
 
 ## Orchestrator enable gate
 
-Official release builds keep the outcome orchestrator's enable gate CLOSED: `release.yml` never sets the `orchestrator-preview` feature, so `synt outcome enable` and `orchestrator.enable` refuse with "the release gate is not passed" (an already enabled home keeps running). Internal and preview builds open it with `cargo build --release --features orchestrator-preview` (`synthesis-cli`, `synthesis-desktop`); debug builds are always open. Do not add the feature to a release job; flipping the default is B8 (docs/specs/orchestrator-remaining-backend.md section 4).
+Official release builds keep the outcome orchestrator's enable gate CLOSED: `release.yml` never sets the `orchestrator-preview` feature, so `synt outcome enable` and `orchestrator.enable` refuse with "the release gate is not passed" (an already enabled home keeps running). Internal and preview builds open it with `cargo build --release --features orchestrator-preview` (`synthesis-cli`, `synthesis-desktop`); debug builds are always open. A preview desktop next to an official `synt` shows enabling as available while that `synt` refuses with the gate message: a mismatch, not a bypass (the owner enforces the gate). Do not add the feature to a release job; flipping the default is B8 (docs/specs/orchestrator-remaining-backend.md section 4).
 
 ## Steps
 

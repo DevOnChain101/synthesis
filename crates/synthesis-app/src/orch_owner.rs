@@ -161,6 +161,7 @@ pub struct Owner<'a> {
     /// `synt.orchestrator.planner.max_items` of this cycle: a model plan is installed within it.
     pub max_items: usize,
     /// The enable gate (build-time); a field so tests can close it in a debug build.
+    #[doc(hidden)]
     pub enable_gate_open: bool,
     /// `(outcome, contract version, plan version)` the model planner could not even start for (said once).
     plan_failed: BTreeSet<(String, u32, Option<u32>)>,

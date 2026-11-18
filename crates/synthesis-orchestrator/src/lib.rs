@@ -83,3 +83,19 @@ pub use sched::{
 pub use verify::{
     CheckRun, CheckRunner, IndependentVerifier, SCOPE_CHECK, SandboxRunner, VerifyError,
 };
+
+#[cfg(test)]
+mod gate_tests {
+    /// Run in release: `cargo test --release -p synthesis-orchestrator --lib closed_without_preview`.
+    #[cfg(not(any(debug_assertions, feature = "orchestrator-preview")))]
+    #[test]
+    fn closed_without_preview() {
+        assert!(!super::enable_gate_open());
+    }
+
+    #[cfg(any(debug_assertions, feature = "orchestrator-preview"))]
+    #[test]
+    fn open_in_debug_and_preview() {
+        assert!(super::enable_gate_open());
+    }
+}
