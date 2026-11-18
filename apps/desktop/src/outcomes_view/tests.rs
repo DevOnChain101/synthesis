@@ -622,7 +622,7 @@ fn a_closed_gate_shows_the_refusal_in_the_dialog_instead_of_the_confirm(cx: &mut
     let _g = theme::opacity_guard();
     for screen in [Screen::Off, Screen::NotReady("not migrated".into())] {
         let (o, v) = guide_view(cx, screen, 1100., 700.);
-        let why = "the release gate is not passed: use a preview build";
+        let why = "the release gate is not passed";
         o.update(v, |o, _| o.state.gate_refusal = Some(why.into()));
         let b = v.debug_bounds("out-guide-open").unwrap();
         v.simulate_click(b.center(), Default::default());

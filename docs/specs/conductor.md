@@ -9,7 +9,7 @@
 > - (d) Built in the desktop TUI view (2026-11-17, `desktop.md` "TUI view: outcomes", not the Conductor mode itself): the Approvals panel, the outcome decision popup above the input, the "outcomes" centre tab (Alt+0) and Alt+A (next approval, oldest first). As in (a) the popup opens by itself above the input; unlike (b) its keys do not depend on an empty input: it never takes the keys until Alt+A or a click gives it focus (Esc or Alt+A returns them), see `desktop.md`. The rest of this spec (conductor chat, per-session frames) is still a proposal.
 
 
-Status: Proposed design (2026-11-17). No product code. Needs the owner decisions in section 8 before the PRs in section 7 start. Queues behind the orchestrator backend (B3, B8) per the standing backend-first goal.
+Status: Proposed design (2026-11-17). No product code. Needs the owner decisions in section 8 before the PRs in section 7 start. Queues behind the orchestrator backend (B3; B8, the enable gate, is open since 2026-11-18) per the standing backend-first goal.
 Inputs: owner direction 2026-11-17 and wireframe `synthesis-compare/mockups/tui-conductor.png`; [desktop.md](desktop.md) (engine, `synthesis-view`, section 8 stdio protocol, WSL); [messaging.md](messaging.md) (addressing, A3 drain points, A4 trust, peers B and J); [terminal-browser.md](terminal-browser.md) (control arbitration pattern); [orchestrator-remaining-backend.md](orchestrator-remaining-backend.md) and ADR-016..021 (outcomes, protocol v4, thin surfaces); code: `crates/synthesis-harness/src/{comm.rs,hub.rs,classifier.rs}`, `apps/desktop/src/{engine.rs,live.rs,remote.rs}`, `crates/synthesis-view/src/{running.rs,state.rs}`.
 Assumptions are marked **[A]**; everything else was read in the code or the docs named above.
 

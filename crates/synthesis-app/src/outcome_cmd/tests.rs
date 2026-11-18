@@ -603,7 +603,7 @@ fn enable_shows_the_notice_and_changes_nothing_without_yes() {
 fn a_closed_gate_refuses_enable_before_the_notice_and_only_enable() {
     let en = OutcomeCmd::Enable { yes: true };
     let why = gate_refusal(false, &en).unwrap();
-    assert!(why.contains("the release gate is not passed") && why.contains("orchestrator-preview"));
+    assert!(why.contains("the release gate is not passed"));
     assert_eq!(gate_refusal(true, &en), None);
     assert_eq!(
         gate_refusal(false, &OutcomeCmd::Enable { yes: false }),

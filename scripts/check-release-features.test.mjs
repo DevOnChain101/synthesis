@@ -62,9 +62,5 @@ test("workflows: another crate's feature of the same name is allowed, ours and -
     "e.yml": "run: cargo build --features=shot",
   };
   assert.equal(mentionedIn(bad).length, 5);
-  // the orchestrator gate feature is refused under any crate prefix
-  for (const a of ["--features orchestrator-preview", "--features synthesis-cli/orchestrator-preview", "-F synthesis-app/orchestrator-preview"]) {
-    assert.equal(mentionedIn({ "g.yml": `run: cargo build --release ${a}` }).length, 1, a);
-  }
   assert.deepEqual(mentionedIn({ "f.yml": "run: cargo build --release -p synthesis-desktop" }), []);
 });

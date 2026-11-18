@@ -15,8 +15,6 @@ path = "src/main.rs"
 [features]
 # Enables `--provider fake:<script.json>` (scripted model, no network). Debug builds only.
 test-provider = ["synthesis-app/test-provider", "synthesis-sandbox/test-backend"]
-# Open the orchestrator enable gate in a release build (preview builds only).
-orchestrator-preview = ["synthesis-app/orchestrator-preview"]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

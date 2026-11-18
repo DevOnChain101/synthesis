@@ -33,8 +33,6 @@ harness = false
 [features]
 # Development only: a scripted model for the engine test.
 test-provider = ["synthesis-app/test-provider"]
-# Open the orchestrator enable gate in a release build (preview builds only).
-orchestrator-preview = ["synthesis-app/orchestrator-preview"]
 # Development only: lets the integration tests start a local engine (`engine::for_tests`); never in a release.
 local-engine-for-tests = []
 # Development only: `--shot out.png --size WxH` renders the TUI view offscreen (headless Metal/wgpu, no window

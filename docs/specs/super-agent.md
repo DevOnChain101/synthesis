@@ -202,7 +202,7 @@ Each phase is one PR, shippable alone, with CI (fmt, clippy, tests on 3 OSes); a
 
 S3 (read-only resume) was removed on 2026-11-17: there is no "Open in TUI".
 
-S1 depends on the orchestrator backend (B3, B8) and, for the live link, the owner's real Windows/WSL run (memory: B8 waits).
+S1 depends on the orchestrator backend (B3) and, for the live link, the owner's real Windows/WSL run. B8 (the enable gate) was opened in every build on 2026-11-18.
 
 ## 13. Risks
 
