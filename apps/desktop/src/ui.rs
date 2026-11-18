@@ -126,6 +126,9 @@ impl Shell {
             });
         }
         self.view = v;
+        // the card's keys never outlive the view: a hidden view must not take the window's focus back later
+        let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
+        self.outcomes.update(cx, |o, _| o.set_visible(sa));
         if v == View::SuperAgent {
             self.outcomes.update(cx, |o, cx| o.shown(window, cx));
         }
@@ -345,8 +348,12 @@ impl Shell {
                 o.rail_open,
                 o.can_back(),
                 o.can_forward(),
-                o.breadcrumb_goal()
-                    .map(synthesis_harness::sanitize_for_display),
+                // capped before sanitising: the whole goal is never walked every frame
+                o.breadcrumb_goal().map(|g| {
+                    synthesis_harness::sanitize_for_display(
+                        &g.chars().take(200).collect::<String>(),
+                    )
+                }),
             )
         };
         let group = div()
@@ -884,9 +891,12 @@ mod tests {
         v.run_until_parked();
         assert!(
             v.debug_bounds("header").is_none(),
-            "the TUI view is not drawn on the Outcomes page"
+            "the TUI view is not drawn on the Super Agent page"
         );
-        assert!(v.debug_bounds("outcomes").is_some(), "the Outcomes view is");
+        assert!(
+            v.debug_bounds("outcomes").is_some(),
+            "the Super Agent view is"
+        );
         assert!(v.debug_bounds("titlebar").is_some(), "the title bar stays");
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
         v.run_until_parked();
@@ -1184,5 +1194,53 @@ mod tests {
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
         v.run_until_parked();
         assert!(v.debug_bounds("nav-rail").is_none());
+    }
+
+    #[gpui::test]
+    fn leaving_super_agent_drops_the_cards_keys_and_a_later_activation_steals_no_focus(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::Focusable as _;
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 900.);
+        let o = shell.read_with(v, |s, _| s.outcomes().clone());
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        o.update(v, |o, cx| {
+            o.state.centre = crate::outcomes_view::model::CentreTab::Goal;
+            cx.notify();
+        });
+        v.run_until_parked();
+        o.update_in(v, |o, window, cx| o.focus_decision(window, cx));
+        assert!(o.update_in(v, |o, window, _| o.popup_has_keys(window)));
+        // Cmd+1 to the TUI view: the card's keys are dropped at once
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        v.run_until_parked();
+        // the window going away and coming back must not move the focus to the hidden view
+        shell.update_in(v, |s, window, cx| {
+            s.outcomes
+                .update(cx, |o, cx| o.window_activation_changed(window, cx))
+        });
+        v.run_until_parked();
+        assert!(!o.update_in(v, |o, window, cx| o.focus_handle(cx).is_focused(window)));
+        assert!(!o.update_in(v, |o, window, _| o.popup_has_keys(window)));
+    }
+
+    #[gpui::test]
+    fn history_buttons_do_nothing_while_a_form_is_open(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 900.);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        let o = shell.read_with(v, |s, _| s.outcomes().clone());
+        let second = o.read_with(v, |o, _| o.state.items[1].row.id.clone());
+        o.update(v, |o, cx| o.select_id(&second, cx));
+        assert!(o.read_with(v, |o, _| o.can_back()));
+        let sel = o.read_with(v, |o, _| o.state.selected.clone());
+        o.update(v, |o, cx| {
+            o.state.open_new();
+            cx.notify();
+        });
+        assert!(!o.read_with(v, |o, _| o.can_back() || o.can_forward()));
+        o.update(v, |o, cx| o.nav(true, cx));
+        assert_eq!(o.read_with(v, |o, _| o.state.selected.clone()), sel);
     }
 }

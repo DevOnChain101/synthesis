@@ -425,8 +425,8 @@ fn a_click_elsewhere_and_the_window_going_to_the_background_take_the_keys_back(
     let (o, v) = open_goal(cx);
     assert!(press(&o, v, "alt-a") && has_keys(&o, v));
     tick(&o, v, ARM_MS + 100);
-    // a press outside the card (the list column)
-    let left = b(v, "out-left");
+    // a press outside the card, on nothing that selects (the inspector column)
+    let left = b(v, "out-right");
     v.simulate_click(
         gpui::point(left.origin.x + px(20.), left.origin.y + px(300.)),
         Default::default(),
@@ -466,7 +466,12 @@ fn another_tab_or_another_outcome_gives_the_keys_back(cx: &mut TestAppContext) {
     });
     v.run_until_parked();
     tick(&o, v, ARM_MS + 100);
-    assert_view_has_the_keys(&o, v, "after an outcome switch");
+    // the other outcome has no card of its own, and the first one's is gone: nothing to choose or send
+    assert!(!has_keys(&o, v));
+    for k in ["1", "enter"] {
+        press(&o, v, k);
+        assert_eq!(answers(&o, v), 0, "after an outcome switch: {k} sent");
+    }
 }
 
 #[gpui::test]
@@ -769,4 +774,30 @@ fn the_tui_view_has_no_answer_path_for_a_decision_any_more() {
             }
         }
     }
+}
+
+#[gpui::test]
+fn a_card_does_not_stay_docked_on_another_outcomes_pages(cx: &mut TestAppContext) {
+    let (o, v) = open_goal(cx);
+    assert!(shown(&o, v));
+    let first = o.read_with(v, |o, _| o.state.selected.clone()).unwrap();
+    let other = o.read_with(v, |o, _| {
+        o.state
+            .items
+            .iter()
+            .map(|i| i.row.id.clone())
+            .find(|i| *i != first)
+            .unwrap()
+    });
+    o.update(v, |o, cx| o.select_id(&other, cx));
+    v.run_until_parked();
+    let for_x = o.read_with(v, |o, _| match o.pop.shown.as_ref() {
+        Some(Shown::Card(p, _)) => Some(p.outcome.clone()),
+        _ => None,
+    });
+    assert_ne!(
+        for_x.as_deref(),
+        Some(first.as_str()),
+        "the first outcome's card is gone"
+    );
 }

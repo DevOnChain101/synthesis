@@ -63,6 +63,8 @@ pub struct OutcomesView {
     win_h: f32,
     /// The list column is shown (the title bar's rail button hides it); kept for this window only.
     pub(crate) rail_open: bool,
+    /// The shell shows this view (or Settings over it). While not, it never moves the window's focus.
+    visible: bool,
     /// Back and forward through the outcomes shown (the title bar's buttons, Alt+Left / Alt+Right).
     hist: history::History,
 }
@@ -115,6 +117,7 @@ impl OutcomesView {
             pop: popup::Wire::new(cx),
             win_h: 0.,
             rail_open: true,
+            visible: true,
             hist,
         }
     }
@@ -312,16 +315,32 @@ impl OutcomesView {
         }
     }
 
+    /// The shell shows or hides this view. Hiding drops the card's keys without touching the window's focus.
+    pub fn set_visible(&mut self, v: bool) {
+        self.visible = v;
+        if !v {
+            self.pop.focus = false;
+        }
+    }
+
+    /// A form or the disclosure is open: history keys and buttons do nothing.
+    fn modal(&self) -> bool {
+        self.state.form.is_some() || self.state.guide.is_some()
+    }
+
     pub fn can_back(&self) -> bool {
-        self.hist.can_back(|p| place_alive(&self.state.items, p))
+        !self.modal() && self.hist.can_back(|p| place_alive(&self.state.items, p))
     }
 
     pub fn can_forward(&self) -> bool {
-        self.hist.can_forward(|p| place_alive(&self.state.items, p))
+        !self.modal() && self.hist.can_forward(|p| place_alive(&self.state.items, p))
     }
 
     /// Title-bar back and forward (also Alt+Left / Alt+Right): moves through the outcomes shown.
     pub fn nav(&mut self, back: bool, cx: &mut Context<Self>) {
+        if self.modal() {
+            return;
+        }
         let items = &self.state.items;
         let alive = |p: &history::Place| place_alive(items, p);
         let to = if back {

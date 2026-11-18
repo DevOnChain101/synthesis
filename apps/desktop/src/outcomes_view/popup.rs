@@ -180,7 +180,7 @@ impl OutcomesView {
         self.sync_inner();
         // the card lost the keys (dismissed, other card, outcome gone) while it still holds GPUI focus, or is gone
         // with it: the view gets the window's focus back at once, so no key is lost on the way
-        if !self.pop.focus && self.pop.handle.is_focused(window) {
+        if self.visible && !self.pop.focus && self.pop.handle.is_focused(window) {
             window.focus(&self.focus, cx);
         }
     }
@@ -201,7 +201,7 @@ impl OutcomesView {
     pub(super) fn release_popup_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let held = self.pop.focus || self.pop.handle.is_focused(window);
         self.pop.focus = false;
-        if held {
+        if held && self.visible {
             window.focus(&self.focus, cx);
             cx.notify();
         }
@@ -269,7 +269,8 @@ impl OutcomesView {
             (Shown::Loading { .. }, true) => {
                 card.map(|c| Shown::Card(Box::new(Popup::new(outcome, c, now)), goal))
             }
-            (Shown::Card(p, _), false) => Some(Shown::Card(p, goal)),
+            // the selection moved to another outcome: its card is not this one (its own opens next frame)
+            (Shown::Card(..), false) => None,
             (Shown::Card(mut p, _), true) => card.map(|c| {
                 // the reply (`Msg::Answered`, counted by `State::answers`) came back: whatever it said, the choice
                 // is gone and the card may answer again, only after a new choice
