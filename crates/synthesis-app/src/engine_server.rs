@@ -283,6 +283,7 @@ fn start(
                 as crate::run::PreStart
         }),
         on_stop: None,
+        browser_view: None,
     };
     let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {

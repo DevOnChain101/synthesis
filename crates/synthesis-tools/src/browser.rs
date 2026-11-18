@@ -24,9 +24,24 @@ use crate::native::{Shared, lock};
 use crate::util::{int_field, str_field};
 use crate::{Block, BoxFuture, Content, ImageSource, ToolOutput};
 
+/// Where a window that shows the session's browser (the desktop pane) finds it: the runtime the main agent
+/// launched, held weakly so the window never keeps Chrome alive past the session.
+#[derive(Debug, Default)]
+pub struct BrowserTap(std::sync::Mutex<std::sync::Weak<BrowserRuntime>>);
+
+impl BrowserTap {
+    /// The running browser of the session, `None` before the agent opens one and after the session ends.
+    pub fn runtime(&self) -> Option<Arc<BrowserRuntime>> {
+        lock(&self.0).upgrade()
+    }
+}
+
 /// Browser settings of the host (set with `Registry::with_browser`).
 #[derive(Debug, Clone, Default)]
 pub struct BrowserConfig {
+    /// A window shows this session's browser (the desktop): the runtime is registered here when the main agent
+    /// launches it. The host also sets `headed` false then (a second visible window would take the person's clicks).
+    pub view: Option<Arc<BrowserTap>>,
     pub policy: UrlPolicy,
     /// Only for containers where Chrome's own sandbox cannot start.
     pub no_sandbox: bool,
@@ -230,9 +245,13 @@ async fn runtime(
                 o.profile = Some(dir);
                 *lock(&state.browser_profile) = Some(name.to_owned());
             }
-            BrowserRuntime::launch(o, &launch_env(&cfg, ctx))
+            let rt = BrowserRuntime::launch(o, &launch_env(&cfg, ctx))
                 .await
-                .map(Arc::new)
+                .map(Arc::new)?;
+            if let (Some(tap), false) = (&cfg.view, ctx.sub_agent) {
+                *lock(&tap.0) = Arc::downgrade(&rt);
+            }
+            Ok(rt)
         })
         .await
         .cloned()

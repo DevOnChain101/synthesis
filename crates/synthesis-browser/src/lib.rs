@@ -1101,6 +1101,31 @@ impl BrowserRuntime {
         self.history(1).await
     }
 
+    /// Reloads the current page; the current entry's URL passes the navigation policy first, like `history`.
+    pub async fn reload(&self) -> Result<PageInfo> {
+        let tab = self.current()?;
+        let h = self
+            .call(&tab, "Page.getNavigationHistory", json!({}))
+            .await?;
+        let url = usize::try_from(h["currentIndex"].as_i64().unwrap_or(-1))
+            .ok()
+            .and_then(|i| h["entries"].get(i))
+            .and_then(|e| e["url"].as_str())
+            .unwrap_or("");
+        self.opts
+            .policy
+            .check_navigation(url)
+            .map_err(BrowserError::Policy)?;
+        let mut rx = self.cdp.subscribe();
+        self.call(&tab, "Page.reload", json!({})).await?;
+        self.finish_load(&mut rx, &tab, WaitUntil::Load).await
+    }
+
+    /// The policy every navigation of this browser passes (the desktop URL bar checks it first).
+    pub fn policy(&self) -> &UrlPolicy {
+        &self.opts.policy
+    }
+
     /// This context's page targets, oldest first.
     async fn page_targets(&self) -> Result<Vec<Value>> {
         self.live()?;

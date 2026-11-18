@@ -473,6 +473,9 @@ pub struct Native {
     /// Asked to show that `synt stop` cancelled this in-process session (see
     /// `sessions::StopAction::InProcess`); an engine process leaves it `None`.
     pub on_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The window shows the session's browser (the desktop pane): the browser then runs headless and is
+    /// registered here when the main agent launches it.
+    pub browser_view: Option<Arc<synthesis_tools::BrowserTap>>,
 }
 
 /// See [`Native::pre_start`].
@@ -975,6 +978,10 @@ pub fn prepare(
     let watch_stop = governed || matches!(front, Front::Cli) || in_process_stop;
     let on_stop = match &front {
         Front::Native(n) => n.on_stop.clone(),
+        _ => None,
+    };
+    let browser_view = match &front {
+        Front::Native(n) => n.browser_view.clone(),
         _ => None,
     };
     let gate: Option<PreStart> = match &front {
@@ -2290,7 +2297,7 @@ pub fn prepare(
     };
     // the interactive app shows the agent's browser (a person watches) unless `synt.browser.headed` says false
     let mut browser = browser;
-    let headed = browser.headed.unwrap_or(is_cli);
+    let headed = browser.headed.unwrap_or(is_cli) && browser_view.is_none();
     browser.headed = Some(headed);
     if headed
         && let Err(why) =
@@ -2309,7 +2316,10 @@ pub fn prepare(
         registry
     } else {
         registry.with_browser(browser.config(
-            synthesis_tools::BrowserConfig::default(),
+            synthesis_tools::BrowserConfig {
+                view: browser_view,
+                ..Default::default()
+            },
             &h.synthesis,
             env,
             browser_host,
