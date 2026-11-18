@@ -204,6 +204,8 @@ pub struct Session {
     title: Arc<Mutex<String>>,
     writer: Option<SyncSender<Vec<u8>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    /// The foreground group captured at the first hang-up or close (see `fg_group`).
+    fg: Mutex<Option<u32>>,
     child: Option<Arc<Mutex<Box<dyn Child + Send + Sync>>>>,
     exit: Arc<Mutex<Option<String>>>,
     /// Set by the reader after new output; cleared by the view when it repaints.
@@ -242,6 +244,7 @@ impl Session {
             title,
             writer: None,
             master: Mutex::new(None),
+            fg: Mutex::new(None),
             child: None,
             exit: Arc::new(Mutex::new(None)),
             dirty: Arc::new(AtomicBool::new(false)),
@@ -362,6 +365,7 @@ impl Session {
             title,
             writer: Some(tx),
             master: Mutex::new(Some(pair.master)),
+            fg: Mutex::new(None),
             child: Some(child),
             exit,
             dirty,
@@ -553,8 +557,8 @@ impl Session {
 
 impl Session {
     /// The foreground process group of the terminal (a job of the interactive shell has its own group, and
-    /// `nohup`/background jobs stay in it after a hang-up). Unix only; read while the master is still ours.
-    fn fg_group(&self) -> Option<u32> {
+    /// `nohup`/`trap '' HUP` jobs outlive the shell's hang-up). Unix only.
+    fn read_fg_group(&self) -> Option<u32> {
         #[cfg(unix)]
         {
             let g = lock(&self.master)
@@ -566,6 +570,17 @@ impl Session {
         None
     }
 
+    /// The foreground group, captured ONCE while the master is open and the shell alive (before the
+    /// hang-up) and kept: the job may outlive the shell, and the master is gone by then. Residual risk: the
+    /// pgid is signalled some time after it was read, so it could in theory have been recycled meanwhile.
+    fn fg_group(&self) -> Option<u32> {
+        let mut fg = lock(&self.fg);
+        if fg.is_none() {
+            *fg = self.read_fg_group();
+        }
+        *fg
+    }
+
     /// Hang up the shell's group and the foreground group (the first half of closing; does not wait).
     pub fn hangup(&self) {
         if let Some(c) = &self.child {
@@ -573,7 +588,8 @@ impl Session {
         }
     }
 
-    /// Kills both groups now (the second half of closing; bounded, no waiting for the reap).
+    /// Kills both groups now (the second half of closing; bounded, no waiting for the reap). The foreground
+    /// group is killed even after the shell was reaped.
     pub fn kill_now(&self) {
         if let Some(c) = &self.child {
             kill(c, self.fg_group());
@@ -607,11 +623,12 @@ impl Drop for Session {
 
 type Child_ = Mutex<Box<dyn Child + Send + Sync>>;
 
+/// `sig` to the shell's group (only while the shell is not reaped: its pid may be recycled) and to the
+/// foreground group `fg` (always: a job that ignores the hang-up outlives the shell).
 #[cfg(unix)]
 fn signal_groups(shell: Option<u32>, fg: Option<u32>, sig: rustix::process::Signal) {
-    let mut gs = vec![shell, fg];
-    gs.dedup();
-    for g in gs.into_iter().flatten() {
+    let fg = fg.filter(|g| Some(*g) != shell);
+    for g in [shell, fg].into_iter().flatten() {
         if let Some(p) = i32::try_from(g)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
@@ -621,38 +638,41 @@ fn signal_groups(shell: Option<u32>, fg: Option<u32>, sig: rustix::process::Sign
     }
 }
 
-/// SIGHUP to the shell's group and the foreground group, unless the shell was reaped (its pid may be
-/// recycled). Under the child lock: no reap can slip in between the check and the signal.
+/// The shell's pid unless it was reaped. Under the child lock no reap slips in before the signal.
+fn live_pid(c: &mut Box<dyn Child + Send + Sync>) -> Option<u32> {
+    if matches!(c.try_wait(), Ok(Some(_))) {
+        None
+    } else {
+        c.process_id()
+    }
+}
+
 fn hup(child: &Child_, fg: Option<u32>) {
     let mut c = lock(child);
-    if matches!(c.try_wait(), Ok(Some(_))) {
-        return;
-    }
+    let _shell = live_pid(&mut c);
     #[cfg(unix)]
-    signal_groups(c.process_id(), fg, rustix::process::Signal::HUP);
+    signal_groups(_shell, fg, rustix::process::Signal::HUP);
     let _ = fg;
 }
 
-/// The same with SIGKILL (`taskkill /T /F` on Windows), then `Child::kill`.
+/// The same with SIGKILL (`taskkill /T /F` on Windows), then `Child::kill` while the shell lives.
 fn kill(child: &Child_, fg: Option<u32>) {
     let mut c = lock(child);
-    if matches!(c.try_wait(), Ok(Some(_))) {
-        return;
-    }
+    let shell = live_pid(&mut c);
     #[cfg(unix)]
-    signal_groups(c.process_id(), fg, rustix::process::Signal::KILL);
+    signal_groups(shell, fg, rustix::process::Signal::KILL);
     let _ = fg;
-    #[cfg(windows)]
-    if let Some(pid) = c.process_id() {
+    if let Some(_pid) = shell {
+        #[cfg(windows)]
         let _ = std::process::Command::new(synthesis_platform::system32("taskkill.exe"))
             .args(["/T", "/F", "/PID"])
-            .arg(pid.to_string())
+            .arg(_pid.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+        let _ = c.kill();
     }
-    let _ = c.kill();
 }
 
 fn terminate(child: &Child_, fg: Option<u32>) {
@@ -660,10 +680,11 @@ fn terminate(child: &Child_, fg: Option<u32>) {
     let end = Instant::now() + Duration::from_secs(2);
     while Instant::now() < end {
         if matches!(lock(child).try_wait(), Ok(Some(_))) {
-            return;
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    // also when the shell is already gone: the foreground job may have ignored the hang-up
     kill(child, fg);
     for _ in 0..3000 {
         if matches!(lock(child).try_wait(), Ok(Some(_))) {
@@ -941,8 +962,18 @@ mod tests {
             .unwrap();
         assert!(s.busy());
         s.hangup();
-        s.kill_now();
+        // the shell dies promptly on the hang-up (and is reaped) while the job ignores it
+        let end = Instant::now() + Duration::from_secs(20);
+        while s.alive() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!s.alive(), "the shell survived the hang-up");
         let p = rustix::process::Pid::from_raw(pid).unwrap();
+        assert!(
+            rustix::process::test_kill_process(p).is_ok(),
+            "the job should outlive the shell"
+        );
+        s.kill_now();
         let end = Instant::now() + Duration::from_secs(20);
         // the job is gone (reaped by init or us): signal 0 fails with ESRCH
         while rustix::process::test_kill_process(p).is_ok() && Instant::now() < end {
