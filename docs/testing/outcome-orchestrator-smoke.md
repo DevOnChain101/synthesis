@@ -120,3 +120,15 @@ cargo test -p synthesis-cli --features test-provider --test outcome_e2e    # rea
 - A model plan or replan is only a proposal. The card shows every item (and, for a replan, what was added, removed and changed against the current plan); nothing runs until you choose `approve_model_plan`, `use_stub_plan` or, for a replan, `keep_current_plan`.
 - A replan is proposed once per plan state after a work item failed or ended blocked, after a rework verdict, or after a revised contract was approved. Its input is state and reason codes only, never what a worker wrote.
 - After you answer a blocked worker's question or allow a grant, the next attempt starts from that worker's commit (the card shows its short id); choosing `retry` starts fresh from the base commit. The final check still compares everything against the base commit.
+
+## In-app path (desktop app, owner request 2026-11-17)
+
+No hand-edited settings and no `synt` commands. Use a scratch home when trying it from a checkout (`SYNT_HOME=/tmp/synt-smoke synthesis-desktop`), or the packaged `Synthesis.app` built with `--synt` (otherwise the app cannot start the orchestrator itself and says to run `synt outcome list`).
+
+1. Settings > Execution (search "Outcomes"): the switch is off. Turn it on: the integrity notice appears; Cancel writes nothing (`$SYNT_HOME/settings.json` unchanged). Or open the Outcomes tab: "Super Agent is off" with "Turn on Super Agent...".
+2. Confirm in the dialog (Tab to Cancel, Tab to Confirm, Enter; or click). Expect `settings.json` to hold `{"synt":{"orchestrator":{"enabled":true}}}` with other keys untouched, and the tab to say "Super Agent needs one more step".
+3. "Migrate the session store..." shows the same notice with its own Confirm. Confirm: `backups/pre-v5-*` appears, the schema becomes 5, the orchestrator starts (`$SYNT_HOME/run/orch.json`) and the outcome list shows. Nothing migrates before this confirm.
+4. With a managed settings file that sets `synt.orchestrator.enabled`, the Settings switch is locked and the tab's confirm reports the refusal.
+5. Native Windows: the switch is locked with the WSL2 reason and the tab has no button.
+
+Not covered by automated tests: a real window, a real orchestrator process started from the bundle, and a packaged bundle run (see the PR report).

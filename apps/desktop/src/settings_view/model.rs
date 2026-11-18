@@ -17,6 +17,56 @@ use synthesis_config::{Env, LoadContext, ProjectTrust, resolve_credential};
 use synthesis_settings::load_settings_with_managed;
 use synthesis_settings_ui::{Edit, Field, Kind, Origin, Section, SetError, SettingsStore};
 
+/// The Outcomes switch (`synthesis-settings-ui` schema). Written only by the person, after the disclosure.
+pub const ORCHESTRATOR: &str = "synt.orchestrator.enabled";
+
+/// Why the switch cannot be used on this platform (`windows`: native Windows, where outcomes are refused).
+fn orchestrator_platform_lock(windows: bool) -> Option<String> {
+    windows.then(|| synthesis_view::outcomes::WSL2_REFUSAL.to_string())
+}
+
+/// A closed enable gate locks the switch while it is off (turning it off stays possible).
+fn orchestrator_gate_lock(gate_refusal: Option<&str>, currently_on: bool) -> Option<String> {
+    gate_refusal.filter(|_| !currently_on).map(String::from)
+}
+
+/// Writes `synt.orchestrator.enabled` = `on` to the USER settings file through the same store the Settings rows
+/// use (managed lock, atomic write, other keys kept). The Outcomes tab calls this after its own confirm.
+pub fn write_orchestrator(env: &Env, on: bool) -> Result<(), String> {
+    write_orchestrator_gated(env, on, synthesis_app::outcome_policy::gate_refusal())
+}
+
+fn write_orchestrator_gated(env: &Env, on: bool, gate_refusal: Option<&str>) -> Result<(), String> {
+    if let Some(why) = orchestrator_platform_lock(cfg!(windows)) {
+        return Err(why);
+    }
+    // a closed enable gate refuses turning it on (turning it off stays possible)
+    if let Some(why) = gate_refusal.filter(|_| on) {
+        return Err(why.into());
+    }
+    let h = synthesis_app::homes(env)?;
+    let none = h.synthesis.join("no-project");
+    let mut s = SettingsStore::open(
+        &LoadContext {
+            cwd: &none,
+            synthesis_home: &h.synthesis,
+            user_home: &h.user,
+            env,
+        },
+        ProjectTrust::Untrusted,
+        &synthesis_settings::managed_settings_path(),
+        None,
+    );
+    s.set_confirmed(ORCHESTRATOR, json!(on))
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+/// Keys whose lock (platform or managed) the model checks itself before asking the store.
+fn guarded(key: &str) -> bool {
+    key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl.") || key == ORCHESTRATOR
+}
+
 /// Everything the model reads from the outside.
 /// Shown instead of the Windows trust store in WSL mode.
 pub const TRUST_IN_ENGINE: &str = "Remembered trust is managed in the engine (WSL): use /trust in the TUI tab. The Windows store is not used for those folders.";
@@ -616,6 +666,13 @@ impl Model {
             "synt.tui.blur" => blur_unsupported().map(Into::into),
             "synt.desktop.wsl.enabled" => self.wsl_lock.clone(),
             "synt.desktop.wsl.distro" => (!cfg!(windows)).then(|| "Windows only".into()),
+            ORCHESTRATOR => orchestrator_platform_lock(cfg!(windows)).or_else(|| {
+                let on = self
+                    .store
+                    .entry(key)
+                    .is_some_and(|e| e.value == json!(true));
+                orchestrator_gate_lock(synthesis_app::outcome_policy::gate_refusal(), on)
+            }),
             _ => None,
         })
     }
@@ -681,10 +738,7 @@ impl Model {
         let Some(f) = self.store.schema.field(key).cloned() else {
             return Outcome::Rejected;
         };
-        if let Some(why) = self
-            .lock_reason(key)
-            .filter(|_| key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl."))
-        {
+        if let Some(why) = self.lock_reason(key).filter(|_| guarded(key)) {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -723,9 +777,20 @@ impl Model {
             }
             _ => return Outcome::Rejected,
         };
-        match self.store.set(key, value.clone()) {
+        // turning outcomes OFF needs no confirmation; turning them ON shows the build's own notice, verbatim
+        let set = if key == ORCHESTRATOR && value == json!(false) {
+            self.store.set_confirmed(key, value.clone())
+        } else {
+            self.store.set(key, value.clone())
+        };
+        match set {
             Err(SetError::NeedsConfirmation { reason, .. }) => {
                 self.errors.remove(key);
+                let reason = if key == ORCHESTRATOR {
+                    synthesis_app::outcome_cmd::ENABLE_NOTICE.to_string()
+                } else {
+                    reason
+                };
                 let mut chars = reason.chars();
                 let reason = chars
                     .next()
@@ -748,6 +813,16 @@ impl Model {
         let Some(p) = self.pending.take() else {
             return Outcome::Rejected;
         };
+        // the files may have changed since the dialog opened: a managed value that appeared meanwhile, or the
+        // platform lock, is checked again against what is on disk now
+        self.store.reload();
+        if let Some(why) = self.lock_reason(&p.key).filter(|_| guarded(&p.key)) {
+            self.errors.insert(
+                p.key.clone(),
+                format!("{}: not editable here: {why}", p.key),
+            );
+            return Outcome::Rejected;
+        }
         let r = self.store.set_confirmed(&p.key, p.value);
         self.done(&p.key, r)
     }
@@ -758,10 +833,7 @@ impl Model {
 
     /// Back to the default (or the lower layer): removes the key from the USER file.
     pub fn reset(&mut self, key: &str) -> Outcome {
-        if let Some(why) = self
-            .lock_reason(key)
-            .filter(|_| key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl."))
-        {
+        if let Some(why) = self.lock_reason(key).filter(|_| guarded(key)) {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -1151,6 +1223,173 @@ mod tests {
         m.change(k, Change::Remove(0));
         assert_eq!(row(&m, k).control, Control::List(vec!["/b".into()]));
         assert_eq!(m.change(k, Change::Remove(5)), Outcome::Rejected);
+    }
+
+    const ORCH: &str = super::ORCHESTRATOR;
+
+    #[test]
+    fn the_outcomes_switch_confirms_with_the_builds_notice_verbatim_then_writes_only_its_key() {
+        let (_t, mut m) = model();
+        // another key and an unknown one are already in the user file: both must survive
+        std::fs::write(
+            m.cfg.home.join("settings.json"),
+            "{\n  \"keep\": [1, 2],\n  \"synt\": {\"memory\": {\"enabled\": false}}\n}\n",
+        )
+        .unwrap();
+        m.store.reload();
+        let r = row(&m, ORCH);
+        assert_eq!(
+            (r.origin, r.locked.is_none()),
+            (Origin::Default, !cfg!(windows))
+        );
+        assert!(matches!(r.control, Control::Switch(false)) && r.confirm);
+        if cfg!(windows) {
+            return;
+        }
+        // on: asks first, with the notice the CLI prints, and writes nothing yet
+        assert_eq!(m.change(ORCH, Change::Bool(true)), Outcome::NeedsConfirm);
+        assert_eq!(
+            m.pending.as_ref().unwrap().reason,
+            synthesis_app::outcome_cmd::ENABLE_NOTICE
+        );
+        assert!(user_file(&m).pointer("/synt/orchestrator").is_none());
+        // cancel writes nothing
+        m.cancel();
+        assert!(user_file(&m).pointer("/synt/orchestrator").is_none());
+        assert_eq!(m.change(ORCH, Change::Bool(true)), Outcome::NeedsConfirm);
+        assert_eq!(m.confirm(), Outcome::Saved);
+        let f = user_file(&m);
+        assert_eq!(f["synt"]["orchestrator"]["enabled"], json!(true));
+        assert_eq!(
+            (f["keep"].clone(), f["synt"]["memory"]["enabled"].clone()),
+            (json!([1, 2]), json!(false))
+        );
+        assert_eq!(row(&m, ORCH).origin, Origin::User);
+        // off needs no confirmation
+        assert_eq!(m.change(ORCH, Change::Bool(false)), Outcome::Saved);
+        assert_eq!(
+            user_file(&m)["synt"]["orchestrator"]["enabled"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn a_managed_value_shows_the_switch_locked_and_refuses_every_write() {
+        let (_t, mut m) = model();
+        std::fs::write(
+            &m.cfg.managed,
+            r#"{"synt":{"orchestrator":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        m.store.reload();
+        let r = row(&m, ORCH);
+        assert_eq!(r.origin, Origin::Managed);
+        assert!(r.locked.is_some() && !r.resettable);
+        for c in [Change::Bool(true), Change::Bool(false)] {
+            assert_eq!(m.change(ORCH, c), Outcome::Rejected);
+            assert!(m.pending.is_none());
+        }
+        assert_eq!(m.reset(ORCH), Outcome::Rejected);
+        assert!(!m.cfg.home.join("settings.json").exists());
+        // a project file can never set it: its copy is ignored and said so
+        std::fs::remove_file(&m.cfg.managed).unwrap();
+        std::fs::create_dir_all(m.cfg.cwd.join(".synt")).unwrap();
+        std::fs::write(
+            m.cfg.cwd.join(".synt/settings.json"),
+            r#"{"synt":{"orchestrator":{"enabled":true}}}"#,
+        )
+        .unwrap();
+        m.store.reload();
+        let r = row(&m, ORCH);
+        assert!(
+            matches!(r.control, Control::Switch(false)),
+            "the project value does not turn it on"
+        );
+    }
+
+    #[test]
+    fn a_managed_lock_that_appears_after_the_dialog_opened_refuses_the_confirm() {
+        if cfg!(windows) {
+            return;
+        }
+        let (_t, mut m) = model();
+        assert_eq!(m.change(ORCH, Change::Bool(true)), Outcome::NeedsConfirm);
+        // the organisation file appears while the dialog is open
+        std::fs::write(
+            &m.cfg.managed,
+            r#"{"synt":{"orchestrator":{"enabled":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.confirm(), Outcome::Rejected);
+        assert!(m.errors[ORCH].contains("managed"), "{:?}", m.errors);
+        assert!(
+            !m.cfg.home.join("settings.json").exists(),
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_closed_gate_locks_the_switch_with_the_refusal_only_while_it_is_off() {
+        let why = "the release gate is not passed: x";
+        assert_eq!(
+            super::orchestrator_gate_lock(Some(why), false).as_deref(),
+            Some(why)
+        );
+        assert!(super::orchestrator_gate_lock(Some(why), true).is_none());
+        assert!(super::orchestrator_gate_lock(None, false).is_none());
+    }
+
+    #[test]
+    fn a_closed_gate_writes_nothing_when_turning_on() {
+        let (_t, m) = model();
+        let e = super::write_orchestrator_gated(
+            &m.cfg.env,
+            true,
+            Some("the release gate is not passed"),
+        );
+        assert!(e.unwrap_err().contains("release gate"));
+        assert!(
+            !m.cfg.home.join("settings.json").exists(),
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn native_windows_disables_the_switch_with_the_reason() {
+        assert_eq!(
+            super::orchestrator_platform_lock(true).as_deref(),
+            Some(synthesis_view::outcomes::WSL2_REFUSAL)
+        );
+        assert!(super::orchestrator_platform_lock(false).is_none());
+    }
+
+    #[test]
+    fn the_outcomes_tabs_writer_uses_the_same_store_and_refuses_what_it_refuses() {
+        if cfg!(windows) {
+            assert!(
+                super::write_orchestrator(&Env::from_pairs([("HOME", "/x".to_string())]), true)
+                    .is_err()
+            );
+            return;
+        }
+        let (_t, m) = model();
+        std::fs::write(m.cfg.home.join("settings.json"), "{\"other\":{\"a\":1}}").unwrap();
+        super::write_orchestrator(&m.cfg.env, true).unwrap();
+        let f = user_file(&m);
+        assert_eq!(
+            (
+                f["synt"]["orchestrator"]["enabled"].clone(),
+                f["other"]["a"].clone()
+            ),
+            (json!(true), json!(1))
+        );
+        // a settings file that is not an object is reported and left alone
+        std::fs::write(m.cfg.home.join("settings.json"), "[1]").unwrap();
+        assert!(super::write_orchestrator(&m.cfg.env, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(m.cfg.home.join("settings.json")).unwrap(),
+            "[1]"
+        );
     }
 
     #[test]

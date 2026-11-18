@@ -15,7 +15,7 @@ use synthesis_view::outcomes::{
 
 use super::OutcomesView;
 use super::form_view::small_button;
-use super::model::{CentreTab, Item, Pane, Screen, off_lines};
+use super::model::{CentreTab, Item, MIGRATE_LINES, OFF_LINES, Pane, Screen};
 use crate::live::now_ms;
 use crate::theme::{self, hsla};
 use crate::widgets::chrome::{self, Chip, dim, rule, strong, text, tracked, with_alpha};
@@ -672,6 +672,16 @@ impl OutcomesView {
                 h("Esc", "close"),
             ];
         }
+        if s.guide.is_some() {
+            return vec![
+                h("Tab", "next button"),
+                h("Enter", "on a button"),
+                h("Esc", "cancel"),
+            ];
+        }
+        if matches!(s.screen, Screen::Off | Screen::NotReady(_)) {
+            return vec![h("Enter", "continue"), h("r", "check again")];
+        }
         if s.screen != Screen::Ready {
             return vec![h("r", "check again")];
         }
@@ -702,19 +712,23 @@ impl OutcomesView {
         v
     }
 
-    fn message(&self) -> Div {
+    fn message(&self, cx: &Context<Self>) -> Div {
         let (title, body): (&str, Vec<String>) = match &self.state.screen {
             Screen::Off => (
-                "Outcomes are off",
-                off_lines(synthesis_app::outcome_policy::gate_refusal()),
+                "Super Agent is off",
+                OFF_LINES.iter().map(|l| l.to_string()).collect(),
             ),
             Screen::Windows => (
-                "Outcomes need WSL2 on Windows",
+                "Super Agent needs WSL2 on Windows",
                 vec![WSL2_REFUSAL.to_string()],
             ),
             Screen::NotReady(e) => (
-                "Outcomes need one more step",
-                vec![synthesis_harness::sanitize_for_display(e)],
+                "Super Agent needs one more step",
+                MIGRATE_LINES
+                    .iter()
+                    .map(|l| l.to_string())
+                    .chain([synthesis_harness::sanitize_for_display(e)])
+                    .collect(),
             ),
             Screen::Unreachable(e) => (
                 "The orchestrator cannot be reached",
@@ -725,6 +739,15 @@ impl OutcomesView {
             ),
             _ => ("Connecting to the orchestrator", vec![]),
         };
+        let body: Vec<String> = body
+            .into_iter()
+            .chain(
+                self.state
+                    .notice
+                    .iter()
+                    .map(|n| synthesis_harness::sanitize_for_display(n)),
+            )
+            .collect();
         div()
             .size_full()
             .flex()
@@ -756,7 +779,8 @@ impl OutcomesView {
                                     .child(title.to_string()),
                             ),
                     )
-                    .children(body.into_iter().map(|l| div().text_color(text()).child(l))),
+                    .children(body.into_iter().map(|l| div().text_color(text()).child(l)))
+                    .children(self.guide_open_button(cx)),
             )
     }
 }
@@ -804,7 +828,7 @@ impl Render for OutcomesView {
                         .child(self.inspector(cx)),
                 )
         } else {
-            self.message()
+            self.message(cx)
         };
         div()
             .debug_selector(|| "outcomes".to_string())
@@ -825,6 +849,7 @@ impl Render for OutcomesView {
             .child(div().flex_1().min_h(px(0.)).p(px(10.)).child(main))
             .child(chrome::footer(&self.hints(), &chips).border_color(rule()))
             .children(self.form_overlay(window, cx))
+            .children(self.guide_overlay(cx))
     }
 }
 

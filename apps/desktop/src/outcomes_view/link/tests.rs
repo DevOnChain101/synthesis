@@ -368,14 +368,29 @@ fn the_synt_next_to_the_app_is_found_by_the_real_path_not_by_a_symlink() {
     std::os::unix::fs::symlink(real.join("app"), user.join("app")).unwrap();
     // a `synt` planted beside the symlink, in the folder the user can write, is not used
     std::fs::write(user.join("synt"), "evil").unwrap();
-    assert_eq!(synt_beside(&user.join("app")), None);
+    assert_eq!(found(&user.join("app")), None);
     // beside the real app it is; a symlink named synt there is not
     std::fs::write(real.join("elsewhere"), "x").unwrap();
     std::os::unix::fs::symlink(real.join("elsewhere"), real.join("synt")).unwrap();
-    assert_eq!(synt_beside(&user.join("app")), None);
+    assert_eq!(found(&user.join("app")), None);
     std::fs::remove_file(real.join("synt")).unwrap();
     std::fs::write(real.join("synt"), "ok").unwrap();
-    assert_eq!(synt_beside(&user.join("app")), Some(real.join("synt")));
+    // not executable: refused; executable: used
+    assert_eq!(found(&user.join("app")), None);
+    use std::os::unix::fs::PermissionsExt as _;
+    for (p, m) in [(real.join("synt"), 0o755), (real.clone(), 0o755)] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
+    assert_eq!(found(&user.join("app")), Some(real.join("synt")));
+}
+
+/// The usable `synt` beside `exe`, if any.
+#[cfg(unix)]
+fn found(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    match synt_beside(exe) {
+        Sibling::Usable(p) => Some(p),
+        _ => None,
+    }
 }
 
 fn ok_head(_: &str) -> Result<String, String> {
@@ -736,4 +751,227 @@ fn a_queued_approval_is_not_reported_as_approved() {
         panic!()
     };
     assert!(text.contains("not approved yet"), "{text}");
+}
+
+// ------------------------------------------------------------------------ the migration step
+
+/// An orchestrator whose store is not migrated: only `orchestrator.enable` is answered.
+struct Unmigrated {
+    calls: Rc<RefCell<Vec<String>>>,
+    reply: Option<Result<Value, ClientError>>,
+}
+
+impl Transport for Unmigrated {
+    fn next_hint(
+        &mut self,
+        _: Duration,
+    ) -> Result<Option<synthesis_app::proto::DecisionHint>, ClientError> {
+        Ok(None)
+    }
+    fn call(&mut self, call: Call) -> Result<Value, ClientError> {
+        let v = serde_json::to_value(&call).unwrap();
+        self.calls
+            .borrow_mut()
+            .push(v["method"].as_str().unwrap().into());
+        self.reply
+            .take()
+            .unwrap_or_else(|| Err(ClientError::Io("no reply scripted".into())))
+    }
+}
+
+fn enable_run(
+    reply: Result<Value, ClientError>,
+    reqs: Vec<Req>,
+) -> (Vec<String>, Vec<Result<(), String>>, bool) {
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut c = OutcomeClient::new(
+        Unmigrated {
+            calls: calls.clone(),
+            reply: Some(reply),
+        },
+        Surface::Superagent,
+    );
+    let (tx, rx) = channel();
+    for r in reqs {
+        tx.send(r).unwrap();
+    }
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    let reconnect = await_enable(&mut c, &rx, &out);
+    drop(out);
+    let res = std::iter::from_fn(|| orx.try_recv().ok())
+        .filter_map(|m| match m {
+            Msg::Enabled(_, r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    let calls = calls.borrow().clone();
+    (calls, res, reconnect)
+}
+
+fn good() -> Value {
+    json!({"schema": 5, "backups": "backups/pre-v5-*", "disclosure": {
+        "id": synthesis_app::outcome_policy::DISCLOSURE_ID,
+        "text": synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE}})
+}
+
+#[test]
+fn the_store_is_migrated_only_on_the_explicit_request_then_the_worker_reconnects() {
+    // nothing asked: nothing sent (a closed window ends the wait)
+    let (calls, res, reconnect) = enable_run(Ok(good()), vec![]);
+    assert!((calls.is_empty(), res.is_empty(), reconnect) == (true, true, false));
+    // other requests are ignored; a retry only looks again
+    let (calls, _, reconnect) = enable_run(Ok(good()), vec![Req::Refresh, Req::Retry]);
+    assert!(calls.is_empty() && reconnect);
+    let (calls, res, reconnect) = enable_run(Ok(good()), vec![Req::Enable(1)]);
+    assert_eq!(calls, ["orchestrator.enable"]);
+    assert_eq!(res, vec![Ok(())]);
+    assert!(reconnect);
+}
+
+#[test]
+fn a_disclosure_that_is_not_this_builds_is_refused_and_reported() {
+    for bad in [
+        json!({"schema": 5}),
+        json!({"disclosure": {"id": "integrity-v0", "text": synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE}}),
+        json!({"disclosure": {"id": synthesis_app::outcome_policy::DISCLOSURE_ID, "text": "another wording"}}),
+    ] {
+        let (calls, res, reconnect) = enable_run(Ok(bad), vec![Req::Enable(1)]);
+        assert_eq!(calls.len(), 1);
+        let [Err(why)] = res.as_slice() else {
+            panic!("{res:?}")
+        };
+        assert!(why.contains("integrity disclosure"), "{why}");
+        assert!(
+            !reconnect,
+            "the worker keeps waiting; it never claims the store is enabled"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_is_reported_and_a_lost_link_reconnects() {
+    let (_, res, reconnect) = enable_run(
+        Err(ClientError::Refused("set the setting first".into())),
+        vec![Req::Enable(1)],
+    );
+    assert!(
+        matches!(res.as_slice(), [Err(w)] if w.contains("set the setting first")) && !reconnect
+    );
+    let (_, res, reconnect) =
+        enable_run(Err(ClientError::Io("closed".into())), vec![Req::Enable(1)]);
+    assert!(matches!(res.as_slice(), [Err(_)]) && reconnect);
+}
+
+// ------------------------------------------------------------------------ the synt beside the app
+
+#[cfg(unix)]
+mod beside {
+    use super::{Sibling, found};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// `<tmp>/Synthesis.app/Contents/MacOS/{Synthesis,synt}` with the given mode on synt (None: no synt).
+    fn bundle(mode: Option<u32>) -> (tempfile::TempDir, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let macos = std::fs::canonicalize(t.path())
+            .unwrap()
+            .join("Synthesis.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(macos.join("Synthesis"), b"x").unwrap();
+        if let Some(m) = mode {
+            std::fs::write(macos.join("synt"), b"x").unwrap();
+            std::fs::set_permissions(macos.join("synt"), std::fs::Permissions::from_mode(m))
+                .unwrap();
+        }
+        (t, macos)
+    }
+
+    #[test]
+    fn the_synt_inside_the_app_bundle_is_found_from_the_app_executable() {
+        let (_t, macos) = bundle(Some(0o755));
+        assert_eq!(found(&macos.join("Synthesis")), Some(macos.join("synt")));
+    }
+
+    #[test]
+    fn a_missing_non_executable_or_writable_by_others_synt_is_refused() {
+        let (_t, macos) = bundle(None);
+        assert_eq!(found(&macos.join("Synthesis")), None);
+        for mode in [0o644, 0o775, 0o757] {
+            let (_t, macos) = bundle(Some(mode));
+            assert_eq!(found(&macos.join("Synthesis")), None, "{mode:o}");
+        }
+        // a folder others can write to: the file could have been swapped
+        let (_t, macos) = bundle(Some(0o755));
+        std::fs::set_permissions(&macos, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(found(&macos.join("Synthesis")), None);
+    }
+
+    #[test]
+    fn a_refused_synt_is_told_apart_from_none_and_a_writable_ancestor_in_the_bundle_refuses() {
+        let (_t, macos) = bundle(None);
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Absent
+        );
+        let (_t, macos) = bundle(Some(0o666));
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Refused
+        );
+        // Contents is writable by others: the folder could have been swapped from above
+        let (_t, macos) = bundle(Some(0o755));
+        let contents = macos.parent().unwrap();
+        std::fs::set_permissions(contents, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Refused
+        );
+        std::fs::set_permissions(contents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            super::super::synt_beside(&macos.join("Synthesis")),
+            Sibling::Usable(_)
+        ));
+    }
+
+    #[test]
+    fn a_symlinked_synt_is_refused_and_a_symlinked_app_looks_where_it_really_is() {
+        let (t, macos) = bundle(None);
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"x").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&elsewhere, macos.join("synt")).unwrap();
+        assert_eq!(found(&macos.join("Synthesis")), None, "never a symlink");
+        // a link to the app from another folder does not pick the synt that sits beside the link
+        let (_t2, real) = bundle(None);
+        let dir = t.path().join("links");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("synt"), b"x").unwrap();
+        std::fs::set_permissions(dir.join("synt"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(real.join("Synthesis"), dir.join("Synthesis")).unwrap();
+        assert_eq!(found(&dir.join("Synthesis")), None);
+    }
+}
+
+#[test]
+fn a_migration_confirm_that_comes_late_is_answered_not_dropped() {
+    let msgs = run(&fake(), vec![Req::Enable(1)]);
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Msg::Enabled(_, Err(e)) if e.contains("already migrated")))
+    );
+}
+
+#[test]
+fn a_worker_that_ended_makes_send_report_it() {
+    let (tx, rx) = channel();
+    let (out, _orx) = unbounded();
+    let l = Link {
+        tx,
+        out,
+        env: Env::default(),
+    };
+    assert!(l.try_send(Req::Refresh));
+    drop(rx);
+    assert!(!l.try_send(Req::Enable(1)));
 }

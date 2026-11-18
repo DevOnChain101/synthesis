@@ -92,6 +92,21 @@ pub fn probe() -> Result<(), String> {
     imp::probe()
 }
 
+/// Restricts the DEFAULT DLL search path of this whole process to System32 and the application
+/// directory (`SetDefaultDllDirectories`): a bare-name `LoadLibrary` (portable-pty loads
+/// `conpty.dll` that way) no longer finds a planted DLL in the current directory (the workspace)
+/// or on `PATH`. Process-wide and irreversible; DLLs next to the executable keep working, others
+/// must be loaded with an explicit full path or flags. No-op off Windows.
+#[cfg(windows)]
+pub fn harden_dll_search() -> Result<(), String> {
+    imp::harden_dll_search()
+}
+
+#[cfg(not(windows))]
+pub fn harden_dll_search() -> Result<(), String> {
+    Ok(())
+}
+
 /// Runs `spec` confined and returns the program's exit code. `Err` means nothing was run, or the
 /// launch failed; the message says which step. Always cleans up what it changed.
 #[cfg(windows)]

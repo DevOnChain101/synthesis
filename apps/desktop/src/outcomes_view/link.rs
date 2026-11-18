@@ -59,6 +59,10 @@ pub enum Req {
     },
     /// Read the stored contract of an outcome whose contract is not approved, for review.
     Review(String),
+    /// The explicit store migration, after the person confirmed the disclosure. Only served while the
+    /// orchestrator says the store is not migrated; never sent by itself.
+    /// The number of the person's confirm (`State::migrations`): the reply carries it back.
+    Enable(u64),
 }
 
 /// What the worker says to the open form.
@@ -98,6 +102,8 @@ pub enum Msg {
     },
     Answered(String),
     Form(FormMsg),
+    /// The migration's result (`Err` is the reason; the worker reconnects itself after an `Ok`).
+    Enabled(u64, Result<(), String>),
 }
 
 pub struct Link {
@@ -131,25 +137,92 @@ impl Link {
 
     pub fn send(&self, r: Req) {
         // a worker that ended has said why; nothing more to do
-        let _ = self.tx.send(r);
+        let _ = self.try_send(r);
+    }
+
+    /// `false`: the worker has ended (it has said why), so the request went nowhere.
+    pub fn try_send(&self, r: Req) -> bool {
+        self.tx.send(r).is_ok()
     }
 }
 
 /// `synt` next to this app (a packaged install): the orchestrator is started with it. Without one the app only
 /// connects to a running orchestrator (it never starts itself, which would open a second window).
 fn synt_exe() -> Option<std::path::PathBuf> {
-    synt_beside(&std::env::current_exe().ok()?)
+    match synt_beside(&std::env::current_exe().ok()?) {
+        Sibling::Usable(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// What sits beside the app executable under the name `synt`.
+#[derive(Debug, PartialEq)]
+enum Sibling {
+    Usable(std::path::PathBuf),
+    /// There is one, but it is not what the app may start (not a regular file of the user's, or writable by others).
+    Refused,
+    Absent,
 }
 
 /// The `synt` in the folder `exe` really is in: the path is resolved first, so a symlink to the app from a
-/// folder the user can write does not pick a `synt` that sits beside the link. A regular file, never a
-/// symlink, never a PATH search.
-fn synt_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let p = std::fs::canonicalize(exe)
-        .ok()?
-        .parent()?
-        .join(if cfg!(windows) { "synt.exe" } else { "synt" });
-    std::fs::symlink_metadata(&p).ok()?.is_file().then_some(p)
+/// folder the user can write does not pick a `synt` that sits beside the link (inside `Synthesis.app` that is
+/// `Contents/MacOS`). A regular file, never a symlink, never a PATH search, and only one `usable_synt` accepts.
+fn synt_beside(exe: &std::path::Path) -> Sibling {
+    let Some(dir) = std::fs::canonicalize(exe)
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    else {
+        return Sibling::Absent;
+    };
+    let p = dir.join(if cfg!(windows) { "synt.exe" } else { "synt" });
+    match std::fs::symlink_metadata(&p) {
+        Err(_) => Sibling::Absent,
+        Ok(m) if usable_synt(&dir, &m) => Sibling::Usable(p),
+        Ok(_) => Sibling::Refused,
+    }
+}
+
+/// A regular file (a symlink is not one). On unix also: the user's own, executable, and neither it nor its
+/// folder, nor any folder above it up to the `.app` bundle (or just the folder, outside a bundle), writable
+/// by group or others; the folder belongs to the user or root. So nobody else can have put it there or
+/// swapped it.
+fn usable_synt(dir: &std::path::Path, file: &std::fs::Metadata) -> bool {
+    if !file.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let me = rustix::process::geteuid().as_raw();
+        let Ok(d) = std::fs::metadata(dir) else {
+            return false;
+        };
+        if file.uid() != me || file.mode() & 0o111 == 0 || file.mode() & 0o022 != 0 {
+            return false;
+        }
+        if ![me, 0].contains(&d.uid()) {
+            return false;
+        }
+        let in_bundle = dir
+            .ancestors()
+            .any(|a| a.extension().is_some_and(|e| e == "app"));
+        for a in dir.ancestors() {
+            match std::fs::metadata(a) {
+                Ok(m) if m.mode() & 0o022 == 0 => {}
+                _ => return false,
+            }
+            // the bundle root ends the walk; outside a bundle only the folder itself counts
+            if !in_bundle || a.extension().is_some_and(|e| e == "app") {
+                break;
+            }
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
+    }
 }
 
 /// The synchronous check before anything starts: the platform supports outcomes and `synt.orchestrator.enabled`
@@ -170,10 +243,12 @@ fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Scree
     let home = gate(env)?;
     let link = connect_started(&home);
     link.map_err(|e| {
-        let hint = if synt_exe().is_none() {
-            " Start it with `synt outcome list` in a terminal, then press r."
-        } else {
-            ""
+        let hint = match std::env::current_exe().ok().map(|e| synt_beside(&e)) {
+            Some(Sibling::Usable(_)) => "",
+            Some(Sibling::Refused) => {
+                " The synt next to the app is not a regular executable file owned by you, or it or its folder is writable by others: reinstall the app."
+            }
+            _ => " Start it with `synt outcome list` in a terminal, then press r.",
         };
         Screen::Unreachable(format!("{e}.{hint}"))
     })
@@ -212,9 +287,16 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                             Err(e) => Screen::Unreachable(e),
                         }
                     }
-                    Ok(_) => Screen::NotReady(
-                        "the orchestrator is on but the store is not migrated: run `synt outcome enable` in a terminal, then press r".into(),
-                    ),
+                    Ok(_) => {
+                        let _ = out.unbounded_send(Msg::Screen(Screen::NotReady(
+                            "the orchestrator is on but the session store is not migrated".into(),
+                        )));
+                        // the one request this state serves is the person's explicit migration
+                        if !await_enable(&mut c, rx, out) {
+                            return;
+                        }
+                        continue;
+                    }
                     Err(e) => Screen::Unreachable(e.to_string()),
                 };
                 let _ = out.unbounded_send(Msg::Screen(screen));
@@ -227,9 +309,46 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
         loop {
             match rx.recv() {
                 Ok(Req::Retry) => break,
+                // not connected: a migration request is answered, never left waiting
+                Ok(Req::Enable(n)) => {
+                    let _ = out.unbounded_send(Msg::Enabled(
+                        n,
+                        Err("not connected to the orchestrator; press r to check again".into()),
+                    ));
+                }
                 Ok(_) => {}
                 Err(_) => return,
             }
+        }
+    }
+}
+
+/// The store is not migrated: waits for `Retry` (`true`: connect again) or the person's `Enable` (the
+/// migration; `true` after it worked, so the worker connects to the migrated store). A migration whose
+/// reply is not this build's disclosure is refused (the client says so) and reported; the worker then keeps
+/// waiting. `false`: the window closed.
+fn await_enable<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    rx: &Receiver<Req>,
+    out: &UnboundedSender<Msg>,
+) -> bool {
+    loop {
+        match rx.recv() {
+            Ok(Req::Retry) => return true,
+            Ok(Req::Enable(n)) => match c.enable() {
+                Ok(_) => {
+                    let _ = out.unbounded_send(Msg::Enabled(n, Ok(())));
+                    return true;
+                }
+                Err(e) => {
+                    let _ = out.unbounded_send(Msg::Enabled(n, Err(e.to_string())));
+                    if matches!(e, ClientError::Io(_)) {
+                        return true;
+                    }
+                }
+            },
+            Ok(_) => {}
+            Err(_) => return false,
         }
     }
 }
@@ -302,6 +421,15 @@ pub(super) fn serve<T: Transport>(
                 Ok(Req::Review(id)) => {
                     let m = review_draft(c, &id)?;
                     let _ = out.unbounded_send(Msg::Form(m));
+                }
+                // the store is migrated already (the person's confirm came late): say so, look again
+                Ok(Req::Enable(n)) => {
+                    let _ = out.unbounded_send(Msg::Enabled(
+                        n,
+                        Err("already migrated; checking again".into()),
+                    ));
+                    refresh(c, &mut w, out)?;
+                    last = Instant::now();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),

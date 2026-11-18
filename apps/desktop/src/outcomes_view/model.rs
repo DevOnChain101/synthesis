@@ -16,24 +16,45 @@ use super::ask::Ask;
 use super::form::{Form, FormText, Review, Stage, Submit};
 use super::link::FormMsg;
 
-/// What the Off screen says (the setting, then the explicit enable step; this window never enables).
-pub const OFF_LINES: [&str; 4] = [
-    "Outcomes are off. Nothing here runs, and nothing is started or migrated for you.",
-    "1. Set synt.orchestrator.enabled to true in your user settings ($SYNT_HOME/synt.json, or your organisation's managed settings).",
-    "2. Run `synt outcome enable` once in a terminal: it shows the integrity notice, backs the session store up and migrates it.",
-    "Then press r here. This window does not turn outcomes on.",
+/// What the Off screen says above its button. It is opt-in and nothing happens before two explicit confirms.
+pub const OFF_LINES: [&str; 3] = [
+    "Super Agent is off. Nothing here runs, and nothing is started or migrated until you confirm it.",
+    "Experimental: Super Agent uses the stub planner, and its workers run with your configured provider and cost tokens.",
+    "Turning it on takes two steps, each with its own confirmation: the setting synt.orchestrator.enabled in your user settings, then the one-time migration of the session store (a backup is made first).",
 ];
 
-/// The Off screen's lines; a build whose enable gate is closed says so instead of offering the enable step.
-pub fn off_lines(gate_refusal: Option<&str>) -> Vec<String> {
-    let mut v: Vec<String> = OFF_LINES.iter().map(|l| l.to_string()).collect();
-    if let Some(why) = gate_refusal {
-        v.splice(
-            1..3,
-            [format!("Turning outcomes on is not offered: {why}.")],
-        );
-    }
-    v
+/// What the not-migrated screen says above its button.
+pub const MIGRATE_LINES: [&str; 2] = [
+    "The setting is on, but the session store is not migrated yet. The migration is its own step: it makes a backup first, then moves the store to schema v5.",
+    "Releases without outcomes refuse a migrated store.",
+];
+
+/// The step of the guided enable flow a disclosure is open for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Step {
+    /// Write `synt.orchestrator.enabled` to the user settings.
+    Setting,
+    /// The explicit store migration (`OutcomeClient::enable`).
+    Migrate,
+}
+
+/// A button of the disclosure; the keys move between them, and nothing starts focused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Btn {
+    Cancel,
+    Confirm,
+}
+
+/// The open disclosure of the guided flow. Consent is never kept: closing it, or a step that ends, drops it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Guide {
+    pub step: Step,
+    pub focus: Option<Btn>,
+    /// The confirmed step is on its way (a migration waits for the orchestrator): no key or click acts.
+    pub busy: bool,
+    pub error: Option<String>,
+    /// The number of the confirm this dialog sent (0: none yet).
+    pub seq: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,6 +143,14 @@ pub struct State {
     pub workspace: String,
     /// The open "New outcome" or "Revise contract" form.
     pub form: Option<Form>,
+    /// The open disclosure of the Off / not-migrated screens.
+    pub guide: Option<Guide>,
+    /// Why this build cannot turn Super Agent on (the enable gate is closed): the guide then shows it instead of the confirm.
+    pub gate_refusal: Option<String>,
+    /// Migrations the person has confirmed so far (the tag of the next one).
+    pub migrations: u64,
+    /// What the screen says about a migration whose dialog is gone (a late reply).
+    pub notice: Option<String>,
 }
 
 /// A key, with the modifiers that matter (any other modifier means it is not ours).
@@ -157,6 +186,11 @@ pub enum Effect {
     },
     /// Read the stored, unapproved contract of this outcome for review.
     Review(String),
+    /// The person confirmed the disclosure: write `synt.orchestrator.enabled` (user settings).
+    EnableSetting,
+    /// The person confirmed the disclosure: migrate the store (`OutcomeClient::enable`); the number tags the
+    /// request, so a reply of an older confirm is never taken for the open dialog's.
+    Migrate(u64),
 }
 
 impl State {
@@ -175,6 +209,10 @@ impl State {
             answers: 0,
             workspace: String::new(),
             form: None,
+            guide: None,
+            gate_refusal: synthesis_app::outcome_policy::gate_refusal().map(String::from),
+            migrations: 0,
+            notice: None,
         }
     }
 
@@ -213,6 +251,7 @@ impl State {
         now: i64,
     ) {
         self.screen = Screen::Ready;
+        self.notice = None;
         self.items = items;
         // the person's selection stands while the outcome exists; else the server's pick
         if !self
@@ -242,6 +281,14 @@ impl State {
     pub fn set_screen(&mut self, screen: Screen) {
         // the choice made before is gone: after a reconnect the card is a fresh one
         self.ask.link_changed();
+        // a disclosure belongs to the screen that opened it
+        let open = matches!(
+            (self.guide.as_ref().map(|g| g.step), &screen),
+            (Some(Step::Setting), Screen::Off) | (Some(Step::Migrate), Screen::NotReady(_))
+        );
+        if !open {
+            self.guide = None;
+        }
         self.screen = screen;
     }
 
@@ -434,14 +481,127 @@ impl State {
         self.ask.send(&outcome, &card, now).into_iter().collect()
     }
 
+    // ------------------------------------------------------------------------- the guided enable flow
+
+    /// The screen's button: opens the disclosure for the step the screen is at. Nothing is focused, nothing
+    /// is written or sent.
+    pub fn open_guide(&mut self) {
+        let step = match self.screen {
+            Screen::Off => Step::Setting,
+            Screen::NotReady(_) => Step::Migrate,
+            _ => return,
+        };
+        self.guide = Some(Guide {
+            step,
+            focus: None,
+            busy: false,
+            // a closed gate: the dialog says why, and has no confirm
+            error: self.gate_refusal.clone(),
+            seq: 0,
+        });
+        self.notice = None;
+    }
+
+    /// Esc, Cancel: closes the dialog, also while a confirmed step is on its way (that request is not recalled;
+    /// its reply is still applied). So a lost reply can never keep the person in the dialog.
+    pub fn close_guide(&mut self) {
+        self.guide = None;
+    }
+
+    /// The Confirm button (a click, or Enter with the button focused): the step's effect, once.
+    pub fn confirm_guide(&mut self) -> Vec<Effect> {
+        match self.guide.as_mut() {
+            Some(g) if !g.busy && self.gate_refusal.is_none() => {
+                g.busy = true;
+                g.error = None;
+                vec![match g.step {
+                    Step::Setting => Effect::EnableSetting,
+                    Step::Migrate => {
+                        self.migrations += 1;
+                        g.seq = self.migrations;
+                        Effect::Migrate(g.seq)
+                    }
+                }]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The reply of confirm `seq`. For the open dialog it ends or fails the step; with no dialog (closed
+    /// meanwhile) or a newer one open, it only says on the screen what happened, never in that dialog.
+    pub fn enabled(&mut self, seq: u64, r: Result<(), String>) {
+        let live = self
+            .guide
+            .as_ref()
+            .is_some_and(|g| g.step == Step::Migrate && g.seq == seq);
+        match (live, r) {
+            (true, Ok(())) => {
+                self.guide = None;
+                self.set_screen(Screen::Loading);
+            }
+            (true, Err(e)) => self.guide_failed(e),
+            (false, Ok(())) => {
+                self.notice = Some("Migration was started and completed; checking...".into());
+                self.set_screen(Screen::Loading);
+            }
+            (false, Err(e)) => {
+                self.notice = Some(format!("Migration was started and reported: {e}"))
+            }
+        }
+    }
+
+    /// The step failed: the dialog stays open with the (sanitised when drawn) reason.
+    pub fn guide_failed(&mut self, why: String) {
+        if let Some(g) = self.guide.as_mut() {
+            g.busy = false;
+            g.error = Some(why);
+        }
+    }
+
+    /// The step is done: the disclosure is gone, and the link looks again.
+    pub fn guide_done(&mut self) {
+        self.guide = None;
+    }
+
+    /// Keys while the disclosure is open: all of them are its own. Tab moves between Cancel and Confirm (the
+    /// first Tab lands on Cancel), Enter acts on the focused button only, Esc cancels.
+    fn guide_key(&mut self, name: &str) -> Vec<Effect> {
+        let Some(g) = self.guide.as_mut() else {
+            return vec![];
+        };
+        if g.busy {
+            // only Esc acts while a step is on its way
+            if name == "escape" {
+                self.guide = None;
+            }
+            return vec![];
+        }
+        match (name, g.focus) {
+            ("escape", _) => self.guide = None,
+            ("tab", Some(Btn::Cancel)) => g.focus = Some(Btn::Confirm),
+            ("tab", _) => g.focus = Some(Btn::Cancel),
+            ("enter", Some(Btn::Confirm)) => return self.confirm_guide(),
+            ("enter", Some(Btn::Cancel)) => self.guide = None,
+            _ => {}
+        }
+        vec![]
+    }
+
     /// A key. `None`: not ours (the window may use it).
     pub fn key(&mut self, k: &Key, now: i64) -> Option<Vec<Effect>> {
         if k.other_mod || self.form.is_some() {
             return None;
         }
+        if self.guide.is_some() {
+            return Some(self.guide_key(k.name));
+        }
         if self.screen != Screen::Ready {
             return match (&self.screen, k.name) {
                 (Screen::Loading | Screen::Windows, _) => None,
+                (Screen::Off | Screen::NotReady(_), "enter") => {
+                    self.open_guide();
+                    Some(vec![])
+                }
                 (_, "r" | "enter") => Some(vec![Effect::Retry]),
                 _ => None,
             };

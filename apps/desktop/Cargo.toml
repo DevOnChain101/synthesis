@@ -86,6 +86,8 @@ uuid = { version = "1", features = ["v4"] }
 # Command Line Tools only (no Xcode): compile Metal shaders at runtime instead of `xcrun metal`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# the owner check of the `synt` beside the app (same crate and features as synthesis-settings)
+rustix = { version = "1", default-features = false, features = ["process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }

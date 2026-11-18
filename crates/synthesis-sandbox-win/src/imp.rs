@@ -149,6 +149,23 @@ pub fn probe() -> Result<(), String> {
     Profile::create().map(drop)
 }
 
+/// Process-wide: later `LoadLibrary` calls without an explicit path search only System32 and the
+/// application directory, not the current directory or `PATH` (see the public wrapper).
+pub fn harden_dll_search() -> Result<(), String> {
+    use windows_sys::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+    // SAFETY: takes only a flag mask, no pointers.
+    let ok = unsafe {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
+    };
+    if ok == 0 {
+        Err(last_error("SetDefaultDllDirectories"))
+    } else {
+        Ok(())
+    }
+}
+
 fn mask(a: Access) -> u32 {
     match a {
         // `ReadOnly` is a cut (see `Island`) that keeps this much

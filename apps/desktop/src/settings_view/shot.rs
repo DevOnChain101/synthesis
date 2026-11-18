@@ -1,5 +1,5 @@
 //! Development only (feature `shot`): `synthesis-desktop --shot out.png --view settings [--size WxH]
-//! [--search TEXT] [--confirm] [--scroll PX] [--tab NAME] [--opacity PCT]` draws the whole shell (title bar,
+//! [--search TEXT] [--confirm] [--confirm-outcomes] [--scroll PX] [--tab NAME] [--opacity PCT]` draws the whole shell (title bar,
 //! TUI sample) with the Settings popup over it, offscreen, on a throwaway `SYNT_HOME` (never `~/.synt`), and
 //! writes a few user values so origins, reset links and the restart badge show. `--opacity` paints the window
 //! over coloured stripes (the desktop behind a real window) so the translucency can be seen.
@@ -19,6 +19,8 @@ pub struct Args {
     h: f32,
     search: String,
     confirm: bool,
+    /// The Outcomes switch turned on: its disclosure is open.
+    confirm_outcomes: bool,
     /// Scroll the panel down by this many pixels.
     scroll: f32,
     /// The tab to open (its label, e.g. `Memory`).
@@ -47,6 +49,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         h,
         search: val("--search").cloned().unwrap_or_default(),
         confirm: args.iter().any(|a| a == "--confirm"),
+        confirm_outcomes: args.iter().any(|a| a == "--confirm-outcomes"),
         scroll: val("--scroll").and_then(|s| s.parse().ok()).unwrap_or(0.),
         tab: val("--tab").cloned(),
         opacity: val("--opacity").and_then(|s| s.parse().ok()),
@@ -112,7 +115,14 @@ pub fn render(a: Args) -> Result<(), Err> {
         shell.update(cx, |s, cx| {
             s.go(crate::ui::View::Settings, window, cx);
             s.settings().update(cx, |v, cx| {
-                v.seed(&a.search, a.confirm, a.scroll, tab.as_deref(), window, cx);
+                v.seed(
+                    &a.search,
+                    (a.confirm, a.confirm_outcomes),
+                    a.scroll,
+                    tab.as_deref(),
+                    window,
+                    cx,
+                );
                 if let Some(o) = opacity {
                     v.apply("synt.tui.opacity", Change::Text(o.to_string()), window, cx);
                 }
@@ -165,7 +175,7 @@ impl SettingsView {
     fn seed(
         &mut self,
         search: &str,
-        confirm: bool,
+        confirm: (bool, bool),
         scroll: f32,
         tab: Option<&str>,
         window: &mut gpui::Window,
@@ -208,8 +218,11 @@ impl SettingsView {
             self.tab = t;
         }
         self.scroll.set_offset(gpui::point(px(0.), px(-scroll)));
-        if confirm {
+        if confirm.0 {
             self.apply("synt.memory.reflection", Change::Bool(true), window, cx);
+        }
+        if confirm.1 {
+            self.apply("synt.orchestrator.enabled", Change::Bool(true), window, cx);
         }
     }
 }
