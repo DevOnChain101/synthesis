@@ -21,11 +21,12 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use synthesis_browser::{BrowserError, Frame, UrlPolicy};
+use synthesis_browser::{BrowserError, Frame, PageView, UrlPolicy};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_harness::sanitize_for_display;
 use synthesis_tools::BrowserTap;
 use tokio::runtime::Handle;
+use tokio::sync::{Notify, watch};
 use tokio::task::AbortHandle;
 
 use super::{ChatTab, TuiView};
@@ -42,6 +43,30 @@ const VIEW_W: u32 = 1600;
 const VIEW_H: u32 = 1000;
 /// How often the pane asks the browser for its URL, title and tabs.
 const POLL: Duration = Duration::from_secs(1);
+/// A page controls its URL and title: at most this many characters of each reach the bar and the tab strip.
+pub const MAX_TEXT: usize = 2048;
+/// An address typed into the bar longer than this is refused at Enter.
+pub const MAX_TYPED: usize = 2048;
+/// Tabs listed in the strip (a page can open popups without end).
+const MAX_TABS: usize = 32;
+/// An address offered to the person's own browser is shown whole next to the button, so it must be short.
+const MAX_OPEN: usize = 200;
+/// Polls without any frame (the view is on) after which the pane asks the browser to start casting again.
+const REASSERT_POLLS: u32 = 5;
+
+/// The first `n` characters (never cuts a character in two).
+pub fn clip(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+/// What the browser tells the pane about its pages is the page's own text: bounded before it is stored or drawn.
+fn capped(mut p: PageState) -> PageState {
+    p.url = clip(&p.url, MAX_TEXT);
+    p.title = clip(&p.title, MAX_TEXT);
+    p.tabs.truncate(MAX_TABS);
+    p.tabs.iter_mut().for_each(|t| *t = clip(t, MAX_TEXT));
+    p
+}
 
 // ---- pure parts -------------------------------------------------------------------------------------------
 
@@ -111,7 +136,9 @@ pub struct Refusal {
 pub fn refusal(why: String, typed: &str) -> Refusal {
     let open = bar_address(typed).ok().filter(|u| {
         let l = u.to_ascii_lowercase();
-        (l.starts_with("http://") || l.starts_with("https://")) && !l.contains(char::is_whitespace)
+        (l.starts_with("http://") || l.starts_with("https://"))
+            && !l.contains(char::is_whitespace)
+            && l.chars().count() <= MAX_OPEN
     });
     Refusal {
         text: sanitize_for_display(&why),
@@ -204,8 +231,15 @@ pub trait Source: Send + Sync + 'static {
     fn act(&self, a: Act) -> BoxFuture<'static, Result<(), String>>;
 }
 
-/// The real thing: the runtime the agent launched, found through the tap (weakly: the pane never keeps Chrome alive).
+/// The real thing: the browser the agent launched, found through the tap (weakly: the pane never keeps Chrome alive) and
+/// reached only through its view-only handle.
 pub struct RuntimeSource(pub Arc<BrowserTap>);
+
+impl RuntimeSource {
+    fn pv(&self) -> Option<PageView> {
+        self.0.view()
+    }
+}
 
 fn why(e: BrowserError) -> String {
     sanitize_for_display(&e.to_string())
@@ -221,16 +255,16 @@ impl Feed for Stream {
 
 impl Source for RuntimeSource {
     fn ready(&self) -> bool {
-        self.0.runtime().is_some()
+        self.pv().is_some()
     }
 
     fn check(&self, raw: &str) -> Result<String, String> {
-        let rt = self.0.runtime().ok_or("no browser is running")?;
+        let rt = self.pv().ok_or("no browser is running")?;
         check_bar(rt.policy(), raw)
     }
 
     fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>> {
-        let rt = self.0.runtime();
+        let rt = self.pv();
         Box::pin(async move {
             match rt {
                 Some(rt) => rt.view(on, VIEW_W, VIEW_H).await.map_err(why),
@@ -240,11 +274,11 @@ impl Source for RuntimeSource {
     }
 
     fn frames(&self) -> Option<Box<dyn Feed>> {
-        Some(Box::new(Stream(self.0.runtime()?.frames())))
+        Some(Box::new(Stream(self.pv()?.frames())))
     }
 
     fn page(&self) -> BoxFuture<'static, Result<PageState, String>> {
-        let rt = self.0.runtime();
+        let rt = self.pv();
         Box::pin(async move {
             let tabs = rt
                 .ok_or("the browser is closed")?
@@ -276,7 +310,7 @@ impl Source for RuntimeSource {
     }
 
     fn act(&self, a: Act) -> BoxFuture<'static, Result<(), String>> {
-        let rt = self.0.runtime();
+        let rt = self.pv();
         Box::pin(async move {
             let rt = rt.ok_or("the browser is closed")?;
             match a {
@@ -311,9 +345,11 @@ struct Link {
     handle: Handle,
     /// Which tap it came from (0: a fixed source of a test or a shot, never replaced).
     tap: usize,
-    /// `view(true)` is in force.
+    /// The state the pane wants (`true`: shown). One worker task applies the latest wish, so view calls never overlap.
     on: bool,
-    tasks: Vec<AbortHandle>,
+    want: watch::Sender<bool>,
+    /// Asks the worker to point the view at the current tab again (it never follows a tab by itself).
+    retarget: Arc<Notify>,
 }
 
 pub struct BrowserPane {
@@ -363,19 +399,29 @@ impl BrowserPane {
     /// A browser the pane shows from now on (the tests and shots hand a fake one; the window uses [`Self::ensure`]).
     pub fn attach(&mut self, src: Arc<dyn Source>, handle: Handle) {
         self.detach();
+        let (want, rx) = watch::channel(false);
+        let retarget = Arc::new(Notify::new());
+        handle.spawn(worker(
+            src.clone(),
+            self.shared.clone(),
+            self.wake.clone(),
+            rx,
+            retarget.clone(),
+        ));
         self.link = Some(Link {
             src,
             handle,
             tap: 0,
             on: false,
-            tasks: vec![],
+            want,
+            retarget,
         });
     }
 
     /// Follows the session's browser: attached once the agent has launched it, dropped when it is gone.
     pub fn ensure(&mut self, tap: &Arc<BrowserTap>, handle: &Handle) {
         let id = Arc::as_ptr(tap) as usize;
-        let ready = tap.runtime().is_some();
+        let ready = tap.view().is_some();
         match &self.link {
             Some(l) if l.tap == 0 => {}
             Some(l) if ready && l.tap == id => {}
@@ -405,34 +451,19 @@ impl BrowserPane {
         self.refusal = None;
     }
 
-    /// The pane is shown (`want`) or not: starts the view of the browser (`view(true)`, the frame pump and the
-    /// page poll) or stops it (`view(false)`, nothing decoded or held any more). Cheap when nothing changes.
+    /// The pane is shown (`want`) or not. The worker starts the view of the browser (`view(true)`, the frame pump and
+    /// the page poll) or stops it (`view(false)`, nothing decoded or held any more). The calls are applied one at a
+    /// time and the last wish wins, so a quick hide and show cannot leave the browser casting the wrong way.
     pub fn sync(&mut self, want: bool) {
         let Some(l) = &mut self.link else { return };
         if want == l.on {
             return;
         }
         l.on = want;
-        for t in l.tasks.drain(..) {
-            t.abort();
-        }
-        let (src, shared) = (l.src.clone(), self.shared.clone());
         if !want {
-            lock(&shared).frame = None; // a hidden pane holds no pixels
-            // `view(false)` also when the browser is mid-start: a cancelled start leaves the view off
-            l.handle.spawn(async move {
-                let _ = src.view(false).await;
-            });
-            return;
+            lock(&self.shared).frame = None; // a hidden pane holds no pixels
         }
-        let wake = self.wake.clone();
-        l.tasks.push(
-            l.handle
-                .spawn(start(src.clone(), shared.clone(), wake.clone()))
-                .abort_handle(),
-        );
-        l.tasks
-            .push(l.handle.spawn(poll(src, shared, wake)).abort_handle());
+        l.want.send_replace(want);
     }
 
     /// What to draw now.
@@ -468,8 +499,21 @@ impl BrowserPane {
     }
 
     /// Enter in the URL bar: the address is checked against the browser's navigation policy and only then sent.
+    /// An unedited bar is a no-op: it shows the page's address redacted (`redact_url`), which is not always the real
+    /// one; the Reload button reloads the real page.
     pub fn go(&mut self, raw: &str) {
         let Some(l) = &self.link else { return };
+        if raw == self.bar_url {
+            self.refusal = None;
+            return;
+        }
+        if raw.chars().count() > MAX_TYPED {
+            self.refusal = Some(Refusal {
+                text: format!("the address is longer than {MAX_TYPED} characters"),
+                open: None,
+            });
+            return;
+        }
         match l.src.check(raw) {
             Err(e) => self.refusal = Some(refusal(e, raw)),
             Ok(url) => {
@@ -479,34 +523,99 @@ impl BrowserPane {
         }
     }
 
+    /// The bar text changed: a refusal (and its "Open in your browser" button) is about the old text.
+    pub fn bar_edited(&mut self) {
+        self.refusal = None;
+    }
+
     pub fn act(&mut self, a: Act) {
         let Some(l) = &self.link else { return };
         let (src, shared, mut wake) = (l.src.clone(), self.shared.clone(), self.wake.clone());
+        let again = l.retarget.clone();
         l.handle.spawn(async move {
-            let retarget = matches!(a, Act::Tab(_));
-            // the view never follows a tab by itself: after a switch it is pointed at the new one
-            let r = match src.act(a).await {
-                Ok(()) if retarget => src.view(true).await,
-                r => r,
-            };
+            let switched = matches!(a, Act::Tab(_));
+            let r = src.act(a).await;
+            // the view never follows a tab by itself: after a switch the worker points it at the new one
+            if r.is_ok() && switched {
+                again.notify_one();
+            }
             lock(&shared).note = r.err();
             if let Ok(p) = src.page().await {
-                lock(&shared).page = Some(p);
+                lock(&shared).page = Some(capped(p));
             }
             let _ = wake.try_send(());
         });
     }
 }
 
-/// `view(true)`, then the frame pump.
-async fn start(src: Arc<dyn Source>, shared: Arc<Mutex<Shared>>, mut wake: Sender<()>) {
-    if let Err(e) = src.view(true).await {
-        lock(&shared).note = Some(e);
-        let _ = wake.try_send(());
-        return;
+/// Applies the pane's latest wish to the browser, one call at a time (a new wish waits for the call in flight, then
+/// the last one wins). While the view is on, it runs the frame pump and the page poll.
+async fn worker(
+    src: Arc<dyn Source>,
+    shared: Arc<Mutex<Shared>>,
+    mut wake: Sender<()>,
+    mut want: watch::Receiver<bool>,
+    retarget: Arc<Notify>,
+) {
+    let mut applied = false;
+    let mut tasks: Vec<AbortHandle> = vec![];
+    let stop = |tasks: &mut Vec<AbortHandle>| tasks.drain(..).for_each(|t| t.abort());
+    loop {
+        let on = *want.borrow_and_update();
+        if on != applied {
+            applied = on;
+            stop(&mut tasks);
+            if on {
+                match src.view(true).await {
+                    Ok(()) => {
+                        lock(&shared).note = None;
+                        if let Some(feed) = src.frames() {
+                            tasks.push(
+                                tokio::spawn(pump(feed, shared.clone(), wake.clone()))
+                                    .abort_handle(),
+                            );
+                        }
+                        tasks.push(
+                            tokio::spawn(poll(
+                                src.clone(),
+                                shared.clone(),
+                                wake.clone(),
+                                retarget.clone(),
+                            ))
+                            .abort_handle(),
+                        );
+                    }
+                    Err(e) => lock(&shared).note = Some(e),
+                }
+                let _ = wake.try_send(());
+            } else {
+                lock(&shared).frame = None;
+                let _ = src.view(false).await;
+            }
+            continue; // the wish may have changed during the call
+        }
+        tokio::select! {
+            r = want.changed() => {
+                if r.is_err() {
+                    break;
+                }
+            }
+            _ = retarget.notified(), if applied => {
+                if let Err(e) = src.view(true).await {
+                    lock(&shared).note = Some(e);
+                }
+            }
+        }
     }
-    lock(&shared).note = None;
-    let Some(mut feed) = src.frames() else { return };
+    // the pane is gone: no frame pump, and the browser stops casting
+    stop(&mut tasks);
+    if applied {
+        let _ = src.view(false).await;
+    }
+}
+
+/// Decodes the newest frame, over and over; only the latest is kept.
+async fn pump(mut feed: Box<dyn Feed>, shared: Arc<Mutex<Shared>>, mut wake: Sender<()>) {
     while let Some(f) = feed.next().await {
         // off the async threads: a decode of a large frame must not stall the browser's own calls
         let r = tokio::task::spawn_blocking(move || decode(&f.jpeg).map(to_decoded)).await;
@@ -522,19 +631,32 @@ async fn start(src: Arc<dyn Source>, shared: Arc<Mutex<Shared>>, mut wake: Sende
 }
 
 /// Every second: URL, title and tabs. A changed active tab or number of tabs (the agent switched, a popup opened,
-/// a tab closed) re-points the view, since it never follows a tab by itself.
-async fn poll(src: Arc<dyn Source>, shared: Arc<Mutex<Shared>>, mut wake: Sender<()>) {
+/// a tab closed) asks the worker to point the view at the current tab again; so does a view that has shown no frame
+/// for [`REASSERT_POLLS`] polls.
+async fn poll(
+    src: Arc<dyn Source>,
+    shared: Arc<Mutex<Shared>>,
+    mut wake: Sender<()>,
+    retarget: Arc<Notify>,
+) {
     let mut last: Option<(usize, usize)> = None;
+    let mut blank = 0;
     loop {
         if let Ok(p) = src.page().await {
+            let p = capped(p);
             let sig = (p.active, p.tabs.len());
-            if last.is_some_and(|l| l != sig)
-                && let Err(e) = src.view(true).await
-            {
-                lock(&shared).note = Some(e);
+            if last.is_some_and(|l| l != sig) {
+                retarget.notify_one();
             }
             last = Some(sig);
-            lock(&shared).page = Some(p);
+            let mut s = lock(&shared);
+            blank = if s.frame.is_some() { 0 } else { blank + 1 };
+            s.page = Some(p);
+            drop(s);
+            if blank >= REASSERT_POLLS {
+                blank = 0;
+                retarget.notify_one();
+            }
             let _ = wake.try_send(());
         }
         tokio::time::sleep(POLL).await;
@@ -581,12 +703,17 @@ impl TuiView {
         if bp.bar.is_none() {
             let bar =
                 cx.new(|cx| InputState::new(window, cx).placeholder("Address (http or https)"));
-            cx.subscribe_in(&bar, window, |this, bar, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
+            cx.subscribe_in(&bar, window, |this, bar, ev: &InputEvent, _, cx| match ev {
+                InputEvent::PressEnter { .. } => {
                     let raw = bar.read(cx).value().to_string();
                     this.ts.bv.go(&raw);
                     cx.notify();
                 }
+                InputEvent::Change => {
+                    this.ts.bv.bar_edited();
+                    cx.notify();
+                }
+                _ => {}
             })
             .detach();
             bp.bar = Some(bar);
@@ -719,6 +846,15 @@ impl TuiView {
                 );
             }
             col = col.child(row);
+            // what the button hands to the person's own browser, whole (it is the typed address, short by rule)
+            if let Some(url) = &r.open {
+                col = col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(dim())
+                        .child(format!("Opens in your browser: {url}")),
+                );
+            }
         } else if let Some(n) = note {
             col = col.child(
                 div()
@@ -851,6 +987,12 @@ pub struct FakeSource {
     pub page: Mutex<PageState>,
     pub calls: Mutex<Vec<String>>,
     pub policy: UrlPolicy,
+    /// How long `view` takes (to make calls overlap if they could), and (in flight now, most at once).
+    pub view_delay: Mutex<Duration>,
+    flight: Arc<(
+        std::sync::atomic::AtomicUsize,
+        std::sync::atomic::AtomicUsize,
+    )>,
 }
 
 #[cfg(any(test, feature = "shot"))]
@@ -861,7 +1003,14 @@ impl FakeSource {
             page: Mutex::new(page),
             calls: Mutex::default(),
             policy: UrlPolicy::default(),
+            view_delay: Mutex::default(),
+            flight: Arc::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub fn most_at_once(&self) -> usize {
+        self.flight.1.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -898,8 +1047,16 @@ impl Source for FakeSource {
         check_bar(&self.policy, raw)
     }
     fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>> {
+        use std::sync::atomic::Ordering::SeqCst;
         self.log(format!("view({on})"));
-        Box::pin(async { Ok(()) })
+        let (delay, flight) = (*self.view_delay.lock().unwrap(), self.flight.clone());
+        Box::pin(async move {
+            let now = flight.0.fetch_add(1, SeqCst) + 1;
+            flight.1.fetch_max(now, SeqCst);
+            tokio::time::sleep(delay).await;
+            flight.0.fetch_sub(1, SeqCst);
+            Ok(())
+        })
     }
     fn frames(&self) -> Option<Box<dyn Feed>> {
         let f = Frame {
@@ -1122,5 +1279,116 @@ mod tests {
         assert!(bp.refusal.is_none());
         wait("the navigation", || !fake.calls().is_empty());
         assert_eq!(fake.calls(), ["Go(\"https://example.com\")"]);
+    }
+
+    #[test]
+    fn what_a_page_says_about_itself_is_bounded() {
+        let long = "\u{e9}".repeat(10_000); // multi-byte: a byte cut would panic
+        assert_eq!(clip(&long, MAX_TEXT).chars().count(), MAX_TEXT);
+        let p = capped(PageState {
+            url: long.clone(),
+            title: long.clone(),
+            tabs: vec![long; 100],
+            active: 0,
+        });
+        assert_eq!(p.url.chars().count(), MAX_TEXT);
+        assert_eq!(p.title.chars().count(), MAX_TEXT);
+        assert_eq!(p.tabs.len(), MAX_TABS);
+        assert!(p.tabs.iter().all(|t| t.chars().count() == MAX_TEXT));
+    }
+
+    #[test]
+    fn a_huge_page_url_and_a_huge_typed_address_are_bounded() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let page = PageState {
+            url: format!("https://a.test/{}", "x".repeat(50_000)),
+            title: "t".repeat(50_000),
+            tabs: vec!["a".into(), "b".repeat(50_000)],
+            active: 0,
+        };
+        let fake = FakeSource::new(sample_jpeg(8, 8), page);
+        let mut bp = BrowserPane::default();
+        bp.attach(fake.clone(), rt.handle().clone());
+        bp.sync(true);
+        wait("the page", || bp.snapshot().2.is_some());
+        let p = bp.snapshot().2.unwrap();
+        assert!(p.url.chars().count() <= MAX_TEXT && p.title.chars().count() <= MAX_TEXT);
+        assert!(p.tabs.iter().all(|t| t.chars().count() <= MAX_TEXT));
+        // typed: refused at Enter, never sent
+        let before = fake.calls().len();
+        bp.go(&format!("https://a.test/{}", "y".repeat(MAX_TYPED)));
+        assert!(bp.refusal.as_ref().is_some_and(|r| r.open.is_none()));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.calls().len(), before);
+    }
+
+    #[test]
+    fn quick_hide_and_show_ends_with_the_last_wish_and_calls_never_overlap() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSource::new(sample_jpeg(16, 16), PageState::default());
+        *fake.view_delay.lock().unwrap() = Duration::from_millis(40);
+        let mut bp = BrowserPane::default();
+        bp.attach(fake.clone(), rt.handle().clone());
+        for want in [true, false, true, false, true] {
+            bp.sync(want);
+        }
+        wait("the view on and a frame", || bp.snapshot().0.is_some());
+        assert_eq!(fake.calls().last().map(String::as_str), Some("view(true)"));
+        for want in [false, true, false] {
+            bp.sync(want);
+        }
+        wait("the view off", || {
+            fake.calls().last().is_some_and(|c| c == "view(false)")
+        });
+        std::thread::sleep(Duration::from_millis(150)); // nothing may follow it
+        assert_eq!(fake.calls().last().map(String::as_str), Some("view(false)"));
+        assert!(bp.snapshot().0.is_none());
+        assert_eq!(
+            fake.most_at_once(),
+            1,
+            "view calls overlapped: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn an_unedited_bar_does_not_navigate_to_the_redacted_address() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSource::new(sample_jpeg(8, 8), PageState::default());
+        let mut bp = BrowserPane::default();
+        bp.attach(fake.clone(), rt.handle().clone());
+        // the bar shows the redacted form of what the page is on
+        bp.bar_url = "https://a.test/cb?token=%5Bredacted%5D".into();
+        bp.go("https://a.test/cb?token=%5Bredacted%5D");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        // an edited one does
+        bp.go("https://b.test/");
+        wait("the navigation", || !fake.calls().is_empty());
+    }
+
+    #[test]
+    fn the_open_button_always_matches_the_displayed_refusal() {
+        // a long address is refused without the button (it could not be shown whole)
+        let long = format!("http://10.0.0.1/{}", "a".repeat(MAX_OPEN));
+        assert!(refusal("private".into(), &long).open.is_none());
+        let mut bp = BrowserPane::default();
+        bp.refusal = Some(refusal("private".into(), "http://10.0.0.1"));
+        assert!(bp.refusal.is_some());
+        // editing the bar drops the refusal and with it the button
+        bp.bar_edited();
+        assert!(bp.refusal.is_none());
     }
 }

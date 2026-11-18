@@ -30,9 +30,12 @@ use crate::{Block, BoxFuture, Content, ImageSource, ToolOutput};
 pub struct BrowserTap(std::sync::Mutex<std::sync::Weak<BrowserRuntime>>);
 
 impl BrowserTap {
-    /// The running browser of the session, `None` before the agent opens one and after the session ends.
-    pub fn runtime(&self) -> Option<Arc<BrowserRuntime>> {
-        lock(&self.0).upgrade()
+    /// A view-only handle on the session's running browser, `None` before the agent opens one and after the
+    /// session ends. It reaches the live view, navigation and tabs only, never the agent's capture APIs.
+    pub fn view(&self) -> Option<synthesis_browser::PageView> {
+        lock(&self.0)
+            .upgrade()
+            .map(synthesis_browser::PageView::new)
     }
 }
 
@@ -248,7 +251,9 @@ async fn runtime(
             let rt = BrowserRuntime::launch(o, &launch_env(&cfg, ctx))
                 .await
                 .map(Arc::new)?;
-            if let (Some(tap), false) = (&cfg.view, ctx.sub_agent) {
+            // the runtime is the SESSION's (a sub-agent shares it with the main agent), so whichever call wins the
+            // launch registers it
+            if let Some(tap) = &cfg.view {
                 *lock(&tap.0) = Arc::downgrade(&rt);
             }
             Ok(rt)

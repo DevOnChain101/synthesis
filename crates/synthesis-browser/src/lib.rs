@@ -169,6 +169,45 @@ struct Tabs {
     order: Vec<String>,
 }
 
+/// What a window that only SHOWS the browser (the desktop pane) may do with it: the live view, navigation under the
+/// policy, tabs. No snapshot, screenshot, click, fill, console or network access: those stay with the agent's tools.
+#[derive(Clone)]
+pub struct PageView(Arc<BrowserRuntime>);
+
+impl PageView {
+    pub fn new(rt: Arc<BrowserRuntime>) -> Self {
+        Self(rt)
+    }
+    pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
+        self.0.view(on, max_w, max_h).await
+    }
+    pub fn frames(&self) -> FrameStream {
+        self.0.frames()
+    }
+    pub fn policy(&self) -> &UrlPolicy {
+        self.0.policy()
+    }
+    pub async fn navigate(&self, url: &str, until: WaitUntil) -> Result<PageInfo> {
+        self.0.navigate(url, until).await
+    }
+    pub async fn back(&self) -> Result<PageInfo> {
+        self.0.back().await
+    }
+    pub async fn forward(&self) -> Result<PageInfo> {
+        self.0.forward().await
+    }
+    pub async fn reload(&self) -> Result<PageInfo> {
+        self.0.reload().await
+    }
+    /// URLs and titles come redacted (`redact_url`, `redact_text`), as for the agent.
+    pub async fn tabs(&self) -> Result<Vec<TabInfo>> {
+        self.0.tabs().await
+    }
+    pub async fn select_tab(&self, index: usize) -> Result<()> {
+        self.0.select_tab(index).await
+    }
+}
+
 pub struct BrowserRuntime {
     cdp: Arc<Cdp>,
     opts: BrowserOptions,
