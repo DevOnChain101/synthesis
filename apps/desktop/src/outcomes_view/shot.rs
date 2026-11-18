@@ -2,7 +2,7 @@
 //! [--mode super-agent|tui] [--badge] [--tools N] [--rail-hidden] [--popup decision|decision-focus|decision-expanded]
 //! [--screen ready|off|windows|unreachable|notready] [--guide] [--focus cancel|confirm] [--centre goal|decisions|history]
 //! [--inspector overview|workers|activity|diff|evidence] [--pane list|centre|inspector] [--outcome ID]
-//! [--card N] [--choose N] [--form new|new-errors|revise|review-new|review-revise|stale]` draws the whole shell with the
+//! [--card N] [--choose N] [--form new|new-picker|new-errors|revise|review-new|review-revise|stale]` draws the whole shell with the
 //! Super Agent view on its sample data, offscreen (no window server), and writes the frame to a PNG. Nothing is read or
 //! sent. `--mode tui` draws the TUI view's window instead (its title bar with the badge, `--badge`); `--popup` shows the
 //! docked decision card (it needs a centre tab other than Decisions, so it implies `--centre goal`).
@@ -206,6 +206,13 @@ fn form_state(st: &mut super::model::State, kind: &str) {
                 ..Default::default()
             };
             st.submit(&t);
+        }
+        "new-picker" => {
+            st.known = vec![
+                "/Users/dev/Vibe/api-gateway".into(),
+                "/Users/dev/work/docs-site".into(),
+            ];
+            st.ws_menu = Some(1);
         }
         "review-new" | "review-revise" => {
             st.apply_form(FormMsg::Review(Box::new(super::sample::review(revise))));

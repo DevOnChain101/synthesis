@@ -141,6 +141,12 @@ pub struct State {
     pub answers: u64,
     /// The folder a new outcome works in by default (the app's workspace).
     pub workspace: String,
+    /// Folders the app already knows (the TUI view's workspaces, newest first): what the form's picker lists.
+    pub known: Vec<String>,
+    /// The engine is on another machine: a local folder dialog would name a path it cannot use.
+    pub remote: bool,
+    /// The picker's list is open, with the cursor on an item (`ws_items().len()` is "Choose folder...").
+    pub ws_menu: Option<usize>,
     /// The open "New outcome" or "Revise contract" form.
     pub form: Option<Form>,
     /// The open disclosure of the Off / not-migrated screens.
@@ -208,6 +214,9 @@ impl State {
             ask: Ask::default(),
             answers: 0,
             workspace: String::new(),
+            known: vec![],
+            remote: false,
+            ws_menu: None,
             form: None,
             guide: None,
             gate_refusal: synthesis_app::outcome_policy::gate_refusal().map(String::from),
@@ -322,6 +331,7 @@ impl State {
 
     /// "New outcome": the form with the app's workspace; its base commit is read at once.
     pub fn open_new(&mut self) -> Vec<Effect> {
+        self.ws_menu = None;
         let mut f = Form::new_outcome(&self.workspace);
         let ws = self.workspace.trim().to_string();
         let eff = (!ws.is_empty()).then(|| {
@@ -370,7 +380,38 @@ impl State {
     }
 
     pub fn close_form(&mut self) {
+        self.ws_menu = None;
         self.form = None;
+    }
+
+    /// The picker's folders: the app's workspace (the default) first, then the other known ones, no repeats.
+    pub fn ws_items(&self) -> Vec<String> {
+        let mut v: Vec<String> = Some(self.workspace.trim())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .into_iter()
+            .collect();
+        for k in &self.known {
+            if !v.contains(k) {
+                v.push(k.clone());
+            }
+        }
+        v
+    }
+
+    /// Items the open list has: the folders, then "Choose folder..." (not for a remote engine).
+    pub fn ws_len(&self) -> usize {
+        self.ws_items().len() + usize::from(!self.remote)
+    }
+
+    /// A folder was picked (from the list or the native dialog): the list closes and the base commit of the new
+    /// folder is read; the owner process still validates the path when the form is sent.
+    pub fn pick_workspace(&mut self, path: &str) -> Vec<Effect> {
+        self.ws_menu = None;
+        self.workspace_left(&FormText {
+            workspace: path.to_string(),
+            ..Default::default()
+        })
     }
 
     /// The workspace field was left: the base commit is read again when the folder changed.
