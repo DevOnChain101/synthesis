@@ -7,8 +7,9 @@
 //! decoded slot (never an event, the store, a log or the model). Decoding runs off the UI thread, the frame
 //! size is capped before the decode and only the newest frame is kept.
 //!
-//! The pane starts nothing: it shows the browser once the agent has launched one (`BrowserTap`), else the tab keeps
-//! its earlier look (the saved screenshots and the call list).
+//! The pane shows the browser once one runs (`BrowserTap`: the agent launched it, or the person pressed "Start browser",
+//! which asks the engine's launcher; the pane never launches anything itself). Until then the tab says there is no
+//! browser, offers Start (or says why it cannot) and keeps its earlier body (the saved screenshots and the call list).
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -130,10 +131,12 @@ pub fn bar_address(raw: &str) -> Result<String, String> {
 }
 
 /// The address the URL bar may navigate to, or why not: the browser's own navigation policy (http and https
-/// only, no private, link-local or metadata address unless the user allowed it, `deny_domains`...).
+/// only, no private, link-local or metadata address unless the user allowed it, `deny_domains`...), except that the
+/// person may open loopback (localhost, 127.0.0.1, ::1).
 pub fn check_bar(policy: &UrlPolicy, raw: &str) -> Result<String, String> {
     let url = bar_address(raw)?;
-    policy.check_navigation(&url)?;
+    // typed by the person: loopback is allowed here (the agent's own navigation stays strict)
+    policy.check_navigation_person(&url)?;
     Ok(url)
 }
 
@@ -372,8 +375,18 @@ struct Link {
     retarget: Arc<Notify>,
 }
 
+/// The person's "Start browser".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Launch {
+    #[default]
+    Idle,
+    Starting,
+    Failed(String),
+}
+
 pub struct BrowserPane {
     link: Option<Link>,
+    launch: Arc<Mutex<Launch>>,
     shared: Arc<Mutex<Shared>>,
     wake: Sender<()>,
     /// Taken once by the window, which repaints on every `()`.
@@ -390,6 +403,7 @@ impl Default for BrowserPane {
         let (wake, rx) = channel(1);
         Self {
             link: None,
+            launch: Arc::default(),
             shared: Arc::default(),
             wake,
             wake_rx: Some(rx),
@@ -435,6 +449,34 @@ impl BrowserPane {
             on: false,
             want,
             retarget,
+        });
+    }
+
+    pub fn launch_state(&self) -> Launch {
+        self.launch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// "Start browser": runs `start` (the engine's launch) off the UI thread. Success is picked up by [`Self::ensure`]
+    /// once the tap holds the browser; a failure is kept to be shown in the pane.
+    pub fn launch_with(&mut self, handle: &Handle, start: BoxFuture<'static, Result<(), String>>) {
+        let (launch, mut wake) = (self.launch.clone(), self.wake.clone());
+        {
+            let mut l = launch.lock().unwrap_or_else(|e| e.into_inner());
+            if *l == Launch::Starting {
+                return;
+            }
+            *l = Launch::Starting;
+        }
+        handle.spawn(async move {
+            let r = start.await;
+            *launch.lock().unwrap_or_else(|e| e.into_inner()) = match r {
+                Ok(()) => Launch::Idle,
+                Err(e) => Launch::Failed(sanitize_for_display(&e)),
+            };
+            let _ = wake.try_send(());
         });
     }
 
@@ -776,6 +818,66 @@ impl TuiView {
                 .bar
                 .as_ref()
                 .is_some_and(|b| b.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// While no browser runs: one line saying so, with the Start button, or why there is no button.
+    pub(super) fn browser_start_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let access = self
+            .live
+            .as_ref()
+            .and_then(|l| l.live.engine.as_ref())
+            .and_then(|e| e.browser_access());
+        let launch = self.ts.bv.launch_state();
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .text_size(px(12.5))
+            .text_color(dim());
+        row = match access {
+            None => row.child(
+                "No browser here: the Browser tab cannot start one while the session runs in WSL or remotely.",
+            ),
+            Some((tap, h)) => {
+                let busy = launch == Launch::Starting;
+                row.child("No browser is running. Start one to browse, or ask the agent to open a page.")
+                    .child(
+                        div()
+                            .id("bv-start")
+                            .px(px(10.))
+                            .h(px(26.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(hsla(t::BORDER))
+                            .text_color(strong())
+                            .when(!busy, |d| {
+                                d.cursor_pointer()
+                                    .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.08)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let tap = tap.clone();
+                                        this.ts.bv.launch_with(
+                                            &h,
+                                            Box::pin(async move { tap.start().await }),
+                                        );
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(if busy { "Starting..." } else { "Start browser" }),
+                    )
+            }
+        };
+        let mut col = div().flex().flex_col().gap(px(6.)).child(row);
+        if let Launch::Failed(e) = launch {
+            col = col.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(hsla(t::ERROR))
+                    .child(format!("Browser not started: {e}")),
+            );
+        }
+        col.into_any_element()
     }
 
     /// The live page view, or `None` while no browser runs (the tab then keeps its earlier body).
@@ -1181,9 +1283,9 @@ mod tests {
             "http://169.254.169.254",
             "http://169.254.169.254/latest/meta-data/",
             "http://10.0.0.1",
-            "http://localhost:3000",
-            "localhost:3000",
-            "http://[::1]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://192.168.0.1:3000",
             "data:text/html,<script>alert(1)</script>",
             "javascript:alert(1)",
             "ftp://example.com/",
@@ -1191,6 +1293,16 @@ mod tests {
         ] {
             assert!(check_bar(&p, u).is_err(), "{u} must be refused");
         }
+        // the person may open loopback (the agent may not: `check_navigation` stays strict)
+        for u in [
+            "http://localhost:3000",
+            "localhost:3000",
+            "http://[::1]:3000/",
+            "127.0.0.1:8080",
+        ] {
+            assert!(check_bar(&p, u).is_ok(), "{u} must be allowed");
+        }
+        assert!(p.check_navigation("http://localhost:3000").is_err());
         assert_eq!(
             check_bar(&p, "https://example.com/a").unwrap(),
             "https://example.com/a"
@@ -1525,5 +1637,54 @@ mod tests {
             },
         );
         assert_ne!((a.active, a.tabs.len()), (b.active, b.tabs.len()));
+    }
+
+    #[test]
+    fn start_browser_shows_progress_then_the_error_or_clears() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut bp = BrowserPane::default();
+        assert!(
+            !bp.is_attached(),
+            "unattached: the tab shows the empty state"
+        );
+        assert_eq!(bp.launch_state(), Launch::Idle);
+        // a failure is kept for the pane, with the SYNT_BROWSER_PATH hint the launcher gave
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        bp.launch_with(rt.handle(), Box::pin(async move { rx.await.unwrap() }));
+        assert_eq!(bp.launch_state(), Launch::Starting);
+        // a second press while starting does nothing
+        bp.launch_with(rt.handle(), Box::pin(async { Ok(()) }));
+        tx.send(Err(
+            "no Chrome found. Install one or set SYNT_BROWSER_PATH".into()
+        ))
+        .unwrap();
+        wait("the failure", || {
+            matches!(bp.launch_state(), Launch::Failed(_))
+        });
+        assert!(matches!(bp.launch_state(), Launch::Failed(e) if e.contains("SYNT_BROWSER_PATH")));
+        // pressing again clears it; on success the state is idle and the tap's browser attaches via `ensure`
+        bp.launch_with(rt.handle(), Box::pin(async { Ok(()) }));
+        wait("success", || bp.launch_state() == Launch::Idle);
+        let fake = FakeSource::new(sample_jpeg(16, 16), PageState::default());
+        bp.attach(fake, rt.handle().clone());
+        assert!(bp.is_attached());
+    }
+
+    #[test]
+    fn a_tap_without_a_launcher_refuses_to_start() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let tap = BrowserTap::default();
+        assert!(!tap.can_start());
+        assert!(
+            rt.block_on(tap.start())
+                .unwrap_err()
+                .contains("cannot start")
+        );
     }
 }

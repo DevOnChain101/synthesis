@@ -1419,3 +1419,103 @@ async fn a_sub_agent_cannot_choose_a_saved_login_and_nobody_is_asked() {
         "refused before any dialog"
     );
 }
+
+/// The person for loopback questions: approves only the listed `host:port` targets and records every question.
+#[derive(Debug, Default)]
+struct LoopbackPerson {
+    approve: Vec<String>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl BrowserHost for LoopbackPerson {
+    fn login<'a>(
+        &'a self,
+        _: &'a LoginRequest,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("not in this test".into()) })
+    }
+    fn confirm_profile<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a [String],
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_secret<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_loopback<'a>(
+        &'a self,
+        target: &'a str,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        self.asked.lock().unwrap().push(target.to_owned());
+        Box::pin(async move { self.approve.iter().any(|a| a == target) })
+    }
+}
+
+fn strict_registry(host: Option<Arc<dyn BrowserHost>>) -> Registry {
+    Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            no_sandbox: no_sandbox(),
+            host,
+            ..Default::default()
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reaches_loopback_only_on_the_target_the_person_approved() {
+    if !have_browser() {
+        return;
+    }
+    let (a, b) = (serve().await, serve().await);
+    let (ta, tb) = (a.replace("http://", ""), b.replace("http://", ""));
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson {
+        approve: vec![ta.clone()],
+        ..Default::default()
+    });
+    let reg = strict_registry(Some(person.clone()));
+    let c = ctx(d.path(), "lb1");
+    let go = |u: String| json!({"url": u});
+    let o = reg
+        .execute("browser_navigate", go(format!("{a}/login")), &c)
+        .await;
+    ok(&o, "approved target");
+    // another port of loopback needs its own approval, which the person withholds
+    let o = reg
+        .execute("browser_navigate", go(format!("{b}/login")), &c)
+        .await;
+    assert!(o.is_error && text(&o).contains("approves"), "{o:?}");
+    // LAN and metadata addresses have no approval path: nobody is asked
+    for u in [
+        "http://169.254.169.254/",
+        "http://10.0.0.1:3000/",
+        "http://192.168.1.1/",
+    ] {
+        let o = reg.execute("browser_navigate", go(u.into()), &c).await;
+        assert!(o.is_error && text(&o).contains("private"), "{u}: {o:?}");
+    }
+    assert_eq!(*person.asked.lock().unwrap(), vec![ta, tb]);
+    reg.close_session("lb1");
+
+    // nobody to ask (headless without a terminal): it stays blocked, and the error says so
+    let reg = strict_registry(None);
+    let c = ctx(d.path(), "lb2");
+    let o = reg
+        .execute("browser_navigate", go(format!("{a}/login")), &c)
+        .await;
+    assert!(
+        o.is_error && text(&o).contains("nobody can be asked"),
+        "{o:?}"
+    );
+    reg.close_session("lb2");
+}

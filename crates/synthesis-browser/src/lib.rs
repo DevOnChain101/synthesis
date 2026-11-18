@@ -17,7 +17,7 @@ mod untrusted;
 pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
-pub use policy::{Resolver, UrlPolicy};
+pub use policy::{Resolver, UrlPolicy, loopback_target};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use screencast::{Frame, FrameMeta, FrameStream};
 pub use untrusted::UntrustedText;
@@ -188,16 +188,16 @@ impl PageView {
         self.0.policy()
     }
     pub async fn navigate(&self, url: &str, until: WaitUntil) -> Result<PageInfo> {
-        self.0.navigate(url, until).await
+        self.0.navigate_as(url, until, true).await
     }
     pub async fn back(&self) -> Result<PageInfo> {
-        self.0.back().await
+        self.0.history(-1, true).await
     }
     pub async fn forward(&self) -> Result<PageInfo> {
-        self.0.forward().await
+        self.0.history(1, true).await
     }
     pub async fn reload(&self) -> Result<PageInfo> {
-        self.0.reload().await
+        self.0.reload_as(true).await
     }
     /// URLs and titles come redacted (`redact_url`, `redact_text`), as for the agent.
     pub async fn tabs(&self) -> Result<Vec<TabInfo>> {
@@ -670,7 +670,8 @@ impl Drop for ViewOff<'_> {
 impl BrowserRuntime {
     /// Discovers a browser (`SYNT_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
-    pub async fn launch(opts: BrowserOptions, env: &Env) -> Result<Self> {
+    pub async fn launch(mut opts: BrowserOptions, env: &Env) -> Result<Self> {
+        opts.policy.reset_grants();
         if (opts.profile.is_some() || !opts.headless) && opts.transport == Transport::Tcp {
             return Err(BrowserError::Launch(
                 "persistent profiles and the visible login window are unsupported with the TCP DevTools transport (Windows) until the pipe transport exists".into(),
@@ -1089,11 +1090,14 @@ impl BrowserRuntime {
         self.info(tab).await
     }
 
+    /// A navigation by the agent: the strict policy.
     pub async fn navigate(&self, url: &str, until: WaitUntil) -> Result<PageInfo> {
-        self.opts
-            .policy
-            .check_navigation(url)
-            .map_err(BrowserError::Policy)?;
+        self.navigate_as(url, until, false).await
+    }
+
+    /// `person`: the navigation was typed by the person (only `PageView`, the desktop's handle, says so).
+    async fn navigate_as(&self, url: &str, until: WaitUntil, person: bool) -> Result<PageInfo> {
+        self.nav_allowed(url, person)?;
         let tab = self.current()?;
         let mut rx = self.cdp.subscribe();
         let r = self
@@ -1108,7 +1112,16 @@ impl BrowserRuntime {
         self.finish_load(&mut rx, &tab, until).await
     }
 
-    async fn history(&self, delta: i64) -> Result<PageInfo> {
+    fn nav_allowed(&self, url: &str, person: bool) -> Result<()> {
+        if person {
+            self.opts.policy.check_navigation_person(url)
+        } else {
+            self.opts.policy.check_navigation(url)
+        }
+        .map_err(BrowserError::Policy)
+    }
+
+    async fn history(&self, delta: i64, person: bool) -> Result<PageInfo> {
         let tab = self.current()?;
         let h = self
             .call(&tab, "Page.getNavigationHistory", json!({}))
@@ -1118,10 +1131,7 @@ impl BrowserRuntime {
             .ok()
             .and_then(|i| h["entries"].get(i))
             .ok_or_else(|| BrowserError::Page("no history entry in that direction".into()))?;
-        self.opts
-            .policy
-            .check_navigation(entry["url"].as_str().unwrap_or(""))
-            .map_err(BrowserError::Policy)?;
+        self.nav_allowed(entry["url"].as_str().unwrap_or(""), person)?;
         let mut rx = self.cdp.subscribe();
         self.call(
             &tab,
@@ -1133,15 +1143,19 @@ impl BrowserRuntime {
     }
 
     pub async fn back(&self) -> Result<PageInfo> {
-        self.history(-1).await
+        self.history(-1, false).await
     }
 
     pub async fn forward(&self) -> Result<PageInfo> {
-        self.history(1).await
+        self.history(1, false).await
     }
 
     /// Reloads the current page; the current entry's URL passes the navigation policy first, like `history`.
     pub async fn reload(&self) -> Result<PageInfo> {
+        self.reload_as(false).await
+    }
+
+    async fn reload_as(&self, person: bool) -> Result<PageInfo> {
         let tab = self.current()?;
         let h = self
             .call(&tab, "Page.getNavigationHistory", json!({}))
@@ -1151,10 +1165,7 @@ impl BrowserRuntime {
             .and_then(|i| h["entries"].get(i))
             .and_then(|e| e["url"].as_str())
             .unwrap_or("");
-        self.opts
-            .policy
-            .check_navigation(url)
-            .map_err(BrowserError::Policy)?;
+        self.nav_allowed(url, person)?;
         let mut rx = self.cdp.subscribe();
         self.call(&tab, "Page.reload", json!({})).await?;
         self.finish_load(&mut rx, &tab, WaitUntil::Load).await

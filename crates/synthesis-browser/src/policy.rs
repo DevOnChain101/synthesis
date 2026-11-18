@@ -155,6 +155,8 @@ impl std::fmt::Debug for Resolver {
     }
 }
 
+pub type Grants = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct UrlPolicy {
     /// When non-empty only these domains (and subdomains) are allowed.
@@ -169,6 +171,11 @@ pub struct UrlPolicy {
     /// Loopback (localhost, 127.0.0.0/8, ::1) is reachable ONLY on these ports, while the rest of
     /// the private network stays blocked: a login on `http://localhost:3000` opens port 3000.
     pub loopback_ports: Vec<u16>,
+    /// Loopback `host:port` targets (see `loopback_target`) the PERSON opened by typing an address. Shared by every
+    /// clone, so the network hooks of the running browser see them. Never widens the agent's own navigation.
+    pub user_loopback: Grants,
+    /// Loopback targets the person APPROVED for the agent (`approve_loopback`), one exact `host:port` each.
+    pub agent_loopback: Grants,
     /// Used by `check_resolved` to look hostnames up.
     pub resolver: Resolver,
 }
@@ -201,13 +208,94 @@ fn matches_domain(host: &str, list: &[String]) -> bool {
     })
 }
 
+/// `host:port` of an http(s) URL whose host is loopback (`localhost`, 127.0.0.0/8, ::1), host normalised: the unit
+/// of every loopback approval.
+pub fn loopback_target(url: &str) -> Option<String> {
+    let u = Url::parse(url).ok()?;
+    let host = match u.host()? {
+        Host::Domain(d) if normalise(d) == "localhost" => "localhost".to_owned(),
+        Host::Ipv4(ip) if ip.is_loopback() => ip.to_string(),
+        Host::Ipv6(ip) if ip.is_loopback() => format!("[{ip}]"),
+        _ => return None,
+    };
+    matches!(u.scheme(), "http" | "https").then_some(())?;
+    Some(format!("{host}:{}", u.port_or_known_default()?))
+}
+
+fn loopback_port(url: &str) -> Option<u16> {
+    loopback_target(url)?.rsplit(':').next()?.parse().ok()
+}
+
 impl UrlPolicy {
-    /// Top-level (and frame) navigation: only http(s) and `about:blank`.
+    /// Top-level (and frame) navigation by the AGENT: only http(s) and `about:blank`. Loopback only on a target
+    /// the person approved for the agent; never on one the person merely opened.
     pub fn check_navigation(&self, raw: &str) -> Result<(), String> {
+        self.check_nav(raw, false)
+    }
+
+    /// A navigation the PERSON typed or reloaded. Like `check_navigation`, except that a loopback host (localhost,
+    /// 127.0.0.0/8, ::1) is allowed, and that exact `host:port` stays open at the network layer for this browser
+    /// (the page's own requests to it). Everything else private (RFC1918, link-local, metadata, other loopback
+    /// ports, names that resolve there) stays refused, and the deny/allow lists still apply.
+    pub fn check_navigation_person(&self, raw: &str) -> Result<(), String> {
+        self.grant(raw, false)
+    }
+
+    /// The person approved the AGENT browsing this exact loopback `host:port`. Checked like a navigation first
+    /// (scheme, deny/allow lists), so a refused URL leaves no grant.
+    pub fn approve_loopback(&self, raw: &str) -> Result<(), String> {
+        self.grant(raw, true)
+    }
+
+    fn grant(&self, raw: &str, agent: bool) -> Result<(), String> {
+        if !agent && loopback_target(raw).is_none() {
+            return self.check_nav(raw, true);
+        }
+        let target = self.dry_run(raw, agent)?;
+        let mut open = if agent {
+            &self.agent_loopback
+        } else {
+            &self.user_loopback
+        }
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+        if !open.contains(&target) {
+            open.push(target);
+        }
+        Ok(())
+    }
+
+    /// Whether `check_navigation` would pass once the person approved this loopback target: false for any other
+    /// reason it fails (deny lists, profile domains, not loopback), so nobody is asked in vain.
+    pub fn check_navigation_if_approved(&self, raw: &str) -> Result<(), String> {
+        self.dry_run(raw, true).map(drop)
+    }
+
+    /// The navigation check on a copy whose grants hold only this loopback target; returns the target.
+    fn dry_run(&self, raw: &str, agent: bool) -> Result<String, String> {
+        let target = loopback_target(raw).ok_or("not a loopback address")?;
+        let mut with = self.clone();
+        let only: Grants = std::sync::Arc::new(std::sync::Mutex::new(vec![target.clone()]));
+        if agent {
+            with.agent_loopback = only;
+        } else {
+            with.user_loopback = only;
+        }
+        with.check_nav(raw, !agent)?;
+        Ok(target)
+    }
+
+    /// Every grant starts empty: grants belong to one browser (one session), not to the settings it was built from.
+    pub(crate) fn reset_grants(&mut self) {
+        self.user_loopback = Grants::default();
+        self.agent_loopback = Grants::default();
+    }
+
+    fn check_nav(&self, raw: &str, person: bool) -> Result<(), String> {
         if raw == "about:blank" {
             return Ok(());
         }
-        self.check(raw, &["http", "https"])?;
+        self.check(raw, &["http", "https"], person)?;
         let host = Url::parse(raw)
             .ok()
             .and_then(|u| u.host().map(|h| normalise(&h.to_string())));
@@ -227,14 +315,14 @@ impl UrlPolicy {
     /// Subresource requests: http(s) plus data/about.
     pub fn check_request(&self, raw: &str) -> Result<(), String> {
         // ws(s), ftp and blob are never allowed: WebSocket handshakes bypass Fetch interception.
-        self.check(raw, &["http", "https", "data", "about"])
+        self.check(raw, &["http", "https", "data", "about"], true)
     }
 
     /// `check_navigation` / `check_request` plus DNS: for a hostname, every address it resolves
     /// to must be public (unless `allow_private_network`). Fails closed when it cannot resolve.
     pub async fn check_resolved(&self, raw: &str, document: bool) -> Result<(), String> {
         if document {
-            self.check_navigation(raw)?;
+            self.check_nav(raw, true)?;
         } else {
             self.check_request(raw)?;
         }
@@ -243,7 +331,7 @@ impl UrlPolicy {
         }
         if let Some(Host::Domain(d)) = Url::parse(raw).map_err(|e| e.to_string())?.host() {
             let name = normalise(d);
-            if name == "localhost" && self.loopback_port_ok(raw) {
+            if name == "localhost" && self.loopback_port_ok(raw, true) {
                 return Ok(()); // `check` already vetted the port; localhost resolves to loopback
             }
             let priority = document
@@ -269,25 +357,24 @@ impl UrlPolicy {
                 .trim_matches(['[', ']'])
                 .parse::<IpAddr>()
                 .is_ok_and(|ip| {
-                    ip_is_private(ip) && !(ip.is_loopback() && self.loopback_port_ok(url))
+                    ip_is_private(ip) && !(ip.is_loopback() && self.loopback_port_ok(url, true))
                 })
     }
 
-    /// `url` points at a loopback host on one of `loopback_ports`.
-    fn loopback_port_ok(&self, url: &str) -> bool {
-        let Ok(u) = Url::parse(url) else { return false };
-        let loop_host = match u.host() {
-            Some(Host::Domain(d)) => normalise(d) == "localhost",
-            Some(Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(Host::Ipv6(ip)) => ip.is_loopback(),
-            None => false,
+    /// `url` is a loopback host on one of `loopback_ports`, or a target the person approved for the agent, or (with
+    /// `net`, the network layer) one the person opened.
+    fn loopback_port_ok(&self, url: &str, net: bool) -> bool {
+        let Some(t) = loopback_target(url) else {
+            return false;
         };
-        loop_host
-            && u.port_or_known_default()
-                .is_some_and(|p| self.loopback_ports.contains(&p))
+        let has = |g: &Grants| g.lock().unwrap_or_else(|e| e.into_inner()).contains(&t);
+        let port = loopback_port(url);
+        port.is_some_and(|p| self.loopback_ports.contains(&p))
+            || has(&self.agent_loopback)
+            || net && has(&self.user_loopback)
     }
 
-    fn check(&self, raw: &str, schemes: &[&str]) -> Result<(), String> {
+    fn check(&self, raw: &str, schemes: &[&str], net: bool) -> Result<(), String> {
         let u = Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
         if !schemes.contains(&u.scheme()) {
             return Err(format!("scheme `{}` is not allowed", u.scheme()));
@@ -312,7 +399,7 @@ impl UrlPolicy {
                         .any(|s| name.ends_with(s))
             }
         };
-        if private && !self.allow_private_network && !self.loopback_port_ok(raw) {
+        if private && !self.allow_private_network && !self.loopback_port_ok(raw, net) {
             return Err(format!("`{name}` is a private/loopback/metadata address"));
         }
         Ok(())
@@ -716,5 +803,106 @@ mod tests {
         assert!(p.check_navigation("https://a.example.com/").is_ok());
         assert!(p.check_navigation("https://evil.example.com/").is_err());
         assert!(p.check_navigation("https://notexample.com/").is_err());
+    }
+
+    #[test]
+    fn the_person_may_type_loopback_the_agent_may_not() {
+        let p = UrlPolicy::default();
+        for u in [
+            "http://localhost:3000/",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000/",
+        ] {
+            assert!(p.check_navigation(u).is_err(), "agent {u}");
+            assert!(p.check_navigation_person(u).is_ok(), "person {u}");
+            // the person's grant never opens the agent's navigation, even to the same target
+            assert!(p.check_navigation(u).is_err(), "agent after person {u}");
+        }
+        // the network layer follows the person's grant, but only for the exact host:port
+        assert!(p.check_request("http://localhost:3000/app.js").is_ok());
+        assert!(p.check_request("http://localhost:3001/").is_err());
+        assert!(p.check_request("http://127.0.0.2:3000/").is_err());
+        // clones (the running browser's hooks) share the grants; a fresh policy does not
+        assert!(p.clone().check_request("http://127.0.0.1:3000/").is_ok());
+        let mut fresh = p.clone();
+        fresh.reset_grants();
+        assert!(fresh.check_request("http://127.0.0.1:3000/").is_err());
+    }
+
+    #[test]
+    fn private_link_local_and_metadata_stay_refused_for_the_person() {
+        let p = UrlPolicy::default();
+        for u in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://[fd00:ec2::254]/",
+            "http://10.0.0.1:3000/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://metadata.google.internal/",
+            "file:///etc/passwd",
+        ] {
+            assert!(p.check_navigation_person(u).is_err(), "{u}");
+            assert!(p.approve_loopback(u).is_err(), "{u}");
+            assert!(p.check_request(u).is_err(), "{u}");
+        }
+    }
+
+    #[test]
+    fn an_approved_loopback_target_is_exact_and_only_for_that_target() {
+        let p = UrlPolicy::default();
+        assert!(p.check_navigation("http://localhost:3000/").is_err());
+        p.approve_loopback("http://localhost:3000/").unwrap();
+        assert!(p.check_navigation("http://localhost:3000/x").is_ok());
+        assert!(p.check_navigation("http://localhost:3001/").is_err());
+        assert!(p.check_navigation("http://127.0.0.1:3000/").is_err());
+        // approval is for loopback only; LAN and metadata have no approval path
+        assert!(p.approve_loopback("http://192.168.1.1:3000/").is_err());
+        assert!(p.check_navigation("http://192.168.1.1:3000/").is_err());
+        // a redirect or subresource from the approved page
+        assert!(p.check_request("http://10.0.0.1/").is_err());
+        assert!(p.check_request("http://169.254.169.254/").is_err());
+        assert!(p.check_request("http://localhost:3001/").is_err());
+        // the deny list still wins, and a refused URL leaves no grant
+        let deny = UrlPolicy {
+            deny_domains: vec!["localhost".into()],
+            ..UrlPolicy::default()
+        };
+        assert!(deny.approve_loopback("http://localhost:3000/").is_err());
+        assert!(deny.check_request("http://localhost:3000/").is_err());
+    }
+
+    #[tokio::test]
+    async fn names_that_resolve_to_loopback_or_private_are_refused_even_after_a_grant() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let p = UrlPolicy {
+            resolver: Resolver::new(move |h| match h {
+                "rebind.test" => Ok(vec![ip("127.0.0.1")]),
+                "lan.test" => Ok(vec![ip("10.0.0.5")]),
+                _ => Err(std::io::Error::other("nxdomain")),
+            }),
+            ..Default::default()
+        };
+        p.check_navigation_person("http://localhost:3000/").unwrap();
+        p.approve_loopback("http://localhost:3000/").unwrap();
+        for u in ["http://rebind.test:3000/", "http://lan.test:3000/"] {
+            assert!(p.check_resolved(u, true).await.is_err(), "{u}");
+            assert!(p.check_resolved(u, false).await.is_err(), "{u}");
+        }
+        assert!(
+            p.check_resolved("http://localhost:3000/", true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            p.check_resolved("http://localhost:3001/", true)
+                .await
+                .is_err()
+        );
+        // Chrome connected to loopback for a name that is not the granted target: dropped
+        assert!(p.remote_ip_denied("127.0.0.1", "http://rebind.test:3000/"));
+        assert!(!p.remote_ip_denied("127.0.0.1", "http://localhost:3000/"));
+        assert!(p.remote_ip_denied("10.0.0.5", "http://localhost:3000/"));
     }
 }
