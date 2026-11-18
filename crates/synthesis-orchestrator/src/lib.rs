@@ -8,6 +8,16 @@
 //! Everything is off unless `synt.orchestrator.enabled` and the store was migrated to v5; this
 //! crate holds no switch of its own, the store's `OutcomePolicy` gate does.
 
+/// Why `orchestrator.enable` and `synt outcome enable` refuse in a build whose gate is closed.
+pub const GATE_REFUSAL: &str = "the release gate is not passed: outcomes cannot be turned on in this build. Use a preview build (cargo build --release --features orchestrator-preview) or a debug build";
+
+/// The build-time enable gate (spec orchestrator-remaining-backend section 4): open in debug builds
+/// and in release builds with `orchestrator-preview`, closed in an official release until B8 flips it.
+/// It blocks only NEW enabling; an already enabled home keeps running.
+pub const fn enable_gate_open() -> bool {
+    cfg!(any(debug_assertions, feature = "orchestrator-preview"))
+}
+
 mod alloc;
 mod commands;
 mod decision;
@@ -73,3 +83,19 @@ pub use sched::{
 pub use verify::{
     CheckRun, CheckRunner, IndependentVerifier, SCOPE_CHECK, SandboxRunner, VerifyError,
 };
+
+#[cfg(test)]
+mod gate_tests {
+    /// Run in release: `cargo test --release -p synthesis-orchestrator --lib closed_without_preview`.
+    #[cfg(not(any(debug_assertions, feature = "orchestrator-preview")))]
+    #[test]
+    fn closed_without_preview() {
+        assert!(!super::enable_gate_open());
+    }
+
+    #[cfg(any(debug_assertions, feature = "orchestrator-preview"))]
+    #[test]
+    fn open_in_debug_and_preview() {
+        assert!(super::enable_gate_open());
+    }
+}

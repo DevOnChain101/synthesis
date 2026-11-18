@@ -54,6 +54,7 @@ impl OutcomesView {
 
     pub(super) fn guide_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let g = self.state.guide.as_ref()?;
+        let refused = self.state.gate_refusal.is_some();
         let (title, yes) = labels(g.step);
         let ring = |b: Btn| g.focus == Some(b);
         let confirm = div()
@@ -137,7 +138,12 @@ impl OutcomesView {
                     .px(px(14.))
                     .py(px(10.))
                     .text_color(text())
-                    .children(ENABLE_NOTICE.lines().map(|l| div().child(l.to_string()))),
+                    .children(
+                        ENABLE_NOTICE
+                            .lines()
+                            .filter(|_| !refused)
+                            .map(|l| div().child(l.to_string())),
+                    ),
             )
             .children(g.error.as_ref().map(|e| {
                 div()
@@ -171,7 +177,7 @@ impl OutcomesView {
                             ),
                     )
                     .child(cancel)
-                    .child(confirm),
+                    .children((!refused).then_some(confirm)),
             );
         Some(
             div()

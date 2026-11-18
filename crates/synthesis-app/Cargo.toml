@@ -14,6 +14,8 @@ workspace = true
 test-provider = ["synthesis-sandbox/test-backend"]
 # `outcome_client::InProc` (the server in the same process) for tests and headless CI; never a production path (ADR-021, plan D22). Debug builds only.
 inproc-test = []
+# Open the enable gate in a release build (preview builds only; the official release does not set it).
+orchestrator-preview = ["synthesis-orchestrator/orchestrator-preview"]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

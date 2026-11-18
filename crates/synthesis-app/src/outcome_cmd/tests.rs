@@ -600,6 +600,19 @@ fn enable_shows_the_notice_and_changes_nothing_without_yes() {
 }
 
 #[test]
+fn a_closed_gate_refuses_enable_before_the_notice_and_only_enable() {
+    let en = OutcomeCmd::Enable { yes: true };
+    let why = gate_refusal(false, &en).unwrap();
+    assert!(why.contains("the release gate is not passed") && why.contains("orchestrator-preview"));
+    assert_eq!(gate_refusal(true, &en), None);
+    assert_eq!(
+        gate_refusal(false, &OutcomeCmd::Enable { yes: false }),
+        Some(why)
+    );
+    assert_eq!(gate_refusal(false, &OutcomeCmd::List), None);
+}
+
+#[test]
 fn inspect_names_the_tabs_and_the_diff_tab_says_it_is_not_there() {
     let (mut c, _) = rig(vec![]);
     let (r, out) = run(

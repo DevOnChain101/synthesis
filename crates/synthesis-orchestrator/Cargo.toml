@@ -28,6 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 # `Runner::with_beat`: tests inject heartbeat errors
 test-seam = []
+# A release build with the enable gate open (internal/preview builds); debug builds are always open.
+orchestrator-preview = []
 
 [target.'cfg(unix)'.dependencies]
 # kill(2) of the worker's descendants (no unsafe)
