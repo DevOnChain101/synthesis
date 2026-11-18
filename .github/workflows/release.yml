@@ -254,13 +254,13 @@ jobs:
       - name: package-desktop.mjs supports --synt (merge the PR that adds it first)
         if: matrix.bundle_synt
         run: |
-          grep -q -- '--synt' scripts/package-desktop.mjs || { echo "::error::scripts/package-desktop.mjs has no --synt flag: merge the desktop-outcomes PR (#174) first, otherwise the macOS bundle would ship without synt"; exit 1; }
+          grep -Eq '\{[^}]*\bsynt\b[^}]*\} *= *a;' scripts/package-desktop.mjs || { echo "::error::scripts/package-desktop.mjs has no --synt flag: merge the desktop-outcomes PR (#174) first, otherwise the macOS bundle would ship without synt"; exit 1; }
       - name: Package
         env:
-          SYNT_BIN: ${{ matrix.bundle_synt && format('target/{0}/release/synt', matrix.target) || '' }}
+          PKG_SYNT: ${{ matrix.bundle_synt && format('target/{0}/release/synt', matrix.target) || '' }}
         run: |
-          synt_args=(); if [ -n "$SYNT_BIN" ]; then synt_args=(--synt "$SYNT_BIN"); fi
-          node scripts/package-desktop.mjs --target "$TARGET" --version "$VERSION" --bin "$BIN" "${synt_args[@]}" --out dist
+          synt_args=(); if [ -n "$PKG_SYNT" ]; then synt_args=(--synt "$PKG_SYNT"); fi
+          node scripts/package-desktop.mjs --target "$TARGET" --version "$VERSION" --bin "$BIN" ${synt_args[@]+"${synt_args[@]}"} --out dist
           ls -l dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
