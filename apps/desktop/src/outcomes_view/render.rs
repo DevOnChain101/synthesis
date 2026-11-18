@@ -773,7 +773,7 @@ impl OutcomesView {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(gpui::img(brand::mark()).size(px(28.)))
+                            .child(brand::mark_img(28.).size(px(28.)))
                             .child(
                                 div()
                                     .text_size(px(16.))

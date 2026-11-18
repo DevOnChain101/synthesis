@@ -2,7 +2,8 @@
 //! `design/01-brand/logo`, embedded in the binary; chrome text uses the UI sans (Inter, bundled
 //! under the SIL OFL) and the user-selected monospace is for code, diff, terminal and tokens only.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::{Image, ImageFormat};
 
@@ -33,6 +34,52 @@ pub fn mark() -> Arc<Image> {
     static MARK: OnceLock<Arc<Image>> = OnceLock::new();
     MARK.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, MARK_PNG.to_vec())))
         .clone()
+}
+
+/// The mark as a texture of exactly `logical * scale` device pixels. gpui samples a texture bilinearly without
+/// mipmaps, so drawing the 256 px PNG at 16-96 px skips most source pixels and the edge turns into stairs; this
+/// resamples once (Lanczos in premultiplied alpha, no fringe) and caches per size.
+fn mark_at(device: u32) -> Arc<gpui::RenderImage> {
+    use image::{RgbaImage, imageops};
+    static CACHE: OnceLock<Mutex<HashMap<u32, Arc<gpui::RenderImage>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    cache
+        .entry(device)
+        .or_insert_with(|| {
+            let mut img = image::load_from_memory(MARK_PNG).unwrap().into_rgba8();
+            let premul = |img: &mut RgbaImage, up: bool| {
+                for p in img.pixels_mut() {
+                    let a = p[3] as f32 / 255.;
+                    let max = if up { 255. } else { p[3] as f32 };
+                    for c in &mut p.0[..3] {
+                        let v = if up {
+                            *c as f32 / a.max(1. / 255.)
+                        } else {
+                            *c as f32 * a
+                        };
+                        *c = v.round().min(max) as u8;
+                    }
+                }
+            };
+            if device < img.width() {
+                premul(&mut img, false);
+                img = imageops::resize(&img, device, device, imageops::FilterType::Lanczos3);
+                premul(&mut img, true);
+            }
+            for p in img.pixels_mut() {
+                p.0.swap(0, 2); // gpui wants BGRA
+            }
+            Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))
+        })
+        .clone()
+}
+
+/// The mark drawn at `size` logical px, sharp at the window's scale factor.
+pub fn mark_img(size: f32) -> gpui::Img {
+    gpui::img(gpui::ImageSource::Custom(Arc::new(move |window, _| {
+        let device = (size * window.scale_factor()).round().max(1.) as u32;
+        Some(Ok(mark_at(device)))
+    })))
 }
 
 gpui_kit_assets::icon_assets!(

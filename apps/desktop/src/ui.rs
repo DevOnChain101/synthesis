@@ -503,7 +503,7 @@ impl Shell {
                         }
                     })
                     .when(!mac, |d| {
-                        d.child(gpui::img(brand::mark()).size(px(16.)).flex_none())
+                        d.child(brand::mark_img(16.).size(px(16.)).flex_none())
                             .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
                     })
                     .children(crumb)
