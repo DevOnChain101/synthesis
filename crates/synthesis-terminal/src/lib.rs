@@ -36,6 +36,7 @@
 //!   [`ProcessStatus`] with [`ProcessStatus::to_event_info`] and emit.
 
 mod disk;
+mod pty;
 mod shell;
 
 use std::collections::{BTreeMap, HashMap};
@@ -59,6 +60,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
+pub use pty::{MAX_COLS, MAX_INPUT, MAX_PTYS, MAX_ROWS, Pty, PtyOutput, PtySpec, WINDOW};
 pub use shell::{ShellKind, ShellSpec, find_git_bash, native_shell, resolve_shell};
 
 const POLL: Duration = Duration::from_millis(10);
@@ -601,6 +603,7 @@ struct Session {
     ws: Arc<WorkspaceContext>,
     env: BTreeMap<String, String>,
     procs: HashMap<String, Arc<Proc>>,
+    ptys: HashMap<String, Arc<Pty>>,
     sandbox: Option<SandboxPolicy>,
     quota: Arc<Quota>,
 }
@@ -714,6 +717,7 @@ impl TerminalRuntime {
                 ws,
                 env,
                 procs: HashMap::new(),
+                ptys: HashMap::new(),
                 sandbox,
                 quota: Arc::new(Quota {
                     used: AtomicU64::new(0),

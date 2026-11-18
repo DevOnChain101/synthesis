@@ -199,10 +199,10 @@ fn the_screens_that_are_not_the_list_explain_themselves(cx: &mut TestAppContext)
     }
     // the words the screens carry
     let off = OFF_LINES.join(" ");
-    assert!(off.contains("synt.orchestrator.enabled") && off.contains("synt outcome enable"));
+    assert!(off.contains("synt.orchestrator.enabled") && off.contains("stub planner"));
     assert!(
-        off.contains("does not turn outcomes on"),
-        "no enabling from the window"
+        off.contains("nothing is started or migrated until you confirm"),
+        "two explicit confirms, no implicit step"
     );
     assert!(WSL2_REFUSAL.contains("WSL2"));
 }
@@ -524,4 +524,95 @@ fn a_held_enter_or_one_in_the_frame_the_review_appears_approves_nothing(cx: &mut
     v.simulate_keystrokes("enter");
     let errs = o.read_with(v, |o, _| o.state.form.as_ref().unwrap().errors.clone());
     assert_eq!(errs, ["Sample data: nothing was sent."]);
+}
+
+// ------------------------------------------------------------------------ the guided enable flow
+
+fn guide_view(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    w: f32,
+    h: f32,
+) -> (Entity<OutcomesView>, &mut VisualTestContext) {
+    let (shell, v) = open(cx, w, h);
+    let o = view(&shell, v);
+    o.update(v, |o, cx| {
+        o.state.screen = screen;
+        cx.notify();
+    });
+    v.run_until_parked();
+    (o, v)
+}
+
+#[gpui::test]
+fn the_off_screen_has_a_button_that_only_opens_the_disclosure_verbatim(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    for (w, h) in [(1400., 900.), (1100., 700.)] {
+        let (o, v) = guide_view(cx, Screen::Off, w, h);
+        assert!(
+            v.debug_bounds("out-guide").is_none() && v.debug_bounds("out-guide-open").is_some()
+        );
+        let b = v.debug_bounds("out-guide-open").unwrap();
+        v.simulate_click(b.center(), Default::default());
+        v.run_until_parked();
+        let g = o.read_with(v, |o, _| o.state.guide.clone().unwrap());
+        assert_eq!(
+            (g.step, g.focus, g.busy),
+            (model::Step::Setting, None, false)
+        );
+        let (p, t) = (bounds(v, "out-guide"), bounds(v, "out-guide-text"));
+        assert!(
+            p.0 >= 0. && p.0 + p.2 <= w && p.1 + p.3 <= h,
+            "{w}x{h}: {p:?}"
+        );
+        assert!(t.3 > 40., "the notice has room: {t:?}");
+        for sel in ["out-guide-confirm", "out-guide-cancel"] {
+            let b = bounds(v, sel);
+            assert!(b.0 + b.2 <= w && b.1 + b.3 <= h, "{sel} on screen: {b:?}");
+        }
+        // the sample has no settings file: confirming writes nothing and says so
+        let c = v.debug_bounds("out-guide-confirm").unwrap();
+        v.simulate_click(c.center(), Default::default());
+        let g = o.read_with(v, |o, _| o.state.guide.clone().unwrap());
+        assert!(!g.busy && g.error.as_deref().unwrap().contains("Sample data"));
+    }
+}
+
+#[gpui::test]
+fn the_keyboard_needs_tab_then_enter_to_confirm_and_esc_cancels(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    let (o, v) = guide_view(cx, Screen::NotReady("not migrated".into()), 1100., 700.);
+    let guide = |o: &Entity<OutcomesView>, v: &VisualTestContext| {
+        o.read_with(v, |o, _| o.state.guide.clone())
+    };
+    v.simulate_keystrokes("enter");
+    assert_eq!(guide(&o, v).unwrap().step, model::Step::Migrate);
+    // Enter with nothing focused does nothing; the first Tab lands on Cancel, never on Confirm
+    v.simulate_keystrokes("enter");
+    assert_eq!(guide(&o, v).map(|g| (g.focus, g.busy)), Some((None, false)));
+    v.simulate_keystrokes("tab");
+    assert_eq!(guide(&o, v).unwrap().focus, Some(model::Btn::Cancel));
+    v.simulate_keystrokes("escape");
+    assert!(guide(&o, v).is_none(), "Esc cancels");
+    // again: Tab, Tab, Enter reaches Confirm (the sample answers locally: nothing is sent)
+    v.simulate_keystrokes("enter tab tab");
+    assert_eq!(guide(&o, v).unwrap().focus, Some(model::Btn::Confirm));
+    v.simulate_keystrokes("enter");
+    assert!(guide(&o, v).unwrap().error.unwrap().contains("Sample data"));
+}
+
+#[gpui::test]
+fn the_notice_shown_is_the_builds_own_text_line_for_line(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    let (o, v) = guide_view(cx, Screen::Off, 1400., 900.);
+    o.update(v, |o, cx| {
+        o.state.open_guide();
+        cx.notify();
+    });
+    v.run_until_parked();
+    // the dialog draws `ENABLE_NOTICE.lines()` and nothing else as its body
+    assert!(v.debug_bounds("out-guide-text").is_some());
+    let n = synthesis_app::outcome_cmd::ENABLE_NOTICE;
+    assert!(n.starts_with(synthesis_app::outcome_policy::INTEGRITY_DISCLOSURE));
+    assert!(n.contains("schema v5") && n.contains("backup"));
 }

@@ -1864,7 +1864,14 @@ impl SettingsView {
                 .child(
                     div()
                         .debug_selector(|| "confirm".to_string())
-                        .w(px(380_f32.min(avail - 32.)))
+                        // a long notice (the Outcomes integrity text) gets a wider dialog and scrolls
+                        .w(px(if p.reason.len() > 300 {
+                            560_f32
+                        } else {
+                            380_f32
+                        }
+                        .min(avail - 32.)))
+                        .max_h_full()
                         .flex()
                         .flex_col()
                         .gap(px(10.))
@@ -1881,6 +1888,9 @@ impl SettingsView {
                         )
                         .child(
                             div()
+                                .id("confirm-reason")
+                                .min_h(px(0.))
+                                .overflow_y_scroll()
                                 .text_color(hsla(t::WARN))
                                 .child(format!("{}.", p.reason.trim_end_matches('.'))),
                         )
