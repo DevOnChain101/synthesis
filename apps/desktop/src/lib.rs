@@ -20,6 +20,7 @@ pub mod reveal;
 pub mod rewind;
 pub mod send_pick;
 pub mod settings_view;
+pub mod term;
 pub mod theme;
 pub mod trace;
 pub mod tui_view;

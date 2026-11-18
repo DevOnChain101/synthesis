@@ -1,0 +1,13 @@
+\e]0;zsh - synthesis\a\e[1;38;2;199;174;144msynthesis\e[0m \e[36m~/code\e[0m \e[32m$\e[0m cargo test -p synthesis-terminal\r\n
+\e[2m   Compiling synthesis-terminal v0.1.0\e[0m\r\n
+\e[32m     Running\e[0m unittests src/lib.rs\r\n
+test pty::size_limits ... \e[32mok\e[0m\r\n
+test pty::only_cpr_and_fixed_da1_are_answered ... \e[32mok\e[0m\r\n
+test pty::flood ... \e[1;31mFAILED\e[0m\r\n
+\r\n
+\e[4munderlined\e[0m \e[3mitalic\e[0m \e[9mstruck\e[0m \e[7minverse\e[0m \e[1mbold\e[0m \e[2mdim\e[0m\r\n
+\e[30;40m 0 \e[31;41m 1 \e[32;42m 2 \e[33;43m 3 \e[34;44m 4 \e[35;45m 5 \e[36;46m 6 \e[37;47m 7 \e[0m\r\n
+\e[90;100m 8 \e[91;101m 9 \e[92;102m10 \e[93;103m11 \e[94;104m12 \e[95;105m13 \e[96;106m14 \e[97;107m15 \e[0m\r\n
+\e[38;5;208mindexed 208\e[0m \e[38;2;120;200;255mtruecolor\e[0m \e[48;5;238m grey bg \e[0m\r\n
+│ box ┌─┐ └─┘ éèü € \e]8;;https://example.com\alink\e]8;;\a\r\n
+\e[32m$\e[0m 

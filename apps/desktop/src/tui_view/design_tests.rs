@@ -730,3 +730,49 @@ fn tab_bodies_stay_inside_the_frame(cx: &mut TestAppContext) {
         }
     }
 }
+
+/// The Terminal tab keeps the other tabs' outer geometry (`tab-pane` between the same gutters), and the shell's
+/// grid sits under the strip, inside the pane and its 1px frame, at the three sizes the owner checks.
+#[gpui::test]
+fn terminal_grid_sits_inside_the_pane(cx: &mut TestAppContext) {
+    for (w, h) in [(900., 600.), (1100., 700.), (1400., 900.)] {
+        let (tui, v) = cx.add_window_view(|_, _| TuiView::new(0., Hidden::default()));
+        v.simulate_resize(size(px(w), px(h)));
+        tui.update(v, |t, cx| {
+            t.select_tab(super::ChatTab::Terminal, cx);
+            t.term_script(b"hello\r\n", cx);
+        });
+        v.run_until_parked();
+        let (pane, grid) = (bounds(v, "tab-pane"), bounds(v, "term-grid"));
+        let what = format!("{w}x{h}");
+        assert!(
+            grid.origin.y > pane.origin.y + px(20.),
+            "{what}: grid under the strip"
+        );
+        near(
+            f(grid.origin.x) - f(pane.origin.x),
+            1.,
+            &format!("{what}: frame left"),
+        );
+        near(
+            f(pane.bottom_right().x) - f(grid.bottom_right().x),
+            1.,
+            &format!("{what}: frame right"),
+        );
+        assert!(
+            grid.bottom_right().y <= pane.bottom_right().y,
+            "{what}: grid inside the pane"
+        );
+        // whole rows and columns of the font's cell (13px Fira Code, 17px lines) fit inside the grid
+        let g = tui.read_with(v, |t, cx| t.term.as_ref().map(|p| p.read(cx).grid_size()));
+        let (cols, rows) = g.flatten().expect("a drawn grid");
+        assert!(
+            rows as f32 * 17. <= f(grid.size.height),
+            "{what}: {rows} rows"
+        );
+        assert!(
+            (cols as f32) * 7. <= f(grid.size.width),
+            "{what}: {cols} cols"
+        );
+    }
+}

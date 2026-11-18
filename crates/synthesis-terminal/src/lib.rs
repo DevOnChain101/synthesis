@@ -60,7 +60,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
-pub use pty::{MAX_COLS, MAX_INPUT, MAX_PTYS, MAX_ROWS, Pty, PtyOutput, PtySpec, WINDOW};
+pub use pty::{MAX_COLS, MAX_INPUT, MAX_PTYS, MAX_ROWS, Pty, PtyOutput, PtySpec, Reply, WINDOW};
 pub use shell::{ShellKind, ShellSpec, find_git_bash, native_shell, resolve_shell};
 
 const POLL: Duration = Duration::from_millis(10);

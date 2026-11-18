@@ -7493,6 +7493,7 @@ dependencies = [
 name = "synthesis-desktop"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "clap",
  "embed-resource",
  "futures",
@@ -7504,6 +7505,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "libc",
+ "portable-pty",
  "rustix",
  "serde",
  "serde_json",
@@ -7522,6 +7524,7 @@ dependencies = [
  "synthesis-permissions",
  "synthesis-platform",
  "synthesis-providers",
+ "synthesis-sandbox-win",
  "synthesis-session",
  "synthesis-settings",
  "synthesis-settings-ui",

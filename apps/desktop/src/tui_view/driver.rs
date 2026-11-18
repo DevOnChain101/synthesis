@@ -942,6 +942,12 @@ impl TuiView {
         if self.outcome_key(ks, window, cx) {
             return true;
         }
+        // the Terminal tab's shell takes every key it can (a dialog still owns the keyboard first)
+        if self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
+            && let Some(done) = self.term_key(ks, window, cx)
+        {
+            return done;
+        }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {
             return false;

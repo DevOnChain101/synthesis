@@ -26,6 +26,7 @@ pub mod sample;
 pub mod shot;
 pub mod snapshot;
 pub mod tabs;
+mod term_pane;
 pub mod topo;
 
 use gpui::{
@@ -207,6 +208,8 @@ pub struct TuiView {
     pub(crate) window_active: Option<bool>,
     /// The Outcomes link of the shell (`None` while outcomes are off or unsupported: no panel, tab or popup).
     pub(crate) outcomes: Option<approvals_ui::Wire>,
+    /// The Terminal tab's personal shells (created on the first look; they outlive session switches).
+    pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
 }
 
 /// A side column of the view.
@@ -275,6 +278,7 @@ impl TuiView {
             input_strip: None,
             window_active: None,
             outcomes: None,
+            term: None,
         }
     }
 
