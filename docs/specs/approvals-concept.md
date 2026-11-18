@@ -459,7 +459,7 @@ Parallelism: A1 runs now beside S1 wave 1 (disjoint files except `synthesis-view
 
 | Q | Question | Default (applied if unanswered) |
 |---|---|---|
-| Q1 | May a T2 card show the agent's suggested option (amends ADR-021 / threat T-34 "no recommended field")? | **Yes**, labelled "agent suggests (untrusted)", never preselected, still choose then Send; never on T3 |
+| Q1 | **DECIDED by the owner 2026-11-18: yes.** May a T2 card show the agent's suggested option (amends ADR-021 / threat T-34 "no recommended field")? | **Yes**, labelled "agent suggests (untrusted)", never preselected, still choose then Send; never on T3 |
 | Q2 | Which classes are T0 out of the box? | `naming`, `formatting`, `test_layout`, `comment_wording`; everything else starts at T1 |
 | Q3 | T1 expiry and caps | 48 h, then the default stands with a permanent caveat; provisional spend at most 25% of the outcome cap, at most 2 stacked levels |
 | Q4 | Digest cadence and quiet hours | Every 2 h of active use or at 5 open T1 rows; quiet hours off until set; T3 notifies at once outside quiet hours |
