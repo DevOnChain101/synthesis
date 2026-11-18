@@ -424,7 +424,7 @@ programs (vim, pwsh), WSL2 end to end, Linux Wayland input.
 - Q4. `synt.browser.headed` ignored by the desktop (2.2): acceptable, or should the desktop offer the separate window too?
 - Q5. PTY tools in the CLI (`synt`) and `synt run`: proposed desktop-only in v1 (registered only with `Front::Native` and
   `--host desktop`), because the person cannot see or hold the PTY elsewhere.
-- Q6. `tauri-winrt-notification` is in `Cargo.lock` as a transitive Windows dependency of `notify-rust` 4.18.2 (toast notifications); decision 1 says
+- Q6. (Resolved 2026-11-18.) `notify-rust` 4.18.2 listed a Windows toast crate with that name in `Cargo.lock` although no target built it; the repo now patches `notify-rust` with `vendor/notify-rust` (see `vendor/README.md`), so `Cargo.lock` has no crate with "tauri" in its name.
   no such crate "anywhere": replace the notification dependency, or accept a transitive crate by that name?
 
 ### Decided in T1 (PR `synthesis-terminal::pty`; reverse any of these in review)
