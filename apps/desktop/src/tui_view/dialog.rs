@@ -59,6 +59,25 @@ impl TuiView {
             .map(|motion| crate::widgets::chrome::attention_red(motion, now_ms()))
     }
 
+    /// Sessions waiting for a tool permission (peers left out) as `(key, title)`: only the Super Agent badge and
+    /// its Alt+A read this, the TUI view draws nothing of it. The key is the session id, or `#index` without one.
+    pub fn waiting_tools(&self) -> Vec<(String, String)> {
+        self.snap
+            .running
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.state == super::activity::RunState::Approval && !r.peer)
+            .map(|(i, r)| {
+                let key = if r.id.is_empty() {
+                    format!("#{i}")
+                } else {
+                    r.id.clone()
+                };
+                (key, synthesis_harness::sanitize_for_display(&r.title))
+            })
+            .collect()
+    }
+
     /// A click on option `i` of the front dialog.
     pub(super) fn click_option(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -69,5 +88,35 @@ impl TuiView {
         if let Some(a) = action {
             self.run_action(a, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{TuiView, activity::RunState, layout::Hidden};
+
+    #[test]
+    fn waiting_tools_are_the_sessions_that_wait_and_show_bidi_controls_escaped() {
+        let mut t = TuiView::new(0., Hidden::default());
+        assert!(
+            t.snap.running.iter().all(|r| r.state != RunState::Approval),
+            "the sample has none waiting"
+        );
+        assert!(t.waiting_tools().is_empty());
+        let bidi = "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}";
+        t.snap.running[0].state = RunState::Approval;
+        t.snap.running[0].peer = false;
+        t.snap.running[0].title = format!("a{bidi}b");
+        let rows = t.waiting_tools();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].1.chars().any(|c| bidi.contains(c)),
+            "raw bidi control in {:?}",
+            rows[0].1
+        );
+        assert!(rows[0].1.contains("\\u{202e}"));
+        // a peer's session is not this window's to answer
+        t.snap.running[0].peer = true;
+        assert!(t.waiting_tools().is_empty());
     }
 }

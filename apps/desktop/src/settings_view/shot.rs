@@ -19,7 +19,7 @@ pub struct Args {
     h: f32,
     search: String,
     confirm: bool,
-    /// The Outcomes switch turned on: its disclosure is open.
+    /// The Super Agent (orchestrator) switch turned on: its disclosure is open.
     confirm_outcomes: bool,
     /// Scroll the panel down by this many pixels.
     scroll: f32,
