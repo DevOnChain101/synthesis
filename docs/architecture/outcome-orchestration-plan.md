@@ -3,6 +3,8 @@
 Changelog: 2026-11-14 rev 2 (owner): the orchestrator serves CLI, TUI and Super Agent through one core and one protocol; standalone orchestrator process; durable decisions and commands; explicit v5 migration; delivery order core, protocol, CLI, TUI, Super Agent; D4, D5, D6 revised and D17-D21 added. Rev 1 (same day): first version.
 
 Status: Proposed (2026-11-14, rev 2). Nothing here is scheduled until the owner answers the decisions in section 7.
+
+Note 2026-11-17 (owner, mode normalisation): the desktop has only two modes, TUI and Super Agent. The desktop tab named "Outcomes" (the surface of PR-13..PR-15 in the desktop) is the **Super Agent** tab again; "Outcomes" names the objects, not a tab. Its design is `docs/specs/super-agent.md`; the chat backend is `docs/specs/conductor.md`.
 Remaining backend work after the implemented PRs: [orchestrator remaining backend spec](../specs/orchestrator-remaining-backend.md) (proposed; owner questions O1-O16).
 Inputs: [gap analysis](./outcome-orchestration-gap-analysis.md), [ADRs](./adr/README.md). Test specs: [acceptance](../testing/outcome-orchestration-acceptance.md). Threat model: [threat model](./outcome-orchestration-threat-model.md). First slice: [MVP slice](./outcome-orchestration-mvp-slice.md).
 
