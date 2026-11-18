@@ -1,5 +1,5 @@
 // Builds apps/desktop/assets/icons/synthesis.icns from the owner's transparent logo, following Apple's
-// macOS icon template: a squircle body of 896/1024 of the canvas, centred, transparent margin around,
+// macOS icon template: a squircle body of 824/1024 of the canvas, centred, transparent margin around,
 // charcoal gradient fill, the logo drawn at body size (the ribbon spans ~77% of the body width), plus a
 // little depth: soft inner edge rim/shade, a faint top sheen under the logo and a drop shadow in the margin.
 // Run on macOS from the repo root:  swift scripts/make-macos-icns.swift
@@ -8,7 +8,7 @@ import AppKit
 
 let src = "design/01-brand/app-icons/synthesis-logo-transparent-1024.png"
 let out = "apps/desktop/assets/icons/synthesis.icns"
-let bodyFraction = 896.0 / 1024.0   // Apple template body
+let bodyFraction = 824.0 / 1024.0   // Apple template body
 let cornerFraction = 0.225          // corner radius / body
 let cornerSmoothing = 0.6           // Figma-style corner smoothing (0 = circular arc): G2-continuous blend into the straight edges
 let gradientTop: UInt32 = 0x3A3F47
@@ -22,7 +22,7 @@ let shadeAlpha = 0.25               // black, bottom edge, from shadeStart of th
 let shadeStart = 0.55
 let sheenAlpha = 0.07               // white, top of the body, fading out by sheenEnd of the height (drawn under the logo)
 let sheenEnd = 0.45
-let shadowOffset = 10.0, shadowBlur = 22.0, shadowAlpha = 0.38   // must fit in the 64 px margin: 10 + 22 < 64
+let shadowOffset = 10.0, shadowBlur = 22.0, shadowAlpha = 0.38   // must fit in the 100 px margin: 10 + 22 < 100
 
 let set = NSTemporaryDirectory() + "synthesis.iconset"
 let fm = FileManager.default
