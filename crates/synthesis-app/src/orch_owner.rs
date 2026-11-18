@@ -160,6 +160,9 @@ pub struct Owner<'a> {
     pub planner: Option<PlannerCtx>,
     /// `synt.orchestrator.planner.max_items` of this cycle: a model plan is installed within it.
     pub max_items: usize,
+    /// The enable gate (build-time); a field so tests can close it in a debug build.
+    #[doc(hidden)]
+    pub enable_gate_open: bool,
     /// `(outcome, contract version, plan version)` the model planner could not even start for (said once).
     plan_failed: BTreeSet<(String, u32, Option<u32>)>,
     #[cfg(feature = "test-provider")]
@@ -245,6 +248,7 @@ impl<'a> Owner<'a> {
             replan_failed: BTreeMap::new(),
             planner: None,
             max_items: synthesis_core::outcome::MAX_PLAN_ITEMS,
+            enable_gate_open: synthesis_orchestrator::enable_gate_open(),
             plan_failed: BTreeSet::new(),
             #[cfg(feature = "test-provider")]
             test: TestHooks::default(),
@@ -885,6 +889,9 @@ impl<'a> Owner<'a> {
     /// first, `backups/pre-v5-*`). It does not change settings: `synt.orchestrator.enabled` must
     /// already be true, which is the person's own step.
     fn enable(&self, pol: &OutcomePolicy) -> Result<Value, String> {
+        if !self.enable_gate_open {
+            return Err(synthesis_orchestrator::GATE_REFUSAL.into());
+        }
         if !pol.enabled {
             return Err("set synt.orchestrator.enabled to true in the user settings first".into());
         }
