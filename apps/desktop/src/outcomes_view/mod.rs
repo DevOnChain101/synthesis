@@ -1,5 +1,7 @@
-//! The Outcomes tab (owner decision 2026-11-17; `docs/specs/desktop.md` "Outcomes tab", ADR-021): outcomes the
-//! orchestrator runs, three columns (list, Goal | Decisions | History, inspector). It is a surface in the
+//! The Super Agent view (owner decisions 2026-11-17/18; `docs/specs/desktop.md` "Super Agent tab",
+//! `docs/specs/super-agent.md`, ADR-021): outcomes the orchestrator runs, three columns (list, Goal | Decisions |
+//! History, inspector). The module and its types keep the name `outcomes_view` (the thing is the outcome, ADR-021;
+//! only the tab is called Super Agent). It is a surface in the
 //! sense of ADR-021: it talks to the orchestrator only through `OutcomeClient` on its own worker thread (`link`),
 //! renders only `synthesis_view::outcomes` models, and depends on no orchestrator crate. This is not the
 //! Conductor (`docs/specs/conductor.md`). It also creates an outcome and revises a contract (`form`,
@@ -25,14 +27,16 @@ pub mod ask;
 pub mod form;
 mod form_view;
 mod guide_view;
+pub mod history;
 pub mod link;
 pub mod model;
+pub mod popup;
 pub(crate) mod render;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
 
-/// The notice while an answer of the TUI view's popup is on its way.
+/// The notice while an answer of the decision card is on its way.
 pub const SENDING: &str = "Sending the answer...";
 
 pub struct OutcomesView {
@@ -53,6 +57,14 @@ pub struct OutcomesView {
     /// The review has been drawn at least once: before that nothing can approve it (a held Enter that sent
     /// the form must not land on the button in the frame the review appears).
     review_armed: bool,
+    /// What waits for the person: the decision card docked under the centre tabs, Alt+A, the title bar's badge.
+    pub(crate) pop: popup::Wire,
+    /// Height of the window at the last frame (the card's share of it).
+    win_h: f32,
+    /// The list column is shown (the title bar's rail button hides it); kept for this window only.
+    pub(crate) rail_open: bool,
+    /// Back and forward through the outcomes shown (the title bar's buttons, Alt+Left / Alt+Right).
+    hist: history::History,
 }
 
 /// The text inputs and the two buttons' focus of the form. Lists are one entry per line.
@@ -83,6 +95,11 @@ impl OutcomesView {
     }
 
     pub fn with_state(state: State, cx: &mut Context<Self>) -> Self {
+        // what is selected at the start is the first place of the history
+        let mut hist = history::History::default();
+        if let Some(id) = &state.selected {
+            hist.visit(history::Place::Outcome(id.clone()));
+        }
         Self {
             state,
             focus: cx.focus_handle(),
@@ -95,6 +112,10 @@ impl OutcomesView {
             form_scroll: ScrollHandle::new(),
             was_reviewing: false,
             review_armed: false,
+            pop: popup::Wire::new(cx),
+            win_h: 0.,
+            rail_open: true,
+            hist,
         }
     }
 
@@ -108,15 +129,15 @@ impl OutcomesView {
         }
     }
 
-    /// The TUI view's Approvals and tab need the list without this tab being opened: it connects now. Only called
-    /// after `approvals::gate` said outcomes are on and supported.
+    /// The title bar's badge needs the list without this tab being opened: it connects now. Only called after
+    /// `approvals::gate` said outcomes are on and supported.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         if !self.started {
             self.start(cx);
         }
     }
 
-    /// Selects outcome `id` (what the TUI view's rows open); the tab shows it from then on.
+    /// Selects outcome `id` (Alt+A, back and forward); the tab shows it from then on.
     pub fn select_id(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.state.items.iter().position(|i| i.row.id == id) {
             let e = self.state.select(i);
@@ -124,10 +145,10 @@ impl OutcomesView {
         }
     }
 
-    /// Sends an effect the TUI view's decision popup made (the same worker path as this tab's own answer).
+    /// Sends an effect the docked decision card made (the same worker path as the Decisions tab's own answer).
     pub fn send_effect(&mut self, e: Effect, cx: &mut Context<Self>) {
-        // the reply (`Msg::Answered`) replaces this line: that is how the popup sees the answer came back
-        // in flight for the tab too: its own Enter sends nothing until the reply (`State::answered`) comes back
+        // the reply (`Msg::Answered`) replaces this line: that is how the card sees the answer came back; in
+        // flight for the Decisions tab too: its own Enter sends nothing until the reply (`State::answered`) comes back
         self.state.ask.sending = true;
         self.state.ask.notice = Some(SENDING.into());
         self.run(vec![e], cx);
@@ -172,6 +193,7 @@ impl OutcomesView {
                 Msg::Enabled(n, r) => self.state.enabled(n, r),
             }
         }
+        self.note_selection();
         cx.notify();
     }
 
@@ -279,7 +301,51 @@ impl OutcomesView {
                 }),
             }
         }
+        self.note_selection();
         cx.notify();
+    }
+
+    /// The outcome now selected is a place of the history (a click, the arrows, Alt+A, the server's first pick).
+    fn note_selection(&mut self) {
+        if let Some(id) = &self.state.selected {
+            self.hist.visit(history::Place::Outcome(id.clone()));
+        }
+    }
+
+    pub fn can_back(&self) -> bool {
+        self.hist.can_back(|p| place_alive(&self.state.items, p))
+    }
+
+    pub fn can_forward(&self) -> bool {
+        self.hist.can_forward(|p| place_alive(&self.state.items, p))
+    }
+
+    /// Title-bar back and forward (also Alt+Left / Alt+Right): moves through the outcomes shown.
+    pub fn nav(&mut self, back: bool, cx: &mut Context<Self>) {
+        let items = &self.state.items;
+        let alive = |p: &history::Place| place_alive(items, p);
+        let to = if back {
+            self.hist.back(alive)
+        } else {
+            self.hist.forward(alive)
+        };
+        if let Some(history::Place::Outcome(id)) = to {
+            self.select_id(&id, cx);
+        }
+        cx.notify();
+    }
+
+    /// The title bar's rail button: hides or shows the list column.
+    pub fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        self.rail_open = !self.rail_open;
+        cx.notify();
+    }
+
+    /// The selected outcome's goal, for the breadcrumb (`None` when the list is not shown or nothing is selected).
+    pub fn breadcrumb_goal(&self) -> Option<&str> {
+        (self.state.screen == Screen::Ready)
+            .then(|| self.state.selected_item().map(|i| i.row.goal.as_str()))
+            .flatten()
     }
 
     /// The person confirmed the disclosure of the Off screen: the user settings file gets
@@ -326,6 +392,20 @@ impl OutcomesView {
         if ev.is_held && self.state.guide.is_some() {
             return true;
         }
+        if self.state.guide.is_none() {
+            if m.alt
+                && !m.control
+                && !m.platform
+                && !m.shift
+                && matches!(k.key.as_str(), "left" | "right")
+            {
+                self.nav(k.key == "left", cx);
+                return true;
+            }
+            if self.popup_key(ev, window, cx) {
+                return true;
+            }
+        }
         let key = Key {
             name: &k.key,
             shift: m.shift,
@@ -339,6 +419,12 @@ impl OutcomesView {
             None => false,
         }
     }
+}
+
+/// Places back and forward may go to: an outcome that is gone is skipped; the chat (S1) and the sessions (S2) are
+/// places of the model that nothing shows yet.
+fn place_alive(items: &[model::Item], p: &history::Place) -> bool {
+    matches!(p, history::Place::Outcome(id) if items.iter().any(|i| &i.row.id == id))
 }
 
 /// Scrolls a pane by `n` lines (negative: up).
@@ -568,5 +654,7 @@ impl Focusable for OutcomesView {
     }
 }
 
+#[cfg(test)]
+mod popup_tests;
 #[cfg(test)]
 mod tests;

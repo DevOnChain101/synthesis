@@ -1,4 +1,4 @@
-//! Sample data of the Outcomes tab (`--sample`, the offscreen shots, the tests): protocol replies, run
+//! Sample data of the Super Agent view (`--sample`, the offscreen shots, the tests): protocol replies, run
 //! through the same `synthesis_view::outcomes` parsers a live reply goes through, so a sample can only show what
 //! the real models can show. Nothing here is sent anywhere.
 

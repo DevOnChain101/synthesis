@@ -20,7 +20,7 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> (Entity<Shell>, &mut VisualT
         Shell::new(window, cx, None, Default::default(), Err("test".into()))
     });
     v.simulate_resize(size(px(w), px(h)));
-    shell.update_in(v, |s, window, cx| s.go(View::Outcomes, window, cx));
+    shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
     v.run_until_parked();
     (shell, v)
 }
@@ -316,7 +316,7 @@ fn settings_over_the_outcomes_tab_and_back_keeps_the_tab(cx: &mut TestAppContext
         v.debug_bounds("outcomes").is_some(),
         "the tab is under the panel"
     );
-    shell.update_in(v, |s, window, cx| s.go(View::Outcomes, window, cx));
+    shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
     v.run_until_parked();
     let o = view(&shell, v);
     assert_eq!(o.read_with(v, |o, _| o.state.screen.clone()), Screen::Ready);
