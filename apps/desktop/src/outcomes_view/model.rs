@@ -1,4 +1,4 @@
-//! The Outcomes tab's state and its key handling, with no window in it: what is shown comes from the
+//! The Super Agent view's state and its key handling, with no window in it: what is shown comes from the
 //! `synthesis_view::outcomes` models the link fetched, and a key or click only moves a cursor or asks for an
 //! `Effect`. Nothing here computes a state, a verdict or a brief (ADR-021).
 //!

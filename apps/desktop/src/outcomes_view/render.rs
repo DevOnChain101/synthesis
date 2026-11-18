@@ -1,4 +1,4 @@
-//! Drawing of the Outcomes tab. Everything shown is a field of a `synthesis_view::outcomes` model; the only
+//! Drawing of the Super Agent view. Everything shown is a field of a `synthesis_view::outcomes` model; the only
 //! decisions made here are layout and colour. Palette: platinum with the accent, no blue or violet.
 
 use gpui::{
@@ -331,6 +331,7 @@ impl OutcomesView {
         self.column(Pane::Centre, "out-centre").child(strip).child(
             div()
                 .id("out-centre-body")
+                .debug_selector(|| "out-centre-body".to_string())
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_y_scroll()
@@ -348,6 +349,8 @@ impl OutcomesView {
                 .text_color(hsla(t::WARN))
                 .child("\u{2193} more below: scroll (PageDown) to read all of it and reach the answers")
         }))
+        // a decision that waits stays in sight on every tab
+        .children(self.decision_popup(cx))
     }
 
     fn goal(&self, cx: &Context<Self>) -> Div {
@@ -788,14 +791,21 @@ impl OutcomesView {
 impl Render for OutcomesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_form_ui(window, cx);
+        self.win_h = f32::from(window.viewport_size().height);
+        self.sync_popup(window, cx);
         let vw = f32::from(window.viewport_size().width);
         let s = &self.state;
         let ready = s.screen == Screen::Ready;
         let (lw, rw) = ((vw * 0.19).clamp(210., 290.), (vw * 0.30).clamp(300., 430.));
-        let cw = vw - 20. - 20. - lw - rw;
+        // the window's padding and the gaps between the columns shown
+        let cw = if self.rail_open {
+            vw - 20. - 20. - lw - rw
+        } else {
+            vw - 20. - 10. - rw
+        };
         let chips = [if ready {
             Chip::new(
-                "outcomes",
+                "super agent",
                 if self.env.is_some() {
                     "on"
                 } else {
@@ -805,14 +815,17 @@ impl Render for OutcomesView {
             )
             .dotted()
         } else {
-            Chip::new("outcomes", "not connected", hsla(t::WARN)).dotted()
+            Chip::new("super agent", "not connected", hsla(t::WARN)).dotted()
         }];
         let main = if ready {
             div()
                 .size_full()
                 .flex()
                 .gap(px(10.))
-                .child(div().w(px(lw)).flex_none().h_full().child(self.list(cx)))
+                .children(
+                    self.rail_open
+                        .then(|| div().w(px(lw)).flex_none().h_full().child(self.list(cx))),
+                )
                 .child(
                     div()
                         .flex_1()

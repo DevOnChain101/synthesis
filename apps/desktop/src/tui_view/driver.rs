@@ -337,14 +337,6 @@ impl TuiView {
             }
         });
         lu.add_sub(key_sub);
-        // the window going to the background or coming back gives the keys to the prompt (the outcome popup)
-        let activation = cx.observe_window_activation(window, |this, window, cx| {
-            this.window_activation_changed(window, cx)
-        });
-        if let Some(lu) = &mut self.live {
-            lu.add_sub(activation);
-        }
-        let Some(lu) = &mut self.live else { return };
         let quit_sub = cx.on_app_quit(|this, _| {
             this.shutdown_engine();
             async {}
@@ -938,9 +930,6 @@ impl TuiView {
     ) -> bool {
         if !self.active || self.bar_focused(window, cx) {
             return false;
-        }
-        if self.outcome_key(ks, window, cx) {
-            return true;
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {
@@ -1817,17 +1806,11 @@ impl TuiView {
             .into_iter()
             .filter(|(k, off)| self.hidden.is_hidden(k) != *off)
             .collect();
-        // `approvals` is not a settings key: it applies to this run only
-        let to_save: Vec<_> = changes
-            .iter()
-            .filter(|(k, _)| *k != "approvals")
-            .copied()
-            .collect();
-        let saved = if to_save.is_empty() {
+        let saved = if changes.is_empty() {
             Ok(())
         } else {
             let (home, cwd) = (&lu.cfg.synthesis_home, &lu.cfg.project);
-            save_panels(home, cwd, &to_save)
+            save_panels(home, cwd, &changes)
         };
         let mut warn = false;
         if let Err(e) = &saved {
@@ -1851,12 +1834,6 @@ impl TuiView {
                     "on "
                 };
                 t += &format!("\n  {on}  {k:<9} {name}");
-            }
-            if self.outcomes.is_some() {
-                let on = if self.hidden.approvals { "off" } else { "on " };
-                t += &format!(
-                    "\n  {on}  approvals Approvals (this run only; shown while something waits for you)"
-                );
             }
             for (name, why) in ALWAYS {
                 t += &format!("\n  on   {name}: {why}");

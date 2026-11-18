@@ -17,7 +17,7 @@ use synthesis_config::{Env, LoadContext, ProjectTrust, resolve_credential};
 use synthesis_settings::load_settings_with_managed;
 use synthesis_settings_ui::{Edit, Field, Kind, Origin, Section, SetError, SettingsStore};
 
-/// The Outcomes switch (`synthesis-settings-ui` schema). Written only by the person, after the disclosure.
+/// The Super Agent switch (`synthesis-settings-ui` schema). Written only by the person, after the disclosure.
 pub const ORCHESTRATOR: &str = "synt.orchestrator.enabled";
 
 /// Why the switch cannot be used on this platform (`windows`: native Windows, where outcomes are refused).
@@ -26,7 +26,7 @@ fn orchestrator_platform_lock(windows: bool) -> Option<String> {
 }
 
 /// Writes `synt.orchestrator.enabled` = `on` to the USER settings file through the same store the Settings rows
-/// use (managed lock, atomic write, other keys kept). The Outcomes tab calls this after its own confirm.
+/// use (managed lock, atomic write, other keys kept). The Super Agent tab calls this after its own confirm.
 pub fn write_orchestrator(env: &Env, on: bool) -> Result<(), String> {
     if let Some(why) = orchestrator_platform_lock(cfg!(windows)) {
         return Err(why);

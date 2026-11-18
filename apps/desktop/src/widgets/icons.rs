@@ -80,6 +80,10 @@ pub fn body(name: &str) -> Option<&'static str> {
         "gear" => {
             r#"<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>"#
         }
+        // the Super Agent title bar's left buttons: rail, back, forward (`super-agent-v7-1.svg`)
+        "rail" => r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>"#,
+        "nav-back" => r#"<path d="M15 6l-6 6 6 6"/>"#,
+        "nav-forward" => r#"<path d="M9 6l6 6-6 6"/>"#,
         "win-min" => r#"<path d="M5 12h14"/>"#,
         "win-max" => r#"<rect x="5" y="5" width="14" height="14" rx="1"/>"#,
         "win-close" => r#"<path d="M6 6l12 12M18 6L6 18"/>"#,
@@ -118,11 +122,15 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "pencil-check" => "editok",
         "cpu" => "cpu",
         "clock" => "clock",
-        "tui" | "super-agent" | "gear" | "win-min" | "win-max" | "win-close" => {
+        "tui" | "super-agent" | "gear" | "rail" | "nav-back" | "nav-forward" | "win-min"
+        | "win-max" | "win-close" => {
             return Some(match name {
                 "tui" => "tui",
                 "super-agent" => "super-agent",
                 "gear" => "gear",
+                "rail" => "rail",
+                "nav-back" => "nav-back",
+                "nav-forward" => "nav-forward",
                 "win-min" => "win-min",
                 "win-max" => "win-max",
                 _ => "win-close",
