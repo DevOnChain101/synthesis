@@ -7508,6 +7508,7 @@ dependencies = [
  "serde",
  "serde_json",
  "synthesis-app",
+ "synthesis-browser",
  "synthesis-cli-ui",
  "synthesis-cli-ui-base",
  "synthesis-cli-ui-render",

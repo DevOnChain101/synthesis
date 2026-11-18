@@ -136,6 +136,8 @@ pub struct TabState {
     /// painted text); the right-click menu of the chat.
     pub chat_all: bool,
     pub chat_menu: Option<super::chat_sel::ChatMenu>,
+    /// The Browser tab's live page view (view only).
+    pub bv: super::browser_view::BrowserPane,
 }
 
 impl TabState {
@@ -670,6 +672,11 @@ impl TuiView {
                 .p(px(14.))
                 .child(note(preview_note(self.ts.tab)))
                 .into_any_element();
+        }
+        if self.ts.tab == ChatTab::Browser
+            && let Some(live) = self.browser_live(cx)
+        {
+            return live;
         }
         let inner = match self.ts.tab {
             ChatTab::Chat | ChatTab::Outcomes => div(),

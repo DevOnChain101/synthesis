@@ -37,7 +37,7 @@ test-provider = ["synthesis-app/test-provider"]
 local-engine-for-tests = []
 # Development only: `--shot out.png --size WxH` renders the TUI view offscreen (headless Metal/wgpu, no window
 # server, no screen recording) to a PNG.
-shot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+shot = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dependencies]
 # Exact pins (ADR: docs/specs/desktop.md section 3). `gpui-pre` is the maintainers' snapshot of
@@ -54,6 +54,7 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 synthesis-app = { path = "../../crates/synthesis-app" }
 synthesis-mcp = { path = "../../crates/synthesis-mcp" }
 synthesis-tools = { path = "../../crates/synthesis-tools" }
+synthesis-browser = { path = "../../crates/synthesis-browser" }
 synthesis-events = { path = "../../crates/synthesis-events" }
 clap = { version = "4.6.7", features = ["derive"] }
 synthesis-config = { path = "../../crates/synthesis-config" }
@@ -75,7 +76,8 @@ synthesis-cli-ui-base = { path = "../../crates/synthesis-cli-ui-base" }
 time = "0.3"
 serde_json = "1.0.154"
 serde = { version = "1.0.229", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# the Browser tab decodes the live JPEG frames (zune-jpeg is already in the lock through gpui); png for the shot harness
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
 tokio-util = { version = "0.7.20", default-features = false }
 # idempotency keys of the commands the Outcomes tab sends (as the CLI)

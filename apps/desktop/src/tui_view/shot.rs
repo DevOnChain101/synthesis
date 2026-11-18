@@ -50,6 +50,11 @@ pub struct Args {
     outcomes: Option<super::approvals_ui::OutShot>,
     /// `--bare`: the Files and Browser tabs get no seeded project or screenshots (their empty states).
     bare: bool,
+    /// `--browser-frame`: the Browser tab shows a fixed frame from a fake browser (the live page view), with a
+    /// tab strip, and the agent cursor when the session is `--live`.
+    browser_frame: bool,
+    /// `--browser-go URL`: that address is typed into the URL bar and Enter pressed (a refused one shows its reason).
+    browser_go: Option<String>,
     /// `--expand`: every tool card open (Ctrl+O).
     expand: bool,
     /// `--dialog-scroll PX`: the docked dialog is scrolled down by this much (its options below the fold).
@@ -347,6 +352,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         outcomes: val("--outcomes").and_then(|v| super::approvals_ui::OutShot::parse(v)),
         window_active: val("--active-window").and_then(|v| v.parse().ok()),
         bare: args.iter().any(|a| a == "--bare"),
+        browser_frame: args.iter().any(|a| a == "--browser-frame"),
+        browser_go: val("--browser-go").cloned(),
         expand: args.iter().any(|a| a == "--expand"),
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
         rows: args.iter().any(|a| a == "--rows"),
@@ -733,6 +740,12 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Default::default();
     let slot = tui_slot.clone();
     let tab = a.tab;
+    // the fake browser's calls run here (the real ones run on the engine's runtime)
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()?;
+    let browser_frame = a.browser_frame.then(|| io.handle().clone());
     let win = cx.open_window(size(px(a.w), px(a.h)), |window, cx| {
         let tui = cx.new(|cx| match live {
             Some((l, c)) => {
@@ -743,7 +756,7 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None => TuiView::new(0., hidden),
         });
         let untrusted = a.live.as_ref().is_some_and(|l| l.untrusted);
-        tui.update(cx, |t, cx| {
+        tui.update(cx, |t, _| {
             t.ts.tab = tab;
             if untrusted && let Some(lu) = &mut t.live {
                 lu.live.ask_trust(
@@ -756,6 +769,32 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 lu.dlg_scroll.set_offset(gpui::point(px(0.), px(-n)));
             }
             t.drawer = a.drawer;
+            if let Some(h) = &browser_frame {
+                let page = super::browser_view::PageState {
+                    url: "https://app.test/dashboard".into(),
+                    title: "Dashboard".into(),
+                    tabs: vec!["Dashboard".into(), "Sign in".into(), "Docs".into()],
+                    active: 0,
+                };
+                let jpeg = super::browser_view::sample_jpeg(1280, 800);
+                t.ts.bv
+                    .attach(super::browser_view::FakeSource::new(jpeg, page), h.clone());
+                if let Some(u) = &a.browser_go {
+                    t.ts.bv.go(u);
+                }
+                if let Some(lu) = &mut t.live {
+                    // the cursor is shown while its age is not past the hold: a future stamp keeps it whole
+                    lu.live.view.panes.pointer = Some(synthesis_view::agent::Pointer {
+                        action: "click".into(),
+                        x: Some(640),
+                        y: Some(200),
+                        w: Some(1280),
+                        h: Some(800),
+                        target: None,
+                        ts: Some(now_ms() + 600_000),
+                    });
+                }
+            }
             if !a.active.is_empty() {
                 t.topo_force = Some((a.active.clone(), a.phase));
             }

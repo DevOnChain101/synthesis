@@ -528,7 +528,7 @@ pub fn cursor_on(
 
 /// The agent's cursor over a screenshot: a dot with a ring that pulses (still when `motion` is off), an arrow and
 /// the action's name, drawn at `(fx, fy)` of its parent at opacity `alpha`.
-fn cursor_overlay(fx: f32, fy: f32, alpha: f32, now: i64, motion: bool, label: &str) -> Div {
+pub fn cursor_overlay(fx: f32, fy: f32, alpha: f32, now: i64, motion: bool, label: &str) -> Div {
     let acc = hsla(t::ACCENT_LIGHT);
     let phase = if motion {
         (now.rem_euclid(1200)) as f32 / 1200.0

@@ -936,7 +936,7 @@ impl TuiView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.active {
+        if !self.active || self.bar_focused(window, cx) {
             return false;
         }
         if self.outcome_key(ks, window, cx) {
