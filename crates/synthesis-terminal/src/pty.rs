@@ -903,9 +903,10 @@ mod tests {
     /// Neither the parser nor input may wait for it, on any OS.
     #[test]
     fn a_blocked_writer_stalls_neither_the_parser_nor_input() {
-        struct Stuck(Receiver<()>);
+        struct Stuck(Receiver<()>, Arc<AtomicBool>);
         impl Write for Stuck {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                self.1.store(true, Ordering::SeqCst); // the writer is now blocked in a write
                 let _ = self.0.recv(); // returns (Err) only when the test drops `gate`
                 Err(std::io::Error::other("released"))
             }
@@ -915,8 +916,10 @@ mod tests {
         }
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
         let (gate, gate_rx) = mpsc::channel::<()>();
+        let blocked = Arc::new(AtomicBool::new(false));
+        let blocked_w = blocked.clone();
         let writer = std::thread::spawn(move || {
-            let mut w = Stuck(gate_rx);
+            let mut w = Stuck(gate_rx, blocked_w);
             while let Ok(d) = rx.recv() {
                 if w.write_all(&d).is_err() {
                     break;
@@ -935,7 +938,16 @@ mod tests {
         let t = Instant::now();
         parser.advance(&mut term, &b"\x1b[6n".repeat(10_000));
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
-        // the queue is full now (replies were accepted until it was): input times out, not hangs
+        // A loaded runner may start the writer thread only after the parse filled the queue, and
+        // its first take frees one slot. So wait until the writer is blocked in its write, then
+        // fill the queue to the brim: from here on nothing drains it.
+        let end = Instant::now() + Duration::from_secs(10);
+        while !blocked.load(Ordering::SeqCst) {
+            assert!(Instant::now() < end, "the writer never took a reply");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        while tx.try_send(vec![0]).is_ok() {}
+        // the queue is full: input times out, not hangs
         let t = Instant::now();
         let e = enqueue(
             &tx,
@@ -943,7 +955,11 @@ mod tests {
             &AtomicBool::new(false),
             Duration::from_secs(2),
         );
-        assert!(matches!(e, Err(Error::Io(ref io)) if io.kind() == std::io::ErrorKind::TimedOut));
+        assert!(
+            matches!(e, Err(Error::Io(ref io)) if io.kind() == std::io::ErrorKind::TimedOut),
+            "{e:?} after {:?}",
+            t.elapsed()
+        );
         assert!(
             t.elapsed() < Duration::from_millis(2200),
             "{:?}",
