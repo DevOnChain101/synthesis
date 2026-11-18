@@ -204,8 +204,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-apple-darwin,       os: macos-latest,     experimental: false }
-          - { target: aarch64-apple-darwin,      os: macos-latest,     experimental: false }
+          - { target: x86_64-apple-darwin,       os: macos-latest,     experimental: false, bundle_synt: true }
+          - { target: aarch64-apple-darwin,      os: macos-latest,     experimental: false, bundle_synt: true }
           - { target: x86_64-unknown-linux-gnu,  os: ubuntu-22.04,     experimental: false }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, experimental: true }
           - { target: x86_64-pc-windows-msvc,    os: windows-latest,   experimental: false }
@@ -244,9 +244,23 @@ jobs:
       # No display on the runners: --help exits in clap before any window code. (Windows release builds use the GUI subsystem, so only the exit code counts.)
       - name: Smoke test (--help exits 0)
         run: '"$BIN" --help >/dev/null'
-      - name: Package
+      # macOS bundles carry `synt` (Synthesis.app/Contents/MacOS/synt) so the app can start the orchestrator itself.
+      - name: Build synt for the macOS bundle (same flags as job build)
+        if: matrix.bundle_synt
+        run: cargo build --release --locked --target "$TARGET" -p synthesis-cli
+      - name: Prove the scripted test provider is absent from synt
+        if: matrix.bundle_synt
+        run: bash scripts/check-no-test-provider.sh "target/$TARGET/release/synt"
+      - name: package-desktop.mjs supports --synt (merge the PR that adds it first)
+        if: matrix.bundle_synt
         run: |
-          node scripts/package-desktop.mjs --target "$TARGET" --version "$VERSION" --bin "$BIN" --out dist
+          grep -Eq '\{[^}]*\bsynt\b[^}]*\} *= *a;' scripts/package-desktop.mjs || { echo "::error::scripts/package-desktop.mjs has no --synt flag: merge the desktop-outcomes PR (#174) first, otherwise the macOS bundle would ship without synt"; exit 1; }
+      - name: Package
+        env:
+          PKG_SYNT: ${{ matrix.bundle_synt && format('target/{0}/release/synt', matrix.target) || '' }}
+        run: |
+          synt_args=(); if [ -n "$PKG_SYNT" ]; then synt_args=(--synt "$PKG_SYNT"); fi
+          node scripts/package-desktop.mjs --target "$TARGET" --version "$VERSION" --bin "$BIN" ${synt_args[@]+"${synt_args[@]}"} --out dist
           ls -l dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
