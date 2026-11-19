@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::{AgentDef, stricter};
-use crate::context::agent_message_block;
+use crate::context::{agent_message_block, conductor_message_block, owner_message_block};
 use crate::exec::Res;
 use crate::harness::{AgentCtx, AgentEnd, AgentState, Harness, TaskRun};
 use crate::hub::{
@@ -364,9 +364,17 @@ impl Harness {
                     text: m.text.clone(),
                 });
             } else {
-                blocks.push(Block::Text {
-                    text: agent_message_block(m, &self.address(task, &m.from)),
-                });
+                // no `user.message` event for these: the view must not show them as the person's own words
+                let text = match m.origin {
+                    Origin::Owner { seq } => owner_message_block(seq, &m.text),
+                    Origin::Conductor { confirmed } => conductor_message_block(confirmed, &m.text),
+                    _ => agent_message_block(m, &self.address(task, &m.from)),
+                };
+                if m.origin.is_person_text() {
+                    // the auto judge reads it as the user's intent, before the task's own request (last)
+                    crate::classifier::add_user_text(&mut lock(&task.user_texts), &m.text);
+                }
+                blocks.push(Block::Text { text });
             }
         }
         blocks.extend(peer.into_iter().map(|text| Block::Text { text }));
@@ -713,6 +721,35 @@ impl Harness {
     /// agent at its next safe point; an idle sub-agent starts again. Never an approval. It is a
     /// user prompt like any other: the `UserPromptSubmit` hook runs first and can reject it.
     pub async fn send_user_message(&self, to: &str, text: String) -> Result<(), String> {
+        self.send_injected(to, text, "user", Origin::User).await
+    }
+
+    /// A line the person sent this worker through the outcome owner (super-agent-s1.md 4.6): the same
+    /// drain points, task check and `UserPromptSubmit` hook as `send_user_message`, but a fenced
+    /// `<owner_message>` block. The origin is set here and nowhere else.
+    pub async fn send_owner_message(&self, seq: u64, text: String) -> Result<(), String> {
+        self.send_injected(MAIN, text, "owner", Origin::Owner { seq })
+            .await
+    }
+
+    /// A request the person's conductor relays to the main agent (conductor.md 2.4). `confirmed`: the
+    /// person approved these exact bytes. A fenced `<conductor_message>` block, never an answer.
+    pub async fn send_conductor_message(
+        &self,
+        text: String,
+        confirmed: bool,
+    ) -> Result<(), String> {
+        self.send_injected(MAIN, text, "conductor", Origin::Conductor { confirmed })
+            .await
+    }
+
+    async fn send_injected(
+        &self,
+        to: &str,
+        text: String,
+        from: &str,
+        origin: Origin,
+    ) -> Result<(), String> {
         let task_id = self
             .hub
             .task_id()
@@ -747,10 +784,10 @@ impl Harness {
         }
         let m = Msg {
             id: uuid(),
-            from: "user".into(),
-            from_kind: "user".into(),
+            from: from.into(),
+            from_kind: from.into(),
             to,
-            origin: Origin::User,
+            origin,
             kind: Kind::Message,
             text,
             summary: None,

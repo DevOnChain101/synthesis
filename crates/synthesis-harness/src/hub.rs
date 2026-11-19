@@ -32,6 +32,16 @@ pub(crate) enum Origin {
     User,
     Agent,
     System,
+    /// The person, through the outcome owner (a worker's inbox, super-agent-s1.md 4.6). Set only
+    /// by `Harness::send_owner_message`; never parsed from text.
+    Owner {
+        seq: u64,
+    },
+    /// The Super Agent's conductor session, relayed by the host (conductor.md 2.4). `confirmed`: the
+    /// person approved these exact bytes. Set only by `Harness::send_conductor_message`.
+    Conductor {
+        confirmed: bool,
+    },
 }
 
 impl Origin {
@@ -40,6 +50,30 @@ impl Origin {
             Self::User => "user",
             Self::Agent => "agent",
             Self::System => "system",
+            Self::Owner { .. } => "owner",
+            Self::Conductor { .. } => "conductor",
+        }
+    }
+
+    /// Text the person approved or wrote: the auto judge may read it as the user's intent.
+    pub fn is_person_text(self) -> bool {
+        matches!(
+            self,
+            Self::User | Self::Owner { .. } | Self::Conductor { confirmed: true }
+        )
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::Origin::*;
+
+    #[test]
+    fn only_the_person_and_a_confirmed_conductor_count_as_user_text() {
+        assert!(User.is_person_text() && Owner { seq: 1 }.is_person_text());
+        assert!(Conductor { confirmed: true }.is_person_text());
+        for o in [Agent, System, Conductor { confirmed: false }] {
+            assert!(!o.is_person_text(), "{o:?}");
         }
     }
 }
