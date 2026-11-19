@@ -315,6 +315,22 @@ impl TuiView {
         }
     }
 
+    /// The folders of the Workspace list, newest first (the Super Agent form's picker), and whether the engine is
+    /// remote. A folder that is gone from this machine is left out (not for a remote engine).
+    pub fn known_folders(&self) -> (Vec<String>, bool) {
+        let Some(lu) = &self.live else {
+            return (vec![], false);
+        };
+        let remote = lu.live.engine.as_ref().is_some_and(|e| e.is_remote());
+        let v = lu.live.view.workspaces.workspaces.iter();
+        (
+            v.filter(|w| remote || w.available)
+                .map(|w| w.root.clone())
+                .collect(),
+            remote,
+        )
+    }
+
     /// Puts the keyboard focus back in the prompt (the shell shows this view again).
     pub fn focus_prompt(&self, window: &mut Window, cx: &mut gpui::App) {
         if let Some(lu) = &self.live {

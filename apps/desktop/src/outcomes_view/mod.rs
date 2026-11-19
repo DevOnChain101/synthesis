@@ -76,7 +76,10 @@ struct FormUi {
     checks: Entity<TextareaState>,
     scope: Entity<TextareaState>,
     budget: Entity<InputState>,
+    /// Holds the folder (its text is what is sent); typed into only for a remote engine, else the picker fills it.
     workspace: Entity<InputState>,
+    /// The picker's button on the Tab ring.
+    ws_focus: FocusHandle,
     confirm: FocusHandle,
     cancel: FocusHandle,
 }
@@ -526,6 +529,7 @@ impl FormUi {
                 cx,
             ),
             workspace,
+            ws_focus: cx.focus_handle().tab_stop(true),
             confirm: cx.focus_handle().tab_stop(true),
             cancel: cx.focus_handle().tab_stop(true),
         }
@@ -548,6 +552,79 @@ impl OutcomesView {
             scope: area(&ui.scope),
             workspace: line(&ui.workspace),
         }
+    }
+
+    /// A folder was picked: it goes into the field, and the base commit is read again if the folder changed.
+    pub(super) fn set_workspace(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ui) = &self.form_ui else { return };
+        ui.workspace
+            .update(cx, |s, cx| s.set_value(path.to_string(), window, cx));
+        let e = self.state.pick_workspace(path);
+        self.run(e, cx);
+        cx.notify();
+    }
+
+    /// "Choose folder...": the system dialog (one directory); a cancelled dialog changes nothing.
+    pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.ws_menu = None;
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose the workspace of the outcome".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(p) = paths.into_iter().next()
+            {
+                this.update_in(cx, |t, window, cx| {
+                    t.set_workspace(&p.to_string_lossy(), window, cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// The list item `i` was chosen (the last one, when the dialog is offered, opens the dialog).
+    pub(super) fn ws_choose(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.state.ws_items().get(i).cloned() {
+            Some(p) => self.set_workspace(&p, window, cx),
+            None => self.choose_folder(window, cx),
+        }
+    }
+
+    /// Keys of the picker: Enter, Space or Down on its button open the list; Up/Down move, Enter chooses, Esc
+    /// closes the list only. True when the key was the picker's.
+    fn ws_key(
+        &mut self,
+        key: &str,
+        held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ui) = &self.form_ui else {
+            return false;
+        };
+        let n = self.state.ws_len();
+        match (self.state.ws_menu, key) {
+            (Some(_), "escape") => self.state.ws_menu = None,
+            (Some(i), "up") => self.state.ws_menu = Some(i.saturating_sub(1)),
+            (Some(i), "down") => self.state.ws_menu = Some((i + 1).min(n.saturating_sub(1))),
+            (Some(_), "enter") if held => {}
+            (Some(i), "enter") => self.ws_choose(i, window, cx),
+            (None, "enter" | "space" | "down" | " ") if ui.ws_focus.is_focused(window) && !held => {
+                self.state.ws_menu = Some(0)
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     fn workspace_left(&mut self, cx: &mut Context<Self>) {
@@ -589,6 +666,9 @@ impl OutcomesView {
             return false;
         }
         let reviewing = self.state.form_review().is_some();
+        if self.ws_key(ev.keystroke.key.as_str(), ev.is_held, window, cx) {
+            return true;
+        }
         match ev.keystroke.key.as_str() {
             "escape" => {
                 self.close_form(cx);

@@ -513,7 +513,7 @@ impl OutcomesView {
             .border_color(if focused {
                 hsla(t::ACCENT)
             } else {
-                with_alpha(hsla(t::ACCENT), 0.35)
+                with_alpha(hsla(t::ACCENT), 0.7)
             })
             .rounded(px(10.))
             // the card holds the window's focus while it has the keys (the prompt does not then)

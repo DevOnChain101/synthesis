@@ -639,3 +639,77 @@ fn a_closed_gate_shows_the_refusal_in_the_dialog_instead_of_the_confirm(cx: &mut
         assert!(o.read_with(v, |o, _| o.state.guide.is_none()));
     }
 }
+
+#[test]
+fn the_picker_lists_the_default_first_then_known_folders_once_and_a_pick_resets_the_base_commit() {
+    let mut st = sample::state();
+    st.workspace = "/w/app".into();
+    st.known = vec!["/w/lib".into(), "/w/app".into(), "/x/other".into()];
+    // the default is preselected in the form and first in the list, no repeats; "Choose folder..." is one more item
+    assert_eq!(st.ws_items(), ["/w/app", "/w/lib", "/x/other"]);
+    assert_eq!(st.ws_len(), 4);
+    st.open_new();
+    assert_eq!(st.form.as_ref().unwrap().initial.workspace, "/w/app");
+    st.form
+        .as_mut()
+        .unwrap()
+        .head_known("/w/app", Ok("abc".into()));
+    st.ws_menu = Some(1);
+    // a folder from the list or the dialog: the list closes, the stale commit is replaced by a read of the new folder
+    let e = st.pick_workspace("/w/lib");
+    assert_eq!(st.ws_menu, None);
+    assert!(
+        matches!(e.as_slice(), [Effect::Head(w)] if w == "/w/lib"),
+        "{e:?}"
+    );
+    assert!(matches!(
+        st.form.as_ref().unwrap().head,
+        Some(form::Head::Resolving(_))
+    ));
+    // the same folder again reads nothing
+    assert!(st.pick_workspace("/w/lib").is_empty());
+}
+
+#[test]
+fn a_remote_engine_has_no_folder_dialog_item() {
+    let mut st = sample::state();
+    st.known = vec!["/srv/a".into()];
+    st.remote = true;
+    assert_eq!(st.ws_len(), st.ws_items().len());
+}
+
+#[test]
+fn folder_names_split_and_cut_in_the_middle() {
+    use super::form_view::{middle, split_folder};
+    assert_eq!(
+        split_folder("/Users/x/Vibe/app/"),
+        ("app".into(), "/Users/x/Vibe".into())
+    );
+    assert_eq!(split_folder(r"C:\w\app"), ("app".into(), r"C:\w".into()));
+    assert_eq!(middle("short", 10), "short");
+    let m = middle("/aaaaaaaaaa/bbbbbbbbbb/cccccccccc", 11);
+    assert_eq!(m.chars().count(), 11);
+    assert!(m.starts_with("/aaaa") && m.ends_with("cccc") && m.contains('\u{2026}'));
+}
+
+#[gpui::test]
+fn the_form_shows_a_read_only_picker_and_a_pick_fills_the_field(cx: &mut TestAppContext) {
+    let _g = theme::opacity_guard();
+    let (shell, v) = open(cx, 1400., 900.);
+    let o = view(&shell, v);
+    o.update(v, |o, _| o.state.known = vec!["/w/lib".into()]);
+    v.simulate_keystrokes("n");
+    v.run_until_parked();
+    assert!(v.debug_bounds("out-form-ws").is_some());
+    // local: no text field for the folder, the list opens from the button
+    o.update(v, |o, cx| {
+        o.state.ws_menu = Some(0);
+        cx.notify();
+    });
+    v.run_until_parked();
+    assert!(v.debug_bounds("out-form-ws-list").is_some());
+    o.update_in(v, |o, window, cx| o.ws_choose(1, window, cx));
+    v.run_until_parked();
+    assert_eq!(o.read_with(v, |o, cx| o.form_text(cx)).workspace, "/w/lib");
+    assert!(v.debug_bounds("out-form-ws-list").is_none());
+}
