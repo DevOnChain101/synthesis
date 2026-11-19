@@ -167,6 +167,19 @@ impl OutcomesView {
         })
     }
 
+    /// Like [`Self::click`] for a handler that needs the window.
+    pub(super) fn click_window(
+        &self,
+        cx: &Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |this, _: &ClickEvent, w, cx| {
+            w.focus(&this.focus, cx);
+            f(this, w, cx);
+            cx.notify();
+        })
+    }
+
     fn column(&self, pane: Pane, id: &'static str) -> Div {
         let on = self.state.pane == pane;
         div()

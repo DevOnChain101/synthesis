@@ -130,7 +130,12 @@ impl Shell {
         let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
         self.outcomes.update(cx, |o, _| o.set_visible(sa));
         if v == View::SuperAgent {
-            self.outcomes.update(cx, |o, cx| o.shown(window, cx));
+            let (known, remote) = self.tui.read(cx).known_folders();
+            self.outcomes.update(cx, |o, cx| {
+                o.state.known = known;
+                o.state.remote = remote;
+                o.shown(window, cx)
+            });
         }
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
         self.tui.update(cx, |t, cx| {
