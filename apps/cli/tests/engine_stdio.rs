@@ -1083,6 +1083,93 @@ fn a_headless_engine_without_a_cost_cap_refuses_to_start_a_session() {
     );
 }
 
+/// The conductor role over the wire (super-agent-s1.md 4.1): the model's `conductor_list` call becomes a
+/// `host.call` line, the client's `host.result` goes back to the model, and a role with no cap or an unknown
+/// role is refused.
+#[test]
+fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
+    let script = |_: &Path| {
+        json!([
+            {"tools": [{"id": "c1", "name": "conductor_list", "input": {}}]},
+            {"dump": "tools", "tools": [{"id": "c2", "name": "conductor_list", "input": {}}]},
+            {"dump": "messages"}
+        ])
+    };
+    let mut e = engine_with(
+        &["--host", "desktop", "--max-cost-usd", "2"],
+        Some(priced()),
+        true,
+        script,
+    );
+    e.hello();
+    let ws = e.ws.to_str().unwrap().to_string();
+    let id = e.call("start", json!({"cwd": ws, "role": "conductor"}));
+    let (_, r) = e.result(id);
+    assert!(r["error"].is_null(), "{r}");
+    e.call("send", json!({"text": "go"}));
+    let mut texts = vec![];
+    let mut calls = 0;
+    loop {
+        let seen = e.until("host.call or task_done", |v| {
+            v["msg"] == "host.call" || is_task_done(v)
+        });
+        for v in &seen {
+            if v["type"] == "assistant.message" {
+                texts.push(v["payload"]["content"].to_string());
+            }
+        }
+        let last = seen.last().unwrap();
+        if is_task_done(last) {
+            break;
+        }
+        calls += 1;
+        assert_eq!(last["tool"], "conductor_list");
+        let (call, host_id) = (
+            last["id"].clone(),
+            e.call(
+                "host.result",
+                json!({"id": last["id"], "ok": {"sessions": [{"handle": "s7"}]}}),
+            ),
+        );
+        let _ = (call, host_id);
+    }
+    assert_eq!(calls, 2, "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("\"conductor_list\"")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("s7")),
+        "the client's answer reached the model: {texts:?}"
+    );
+}
+
+#[test]
+fn a_conductor_role_needs_the_engines_own_cap_and_an_unknown_role_is_refused() {
+    let mut e = engine_with(
+        &["--host", "desktop"],
+        None,
+        false,
+        |_| json!([{"text": "x"}]),
+    );
+    e.hello();
+    let ws = e.ws.to_str().unwrap().to_string();
+    let id = e.call("start", json!({"cwd": ws, "role": "bogus"}));
+    let (_, r) = e.result(id);
+    assert!(
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("unknown role")),
+        "{r}"
+    );
+    let id = e.call("start", json!({"cwd": ws, "role": "conductor"}));
+    let (_, r) = e.result(id);
+    assert!(
+        r["error"].as_str().is_some_and(|e| e.contains("cost cap")),
+        "{r}"
+    );
+}
+
 /// `synt stop` from another process reaches the engine: the running task is cancelled.
 #[test]
 fn synt_stop_cancels_a_task_of_a_running_engine() {

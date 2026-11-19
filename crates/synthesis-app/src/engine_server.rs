@@ -22,7 +22,8 @@ use crate::engine_methods::{
 };
 use crate::engine_ops::{self, Tokens};
 use crate::host::{CancelSlot, Info, Live, lock};
-use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, Request, read_line};
+use crate::host_tools::{Relay, stub_specs};
+use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, ROLE_CONDUCTOR, Request, read_line};
 use crate::run::{Common, Front, Limits, Native, prepare};
 use crate::trust::{Grant, TRUST_CHANGED, TrustCheck, launch_common, root_of, trust_changed_error};
 use synthesis_view::workspaces::fold_dir;
@@ -144,6 +145,8 @@ struct Oob {
     /// still waits in the queue is applied to that send when the worker starts it (a cancel is never lost).
     sends_queued: AtomicU64,
     cancel_upto: AtomicU64,
+    /// P3a: the conductor role's calls to the client (`host.call`), answered here by `host.result`.
+    host: Arc<Relay>,
 }
 
 /// One engine process: one folder, one session at a time (restarted in place by the methods below).
@@ -159,6 +162,8 @@ struct Srv<'a> {
     /// A session was started once: `start` is one-shot, whatever happens to it later.
     began: bool,
     spec: Spec,
+    /// P3a: started with `role: "conductor"`; the session's tools are the client's, over `host.call`.
+    conductor: bool,
     /// The session-only trust of this process (carried across its restarts, gone with it).
     grant: Option<Grant>,
     /// Is the live session running with the folder trusted.
@@ -246,6 +251,17 @@ fn start(
     }
     let h = crate::homes(srv.env)?;
     let mut c = srv.common.clone();
+    if srv.conductor {
+        // the conductor's own session: no transcript yet (P3b adds the store kind), no worktree, memory or peers
+        c.no_session_store = true;
+        c.no_worktree = true;
+        c.no_memory = true;
+        c.peers = false;
+        c.permission_mode = Some(crate::run::ModeArg::Default);
+    }
+    if srv.conductor && spec.resume.is_some() {
+        return Err("start: a conductor session is never resumed".into());
+    }
     if let Some(id) = &spec.resume {
         srv.ctx(&h).check_resumable(id, cwd)?;
         // checked above: the same folder, so the workspace filter of `--resume` may stay off
@@ -284,7 +300,9 @@ fn start(
         }),
         on_stop: None,
         browser_view: None,
-        host_tools: None,
+        host_tools: srv
+            .conductor
+            .then(|| srv.oob.host.clone() as Arc<dyn crate::host_tools::HostTools>),
     };
     let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
@@ -1001,6 +1019,19 @@ fn read_requests(mut input: impl BufRead, wire: &Wire, oob: &Oob, queue: &mpsc::
                 }
                 wire.result(id, Ok(json!({})));
             }
+            Call::HostResult {
+                id: call,
+                ok,
+                error,
+            } => {
+                oob.host.deliver(
+                    call,
+                    match error {
+                        Some(e) => Err(e),
+                        None => Ok(ok.unwrap_or(Value::Null)),
+                    },
+                );
+            }
             Call::Answer { id: ask, choice } => {
                 let ok = oob.asks.answer(&ask, choice);
                 wire.result(id, Ok(json!({"accepted": ok})));
@@ -1048,6 +1079,16 @@ pub fn serve(
         cancel: Mutex::new(None),
         sends_queued: AtomicU64::new(0),
         cancel_upto: AtomicU64::new(0),
+        host: Arc::new(Relay::new(stub_specs, {
+            let wire = wire.clone();
+            Box::new(move |id, tool, input| {
+                wire.msg(&Out::HostCall {
+                    id,
+                    tool: tool.into(),
+                    input,
+                })
+            })
+        })),
     });
     let (queue, work) = mpsc::sync_channel::<Item>(QUEUE);
     {
@@ -1065,6 +1106,7 @@ pub fn serve(
         cwd: None,
         began: false,
         spec: Spec::default(),
+        conductor: false,
         grant: None,
         trusted: false,
         compacting: Arc::default(),
@@ -1092,10 +1134,21 @@ pub fn serve(
         let id = req.id;
         match req.call {
             Call::Start { .. } if srv.began => wire.result(id, Err("already started".into())),
-            Call::Start { cwd, resume, model } => {
+            Call::Start { role, .. } if role.as_deref().is_some_and(|r| r != ROLE_CONDUCTOR) => {
+                wire.result(id, Err("start: unknown role".into()))
+            }
+            Call::Start {
+                cwd,
+                resume,
+                model,
+                role,
+            } => {
                 let cwd = PathBuf::from(cwd);
                 let spec = Spec { resume, model };
-                match start(&srv, &cwd, &spec, None, true) {
+                srv.conductor = role.is_some();
+                let started = start(&srv, &cwd, &spec, None, true);
+                srv.conductor &= started.is_ok();
+                match started {
                     Ok((l, v, trusted)) => {
                         srv.adopt(l, trusted, &v);
                         srv.cwd = Some(cwd);

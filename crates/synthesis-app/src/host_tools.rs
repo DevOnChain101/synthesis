@@ -100,18 +100,94 @@ pub fn toolbox(host: Arc<dyn HostTools>) -> Result<ToolBox, String> {
     Ok(tb.only(&only))
 }
 
-/// P3a placeholder: one read tool that lists nothing. P3b replaces it with the conductor host.
+/// Longest wait for the host's answer on the stdio link: a card waits 10 minutes (conductor.md 2.5).
+const RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The conductor engine's host across the stdio link: each call becomes one `host.call` line (`send`), the
+/// client's `host.result` is handed to [`Relay::deliver`]. One call is outstanding at a time, because the
+/// client treats a second one as hostile (conductor.md 2.2).
+pub struct Relay {
+    next: std::sync::atomic::AtomicU64,
+    gate: tokio::sync::Mutex<()>,
+    pending: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<Result<Value, String>>)>>,
+    send: Box<dyn Fn(u64, &str, Value) -> bool + Send + Sync>,
+    specs: fn() -> Vec<ToolSpec>,
+}
+
+impl Relay {
+    pub fn new(
+        specs: fn() -> Vec<ToolSpec>,
+        send: Box<dyn Fn(u64, &str, Value) -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            next: 1.into(),
+            gate: tokio::sync::Mutex::new(()),
+            pending: Default::default(),
+            send,
+            specs,
+        }
+    }
+
+    /// The client's answer to call `id`; an id that is not the outstanding one is ignored.
+    pub fn deliver(&self, id: u64, r: Result<Value, String>) {
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if p.as_ref().is_some_and(|(i, _)| *i == id)
+            && let Some((_, tx)) = p.take()
+        {
+            let _ = tx.send(r);
+        }
+    }
+}
+
+impl HostTools for Relay {
+    fn specs(&self) -> Vec<ToolSpec> {
+        (self.specs)()
+    }
+
+    fn call<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            let _one = self.gate.lock().await;
+            let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, tx));
+            if !(self.send)(id, name, input) {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                return Err("the host is gone".into());
+            }
+            match tokio::time::timeout(RELAY_TIMEOUT, rx).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(_)) => Err("the host is gone".into()),
+                Err(_) => {
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                    Err("the host did not answer in time".into())
+                }
+            }
+        })
+    }
+}
+
+/// P3a placeholder set: one read tool that lists nothing. P3b replaces it with the conductor host's tools.
+pub fn stub_specs() -> Vec<ToolSpec> {
+    vec![ToolSpec {
+        name: "conductor_list".into(),
+        description: "List the sessions this window owns (none yet).".into(),
+        input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        side_effect: SideEffectClass::Read,
+        runtime: ToolRuntime::Builtin,
+    }]
+}
+
 pub struct ReadOnlyStub;
 
 impl HostTools for ReadOnlyStub {
     fn specs(&self) -> Vec<ToolSpec> {
-        vec![ToolSpec {
-            name: "conductor_list".into(),
-            description: "List the sessions this window owns (none yet).".into(),
-            input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}),
-            side_effect: SideEffectClass::Read,
-            runtime: ToolRuntime::Builtin,
-        }]
+        stub_specs()
     }
 
     fn call<'a>(&'a self, name: &'a str, _: Value) -> BoxFuture<'a, Result<Value, String>> {
@@ -174,6 +250,35 @@ mod tests {
             spec("conductor_a", SideEffectClass::Read, true),
         ]);
         assert!(toolbox(Arc::new(twice)).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_relay_keeps_one_call_outstanding_and_ignores_a_stale_answer() {
+        let sent = Arc::new(std::sync::Mutex::new(vec![]));
+        let s2 = sent.clone();
+        let relay = Arc::new(Relay::new(
+            stub_specs,
+            Box::new(move |id, tool, _| {
+                s2.lock().unwrap().push((id, tool.to_string()));
+                true
+            }),
+        ));
+        let (a, b) = (relay.clone(), relay.clone());
+        let first = tokio::spawn(async move { a.call("conductor_list", json!({})).await });
+        let second = tokio::spawn(async move { b.call("conductor_list", json!({})).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            1,
+            "the second call waits its turn"
+        );
+        relay.deliver(99, Ok(json!("stale"))); // not the outstanding id
+        relay.deliver(1, Ok(json!("one")));
+        assert_eq!(first.await.unwrap(), Ok(json!("one")));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        relay.deliver(2, Err("no".into()));
+        assert_eq!(second.await.unwrap(), Err("no".into()));
     }
 
     #[test]

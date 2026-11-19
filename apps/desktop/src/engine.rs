@@ -359,7 +359,21 @@ impl Engine {
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let (tx, rx) = unbounded();
         let (remote, v) = crate::remote::Remote::connect(launcher, project, tx.clone(), spec)?;
-        Ok((Self::from_report(remote, &v, project, tx), rx))
+        Ok((Self::from_report(remote, &v, project, tx, false), rx))
+    }
+
+    /// [`Engine::start_remote`] with the conductor role: the engine's tools are `host`'s, called over the link
+    /// (the launcher must give the engine its own `--max-cost-usd`).
+    pub fn start_remote_conductor(
+        launcher: &crate::remote::Launcher,
+        project: &Path,
+        spec: &crate::remote::StartSpec,
+        host: Arc<dyn synthesis_app::host_tools::HostTools>,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        let (tx, rx) = unbounded();
+        let (remote, v) =
+            crate::remote::Remote::connect_with(launcher, project, tx.clone(), spec, Some(host))?;
+        Ok((Self::from_report(remote, &v, project, tx, true), rx))
     }
 
     /// The window's view of a remote session from the engine's start report.
@@ -368,6 +382,7 @@ impl Engine {
         v: &Value,
         project: &Path,
         tx: UnboundedSender<UiMsg>,
+        conductor: bool,
     ) -> Self {
         let text = |k: &str| v[k].as_str().map(sanitize_for_display).unwrap_or_default();
         let list = |k: &str| {
@@ -420,7 +435,7 @@ impl Engine {
                 long_term: false,
             },
             followup: Arc::default(),
-            conductor: false,
+            conductor,
             browser: Arc::default(),
         }
     }
@@ -448,7 +463,7 @@ impl Engine {
             Ok(v) => {
                 let project = PathBuf::from(&self.cwd);
                 let distro = self.remote_distro.take();
-                let mut e = Self::from_report(remote, &v, &project, tx);
+                let mut e = Self::from_report(remote, &v, &project, tx, self.conductor);
                 e.remote_distro = distro;
                 Ok((e, rx, None, v))
             }
@@ -474,7 +489,9 @@ impl Engine {
 
     /// The conductor engine: the chat's model session, with no file, shell, web or MCP tool, no project
     /// instructions or memory, no peers, no worktree and no stored transcript until P3b adds the store kind.
-    /// Blocking, like `start_with`.
+    /// Blocking, like `start_with`. Tests only until P3b: the product start goes through `driver.rs` behind the WSL
+    /// gate like every local start.
+    #[cfg(any(feature = "shot", feature = "local-engine-for-tests"))]
     pub(crate) fn start_conductor(
         mut o: StartOpts,
         c: ConductorOpts,
