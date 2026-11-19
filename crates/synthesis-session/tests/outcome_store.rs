@@ -3979,6 +3979,17 @@ fn ro_base_commit_is_empty_for_read_only_and_required_for_write() {
     assert!(create_with_base(&e, &store, &read_only_contract(), "c0ffee").is_err());
     assert!(create_with_base(&e, &store, &contract(), "").is_err());
     assert_eq!(e.version(), 5, "no DDL: the store stays v5");
+    // a write goal's stored body has no `kind`: its hash is what it was before read-only goals
+    let w = create_with_base(&e, &store, &contract(), "c0ffee").unwrap();
+    let hash = w.get_contract(w.id(), 1).unwrap().1;
+    let body: String = e
+        .db()
+        .query_row("SELECT body FROM contracts WHERE hash=?1", [&hash], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(!body.contains("kind"), "{body}");
+    assert_eq!(hash, format!("{:x}", Sha256::digest(body.as_bytes())));
 }
 
 #[test]

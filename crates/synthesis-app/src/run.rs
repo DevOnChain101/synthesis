@@ -220,6 +220,13 @@ pub fn resolve_governed_sandbox_mode(
     }
 }
 
+/// A read-only attempt's sandbox: nothing may be written but the private tmp dir (`tmp_dir`); no
+/// path is protected inside a writable root that no longer exists.
+fn without_writable_roots(p: &mut SandboxPolicy) {
+    p.writable_roots.clear();
+    p.readonly_paths.clear();
+}
+
 /// The tools of a planning run and of a read-only attempt: an allow-list, never a deny-list.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
 
@@ -1501,10 +1508,7 @@ pub fn prepare(
         let mut p = standard_policy_git(ws, net.clone(), git_dir.as_deref())?;
         p.deny_paths.extend(synthesis_deny.clone());
         if read_only {
-            // nothing may be written but the private tmp dir; no path is protected inside a
-            // writable root that no longer exists
-            p.writable_roots.clear();
-            p.readonly_paths.clear();
+            without_writable_roots(&mut p);
         }
         p.readable_roots.extend(reads.iter().cloned());
         p.wsl_hide_drives = hide_drives;
@@ -3317,6 +3321,70 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 
 #[cfg(test)]
 mod tests {
+    /// `ro-sandbox-no-writable-root`: under the policy of a read-only attempt the OS sandbox lets a
+    /// command write the private tmp dir and nothing in the folder (the control writes before it).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_attempts_sandbox_has_no_writable_folder() {
+        use synthesis_sandbox::{NetworkPolicy, SandboxedCommand};
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("folder");
+        std::fs::create_dir_all(&root).unwrap();
+        let ws =
+            synthesis_core::WorkspaceContext::open("w", &root, &root, &[], base.join("art"), "s")
+                .unwrap();
+        let mut p = synthesis_tools::standard_policy_git(&ws, NetworkPolicy::Deny, None).unwrap();
+        assert!(
+            p.writable_roots.contains(&root),
+            "control: a write attempt may write the folder"
+        );
+        super::without_writable_roots(&mut p);
+        assert!(p.writable_roots.is_empty());
+        let run = |cmd: &str| {
+            let w = synthesis_sandbox::detect().wrap(
+                &p,
+                &SandboxedCommand {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), cmd.into()],
+                    env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+                    cwd: Some(root.clone()),
+                    clear_env: true,
+                },
+            );
+            let w = match w {
+                Ok(w) => w,
+                Err(e) => {
+                    assert!(
+                        std::env::var_os("SYNT_REQUIRE_BWRAP").is_none_or(|v| v.is_empty()),
+                        "SYNT_REQUIRE_BWRAP is set but the host cannot confine: {e}"
+                    );
+                    return None;
+                }
+            };
+            let mut c = std::process::Command::new(&w.program);
+            c.args(&w.args)
+                .env_clear()
+                .envs(w.env.iter().map(|(k, v)| (k, v)));
+            if let Some(d) = &w.cwd {
+                c.current_dir(d);
+            }
+            Some(c.output().unwrap().status.success())
+        };
+        let Some(tmp_ok) = run(&format!("echo x > {}/ok", base.join("art/tmp").display())) else {
+            println!("SKIP: this host has no enforcing sandbox");
+            return;
+        };
+        assert!(tmp_ok, "control: the private tmp dir is writable");
+        assert_eq!(run("echo x > a.txt"), Some(false));
+        assert_eq!(run("touch b.txt"), Some(false));
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "nothing was written"
+        );
+    }
+
     #[test]
     fn resource_limits_apply_settings_over_the_defaults() {
         let d = super::resource_limits(&Default::default());

@@ -700,7 +700,8 @@ mod tests {
     #[test]
     fn a_read_only_goal_asks_for_nothing_but_reading() {
         assert_eq!(validate_contract(&read_only()), Ok(()));
-        let bad: [(&str, fn(&mut Contract)); 6] = [
+        type Edit = fn(&mut Contract);
+        let bad: [(&str, Edit); 7] = [
             ("checked criterion", |c| {
                 c.criteria[0].manual = false;
                 c.criteria[0].required_trust = TrustClass::IndependentCheck;
@@ -723,6 +724,11 @@ mod tests {
                 c.envelope
                     .capabilities
                     .insert(Capability::TestsRun, CapabilityMode::ApprovalRequired);
+            }),
+            ("network", |c| {
+                c.envelope
+                    .capabilities
+                    .insert(Capability::NetworkOutbound, CapabilityMode::Allow);
             }),
             ("two workers", |c| {
                 c.envelope.budgets.max_parallel_workers = 2
