@@ -1984,7 +1984,7 @@ pub fn prepare(
     }
     // after memory starts: learned skills are installed by `start`
     let skills = crate::ctx::visible_skills(
-        synthesis_tools::discover_skills(env, &ws.root),
+        synthesis_tools::discover_session_skills(env, &ws.root, Some(&sid)),
         trust == ProjectTrust::Trusted,
     );
     let mut context = SynthesisContext::new(

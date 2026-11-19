@@ -7,6 +7,7 @@
 //! `untrusted_project_skill` wrapper. Directories are opened through cap-std, so a symlinked
 //! `SKILL.md` that points outside the skills directory is refused.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -31,12 +32,18 @@ pub struct LearnedSkill {
 
 pub type LearnedProvider = Arc<dyn Fn() -> Vec<LearnedSkill> + Send + Sync>;
 
-static LEARNED: Mutex<Option<LearnedProvider>> = Mutex::new(None);
+/// One source per session id: several engines in one process (the Super Agent host) must not see
+/// or clear each other's learned skills.
+static LEARNED: Mutex<BTreeMap<String, LearnedProvider>> = Mutex::new(BTreeMap::new());
 
-/// Installs (or clears) the source of learned skills, so this crate needs no database. They are
-/// listed and loaded as `learned:<name>`, after the user skills and before project ones.
-pub fn set_learned_skills(p: Option<LearnedProvider>) {
-    *LEARNED.lock().unwrap_or_else(|e| e.into_inner()) = p;
+/// Installs (or clears) session `sid`'s source of learned skills, so this crate needs no database.
+/// They are listed and loaded as `learned:<name>`, after the user skills and before project ones.
+pub fn set_learned_skills(sid: &str, p: Option<LearnedProvider>) {
+    let mut g = LEARNED.lock().unwrap_or_else(|e| e.into_inner());
+    match p {
+        Some(p) => g.insert(sid.to_string(), p),
+        None => g.remove(sid),
+    };
 }
 
 const MAX_SKILL_BYTES: u64 = 64 * 1024;
@@ -204,7 +211,7 @@ fn synthesis_home(env: &Env) -> Option<PathBuf> {
         })
 }
 
-fn load(env: &Env, project_root: &Path) -> Vec<Skill> {
+fn load(env: &Env, project_root: &Path, sid: Option<&str>) -> Vec<Skill> {
     let mut all: Vec<Skill> = BUNDLED
         .iter()
         .filter_map(|(d, raw)| parse(d, raw, SkillSource::Bundled, None))
@@ -212,7 +219,13 @@ fn load(env: &Env, project_root: &Path) -> Vec<Skill> {
     if let Some(home) = synthesis_home(env) {
         scan(&home, "skills", SkillSource::User, &mut all);
     }
-    let learned = LEARNED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let learned = sid.and_then(|s| {
+        LEARNED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(s)
+            .cloned()
+    });
     for l in learned.iter().flat_map(|p| p()) {
         let name = format!("learned:{}", l.name);
         if valid_name(&name) {
@@ -237,7 +250,16 @@ fn load(env: &Env, project_root: &Path) -> Vec<Skill> {
 /// Skills visible to a session, in precedence order. Reads only names and descriptions into
 /// the result; bodies are loaded again by the Skill tool when invoked.
 pub fn discover_skills(env: &Env, project_root: &Path) -> Vec<SkillInfo> {
-    load(env, project_root)
+    discover_session_skills(env, project_root, None)
+}
+
+/// `discover_skills` plus the learned skills of session `sid`.
+pub fn discover_session_skills(
+    env: &Env,
+    project_root: &Path,
+    sid: Option<&str>,
+) -> Vec<SkillInfo> {
+    load(env, project_root, sid)
         .into_iter()
         .map(|s| s.info)
         .collect()
@@ -248,7 +270,7 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         return ToolOutput::error("Skill: \"skill\" is required.");
     };
     let env = Env::from_pairs(ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())));
-    let skills = load(&env, &ctx.workspace.root);
+    let skills = load(&env, &ctx.workspace.root, Some(&ctx.session_id));
     let Some(s) = skills.iter().find(|s| s.info.name == name) else {
         let list = skills
             .iter()

@@ -37,7 +37,8 @@ pub use browser::{
 };
 pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
 pub use skill::{
-    LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_skills, set_learned_skills,
+    LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_session_skills,
+    discover_skills, set_learned_skills,
 };
 pub use synthesis_terminal::OutputSink;
 pub use tasks::{NeedsUser, Question, QuestionOption};
