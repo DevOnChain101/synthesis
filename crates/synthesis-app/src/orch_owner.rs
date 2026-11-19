@@ -865,6 +865,7 @@ impl<'a> Owner<'a> {
             return Err("workspace must be an existing absolute directory".into());
         }
         if read_only {
+            // an unknown home gives an empty path, which the check refuses
             let user = crate::homes(&Env::from_process())
                 .map(|h| h.user)
                 .unwrap_or_default();
@@ -937,18 +938,37 @@ impl<'a> Owner<'a> {
 }
 
 /// A read-only worker reads its whole folder, so the folder must not be, hold or sit above the
-/// user's home, Synthesis's own home (state, keys) or the filesystem root. `None`: allowed.
+/// user's home, Synthesis's own home (state, keys) or the filesystem root, and must not be, hold or
+/// sit inside a credential store (`~/.config`, `~/.docker`, `~/Library`, `~/.kube` ...: the
+/// `--sandbox-read` check). An unknown home fails closed. `None`: allowed. Used when the goal is
+/// created and again when an attempt starts (the folder may have been swapped for a symlink).
 pub(crate) fn read_only_folder_refusal(root: &Path, user: &Path, synt: &Path) -> Option<String> {
+    if user.as_os_str().is_empty() {
+        return Some("cannot tell where your home folder is (HOME or USERPROFILE is not set), so no folder can be checked".into());
+    }
     let real = |p: &Path| synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let root = real(root);
+    let root = match synthesis_core::canonicalize(root) {
+        Ok(r) => r,
+        Err(e) => return Some(format!("{}: {e}", root.display())),
+    };
     let (user, synt) = (real(user), real(synt));
+    let mut deny = synthesis_sandbox::credential_dirs(&user);
+    deny.extend(synthesis_sandbox::synthesis_state_paths(&synt));
+    let policy = synthesis_sandbox::SandboxPolicy {
+        deny_paths: deny,
+        ..Default::default()
+    };
+    let credential = policy.check_read_root(&root).err();
     let holds = |h: &Path| !h.as_os_str().is_empty() && h.starts_with(&root);
     let wide = root.parent().is_none()
         || holds(&user)
         || holds(&synt)
         || (!synt.as_os_str().is_empty() && root.starts_with(&synt));
-    wide.then(|| {
-        "a read-only goal needs a project folder: not your home folder, a folder that holds it, the filesystem root or Synthesis's own folder".into()
+    (wide || credential.is_some()).then(|| {
+        format!(
+            "a read-only goal needs a project folder: not your home folder, a folder that holds it, the filesystem root, a credential folder or Synthesis's own folder{}",
+            credential.map_or(String::new(), |c| format!(" ({c})"))
+        )
     })
 }
 
@@ -1362,6 +1382,26 @@ mod tests {
             }
         }
         assert!(refused(Path::new("/")));
+        // credential stores chosen directly, and a folder that holds one
+        for d in [".config", ".docker", ".kube", "Library", ".config/gh"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
+        for d in [".config", ".docker", ".kube", "Library", ".config/gh"] {
+            assert!(refused(&home.join(d)), "{d}");
+        }
+        // an unknown home fails closed
+        assert!(
+            read_only_folder_refusal(&proj, Path::new(""), &synt)
+                .is_some_and(|m| m.contains("home folder"))
+        );
+        // a project folder reached through a symlink to home is home
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            assert!(refused(&link));
+        }
     }
 
     #[test]

@@ -1370,6 +1370,12 @@ pub fn prepare(
         })
         .collect();
 
+    // the folder was checked when the goal was made; check again, a path can be swapped for a symlink since
+    if c.read_only_session
+        && let Some(why) = crate::orch_owner::read_only_folder_refusal(cwd, &h.user, &h.synthesis)
+    {
+        return Err(why);
+    }
     if c.confined() && !c.add_dir.is_empty() {
         return Err("an outcome attempt works in its worktree only: --add-dir is refused".into());
     }

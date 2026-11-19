@@ -1452,6 +1452,20 @@ fn ro_read_scope_is_the_folder_not_the_enclosing_repository_and_key_files_are_de
     std::fs::write(pkg.join("id_rsa"), "RSASECRET\n").unwrap();
     std::fs::write(pkg.join("x.pem"), "PEMSECRET\n").unwrap();
     std::os::unix::fs::symlink("../secret.txt", pkg.join("link")).unwrap();
+    // secret-shaped files INSIDE the declared folder
+    std::fs::create_dir_all(pkg.join(".git")).unwrap();
+    std::fs::create_dir_all(pkg.join(".docker")).unwrap();
+    std::fs::write(
+        pkg.join(".git/config"),
+        "[remote \"o\"]\n url = https://TOKENSECRET@h/x\n",
+    )
+    .unwrap();
+    std::fs::write(pkg.join(".pypirc"), "password = TOKENSECRET\n").unwrap();
+    std::fs::write(
+        pkg.join(".docker/config.json"),
+        "{\"auth\":\"TOKENSECRET\"}",
+    )
+    .unwrap();
     let rd = |id: &str, p: PathBuf| json!({"id": id, "name": "Read", "input": {"file_path": p}});
     let tools = json!([
         rd("t1", mono.join("secret.txt")),
@@ -1461,6 +1475,9 @@ fn ro_read_scope_is_the_folder_not_the_enclosing_repository_and_key_files_are_de
         rd("t5", pkg.join("id_rsa")),
         rd("t6", pkg.join("x.pem")),
         rd("t7", mono.join(".git/config")),
+        rd("t8", pkg.join(".git/config")),
+        rd("t9", pkg.join(".pypirc")),
+        rd("t10", pkg.join(".docker/config.json")),
     ]);
     let script =
         json!([{"text": "looking", "tools": tools}, {"text": "R"}, {"text": "R"}, {"text": "R"}]);
@@ -1501,6 +1518,9 @@ fn ro_read_scope_is_the_folder_not_the_enclosing_repository_and_key_files_are_de
         ("t3", "PARENTSECRET"),
         ("t5", "RSASECRET"),
         ("t6", "PEMSECRET"),
+        ("t8", "TOKENSECRET"),
+        ("t9", "TOKENSECRET"),
+        ("t10", "TOKENSECRET"),
     ] {
         let (err, shown) = result(id).unwrap_or_else(|| panic!("{id} unanswered: {log}"));
         assert!(err && !shown.contains(secret), "{id} was read: {shown}");
@@ -1611,4 +1631,30 @@ fn read_only_session_needs_an_attempt_session_and_takes_no_worktree() {
             .unwrap();
         assert_eq!(o.status.code(), Some(2), "{bad:?}");
     }
+}
+
+/// An attempt whose folder turns out to be the home folder (here through a symlink made after the
+/// goal was approved) does not start: the worker refuses it, and nothing is read.
+#[test]
+fn ro_attempt_refuses_a_folder_that_is_the_home_folder_through_a_symlink() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the read-only attempt cannot run");
+        println!("SKIP: no enforcing sandbox on this host");
+        return;
+    }
+    // the worker's HOME is `r.dir`
+    let home = std::fs::canonicalize(r.dir.path()).unwrap();
+    let link = home
+        .parent()
+        .unwrap()
+        .join(format!("homelink-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    let (_, _, _, settled) =
+        run_read_only(&r, &link, json!([{"text": "REPORT"}, {"text": "REPORT"}]));
+    let _ = std::fs::remove_file(&link);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    assert_eq!(settled.unwrap().end, WorkerEnd::Failed, "{log}");
+    assert!(log.contains("home folder"), "{log}");
 }
