@@ -1937,6 +1937,8 @@ fn usage_month_panel(s: &DashState, w: i64, h: i64, valign: VAlign, now: i64) ->
         COL_MUTED,
         &format!("{} {}", MONTHS[grid.month], grid.year),
     )];
+    // grid.weeks is column-major; a row is read across all columns, so both indices are needed
+    #[allow(clippy::needless_range_loop)]
     for r in 0..7 {
         let mut cells = vec![];
         for c in 0..weeks {
