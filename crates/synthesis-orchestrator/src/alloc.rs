@@ -185,17 +185,22 @@ impl Allocator<'_> {
         {
             return self.env_of(existing, &outcome_root, in_place);
         }
+        let mut payload = json!({
+            "session_id": session_id,
+            "work_item": spec.item,
+            "ordinal": spec.ordinal,
+            "source": source,
+            "base_commit": spec.base_commit,
+        });
+        // only an in-place row carries the key: a write row stays what older binaries wrote, so a
+        // replay after an upgrade finds the same effect
+        if in_place {
+            payload["in_place"] = json!(true);
+        }
         let outbox = NewOutbox {
             idempotency_key: key.clone(),
             kind: OutboxKind::WorktreeCreate,
-            payload: json!({
-                "session_id": session_id,
-                "work_item": spec.item,
-                "ordinal": spec.ordinal,
-                "source": source,
-                "base_commit": spec.base_commit,
-                "in_place": in_place,
-            }),
+            payload,
         };
         w.atomically(|tx| tx.enqueue(&outbox))?;
         let mut effect = WorktreeEffect {
