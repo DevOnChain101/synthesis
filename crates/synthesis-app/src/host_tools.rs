@@ -106,19 +106,20 @@ const RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 6
 /// The conductor engine's host across the stdio link: each call becomes one `host.call` line (`send`), the
 /// client's `host.result` is handed to [`Relay::deliver`]. One call is outstanding at a time, because the
 /// client treats a second one as hostile (conductor.md 2.2).
+type Pending = Option<(u64, tokio::sync::oneshot::Sender<Result<Value, String>>)>;
+/// Writes one `host.call` line (id, tool, input); false when the link is gone.
+pub type SendCall = Box<dyn Fn(u64, &str, Value) -> bool + Send + Sync>;
+
 pub struct Relay {
     next: std::sync::atomic::AtomicU64,
     gate: tokio::sync::Mutex<()>,
-    pending: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<Result<Value, String>>)>>,
-    send: Box<dyn Fn(u64, &str, Value) -> bool + Send + Sync>,
+    pending: std::sync::Mutex<Pending>,
+    send: SendCall,
     specs: fn() -> Vec<ToolSpec>,
 }
 
 impl Relay {
-    pub fn new(
-        specs: fn() -> Vec<ToolSpec>,
-        send: Box<dyn Fn(u64, &str, Value) -> bool + Send + Sync>,
-    ) -> Self {
+    pub fn new(specs: fn() -> Vec<ToolSpec>, send: SendCall) -> Self {
         Self {
             next: 1.into(),
             gate: tokio::sync::Mutex::new(()),

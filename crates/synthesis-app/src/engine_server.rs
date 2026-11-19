@@ -1349,6 +1349,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
+            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
         });
         // a queue of one that nobody reads: the worker is stuck on a slow call
         let (q, rx) = mpsc::sync_channel(1);
@@ -1407,6 +1408,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
+            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
         });
         let (q, rx) = mpsc::sync_channel(8);
         let input = std::io::Cursor::new(
