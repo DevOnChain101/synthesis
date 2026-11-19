@@ -17,8 +17,9 @@ use synthesis_tools::NeedsUser;
 
 use crate::asks::{Ask, AskApproval, Choice};
 
-/// Bumped when a message changes shape. The version handshake is exact: both numbers must match.
-pub const PROTOCOL: u32 = 4;
+/// Bumped when a message changes shape (5: `start.role` and `host.call`/`host.result`, so an older engine, which
+/// would ignore `role` and start a full coding session, fails at hello, before `start`). The version handshake is exact: both numbers must match.
+pub const PROTOCOL: u32 = 5;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
@@ -1073,7 +1074,13 @@ mod tests {
                 .unwrap_err()
                 .contains("protocol 3")
         );
-        assert_eq!(PROTOCOL, 4);
+        let v4 = format!(r#"{{"msg":"hello","version":"{VERSION}","protocol":4}}"#);
+        assert!(
+            check_hello(v4.as_bytes())
+                .unwrap_err()
+                .contains("protocol 4")
+        );
+        assert_eq!(PROTOCOL, 5);
         assert!(check_hello(br#"{"msg":"task_done","error":null}"#).is_err());
         assert!(check_hello(b"garbage").is_err());
     }

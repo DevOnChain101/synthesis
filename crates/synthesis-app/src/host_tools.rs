@@ -101,7 +101,7 @@ pub fn toolbox(host: Arc<dyn HostTools>) -> Result<ToolBox, String> {
 }
 
 /// Longest wait for the host's answer on the stdio link: a card waits 10 minutes (conductor.md 2.5).
-const RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+pub const RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// The conductor engine's host across the stdio link: each call becomes one `host.call` line (`send`), the
 /// client's `host.result` is handed to [`Relay::deliver`]. One call is outstanding at a time, because the

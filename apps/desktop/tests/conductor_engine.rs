@@ -372,3 +372,61 @@ fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
     );
     n.engine.close();
 }
+
+/// `prepare` alone (no `start_conductor`, no engine server) is enough: with `trust_project: true` and the
+/// conductor front end the project's hook still does not run; the same call without the role runs it.
+#[test]
+fn prepare_alone_drops_the_projects_trust_for_the_conductor_front_end() {
+    use synthesis_app::asks::{Ask, Asks, Notify};
+    use synthesis_app::host::Live;
+    use synthesis_app::run::{Front, Limits, Native, prepare};
+    let run = |conductor: bool| -> bool {
+        let d = dirs(json!([{"text": "ok"}]), priced());
+        let marker = d.ws.join("hook-ran");
+        let cmd = format!("cat >/dev/null; touch {}", marker.display());
+        std::fs::create_dir_all(d.ws.join(".synt")).unwrap();
+        std::fs::write(
+            d.ws.join(".synt/settings.json"),
+            json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": cmd}]}]}})
+                .to_string(),
+        )
+        .unwrap();
+        let (mut o, env) = opts(&d);
+        o.common.trust_project = true;
+        o.common.no_session_store = true;
+        o.common.no_worktree = true;
+        o.common.no_memory = true;
+        let asks = Asks::default();
+        let notify: Notify = Arc::new(|_: Ask| true);
+        let native = Native {
+            out: Box::new(std::io::sink()),
+            approver: asks.approver(notify.clone()),
+            input: asks.input(notify),
+            pre_start: None,
+            on_stop: None,
+            browser_view: None,
+            host_tools: conductor.then(|| Arc::new(Host::default()) as Arc<dyn HostTools>),
+        };
+        let limits = Limits {
+            max_cost_usd: Some(2.0),
+            ..Limits::default()
+        };
+        let p = prepare(&o.common, &d.ws, &env, &limits, Front::Native(native)).expect("prepared");
+        let (live, _) = Live::begin(p, asks, vec![], false).expect("begins");
+        let (tx, rx) = std::sync::mpsc::channel();
+        live.start_task("go".into(), vec![], false, move |r| {
+            let _ = tx.send(r);
+        })
+        .unwrap();
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("task ends")
+            .unwrap();
+        live.close();
+        marker.exists()
+    };
+    assert!(
+        run(false),
+        "control: the trusted project's hook runs in an ordinary session"
+    );
+    assert!(!run(true), "the conductor front end must not run it");
+}

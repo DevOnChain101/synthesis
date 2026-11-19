@@ -739,9 +739,14 @@ fn watchdog(s: &Arc<Shared>, idle: Duration) {
     while !s.dead.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(250));
         // a host call being answered (a card can wait for the person) is this side's wait, not the engine's silence
-        let owes = (s.running.load(Ordering::SeqCst) || !lock(&s.waiting).is_empty())
-            && !s.host_busy.load(Ordering::SeqCst);
-        if owes && !s.closing.load(Ordering::SeqCst) && s.idle() > idle {
+        let owes = s.running.load(Ordering::SeqCst) || !lock(&s.waiting).is_empty();
+        // the host call's own limit (plus slack) bounds the suspension: a host that never answers still ends it
+        let limit = if s.host_busy.load(Ordering::SeqCst) {
+            idle.max(synthesis_app::host_tools::RELAY_TIMEOUT + Duration::from_secs(60))
+        } else {
+            idle
+        };
+        if owes && !s.closing.load(Ordering::SeqCst) && s.idle() > limit {
             s.tell(UiMsg::BadEvent("the engine stopped answering".into()));
             s.kill();
             return;

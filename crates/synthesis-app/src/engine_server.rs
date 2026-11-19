@@ -250,6 +250,11 @@ fn start(
         return Err("start: cwd must be an existing absolute folder path on this machine".into());
     }
     let h = crate::homes(srv.env)?;
+    // a conductor session is never resumed (it is not stored): a restart of it (`trust.set`, `model.set`) is a fresh one
+    let spec = &Spec {
+        resume: spec.resume.clone().filter(|_| !srv.conductor),
+        ..spec.clone()
+    };
     let mut c = srv.common.clone();
     if srv.conductor {
         // the conductor's own session: no transcript yet (P3b adds the store kind), no worktree, memory or peers
@@ -258,9 +263,6 @@ fn start(
         c.no_memory = true;
         c.peers = false;
         c.permission_mode = Some(crate::run::ModeArg::Default);
-    }
-    if srv.conductor && spec.resume.is_some() {
-        return Err("start: a conductor session is never resumed".into());
     }
     if let Some(id) = &spec.resume {
         srv.ctx(&h).check_resumable(id, cwd)?;
@@ -285,6 +287,15 @@ fn start(
         &h.synthesis,
         user,
     );
+    // the conductor runs as in an untrusted folder whatever the launch rules decided: report and adopt that
+    let (mut c, verify) = (c, verify);
+    let verify = if srv.conductor {
+        c.trust_project = false;
+        c.project_exec_inert = false;
+        None
+    } else {
+        verify
+    };
     let trusted = c.trust_project;
     let notify: crate::asks::Notify = {
         let wire = srv.wire.clone();
@@ -1144,6 +1155,13 @@ pub fn serve(
                 role,
             } => {
                 let cwd = PathBuf::from(cwd);
+                if role.is_some() && resume.is_some() {
+                    wire.result(
+                        id,
+                        Err("start: a conductor session is never resumed".into()),
+                    );
+                    continue;
+                }
                 let spec = Spec { resume, model };
                 srv.conductor = role.is_some();
                 let started = start(&srv, &cwd, &spec, None, true);
