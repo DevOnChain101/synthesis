@@ -1,5 +1,5 @@
 //! The Browser tab as a page view (spec `docs/specs/terminal-browser.md` 2.3, 2.6, PR B2, VIEW ONLY): the live
-//! frames of the session's browser (`BrowserRuntime::view` / `frames`) drawn letterboxed into the pane, a URL bar
+//! frames of the session's browser (`BrowserRuntime::view` / `frames`) drawn 1:1 in device pixels into the pane (the page's viewport follows the pane, so it needs no letterbox), a URL bar
 //! whose navigation passes the browser's own `UrlPolicy`, back / forward / reload, the browser's tabs and the
 //! agent cursor. Nothing the person does in the pane reaches the page (input is B3); the pane says so.
 //!
@@ -22,7 +22,7 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use synthesis_browser::{BrowserError, Frame, PageView, UrlPolicy};
+use synthesis_browser::{BrowserError, Frame, PageView, UrlPolicy, ViewMetrics};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_harness::sanitize_for_display;
 use synthesis_tools::BrowserTap;
@@ -39,7 +39,7 @@ use crate::widgets::panes;
 pub const MAX_SIDE: u32 = 4096;
 /// The decoder may not allocate more than this for one frame (4096 x 4096 RGBA is 64 MiB).
 const MAX_ALLOC: u64 = 80 << 20;
-/// The size Chrome is asked to cast at (it scales down to it, keeping the aspect ratio).
+/// The cast size before the pane has reported its size (then the page keeps the browser's configured viewport).
 const VIEW_W: u32 = 1600;
 const VIEW_H: u32 = 1000;
 /// How often the pane asks the browser for its URL, title and tabs.
@@ -52,6 +52,8 @@ pub const MAX_TYPED: usize = 2048;
 const MAX_TABS: usize = 32;
 /// An address offered to the person's own browser is shown whole next to the button, so it must be short.
 const MAX_OPEN: usize = 200;
+/// A pane size or scale change must hold still this long before the page is resized (a window drag is one resize).
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 250 });
 /// A failed `view(true)` is tried again after this long, this many times in all.
 const START_RETRY: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 5000 });
 const MAX_STARTS: u32 = 5;
@@ -83,16 +85,17 @@ fn capped(mut p: PageState) -> PageState {
 
 // ---- pure parts -------------------------------------------------------------------------------------------
 
-/// Where a frame of `fw` x `fh` is drawn inside a pane of `pw` x `ph`: as large as fits, centred, aspect ratio kept
-/// (the bars at the sides or top and bottom are the letterbox). `None` for a size that is not a positive finite number.
-pub fn letterbox(pw: f32, ph: f32, fw: f32, fh: f32) -> Option<(f32, f32, f32, f32)> {
+/// Where a frame of `fw` x `fh` device pixels goes in a pane whose top-left is `(ox, oy)` (logical pixels) at `scale`:
+/// 1:1 (never resampled by the window), the origin on a whole device pixel, so the text stays as sharp as Chrome
+/// drew it. Where the frame does not reach (a resize in flight) the pane's own background shows. `None` for a size or
+/// scale that is not a positive finite number.
+pub fn place(ox: f32, oy: f32, fw: f32, fh: f32, scale: f32) -> Option<(f32, f32, f32, f32)> {
     let ok = |v: f32| v.is_finite() && v > 0.0;
-    if !(ok(pw) && ok(ph) && ok(fw) && ok(fh)) {
+    if !(ok(fw) && ok(fh) && ok(scale) && ox.is_finite() && oy.is_finite()) {
         return None;
     }
-    let k = (pw / fw).min(ph / fh);
-    let (w, h) = (fw * k, fh * k);
-    Some(((pw - w) / 2.0, (ph - h) / 2.0, w, h))
+    let snap = |v: f32| (v * scale).round() / scale;
+    Some((snap(ox), snap(oy), fw / scale, fh / scale))
 }
 
 /// What the person typed in the URL bar as an address: no scheme means https. `localhost:3000` is a host and a
@@ -247,7 +250,8 @@ pub trait Feed: Send {
 pub trait Source: Send + Sync + 'static {
     fn ready(&self) -> bool;
     fn check(&self, raw: &str) -> Result<String, String>;
-    fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>>;
+    /// Starts (`on`) or stops the live view; `fit` is the page viewport the pane wants (`None`: not known yet).
+    fn view(&self, on: bool, fit: Option<ViewMetrics>) -> BoxFuture<'static, Result<(), String>>;
     fn frames(&self) -> Option<Box<dyn Feed>>;
     fn page(&self) -> BoxFuture<'static, Result<PageState, String>>;
     fn act(&self, a: Act) -> BoxFuture<'static, Result<(), String>>;
@@ -285,12 +289,13 @@ impl Source for RuntimeSource {
         check_bar(rt.policy(), raw)
     }
 
-    fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>> {
+    fn view(&self, on: bool, fit: Option<ViewMetrics>) -> BoxFuture<'static, Result<(), String>> {
         let rt = self.pv();
         Box::pin(async move {
-            match rt {
-                Some(rt) => rt.view(on, VIEW_W, VIEW_H).await.map_err(why),
-                None => Ok(()),
+            match (rt, fit) {
+                (Some(rt), Some(m)) if on => rt.view_fit(true, m).await.map_err(why),
+                (Some(rt), _) => rt.view(on, VIEW_W, VIEW_H).await.map_err(why),
+                (None, _) => Ok(()),
             }
         })
     }
@@ -396,6 +401,8 @@ pub struct BrowserPane {
     pub refusal: Option<Refusal>,
     /// The image last handed to the window, to free it from the atlas when the next one comes.
     painted: Option<Arc<RenderImage>>,
+    /// The page viewport the pane wants (its size at the window's scale), reported by the drawing code.
+    fit: Arc<watch::Sender<Option<ViewMetrics>>>,
 }
 
 impl Default for BrowserPane {
@@ -411,6 +418,7 @@ impl Default for BrowserPane {
             bar_url: String::new(),
             refusal: None,
             painted: None,
+            fit: Arc::new(watch::channel(None).0),
         }
     }
 }
@@ -440,6 +448,7 @@ impl BrowserPane {
             self.shared.clone(),
             self.wake.clone(),
             rx,
+            self.fit.subscribe(),
             retarget.clone(),
         ));
         self.link = Some(Link {
@@ -617,6 +626,7 @@ async fn worker(
     shared: Arc<Mutex<Shared>>,
     mut wake: Sender<()>,
     mut want: watch::Receiver<bool>,
+    mut fit: watch::Receiver<Option<ViewMetrics>>,
     retarget: Arc<Notify>,
 ) {
     let mut applied = false;
@@ -631,7 +641,8 @@ async fn worker(
             retry = false;
             stop(&mut tasks);
             if on {
-                match src.view(true).await {
+                let m = *fit.borrow_and_update();
+                match src.view(true, m).await {
                     Ok(()) => {
                         tries = 0;
                         lock(&shared).note = None;
@@ -665,7 +676,7 @@ async fn worker(
                 let _ = wake.try_send(());
             } else {
                 lock(&shared).frame = None;
-                let _ = src.view(false).await;
+                let _ = src.view(false, None).await;
             }
             continue; // the wish may have changed during the call
         }
@@ -681,7 +692,23 @@ async fn worker(
                 applied = false;
             }
             _ = retarget.notified(), if applied => {
-                if let Err(e) = src.view(true).await {
+                let m = *fit.borrow_and_update();
+                if let Err(e) = src.view(true, m).await {
+                    lock(&shared).note = Some(e);
+                }
+            }
+            r = fit.changed(), if applied => {
+                if r.is_err() {
+                    break;
+                }
+                // wait until the size holds still, then resize the page once
+                while let Ok(r) = tokio::time::timeout(RESIZE_DEBOUNCE, fit.changed()).await {
+                    if r.is_err() {
+                        break;
+                    }
+                }
+                let m = *fit.borrow_and_update();
+                if let Err(e) = src.view(true, m).await {
                     lock(&shared).note = Some(e);
                 }
             }
@@ -690,7 +717,7 @@ async fn worker(
     // the pane is gone: no frame pump, and the browser stops casting
     stop(&mut tasks);
     if applied {
-        let _ = src.view(false).await;
+        let _ = src.view(false, None).await;
     }
 }
 
@@ -1005,6 +1032,7 @@ impl TuiView {
                     .child(sanitize_for_display(&n)),
             );
         }
+        let shown = frame.is_some();
         let pointer = self
             .live
             .as_ref()
@@ -1021,34 +1049,45 @@ impl TuiView {
             .border_color(hsla(t::BORDER))
             .bg(hsla(t::BG))
             .overflow_hidden();
-        col = col.child(match frame {
-            Some(d) => {
-                let frame_d = d.clone();
-                stage.child(
-                    canvas(
-                        move |b, window, cx| {
-                            prepare_page(b, &frame_d, pointer.as_ref(), now, motion, window, cx)
-                        },
-                        move |_, prepared, window, cx| {
-                            if let Some((at, cursor)) = prepared {
-                                let _ = window.paint_image(
-                                    at,
-                                    at,
-                                    Corners::default(),
-                                    d.image.clone(),
-                                    0,
-                                    false,
-                                );
-                                if let Some(mut el) = cursor {
-                                    el.paint(window, cx);
-                                }
-                            }
-                        },
-                    )
-                    .size_full(),
-                )
-            }
-            None => stage
+        let fit = bp.fit.clone();
+        let frame_d = frame.clone();
+        // The canvas is always there: it reports the pane's size (the page's viewport follows it) and paints the frame.
+        let stage = stage.child(
+            canvas(
+                move |b, window, cx| {
+                    let (w, h) = (
+                        f64::from(f32::from(b.size.width)),
+                        f64::from(f32::from(b.size.height)),
+                    );
+                    let want = ViewMetrics::fit(w, h, f64::from(window.scale_factor()));
+                    fit.send_if_modified(|c| (*c != want).then(|| *c = want).is_some());
+                    frame_d
+                        .as_ref()
+                        .and_then(|d| prepare_page(b, d, pointer.as_ref(), now, motion, window, cx))
+                },
+                move |_, prepared, window, cx| {
+                    if let (Some((at, cursor)), Some(d)) = (prepared, &frame) {
+                        let _ = window.paint_image(
+                            at,
+                            at,
+                            Corners::default(),
+                            d.image.clone(),
+                            0,
+                            false,
+                        );
+                        if let Some(mut el) = cursor {
+                            el.paint(window, cx);
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        );
+        col = col.child(if shown {
+            stage
+        } else {
+            stage
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1056,7 +1095,7 @@ impl TuiView {
                 .child(frame_err.map_or_else(
                     || "Waiting for the first frame...".to_string(),
                     |e| format!("Frame not shown: {e}"),
-                )),
+                ))
         });
         col = col.child(
             div().text_size(px(12.)).text_color(dim()).child(
@@ -1075,8 +1114,8 @@ impl TuiView {
     }
 }
 
-/// Where the frame goes inside `b` (letterboxed), with the agent cursor laid out over it (layout is only allowed
-/// while preparing, so the cursor is built here and painted later).
+/// Where the frame goes inside `b` (1:1 in device pixels), with the agent cursor laid out over it (layout is only
+/// allowed while preparing, so the cursor is built here and painted later).
 fn prepare_page(
     b: Bounds<gpui::Pixels>,
     d: &Decoded,
@@ -1086,16 +1125,14 @@ fn prepare_page(
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> Option<(Bounds<gpui::Pixels>, Option<AnyElement>)> {
-    let (x, y, w, h) = letterbox(
-        f32::from(b.size.width),
-        f32::from(b.size.height),
+    let (x, y, w, h) = place(
+        f32::from(b.origin.x),
+        f32::from(b.origin.y),
         d.w as f32,
         d.h as f32,
+        window.scale_factor(),
     )?;
-    let at = Bounds::new(
-        point(b.origin.x + px(x), b.origin.y + px(y)),
-        size(px(w), px(h)),
-    );
+    let at = Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
     let cursor = pointer
         .zip(pointer.and_then(|p| panes::cursor_on(p, d.w, d.h)))
         .map(|(p, (fx, fy))| {
@@ -1133,6 +1170,8 @@ pub struct FakeSource {
     pub view_delay: Mutex<Duration>,
     /// The next this-many `view(true)` calls fail.
     pub view_fails: std::sync::atomic::AtomicUsize,
+    /// The page viewport of every `view(true)` call, in order.
+    pub fits: Mutex<Vec<Option<ViewMetrics>>>,
     flight: Arc<(
         std::sync::atomic::AtomicUsize,
         std::sync::atomic::AtomicUsize,
@@ -1149,6 +1188,7 @@ impl FakeSource {
             policy: UrlPolicy::default(),
             view_delay: Mutex::default(),
             view_fails: Default::default(),
+            fits: Mutex::default(),
             flight: Arc::default(),
         })
     }
@@ -1191,9 +1231,12 @@ impl Source for FakeSource {
     fn check(&self, raw: &str) -> Result<String, String> {
         check_bar(&self.policy, raw)
     }
-    fn view(&self, on: bool) -> BoxFuture<'static, Result<(), String>> {
+    fn view(&self, on: bool, fit: Option<ViewMetrics>) -> BoxFuture<'static, Result<(), String>> {
         use std::sync::atomic::Ordering::SeqCst;
         self.log(format!("view({on})"));
+        if on {
+            self.fits.lock().unwrap().push(fit);
+        }
         // one caller at a time in the tests, so load then subtract is enough
         let fail =
             on && self.view_fails.load(SeqCst) > 0 && self.view_fails.fetch_sub(1, SeqCst) > 0;
@@ -1249,30 +1292,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_frame_is_scaled_to_fit_and_centred() {
-        // wider pane: bars left and right
+    fn the_frame_is_drawn_one_to_one_on_a_device_pixel() {
+        // 2x: a 1800x1200 px frame is 900x600 logical; the origin is snapped to a half logical pixel
         assert_eq!(
-            letterbox(1000., 400., 1280., 800.),
-            Some((180., 0., 640., 400.))
-        );
-        // taller pane: bars above and below
-        assert_eq!(
-            letterbox(640., 800., 1280., 800.),
-            Some((0., 200., 640., 400.))
-        );
-        // exact fit and a frame smaller than the pane (scaled up)
-        assert_eq!(
-            letterbox(1280., 800., 1280., 800.),
-            Some((0., 0., 1280., 800.))
+            place(10., 20., 1800., 1200., 2.),
+            Some((10., 20., 900., 600.))
         );
         assert_eq!(
-            letterbox(200., 200., 100., 50.),
-            Some((0., 50., 200., 100.))
+            place(10.3, 20.2, 1800., 1200., 2.),
+            Some((10.5, 20., 900., 600.))
         );
+        // 1x, and a fractional scale (1.5: 3 device pixels are 2 logical)
+        assert_eq!(place(0., 0., 640., 400., 1.), Some((0., 0., 640., 400.)));
+        assert_eq!(place(0., 0., 150., 150., 1.5), Some((0., 0., 100., 100.)));
+        // never scaled to the pane: a frame bigger than the pane keeps its size (the pane clips it)
+        assert_eq!(place(0., 0., 4000., 100., 2.), Some((0., 0., 2000., 50.)));
         // no size, no frame
-        assert_eq!(letterbox(0., 400., 1280., 800.), None);
-        assert_eq!(letterbox(400., 400., 0., 800.), None);
-        assert_eq!(letterbox(f32::NAN, 400., 10., 10.), None);
+        assert_eq!(place(0., 0., 0., 800., 2.), None);
+        assert_eq!(place(0., 0., 800., 800., 0.), None);
+        assert_eq!(place(f32::NAN, 0., 10., 10., 1.), None);
+    }
+
+    #[test]
+    fn the_page_is_resized_once_after_the_pane_size_holds_still() {
+        let page = PageState::default();
+        let fake = FakeSource::new(sample_jpeg(16, 16), page);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut bp = BrowserPane::default();
+        bp.attach(fake.clone(), rt.handle().clone());
+        bp.sync(true);
+        wait("the view on", || fake.calls() == ["view(true)"]);
+        let m = |w| ViewMetrics::fit(w, 600., 2.);
+        // before the pane reported a size: the browser's own viewport
+        assert_eq!(*fake.fits.lock().unwrap(), [None]);
+        // a drag: many sizes in a row are one resize, to the last
+        for w in [800., 810., 820., 830.] {
+            bp.fit.send_replace(m(w));
+            std::thread::sleep(RESIZE_DEBOUNCE / 5);
+        }
+        wait("the resize", || fake.fits.lock().unwrap().len() == 2);
+        std::thread::sleep(RESIZE_DEBOUNCE * 3);
+        assert_eq!(*fake.fits.lock().unwrap(), [None, m(830.)]);
+        // the same size again is no resize; a hide and show starts with the size the pane has
+        bp.fit.send_replace(m(830.));
+        bp.sync(false);
+        wait("view(false)", || {
+            fake.calls().last().is_some_and(|c| c == "view(false)")
+        });
+        bp.sync(true);
+        wait("view(true) again", || fake.fits.lock().unwrap().len() == 3);
+        assert_eq!(fake.fits.lock().unwrap()[2], m(830.));
     }
 
     #[test]
