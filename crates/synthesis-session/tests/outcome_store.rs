@@ -142,6 +142,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     caps.insert(Capability::TestsRun, CapabilityMode::Allow);
     Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "implement the endpoint".into(),
         criteria: vec![crit("c1"), crit("c2")],
@@ -3923,4 +3924,120 @@ fn the_number_of_plan_runs_of_an_outcome_is_bounded() {
         }
     }
     assert_eq!(made, MAX_PLAN_RUNS);
+}
+
+fn read_only_contract() -> Contract {
+    let mut c = contract();
+    c.kind = ContractKind::ReadOnly;
+    c.criteria = ["report", "r1"]
+        .iter()
+        .map(|id| ContractCriterion {
+            id: (*id).into(),
+            text: format!("criterion {id}"),
+            mandatory: true,
+            manual: true,
+            required_trust: TrustClass::HumanReview,
+            check_ids: vec![],
+        })
+        .collect();
+    c.envelope.allowed_paths = vec![];
+    c.envelope.denied_paths = vec![];
+    c.envelope.capabilities = BTreeMap::from([(Capability::RepoRead, CapabilityMode::Allow)]);
+    c.envelope.budgets.max_parallel_workers = 1;
+    c
+}
+
+fn create_with_base(
+    e: &Env,
+    store: &Store,
+    c: &Contract,
+    base: &str,
+) -> Result<OutcomeWriter, Error> {
+    store.create_outcome(NewOutcome {
+        workspace: &e.ws(),
+        base_commit: base.into(),
+        contract: c,
+        policy: &policy(),
+    })
+}
+
+/// A read-only goal has no base commit (no git needed) and a write goal always has one: neither
+/// can be created with the other's base, so a write contract cannot be stored as a read-only one
+/// by leaving the commit out, nor the reverse.
+#[test]
+fn ro_base_commit_is_empty_for_read_only_and_required_for_write() {
+    let e = env();
+    let store = e.v5();
+    let w = create_with_base(&e, &store, &read_only_contract(), "").unwrap();
+    let o = w.get_outcome(w.id()).unwrap();
+    assert_eq!(o.base_commit, "");
+    assert_eq!(
+        w.get_contract(w.id(), 1).unwrap().0.kind,
+        ContractKind::ReadOnly
+    );
+    drop(w);
+    assert!(create_with_base(&e, &store, &read_only_contract(), "c0ffee").is_err());
+    assert!(create_with_base(&e, &store, &contract(), "").is_err());
+    assert_eq!(e.version(), 5, "no DDL: the store stays v5");
+}
+
+#[test]
+fn ro_revise_kind_refused_in_both_directions_and_for_a_bare_row() {
+    for (start, other, base) in [
+        (contract(), read_only_contract(), "c0ffee"),
+        (read_only_contract(), contract(), ""),
+    ] {
+        let e = env();
+        let store = e.v5();
+        let mut w = create_with_base(&e, &store, &start, base).unwrap();
+        go(&mut w, OutcomeState::ContractPending);
+        let h = contract_hash(&w);
+        w.approve_contract(1, &h, "user").unwrap();
+        let mut p = plan();
+        if start.kind == ContractKind::ReadOnly {
+            p.items = vec![PlanItem {
+                key: "research".into(),
+                kind: WorkItemKind::Agent,
+                requires: vec![],
+                capabilities: vec!["repo.read".into()],
+                covers: vec!["report".into(), "r1".into()],
+                title: String::new(),
+                instructions: String::new(),
+            }];
+        }
+        w.insert_plan(&p).unwrap();
+        go(&mut w, OutcomeState::Ready);
+        go(&mut w, OutcomeState::Running);
+        go(&mut w, OutcomeState::Blocked);
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        let mut next = other.clone();
+        next.envelope.budgets.max_cost_usd = 9.0;
+        let err = w
+            .atomically(|tx| tx.revise_contract(rev, next.clone()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("kind of a goal never changes"),
+            "{err}"
+        );
+        // a row written around the API is refused when a person tries to approve it
+        let mut bare = other.clone();
+        bare.version = 2;
+        let body = serde_json::to_value(&bare).unwrap().to_string();
+        let hash = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        e.db()
+            .execute(
+                "INSERT INTO contracts(outcome_id,version,hash,body) SELECT outcome_id,2,?1,?2 FROM contracts WHERE version=1",
+                params![hash, body],
+            )
+            .unwrap();
+        let err = w.approve_contract(2, &hash, "user").unwrap_err();
+        assert!(
+            err.to_string().contains("kind of a goal never changes"),
+            "{err}"
+        );
+        assert_eq!(w.get_outcome(w.id()).unwrap().contract_version, 1);
+    }
 }

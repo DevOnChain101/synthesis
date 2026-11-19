@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use synthesis_core::outcome::{
-    Actor, AttemptId, AttemptState, CommandId, Contract, DecisionGuards, DecisionId, DecisionState,
-    EvidenceId, OutcomeGuards, OutcomeId, OutcomeState, Plan, TrustClass, WorkItemGuards,
-    WorkItemId, WorkItemKind, WorkItemState, diff_contracts, validate_contract, validate_plan,
+    Actor, AttemptId, AttemptState, CommandId, Contract, ContractKind, DecisionGuards, DecisionId,
+    DecisionState, EvidenceId, OutcomeGuards, OutcomeId, OutcomeState, Plan, TrustClass,
+    WorkItemGuards, WorkItemId, WorkItemKind, WorkItemState, diff_contracts, validate_contract,
+    validate_plan,
 };
 use synthesis_core::{PermissionMode, TaskStatus, WorkspaceContext};
 use synthesis_events::{Budget, outcome as ev};
@@ -1417,6 +1418,12 @@ impl Store {
         need_v5(&connect(self.home(), true)?)?;
         validate_contract(new.contract).map_err(refuse)?;
         new.policy.check(new.contract)?;
+        // a read-only goal has no base commit and never a git requirement; a write goal always has one
+        if (new.contract.kind == ContractKind::ReadOnly) != new.base_commit.is_empty() {
+            return Err(Error::Invalid(
+                "a write goal needs a base commit, and a read-only goal has none".into(),
+            ));
+        }
         let id = OutcomeId::parse(&new_uuid()).map_err(refuse)?;
         // no Node transcript mirror: a control session holds events only
         let mut w = self.create_kind(
@@ -2754,6 +2761,10 @@ impl OutcomeTx<'_, '_> {
         // the ceilings may have tightened since the contract was created
         let contract: Contract = serde_json::from_str(&body)?;
         self.policy.check(&contract)?;
+        if rebinds {
+            // a row written around `revise_contract` (a bare INSERT) is held to the same rule
+            self.same_kind(&contract)?;
+        }
         let at = ts(self.now);
         let m = contract_mac(
             self.et.key(),
@@ -2836,6 +2847,7 @@ impl OutcomeTx<'_, '_> {
     fn insert_contract(&mut self, contract: &Contract) -> Result<String> {
         validate_contract(contract).map_err(refuse)?;
         self.policy.check(contract)?;
+        self.same_kind(contract)?;
         let mut body = serde_json::to_value(contract)?;
         self.et.redact_value(&mut body);
         let hash = body_hash(&body);
@@ -2844,6 +2856,19 @@ impl OutcomeTx<'_, '_> {
             params![self.id.as_str(), contract.version, hash, body.to_string()],
         )?;
         Ok(hash)
+    }
+
+    /// A goal keeps its kind for good (a write goal never becomes read-only, nor the reverse): the
+    /// outcome's base commit and its attempts are made for one kind. A person who wants the other
+    /// kind creates a new goal.
+    fn same_kind(&self, next: &Contract) -> Result<()> {
+        let o = self.outcome()?;
+        if self.stored_contract(o.contract_version)?.kind != next.kind {
+            return Err(Error::Invalid(
+                "the kind of a goal never changes: create a new goal instead".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Is an attempt of this outcome still `starting` or `running`?

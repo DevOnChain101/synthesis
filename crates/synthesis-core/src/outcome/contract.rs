@@ -366,11 +366,34 @@ pub struct ContractCheck {
 pub const MAX_CHECKS: usize = 32;
 pub const MAX_CHECK_COMMAND_CHARS: usize = 512;
 
+/// What the outcome may do to the folder. Part of the approved body, so the contract hash and its
+/// MAC cover it; a revision cannot change it (the store refuses), and a write contract can never
+/// become a read-only one (or the reverse) without a new outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractKind {
+    /// Today's outcome: attempts edit a worktree and independent checks verify them.
+    #[default]
+    Write,
+    /// Research or review: attempts only read the folder in place and send back a report.
+    ReadOnly,
+}
+
+impl ContractKind {
+    pub fn is_write(&self) -> bool {
+        *self == Self::Write
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
     /// 1-based; a change is a new version, never an edit (ADR-017).
     pub version: u32,
+    /// Absent from the stored JSON for a write contract (older contracts keep their hash, and a
+    /// binary from before read-only goals refuses the unknown field: fail closed).
+    #[serde(default, skip_serializing_if = "ContractKind::is_write")]
+    pub kind: ContractKind,
     pub goal: String,
     pub criteria: Vec<ContractCriterion>,
     pub envelope: Envelope,
@@ -391,6 +414,8 @@ pub enum ContractError {
     Envelope(EnvelopeError),
     /// A check with a bad id or command, a duplicate, or a criterion naming an unknown check.
     Check(String),
+    /// A read-only goal that asks for more than reading.
+    ReadOnly(&'static str),
 }
 
 impl std::fmt::Display for ContractError {
@@ -410,6 +435,7 @@ impl std::fmt::Display for ContractError {
             ),
             Self::Envelope(e) => write!(f, "{e}"),
             Self::Check(m) => write!(f, "checks: {m}"),
+            Self::ReadOnly(m) => write!(f, "read-only goal: {m}"),
         }
     }
 }
@@ -464,6 +490,9 @@ pub fn validate_contract(c: &Contract) -> Result<(), ContractError> {
         ));
     }
     validate_envelope(&c.envelope)?;
+    if c.kind == ContractKind::ReadOnly {
+        validate_read_only(c)?;
+    }
     if c.checks.len() > MAX_CHECKS {
         return Err(ContractError::Check(format!(
             "more than {MAX_CHECKS} checks"
@@ -504,6 +533,32 @@ pub fn validate_contract(c: &Contract) -> Result<(), ContractError> {
     Ok(())
 }
 
+/// A read-only goal is the goal and a budget: only a person's review can satisfy it, and it asks
+/// for nothing but reading (S5: nothing here lets an attempt write, run or reach out).
+fn validate_read_only(c: &Contract) -> Result<(), ContractError> {
+    let no = ContractError::ReadOnly;
+    if c.criteria.iter().any(|k| !k.manual) {
+        return Err(no("every criterion is a person's review (manual)"));
+    }
+    if !c.checks.is_empty() {
+        return Err(no("it has no checks"));
+    }
+    if !c.envelope.allowed_paths.is_empty() {
+        return Err(no("it has no write scope (allowed_paths)"));
+    }
+    if c.envelope
+        .capabilities
+        .iter()
+        .any(|(&cap, &m)| cap != Capability::RepoRead && m != CapabilityMode::Deny)
+    {
+        return Err(no("only repo.read may be allowed"));
+    }
+    if c.envelope.budgets.max_parallel_workers != 1 {
+        return Err(no("max_parallel_workers must be 1"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
@@ -519,6 +574,25 @@ pub(crate) mod fixtures {
         }
     }
 
+    /// A valid read-only goal: the implicit `report` criterion and one rubric line.
+    pub fn read_only() -> Contract {
+        let mut c = contract(&[]);
+        c.kind = ContractKind::ReadOnly;
+        c.criteria = ["report", "r1"]
+            .iter()
+            .map(|id| ContractCriterion {
+                manual: true,
+                required_trust: TrustClass::HumanReview,
+                ..criterion(id)
+            })
+            .collect();
+        c.envelope.allowed_paths = vec![];
+        c.envelope.denied_paths = vec![];
+        c.envelope.capabilities = BTreeMap::from([(Capability::RepoRead, CapabilityMode::Allow)]);
+        c.envelope.budgets.max_parallel_workers = 1;
+        c
+    }
+
     pub fn contract(ids: &[&str]) -> Contract {
         let mut capabilities = BTreeMap::new();
         capabilities.insert(Capability::RepoRead, CapabilityMode::Allow);
@@ -527,6 +601,7 @@ pub(crate) mod fixtures {
         capabilities.insert(Capability::GitPush, CapabilityMode::Deny);
         Contract {
             version: 1,
+            kind: ContractKind::Write,
             goal: "implement the endpoint".into(),
             criteria: ids.iter().map(|i| criterion(i)).collect(),
             envelope: Envelope {
@@ -553,6 +628,92 @@ mod tests {
         let j = serde_json::to_string(&c).unwrap();
         assert!(j.contains("\"repo.read\":\"allow\""), "{j}");
         assert_eq!(serde_json::from_str::<Contract>(&j).unwrap(), c);
+    }
+
+    #[test]
+    fn kind_is_stored_only_when_it_is_not_the_default() {
+        let w = serde_json::to_value(contract(&["c1"])).unwrap();
+        assert!(w.get("kind").is_none(), "{w}");
+        let r = serde_json::to_value(read_only()).unwrap();
+        assert_eq!(r["kind"], "read_only");
+        assert_eq!(serde_json::from_value::<Contract>(r).unwrap(), read_only());
+        assert_eq!(
+            serde_json::from_value::<Contract>(w).unwrap().kind,
+            ContractKind::Write
+        );
+    }
+
+    /// An older binary parses the contract with the shape below (every field of v1, nothing
+    /// else, `deny_unknown_fields`): a read-only body is refused there, so that outcome fails
+    /// closed and the old binary never runs it as a write goal. The write body is unchanged.
+    #[test]
+    fn a_pre_read_only_parser_refuses_a_read_only_body_and_reads_a_write_one() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OldContract {
+            version: u32,
+            goal: String,
+            criteria: Vec<ContractCriterion>,
+            envelope: Envelope,
+            #[serde(default)]
+            checks: Vec<ContractCheck>,
+        }
+        let ro = serde_json::to_string(&read_only()).unwrap();
+        let err = serde_json::from_str::<OldContract>(&ro)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field `kind`"), "{err}");
+        let wr = serde_json::to_string(&contract(&["c1"])).unwrap();
+        assert!(serde_json::from_str::<OldContract>(&wr).is_ok());
+        assert!(!wr.contains("kind"), "{wr}");
+    }
+
+    #[test]
+    fn a_read_only_goal_asks_for_nothing_but_reading() {
+        assert_eq!(validate_contract(&read_only()), Ok(()));
+        let bad: [(&str, fn(&mut Contract)); 6] = [
+            ("checked criterion", |c| {
+                c.criteria[0].manual = false;
+                c.criteria[0].required_trust = TrustClass::IndependentCheck;
+            }),
+            ("check", |c| {
+                c.checks.push(ContractCheck {
+                    id: "t".into(),
+                    command: "true".into(),
+                })
+            }),
+            ("write scope", |c| {
+                c.envelope.allowed_paths = vec!["src/**".into()]
+            }),
+            ("repo.write", |c| {
+                c.envelope
+                    .capabilities
+                    .insert(Capability::RepoWrite, CapabilityMode::Allow);
+            }),
+            ("approval for tests", |c| {
+                c.envelope
+                    .capabilities
+                    .insert(Capability::TestsRun, CapabilityMode::ApprovalRequired);
+            }),
+            ("two workers", |c| {
+                c.envelope.budgets.max_parallel_workers = 2
+            }),
+        ];
+        for (name, f) in bad {
+            let mut c = read_only();
+            f(&mut c);
+            assert!(
+                matches!(validate_contract(&c), Err(ContractError::ReadOnly(_))),
+                "{name}"
+            );
+        }
+        // a denied capability is fine; the same body as a write goal is judged by the old rules
+        let mut c = read_only();
+        c.envelope
+            .capabilities
+            .insert(Capability::RepoWrite, CapabilityMode::Deny);
+        assert_eq!(validate_contract(&c), Ok(()));
     }
 
     #[test]

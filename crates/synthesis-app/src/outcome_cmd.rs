@@ -486,6 +486,7 @@ pub fn dispatch<T: Transport>(
                 .map_err(|x| format!("{}: {x}", dir.display()))?;
             let ws = dir.to_str().ok_or("the folder path is not valid UTF-8")?;
             let contract = Contract {
+                kind: synthesis_core::outcome::ContractKind::Write,
                 version: 1,
                 goal,
                 criteria,

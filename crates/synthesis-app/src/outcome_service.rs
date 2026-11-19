@@ -539,6 +539,7 @@ mod tests {
         let mut caps = BTreeMap::new();
         caps.insert(Capability::RepoRead, CapabilityMode::Allow);
         let contract = Contract {
+            kind: synthesis_core::outcome::ContractKind::Write,
             version: 1,
             goal: "goal".into(),
             criteria: vec![ContractCriterion {

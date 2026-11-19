@@ -282,6 +282,7 @@ fn seeded(r: &Rig) -> (String, String) {
     let mut caps = BTreeMap::new();
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     let contract = Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "decide".into(),
         criteria: vec![ContractCriterion {
