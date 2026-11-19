@@ -3376,6 +3376,9 @@ mod tests {
             "control: a write attempt may write the folder"
         );
         super::without_writable_roots(&mut p);
+        // as `SandboxRunner` does for its checkout: the folder is mounted, read-only (on Linux the
+        // sandbox hides what is not listed, and a folder under /tmp would be a private tmpfs copy)
+        p.readable_roots.push(root.clone());
         assert!(p.writable_roots.is_empty());
         let run = |cmd: &str| {
             let w = synthesis_sandbox::detect().wrap(
