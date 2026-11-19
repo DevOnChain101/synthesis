@@ -707,6 +707,10 @@ async fn worker(
                         break;
                     }
                 }
+                // hidden during the wait: the hide is next, a resize now would switch the view back on
+                if want.has_changed().unwrap_or(true) {
+                    continue;
+                }
                 let m = *fit.borrow_and_update();
                 if let Err(e) = src.view(true, m).await {
                     lock(&shared).note = Some(e);
@@ -1338,7 +1342,9 @@ mod tests {
         std::thread::sleep(RESIZE_DEBOUNCE * 3);
         assert_eq!(*fake.fits.lock().unwrap(), [None, m(830.)]);
         // the same size again is no resize; a hide and show starts with the size the pane has
-        bp.fit.send_replace(m(830.));
+        // as the drawing code reports it: an equal size does not notify
+        bp.fit
+            .send_if_modified(|c| (*c != m(830.)).then(|| *c = m(830.)).is_some());
         bp.sync(false);
         wait("view(false)", || {
             fake.calls().last().is_some_and(|c| c == "view(false)")
