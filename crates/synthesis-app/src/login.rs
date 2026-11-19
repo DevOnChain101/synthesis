@@ -552,6 +552,25 @@ impl BrowserHost for CliHost {
         })
     }
 
+    fn confirm_loopback<'a>(
+        &'a self,
+        target: &'a str,
+        page: &'a str,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            ask_yes(
+                &format!(
+                    "Let the agent use {} on this machine (the open page is {})?",
+                    sanitize_for_display(target),
+                    sanitize_for_display(page)
+                ),
+                cancel,
+            )
+            .await
+        })
+    }
+
     fn confirm_secret<'a>(
         &'a self,
         secret: &'a str,
@@ -672,6 +691,28 @@ impl BrowserHost for DialogHost {
                     "The main agent asks to browse with saved login \"{}\" (logged in to: {}). Asked once per session; requests from sub-agents and peer sessions are refused before this dialog.",
                     sanitize_for_display(profile),
                     sanitize_for_display(&domains.join(", "))
+                ),
+                cancel,
+            )
+            .await
+        })
+    }
+
+    fn confirm_loopback<'a>(
+        &'a self,
+        target: &'a str,
+        page: &'a str,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.ask(
+                "browser_navigate",
+                "browser-host",
+                serde_json::json!({"loopback": target, "page": page}),
+                format!(
+                    "The agent asks to browse or read {} on this machine (a local server); the open page is {}. Asked once per session and address; private network and metadata addresses are never allowed.",
+                    sanitize_for_display(target),
+                    sanitize_for_display(page)
                 ),
                 cancel,
             )

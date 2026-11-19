@@ -1419,3 +1419,289 @@ async fn a_sub_agent_cannot_choose_a_saved_login_and_nobody_is_asked() {
         "refused before any dialog"
     );
 }
+
+/// The person for loopback questions: approves only the listed `host:port` targets and records every question.
+#[derive(Debug, Default)]
+struct LoopbackPerson {
+    approve: Mutex<Vec<String>>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl BrowserHost for LoopbackPerson {
+    fn login<'a>(
+        &'a self,
+        _: &'a LoginRequest,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("not in this test".into()) })
+    }
+    fn confirm_profile<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a [String],
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_secret<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_loopback<'a>(
+        &'a self,
+        target: &'a str,
+        _: &'a str,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        self.asked.lock().unwrap().push(target.to_owned());
+        Box::pin(async move { self.approve.lock().unwrap().iter().any(|a| a == target) })
+    }
+}
+
+fn strict_registry(host: Option<Arc<dyn BrowserHost>>) -> Registry {
+    Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            no_sandbox: no_sandbox(),
+            host,
+            ..Default::default()
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reaches_loopback_only_on_the_target_the_person_approved() {
+    if !have_browser() {
+        return;
+    }
+    let (a, b) = (serve().await, serve().await);
+    let (ta, tb) = (a.replace("http://", ""), b.replace("http://", ""));
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson {
+        approve: Mutex::new(vec![ta.clone()]),
+        ..Default::default()
+    });
+    let reg = strict_registry(Some(person.clone()));
+    let c = ctx(d.path(), "lb1");
+    let go = |u: String| json!({"url": u});
+    let o = reg
+        .execute("browser_navigate", go(format!("{a}/login")), &c)
+        .await;
+    ok(&o, "approved target");
+    // another port of loopback needs its own approval, which the person withholds
+    let o = reg
+        .execute("browser_navigate", go(format!("{b}/login")), &c)
+        .await;
+    assert!(o.is_error && text(&o).contains("approves"), "{o:?}");
+    // LAN and metadata addresses have no approval path: nobody is asked
+    for u in [
+        "http://169.254.169.254/",
+        "http://10.0.0.1:3000/",
+        "http://192.168.1.1/",
+    ] {
+        let o = reg.execute("browser_navigate", go(u.into()), &c).await;
+        assert!(o.is_error && text(&o).contains("private"), "{u}: {o:?}");
+    }
+    assert_eq!(*person.asked.lock().unwrap(), vec![ta, tb]);
+    reg.close_session("lb1");
+
+    // nobody to ask (headless without a terminal): it stays blocked, and the error says so
+    let reg = strict_registry(None);
+    let c = ctx(d.path(), "lb2");
+    let o = reg
+        .execute("browser_navigate", go(format!("{a}/login")), &c)
+        .await;
+    assert!(
+        o.is_error && text(&o).contains("nobody can be asked"),
+        "{o:?}"
+    );
+    reg.close_session("lb2");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loopback_page_the_person_opened_is_not_the_agents_until_approved() {
+    if !have_browser() {
+        return;
+    }
+    let a = serve().await;
+    let ta = a.replace("http://", "");
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson::default());
+    let tap = Arc::new(synthesis_tools::BrowserTap::default());
+    let cfg = BrowserConfig {
+        no_sandbox: no_sandbox(),
+        host: Some(person.clone()),
+        view: Some(tap.clone()),
+        ..Default::default()
+    };
+    tap.enable_start(
+        cfg.clone(),
+        d.path().join("art"),
+        synthesis_config::Env::from_process(),
+    );
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(cfg);
+    // the person starts the browser from the tab and opens the dev server
+    tap.start().await.unwrap();
+    let view = tap.view().unwrap();
+    view.navigate(&format!("{a}/login"), synthesis_browser::WaitUntil::Load)
+        .await
+        .unwrap();
+    // the agent adopts that browser, but may not read or act on the person's loopback page
+    let c = ctx(d.path(), "lb3");
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    assert!(o.is_error && text(&o).contains("approves"), "{o:?}");
+    assert_eq!(*person.asked.lock().unwrap(), vec![ta.clone()]);
+    // after approval the same page works for the agent
+    person.approve.lock().unwrap().push(ta);
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    ok(&o, "snapshot after approval");
+    ok(&reg.execute("browser_tabs", json!({}), &c).await, "tabs");
+    reg.close_session("lb3");
+}
+
+/// A dev server whose `/m` page logs, fetches and throws markers named after `tag`.
+async fn serve_markers(tag: &'static str) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = if head.starts_with("GET /m ") {
+                    format!(
+                        "<html><head><title>TITLE_{tag}</title></head><body><script>console.log('CONSOLE_{tag}');fetch('/PATH_{tag}');setTimeout(()=>{{throw new Error('ERR_{tag}')}},10)</script></body></html>"
+                    )
+                } else {
+                    "nope".to_owned()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_wide_console_network_and_tabs_need_approval_for_a_page_the_person_showed() {
+    if !have_browser() {
+        return;
+    }
+    let a = serve_markers("A").await;
+    let ta = a.replace("http://", "");
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson::default());
+    let tap = Arc::new(synthesis_tools::BrowserTap::default());
+    let cfg = BrowserConfig {
+        no_sandbox: no_sandbox(),
+        host: Some(person.clone()),
+        view: Some(tap.clone()),
+        ..Default::default()
+    };
+    tap.enable_start(
+        cfg.clone(),
+        d.path().join("art"),
+        synthesis_config::Env::from_process(),
+    );
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(cfg);
+    tap.start().await.unwrap();
+    // the person opens the dev server; its page logs, fetches and throws
+    tap.view()
+        .unwrap()
+        .navigate(&format!("{a}/m"), synthesis_browser::WaitUntil::Load)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // the agent moves the same tab to a page that needs no approval
+    let c0 = ctx(d.path(), "rw0");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": "about:blank"}), &c0)
+            .await,
+        "about:blank",
+    );
+    // (1)(2)(3) every runtime-wide reader is refused without approval and shows nothing of the person's page
+    for (n, (tool, input)) in [
+        ("browser_console", json!({})),
+        ("browser_network", json!({})),
+        ("browser_tabs", json!({})),
+        ("browser_tabs", json!({"action": "select", "index": 0})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let c = ctx(d.path(), &format!("rw-no-{n}"));
+        let o = reg.execute(tool, input, &c).await;
+        let t = text(&o);
+        assert!(o.is_error && t.contains("approves"), "{tool}: {o:?}");
+        for m in ["CONSOLE_A", "ERR_A", "PATH_A", "TITLE_A"] {
+            assert!(!t.contains(m), "{tool} leaked {m}: {t}");
+        }
+    }
+    assert!(person.asked.lock().unwrap().iter().all(|t| *t == ta));
+    // after the person approves, console (with the page error), network and tabs work
+    person.approve.lock().unwrap().push(ta.clone());
+    let c = ctx(d.path(), "rw-yes");
+    let console = text(&reg.execute("browser_console", json!({}), &c).await);
+    assert!(
+        console.contains("CONSOLE_A") && console.contains("ERR_A"),
+        "{console}"
+    );
+    let net = text(&reg.execute("browser_network", json!({}), &c).await);
+    assert!(net.contains("PATH_A"), "{net}");
+    ok(&reg.execute("browser_tabs", json!({}), &c).await, "tabs");
+    reg.close_session("rw-yes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_only_session_reads_console_network_and_tabs_without_a_prompt() {
+    if !have_browser() {
+        return;
+    }
+    let a = serve_markers("B").await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson::default());
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            policy: UrlPolicy {
+                allow_private_network: true,
+                ..Default::default()
+            },
+            no_sandbox: no_sandbox(),
+            host: Some(person.clone()),
+            ..Default::default()
+        });
+    let c = ctx(d.path(), "rw-agent");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{a}/m")}), &c)
+            .await,
+        "navigate",
+    );
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let console = text(&reg.execute("browser_console", json!({}), &c).await);
+    assert!(console.contains("CONSOLE_B"), "{console}");
+    ok(
+        &reg.execute("browser_network", json!({}), &c).await,
+        "network",
+    );
+    ok(&reg.execute("browser_tabs", json!({}), &c).await, "tabs");
+    assert!(
+        person.asked.lock().unwrap().is_empty(),
+        "nobody is asked in an agent-only session"
+    );
+    reg.close_session("rw-agent");
+}

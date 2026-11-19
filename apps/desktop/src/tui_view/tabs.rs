@@ -716,7 +716,7 @@ impl TuiView {
                     }))
                 };
                 let motion = self.live.as_ref().is_none_or(|l| l.cfg.tui.motion);
-                panes::browser(
+                let still = panes::browser(
                     live,
                     self.ts.frame,
                     tz,
@@ -724,7 +724,13 @@ impl TuiView {
                     &pick,
                     crate::live::now_ms(),
                     motion,
-                )
+                );
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(self.browser_start_bar(cx))
+                    .child(still)
             }
             ChatTab::Files => return self.files_tab(cx),
         };

@@ -24,18 +24,66 @@ use crate::native::{Shared, lock};
 use crate::util::{int_field, str_field};
 use crate::{Block, BoxFuture, Content, ImageSource, ToolOutput};
 
-/// Where a window that shows the session's browser (the desktop pane) finds it: the runtime the main agent
-/// launched, held weakly so the window never keeps Chrome alive past the session.
-#[derive(Debug, Default)]
-pub struct BrowserTap(std::sync::Mutex<std::sync::Weak<BrowserRuntime>>);
+type Launcher =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<BrowserRuntime, BrowserError>> + Send + Sync>;
+
+/// Where a window that shows the session's browser (the desktop pane) finds it. Whichever of the agent or the window
+/// launches the browser first registers it here, held weakly so the window never keeps Chrome alive past the session
+/// (a browser the window started is also held by the tap itself, which lives and dies with the session).
+#[derive(Default)]
+pub struct BrowserTap {
+    weak: std::sync::Mutex<std::sync::Weak<BrowserRuntime>>,
+    started: std::sync::Mutex<Option<Arc<BrowserRuntime>>>,
+    launcher: std::sync::Mutex<Option<Launcher>>,
+    starting: tokio::sync::Mutex<()>,
+}
+
+impl std::fmt::Debug for BrowserTap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BrowserTap")
+    }
+}
 
 impl BrowserTap {
-    /// A view-only handle on the session's running browser, `None` before the agent opens one and after the
+    /// A view-only handle on the session's running browser, `None` before one is launched and after the
     /// session ends. It reaches the live view, navigation and tabs only, never the agent's capture APIs.
     pub fn view(&self) -> Option<synthesis_browser::PageView> {
-        lock(&self.0)
+        lock(&self.weak)
             .upgrade()
             .map(synthesis_browser::PageView::new)
+    }
+
+    /// The window may start the browser itself (`start`): headless, with the agent's URL policy and caps.
+    pub fn enable_start(&self, cfg: BrowserConfig, artifact_dir: PathBuf, env: Env) {
+        let env = cfg.process_env.clone().unwrap_or(env);
+        *lock(&self.launcher) = Some(Arc::new(move || {
+            let mut o = BrowserOptions::new(artifact_dir.clone());
+            o.policy = cfg.policy.clone();
+            o.no_sandbox = cfg.no_sandbox;
+            let env = env.clone();
+            Box::pin(async move { BrowserRuntime::launch(o, &env).await })
+        }));
+    }
+
+    /// A launcher is set (not so in remote mode and in runs without browser tools).
+    pub fn can_start(&self) -> bool {
+        lock(&self.launcher).is_some()
+    }
+
+    /// Launches the session's browser unless one runs. The agent's tools then use this same browser and its strict
+    /// URL policy.
+    pub async fn start(&self) -> Result<(), String> {
+        let _one_at_a_time = self.starting.lock().await;
+        if self.view().is_some() {
+            return Ok(());
+        }
+        let launch = lock(&self.launcher)
+            .clone()
+            .ok_or("this session cannot start a browser")?;
+        let rt = Arc::new(launch().await.map_err(|e| e.to_string())?);
+        *lock(&self.weak) = Arc::downgrade(&rt);
+        *lock(&self.started) = Some(rt);
+        Ok(())
     }
 }
 
@@ -119,6 +167,18 @@ pub trait BrowserHost: Send + Sync + std::fmt::Debug {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, bool>;
 
+    /// The agent wants to browse (or, `page` being the same origin, to read the open page at) the loopback address
+    /// `target` (`localhost:3000`) while the tab shows `page` (an origin, or empty): return whether the person agrees.
+    /// Asked once per exact host:port and session. The default (no way to ask) refuses.
+    fn confirm_loopback<'a>(
+        &'a self,
+        _target: &'a str,
+        _page: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
     /// First use of `secret` on `origin` in this session: show the NAME and the origin (never the
     /// value) and return whether the person agrees.
     fn confirm_secret<'a>(
@@ -196,6 +256,18 @@ async fn runtime(
     let rt = state
         .browser
         .get_or_try_init(|| async {
+            // one launch at a time with the window's Start: two Chromes cannot both register
+            let _one = match &cfg.view {
+                Some(t) => Some(t.starting.lock().await),
+                None => None,
+            };
+            // the person started it from the window: the session uses that browser
+            if let Some(rt) = cfg.view.as_ref().and_then(|t| lock(&t.started).clone()) {
+                return Ok(rt);
+            }
+            if let Some(rt) = cfg.view.as_ref().and_then(|t| lock(&t.weak).upgrade()) {
+                return Ok(rt);
+            }
             let mut o = BrowserOptions::new(ctx.workspace.artifact_root.join("browser"));
             o.policy = cfg.policy.clone();
             o.no_sandbox = cfg.no_sandbox;
@@ -254,7 +326,7 @@ async fn runtime(
             // the runtime is the SESSION's (a sub-agent shares it with the main agent), so whichever call wins the
             // launch registers it
             if let Some(tap) = &cfg.view {
-                *lock(&tap.0) = Arc::downgrade(&rt);
+                *lock(&tap.weak) = Arc::downgrade(&rt);
             }
             Ok(rt)
         })
@@ -325,6 +397,21 @@ macro_rules! browser_tool {
                     Ok(rt) => rt,
                     Err(e) => return e,
                 };
+                // a loopback page the person opened is not the agent's to read or act on until the person approves it
+                if $wire != "browser_close"
+                    && let Err(e) =
+                        approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await
+                {
+                    return fail($wire, e.into());
+                }
+                // console, network and tab data are browser-wide: every loopback page the person had shown needs approval
+                if matches!(
+                    $wire,
+                    "browser_console" | "browser_network" | "browser_tabs"
+                ) && let Err(e) = approve_taint(sh, ctx, &rt).await
+                {
+                    return fail($wire, e.into());
+                }
                 let r = tokio::select! {
                     r = $body(&rt, input, sh) => r,
                     () = ctx.cancel.cancelled() => Err("aborted.".into()),
@@ -334,7 +421,108 @@ macro_rules! browser_tool {
         }
     };
 }
-browser_tool!(navigate, "browser_navigate", nav);
+/// `browser_navigate`: like the other browser tools, plus the person's approval for a loopback address (a dev server).
+pub(crate) fn navigate<'a>(
+    sh: &'a Shared,
+    input: &'a Value,
+    ctx: &'a ToolContext,
+) -> BoxFuture<'a, ToolOutput> {
+    Box::pin(async move {
+        let wire = "browser_navigate";
+        let rt = match runtime(sh, ctx, wire, str_field(input, "profile")).await {
+            Ok(rt) => rt,
+            Err(e) => return e,
+        };
+        if let Err(e) = approve_loopback(sh, ctx, &rt, str_field(input, "url")).await {
+            return fail(wire, e.into());
+        }
+        let r = tokio::select! {
+            r = nav(&rt, input, sh) => r,
+            () = ctx.cancel.cancelled() => Err("aborted.".into()),
+        };
+        r.unwrap_or_else(|e| fail(wire, e))
+    })
+}
+
+/// Approval for every loopback target a person-origin page has shown in this browser that the agent has no approval
+/// for yet; the first refusal fails the call (nothing is redacted silently).
+async fn approve_taint(
+    sh: &Shared,
+    ctx: &ToolContext,
+    rt: &BrowserRuntime,
+) -> Result<(), BrowserError> {
+    for t in rt.policy().unapproved_taint() {
+        approve_loopback(sh, ctx, rt, Some(&format!("http://{t}/"))).await?;
+    }
+    Ok(())
+}
+
+/// Distinct loopback targets the person may refuse in one session before nobody is asked again.
+const MAX_LOOPBACK_REFUSED: usize = 3;
+
+/// URL of the tab the agent would read or act on.
+async fn current_page(rt: &BrowserRuntime) -> Option<String> {
+    let tabs = rt.tabs().await.ok()?;
+    tabs.iter()
+        .find(|t| t.active)
+        .map(|t| t.page.url.expose().to_owned())
+}
+
+/// The agent's URL policy refuses loopback until the person approves that exact host:port (remembered for the
+/// browser's life). LAN, link-local and metadata addresses have no approval path; nobody to ask (`synt run` without a
+/// terminal) keeps it blocked.
+async fn approve_loopback(
+    sh: &Shared,
+    ctx: &ToolContext,
+    rt: &BrowserRuntime,
+    url: Option<&str>,
+) -> Result<(), BrowserError> {
+    let Some(url) = url else { return Ok(()) };
+    let Some(target) = synthesis_browser::loopback_target(url) else {
+        return Ok(());
+    };
+    if rt.policy().check_navigation(url).is_ok() {
+        return Ok(());
+    }
+    // refused for another reason (deny list, profile domains): that reason, and nobody is asked
+    rt.policy()
+        .check_navigation_if_approved(url)
+        .map_err(BrowserError::Policy)?;
+    let key = format!("loopback:{target}");
+    let state = sh.session(ctx);
+    let host = lock(&sh.browser_cfg).host.clone();
+    // the person is not asked again and again about new targets
+    let refused_targets = lock(&state.refusals)
+        .iter()
+        .filter(|(k, n)| k.starts_with("loopback:") && **n > 0)
+        .count();
+    let how = format!(
+        "{target} is a loopback address: the agent may browse it only after the person approves it (asked once per session and exact host:port)"
+    );
+    let Some(host) = host else {
+        return Err(BrowserError::Policy(format!(
+            "{how}; nobody can be asked in this run, so it stays blocked"
+        )));
+    };
+    if refused_too_often(&state, &key) || refused_targets >= MAX_LOOPBACK_REFUSED {
+        return Err(BrowserError::Policy(format!(
+            "{how}; the person already refused it (or several loopback addresses) in this session, so it is not asked again"
+        )));
+    }
+    let page = current_page(rt)
+        .await
+        .and_then(|u| url::Url::parse(&u).ok())
+        .map_or(String::new(), |u| u.origin().ascii_serialization());
+    if !host.confirm_loopback(&target, &page, &ctx.cancel).await {
+        note_refusal(&state, &key);
+        return Err(BrowserError::Policy(format!(
+            "{how}; the person did not approve it. Ask the person to approve, then retry"
+        )));
+    }
+    rt.policy()
+        .approve_loopback(url)
+        .map_err(BrowserError::Policy)
+}
 browser_tool!(snapshot, "browser_snapshot", snap);
 browser_tool!(click, "browser_click", click_body);
 browser_tool!(fill, "browser_fill", fill_body);
@@ -468,6 +656,9 @@ pub(crate) fn fill_secret<'a>(
             Ok(rt) => rt,
             Err(e) => return e,
         };
+        if let Err(e) = approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await {
+            return fail("browser_fill_secret", e.into());
+        }
         let r = tokio::select! {
             r = fill_secret_body(&rt, input, sh, ctx) => r,
             () = ctx.cancel.cancelled() => Err("aborted.".into()),
