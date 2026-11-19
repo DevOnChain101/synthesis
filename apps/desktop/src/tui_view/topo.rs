@@ -855,7 +855,7 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
                 halo(0.28 + 0.5 * lvl, s * 0.35),
                 halo(0.14 + 0.3 * lvl, s * 0.2),
             ])
-            .child(gpui::img(brand::mark()).size(px(s)))
+            .child(brand::mark_img(s).size(px(s)))
             .into_any_element()
     };
     let ch = (

@@ -146,6 +146,8 @@ pub fn apply(mono: &str, cx: &mut App) {
     c.warning = hsla(t::WARN);
     c.danger = hsla(t::ERROR);
     c.ring = hsla(t::ACCENT);
+    // gpui-component's default draws a 1px border plus a gapped outer ring (a heavy double outline); off = one 1px accent border
+    th.focus_ring = false;
     c.caret = hsla(t::PEARL);
     th.font_family = SharedString::from(crate::brand::UI_FONT);
     th.mono_font_family = SharedString::from(mono.to_string());

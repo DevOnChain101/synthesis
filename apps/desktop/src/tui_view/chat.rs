@@ -636,7 +636,7 @@ impl TuiView {
             }
             Item::Assistant { text: s, .. } => msg(
                 div().size_full().bg(crate::theme::ground()).child(
-                    gpui::img(crate::brand::mark())
+                    crate::brand::mark_img(32.)
                         .size_full()
                         .rounded(px(6.))
                         .object_fit(gpui::ObjectFit::Cover),
@@ -1180,7 +1180,7 @@ impl TuiView {
             .child(
                 div()
                     .size(px(128.))
-                    .child(gpui::img(crate::brand::mark()).size(px(128.))),
+                    .child(crate::brand::mark_img(128.).size(px(128.))),
             )
             .child(super::tracked("SYNTHESIS", 16., 0.32, strong()))
             .child(div().text_color(dim()).child("Autonomous coding agent"))

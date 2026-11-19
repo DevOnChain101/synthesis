@@ -167,8 +167,20 @@ impl OutcomesView {
         })
     }
 
+    /// Like [`Self::click`] for a handler that needs the window.
+    pub(super) fn click_window(
+        &self,
+        cx: &Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |this, _: &ClickEvent, w, cx| {
+            w.focus(&this.focus, cx);
+            f(this, w, cx);
+            cx.notify();
+        })
+    }
+
     fn column(&self, pane: Pane, id: &'static str) -> Div {
-        let on = self.state.pane == pane;
         div()
             .debug_selector(move || id.to_string())
             .min_w(px(0.))
@@ -176,10 +188,12 @@ impl OutcomesView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(8.))
-            .bg(theme::fill(t::SURFACE))
-            .border_1()
-            .border_color(if on { hsla(t::ACCENT) } else { hsla(t::BORDER) })
+            // flat: the rail and the context column sit on the surface tone, the centre on the window ground; one
+            // hairline between the centre and the context column, no outline round a panel
+            .when(pane != Pane::Centre, |d| d.bg(theme::fill(t::SURFACE)))
+            .when(pane == Pane::Inspector, |d| {
+                d.border_l_1().border_color(rule())
+            })
     }
 
     // ------------------------------------------------------------------------------ list
@@ -256,13 +270,14 @@ impl OutcomesView {
             .px(px(10.))
             .py(px(8.))
             .rounded(px(8.))
+            // the accent border is the attention signal: an outcome that needs the owner
             .border_1()
-            .border_color(if on { hsla(t::ACCENT) } else { hsla(t::BORDER) })
-            .bg(if on {
-                hsla(t::ELEVATED)
+            .border_color(if it.row.needs_you.any() {
+                hsla(t::ACCENT)
             } else {
-                with_alpha(hsla(t::BG), 0.35)
+                gpui::transparent_black()
             })
+            .when(on, |d| d.bg(hsla(t::ELEVATED)))
             .hover(|d| d.bg(hsla(t::ELEVATED)))
             .on_click(self.click(cx, move |this, cx| {
                 this.state.pane = Pane::List;
@@ -294,31 +309,31 @@ impl OutcomesView {
 
     // ----------------------------------------------------------------------------- centre
 
-    fn centre(&self, avail: f32, cx: &Context<Self>) -> Div {
+    fn centre(&self, cx: &Context<Self>) -> Div {
         let s = &self.state;
         let pending = s.selected_item().map(|i| i.row.needs_you.decisions_pending);
-        let items: Vec<chrome::Tab> = CentreTab::ALL
-            .iter()
-            .map(|t| chrome::Tab {
-                label: t.label(),
-                icon: "",
-                badge: (*t == CentreTab::Decisions)
+        let strip = tab_strip(
+            CentreTab::ALL.iter().map(|t| t.label()),
+            CentreTab::ALL
+                .iter()
+                .position(|t| *t == s.centre)
+                .unwrap_or(0),
+            "out-ctab",
+            // the count of decisions that wait is attention: the accent
+            |i| {
+                (CentreTab::ALL[i] == CentreTab::Decisions)
                     .then_some(pending)
                     .flatten()
                     .filter(|n| *n > 0)
-                    .map(|n| n.to_string()),
-            })
-            .collect();
-        let sel = CentreTab::ALL
-            .iter()
-            .position(|t| *t == s.centre)
-            .unwrap_or(0);
-        let strip = chrome::tabs(&items, sel, false, avail, &|i| {
-            Box::new(self.click(cx, move |this, _| {
-                this.state.pane = Pane::Centre;
-                this.state.centre = CentreTab::ALL[i];
-            }))
-        })
+                    .map(|n| n.to_string())
+            },
+            &|i| {
+                Box::new(self.click(cx, move |this, _| {
+                    this.state.pane = Pane::Centre;
+                    this.state.centre = CentreTab::ALL[i];
+                }))
+            },
+        )
         .font_family(brand::MONO_FONT);
         let body = match s.centre {
             CentreTab::Goal => self.goal(cx),
@@ -490,8 +505,13 @@ impl OutcomesView {
             .p(px(12.))
             .rounded(px(10.))
             .border_1()
-            .border_color(hsla(t::BORDER))
-            .bg(hsla(t::BG))
+            // attention: the decision that waits for the owner's answer
+            .border_color(if s.ask.picker.is_some() {
+                hsla(t::ACCENT)
+            } else {
+                gpui::transparent_black()
+            })
+            .bg(hsla(t::ELEVATED))
             .child(
                 div()
                     .flex()
@@ -606,43 +626,22 @@ impl OutcomesView {
 
     fn inspector(&self, cx: &Context<Self>) -> Div {
         let s = &self.state;
-        let strip = div()
-            .flex_none()
-            .flex()
-            .h(px(32.))
-            .border_b_1()
-            .border_color(rule())
-            .bg(chrome::black_a(0.18))
-            .children(InspectorTab::ALL.iter().enumerate().map(|(i, tab)| {
-                let on = *tab == s.itab;
-                div()
-                    .id(("out-itab", i))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .px(px(9.))
-                    .h_full()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(if on { strong() } else { text() })
-                    .when(on, |d| {
-                        d.bg(hsla(t::ELEVATED)).child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(2.))
-                                .bg(hsla(t::ACCENT)),
-                        )
-                    })
-                    .on_click(self.click(cx, move |this, cx| {
-                        this.state.pane = Pane::Inspector;
-                        let e = this.state.set_itab(InspectorTab::ALL[i]);
-                        this.run(e, cx);
-                    }))
-                    .child(tab.label())
-            }));
+        let strip = tab_strip(
+            InspectorTab::ALL.iter().map(|t| t.label()),
+            InspectorTab::ALL
+                .iter()
+                .position(|t| *t == s.itab)
+                .unwrap_or(0),
+            "out-itab",
+            |_| None,
+            &|i| {
+                Box::new(self.click(cx, move |this, cx| {
+                    this.state.pane = Pane::Inspector;
+                    let e = this.state.set_itab(InspectorTab::ALL[i]);
+                    this.run(e, cx);
+                }))
+            },
+        );
         let body = match &s.inspector {
             Some(c) => inspector_body(c),
             None if s.selected.is_none() => div().text_color(dim()).child("No outcome selected."),
@@ -765,15 +764,13 @@ impl OutcomesView {
                     .gap(px(8.))
                     .p(px(20.))
                     .rounded(px(10.))
-                    .border_1()
-                    .border_color(hsla(t::BORDER))
                     .bg(theme::fill(t::SURFACE))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .child(gpui::img(brand::mark()).size(px(28.)))
+                            .child(brand::mark_img(28.).size(px(28.)))
                             .child(
                                 div()
                                     .text_size(px(16.))
@@ -797,12 +794,6 @@ impl Render for OutcomesView {
         let s = &self.state;
         let ready = s.screen == Screen::Ready;
         let (lw, rw) = ((vw * 0.19).clamp(210., 290.), (vw * 0.30).clamp(300., 430.));
-        // the window's padding and the gaps between the columns shown
-        let cw = if self.rail_open {
-            vw - 20. - 20. - lw - rw
-        } else {
-            vw - 20. - 10. - rw
-        };
         let chips = [if ready {
             Chip::new(
                 "super agent",
@@ -821,18 +812,11 @@ impl Render for OutcomesView {
             div()
                 .size_full()
                 .flex()
-                .gap(px(10.))
                 .children(
                     self.rail_open
                         .then(|| div().w(px(lw)).flex_none().h_full().child(self.list(cx))),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h_full()
-                        .child(self.centre(cw, cx)),
-                )
+                .child(div().flex_1().min_w(px(0.)).h_full().child(self.centre(cx)))
                 .child(
                     div()
                         .w(px(rw))
@@ -859,7 +843,7 @@ impl Render for OutcomesView {
                     cx.stop_propagation();
                 }
             }))
-            .child(div().flex_1().min_h(px(0.)).p(px(10.)).child(main))
+            .child(div().flex_1().min_h(px(0.)).child(main))
             .child(chrome::footer(&self.hints(), &chips).border_color(rule()))
             .children(self.form_overlay(window, cx))
             .children(self.guide_overlay(cx))
@@ -882,9 +866,7 @@ fn collapsed(
         .px(px(12.))
         .py(px(9.))
         .rounded(px(10.))
-        .border_1()
-        .border_color(hsla(t::BORDER))
-        .bg(with_alpha(hsla(t::BG), 0.5))
+        .bg(with_alpha(hsla(t::ELEVATED), 0.5))
         .hover(|d| d.bg(hsla(t::ELEVATED)))
         .on_click(on_click)
         .child(
@@ -896,6 +878,51 @@ fn collapsed(
         )
         .child(mono(c.id.clone()).text_size(px(11.)).text_color(dim()))
         .child(badge(c.state.clone(), state_colour(&c.state)))
+}
+
+/// A flat tab strip: no box, the active tab in the strong colour with a 2px underline; `badge(i)` is a count in the
+/// accent (what waits for the owner).
+fn tab_strip<'a>(
+    labels: impl Iterator<Item = &'a str>,
+    selected: usize,
+    id: &'static str,
+    badge: impl Fn(usize) -> Option<String>,
+    click: &dyn Fn(usize) -> chrome::OnClick,
+) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .h(px(34.))
+        .px(px(6.))
+        .children(labels.enumerate().map(|(i, label)| {
+            let on = i == selected;
+            div()
+                .id((id, i))
+                .relative()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(9.))
+                .h_full()
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(if on { strong() } else { dim() })
+                .when(!on, |d| d.hover(|d| d.text_color(text())))
+                .when(on, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(9.))
+                            .right(px(9.))
+                            .bottom_0()
+                            .h(px(2.))
+                            .bg(strong()),
+                    )
+                })
+                .on_click(click(i))
+                .child(label.to_string())
+                .children(badge(i).map(|n| div().text_color(hsla(t::ACCENT_LIGHT)).child(n)))
+        }))
 }
 
 fn send_button(
@@ -1159,8 +1186,7 @@ fn attempt(a: &AttemptView) -> Div {
         .p(px(8.))
         .mb(px(6.))
         .rounded(px(8.))
-        .border_1()
-        .border_color(hsla(t::BORDER))
+        .bg(hsla(t::ELEVATED))
         .child(
             div()
                 .flex()
@@ -1299,8 +1325,6 @@ fn diff(d: &DiffTab) -> Div {
                     .p(px(6.))
                     .rounded(px(6.))
                     .bg(hsla(t::BG))
-                    .border_1()
-                    .border_color(hsla(t::BORDER))
                     .children(p.split('\n').take(PATCH_LINES).map(|l| {
                         let c = match l.chars().next() {
                             Some('+') => hsla(t::DIFF_ADD),
@@ -1359,8 +1383,7 @@ fn evidence(e: &EvidenceTab) -> Div {
             .gap(px(2.))
             .p(px(8.))
             .rounded(px(8.))
-            .border_1()
-            .border_color(hsla(t::BORDER))
+            .bg(hsla(t::ELEVATED))
             .child(
                 div()
                     .flex()

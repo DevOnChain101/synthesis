@@ -208,7 +208,7 @@ fn review_body(f: &Form, r: &Review) -> Div {
 }
 
 impl OutcomesView {
-    fn fields(&self, f: &Form, cx: &Context<Self>) -> Option<Div> {
+    fn fields(&self, f: &Form, window: &Window, cx: &Context<Self>) -> Option<Div> {
         let ui = self.form_ui.as_ref()?;
         let mut d = div()
             .flex()
@@ -244,7 +244,7 @@ impl OutcomesView {
                     "Workspace",
                     "the repository's folder (absolute path)",
                 ))
-                .child(Input::new(&ui.workspace))
+                .child(self.workspace_picker(ui, window, cx))
                 .child(label(
                     "Base commit",
                     "HEAD of the workspace; the work starts from this commit",
@@ -267,6 +267,138 @@ impl OutcomesView {
         Some(d)
     }
 
+    /// The workspace field: a button showing the chosen folder (read-only) that opens the list of known folders and
+    /// "Choose folder..."; for a remote engine the path is typed (a local dialog cannot name its folders).
+    fn workspace_picker(&self, ui: &super::FormUi, window: &Window, cx: &Context<Self>) -> Div {
+        let st = &self.state;
+        let chosen = ui.workspace.read(cx).value().to_string();
+        let chosen = chosen.trim();
+        let focused = ui.ws_focus.is_focused(window);
+        let shown = if chosen.is_empty() {
+            "No folder chosen".to_string()
+        } else {
+            middle(chosen, 80)
+        };
+        let button = div()
+            .id("out-form-ws")
+            .debug_selector(|| "out-form-ws".to_string())
+            .track_focus(&ui.ws_focus)
+            .cursor_pointer()
+            .mt(px(4.))
+            .px(px(9.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(hsla(if focused { t::ACCENT_LIGHT } else { t::BORDER }))
+            .when(focused, |d| d.border_2())
+            .flex()
+            .flex_col()
+            .on_click(self.click(cx, |this, cx| {
+                this.state.ws_menu = if this.state.ws_menu.is_some() {
+                    None
+                } else {
+                    Some(0)
+                };
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(if st.remote {
+                        "Known folders...".to_string()
+                    } else {
+                        shown.clone()
+                    })
+                    .child(div().text_color(dim()).child(if st.ws_menu.is_some() {
+                        "\u{25b4}"
+                    } else {
+                        "\u{25be}"
+                    })),
+            )
+            .when(!st.remote && !chosen.is_empty() && shown != chosen, |d| {
+                d.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(dim())
+                        .child(chosen.to_string()),
+                )
+            })
+            .when(
+                !st.remote && chosen == st.workspace.trim() && !chosen.is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(dim())
+                            .child("The app's workspace, used unless you choose another."),
+                    )
+                },
+            );
+        let items = st.ws_items();
+        let list = st.ws_menu.map(|cur| {
+            let mut col = div()
+                .id("out-form-ws-list")
+                .debug_selector(|| "out-form-ws-list".to_string())
+                .mt(px(2.))
+                .flex()
+                .flex_col()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .bg(theme::fill(t::ELEVATED));
+            let row =
+                |i: usize, id: &'static str| {
+                    div()
+                        .id((id, i))
+                        .cursor_pointer()
+                        .px(px(9.))
+                        .py(px(4.))
+                        .when(i == cur, |d| {
+                            d.bg(hsla(t::ACCENT)).text_color(hsla(t::ACCENT_INK))
+                        })
+                        .hover(|d| d.bg(hsla(t::ACCENT)))
+                        .on_click(self.click_window(cx, move |this, window, cx| {
+                            this.ws_choose(i, window, cx)
+                        }))
+                };
+            for (i, p) in items.iter().enumerate() {
+                let (name, parent) = split_folder(p);
+                col = col.child(
+                    row(i, "out-form-ws-item")
+                        .flex()
+                        .gap(px(8.))
+                        .child(name)
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .when(i != cur, |d| d.text_color(dim()))
+                                .child(parent),
+                        ),
+                );
+            }
+            if !st.remote {
+                col = col.child(
+                    row(items.len(), "out-form-ws-item")
+                        .border_t_1()
+                        .border_color(rule())
+                        .child("Choose folder..."),
+                );
+            }
+            col
+        });
+        let mut d = div().flex().flex_col().child(button).children(list);
+        if st.remote {
+            d = d
+                .child(Input::new(&ui.workspace))
+                .child(div().text_size(px(11.)).text_color(dim()).child(
+                    "The engine runs on another machine: type the folder as that machine names it (a local folder dialog would not fit).",
+                ));
+        }
+        d
+    }
+
     /// The form as a modal over the tab; `None` when no form is open.
     pub(super) fn form_overlay(&self, window: &Window, cx: &Context<Self>) -> Option<AnyElement> {
         let f = self.state.form.as_ref()?;
@@ -282,7 +414,7 @@ impl OutcomesView {
                 .text_color(dim())
                 .child("Reading the contract from the orchestrator..."),
             (_, Mode::Draft { .. }) => div(),
-            _ => self.fields(f, cx)?,
+            _ => self.fields(f, window, cx)?,
         };
         let sending = matches!(f.stage, Stage::Sending | Stage::Approving(_));
         let can_confirm = match &f.stage {
@@ -362,7 +494,7 @@ impl OutcomesView {
             .overflow_hidden()
             .rounded(px(10.))
             .border_1()
-            .border_color(hsla(t::ACCENT))
+            .border_color(hsla(t::BORDER))
             .bg(theme::fill(t::SURFACE))
             .child(
                 div()
@@ -427,5 +559,26 @@ impl OutcomesView {
                 .child(panel)
                 .into_any_element(),
         )
+    }
+}
+
+/// `s` cut in the middle to `max` characters (the ends of a path are the part that tells folders apart).
+pub(super) fn middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let (a, b) = ((max - 1) / 2, max - 1 - (max - 1) / 2);
+    let head: String = s.chars().take(a).collect();
+    let tail: String = s.chars().skip(n - b).collect();
+    format!("{head}\u{2026}{tail}")
+}
+
+/// A folder's name and its parent path (either separator: a remote path may not be this machine's).
+pub(super) fn split_folder(p: &str) -> (String, String) {
+    let t = p.trim_end_matches(['/', '\\']);
+    match t.rfind(['/', '\\']) {
+        Some(i) if i + 1 < t.len() => (t[i + 1..].to_string(), t[..i].to_string()),
+        _ => (t.to_string(), String::new()),
     }
 }
