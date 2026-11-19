@@ -215,6 +215,14 @@ pub struct StartOpts {
     pub verify: Option<TrustCheck>,
 }
 
+/// The conductor role of the Super Agent (super-agent-s1.md 4.1): the engine whose only tools are the
+/// host's read-only `conductor_*` tools. Its spend is its own, capped, and never an outcome's.
+pub struct ConductorOpts {
+    pub host: Arc<dyn synthesis_app::host_tools::HostTools>,
+    /// `synt.conductor.max_cost_usd`; a model with no price is refused under it.
+    pub max_cost_usd: f64,
+}
+
 /// One row of the MCP panel.
 #[derive(Debug, Clone)]
 pub struct McpInfo {
@@ -269,6 +277,8 @@ pub struct Engine {
     pub notes: synthesis_app::memory::Notes,
     /// A `!cmd` ended and the model should read its output (the window starts that turn).
     followup: Arc<std::sync::atomic::AtomicBool>,
+    /// The conductor role: its mode never leaves default, plan and dontAsk.
+    conductor: bool,
     /// Where the session's browser is found by the Browser tab (empty in remote mode: no pane there yet).
     browser: Arc<synthesis_tools::BrowserTap>,
 }
@@ -410,6 +420,7 @@ impl Engine {
                 long_term: false,
             },
             followup: Arc::default(),
+            conductor: false,
             browser: Arc::default(),
         }
     }
@@ -458,6 +469,32 @@ impl Engine {
         o: StartOpts,
         env: &Env,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Self::start_role(o, env, None)
+    }
+
+    /// The conductor engine: the chat's model session, with no file, shell, web or MCP tool, no project
+    /// instructions or memory, no peers, no worktree and no stored transcript until P3b adds the store kind.
+    /// Blocking, like `start_with`.
+    pub(crate) fn start_conductor(
+        mut o: StartOpts,
+        c: ConductorOpts,
+        env: &Env,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        let common = &mut o.common;
+        common.no_session_store = true;
+        common.no_worktree = true;
+        common.no_memory = true;
+        common.peers = false;
+        common.permission_mode = Some(synthesis_app::run::ModeArg::Default);
+        o.resume = None;
+        Self::start_role(o, env, Some(c))
+    }
+
+    fn start_role(
+        o: StartOpts,
+        env: &Env,
+        conductor: Option<ConductorOpts>,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let StartOpts {
             project,
             mut common,
@@ -502,18 +539,17 @@ impl Engine {
             // `synt stop` on this in-process session: cancel it without exiting the app
             on_stop: Some(stop_callback(tx.clone())),
             browser_view: Some(browser.clone()),
+            host_tools: conductor.as_ref().map(|c| c.host.clone()),
+        };
+        let limits = Limits {
+            max_cost_usd: conductor.as_ref().map(|c| c.max_cost_usd),
+            ..Limits::default()
         };
         let t_prepare = crate::trace::span(
             env,
             "start_with: prepare (config, MCP, memory, skills, store)",
         );
-        let p = prepare(
-            &common,
-            &project,
-            env,
-            &Limits::default(),
-            Front::Native(native),
-        )?;
+        let p = prepare(&common, &project, env, &limits, Front::Native(native))?;
         // the configuration is loaded now and no hook has run yet: it must still be what the person approved
         if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
             return Err(trust_changed_error(&files));
@@ -618,6 +654,7 @@ impl Engine {
             memory_report: (info.notes.clone().hook().report)(),
             notes: info.notes,
             followup: Arc::default(),
+            conductor: limits.max_cost_usd.is_some(),
             browser,
         };
         Ok((engine, rx))
@@ -699,6 +736,9 @@ impl Engine {
     }
 
     pub fn set_mode(&self, mode: Mode) {
+        if self.conductor && !matches!(mode, Mode::Default | Mode::Plan | Mode::DontAsk) {
+            return;
+        }
         match (&self.live, &self.remote) {
             (Some(l), _) => {
                 let _ = l.harness.set_mode(mode, false);
@@ -715,6 +755,9 @@ impl Engine {
     /// Enters bypassPermissions after the person said yes to the confirmation dialog; the core still takes the
     /// flag from here only and answers with its own error otherwise.
     pub fn enable_bypass(&self) -> Result<(), String> {
+        if self.conductor {
+            return Err("a conductor session never runs in bypassPermissions".into());
+        }
         self.live()?
             .harness
             .set_mode(Mode::BypassPermissions, true)
@@ -805,6 +848,31 @@ impl Engine {
         rt.spawn(async move {
             if let Err(why) = h.send_user_message(&to, text.clone()).await {
                 let _ = tx.unbounded_send(UiMsg::SendFailed { to, text, why });
+            }
+        });
+        Ok(())
+    }
+
+    /// The conductor host relays a line to this session (conductor.md 2.4): delivered at the next safe point of
+    /// the running task as a fenced `<conductor_message>` block, never as the person's own line and never as an
+    /// answer. `confirmed`: the person approved these exact bytes. In-process engines only (the stdio engine has
+    /// no mid-task send yet); `UiMsg::SendFailed` follows when refused.
+    pub fn send_via_conductor(&self, text: String, confirmed: bool) -> Result<(), &'static str> {
+        if is_command(&text) {
+            return Err("commands are not relayed");
+        }
+        let live = self.live()?;
+        let Some(rt) = &live.tokio else {
+            return Err("the engine is closed");
+        };
+        let (h, tx) = (live.harness.clone(), self.tx.clone());
+        rt.spawn(async move {
+            if let Err(why) = h.send_conductor_message(text.clone(), confirmed).await {
+                let _ = tx.unbounded_send(UiMsg::SendFailed {
+                    to: "main".into(),
+                    text,
+                    why,
+                });
             }
         });
         Ok(())
@@ -1447,5 +1515,13 @@ pub mod for_tests {
         env: &Env,
     ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         Engine::start_with(o, env)
+    }
+
+    pub fn start_conductor(
+        o: StartOpts,
+        c: ConductorOpts,
+        env: &Env,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start_conductor(o, c, env)
     }
 }

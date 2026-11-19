@@ -284,6 +284,7 @@ fn start(
         }),
         on_stop: None,
         browser_view: None,
+        host_tools: None,
     };
     let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {

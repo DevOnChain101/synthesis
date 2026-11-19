@@ -476,6 +476,10 @@ pub struct Native {
     /// The window shows the session's browser (the desktop pane): the browser then runs headless and is
     /// registered here when the main agent launches it.
     pub browser_view: Option<Arc<synthesis_tools::BrowserTap>>,
+    /// Set: the conductor role (super-agent-s1.md 4.1). The session's only tools are the host's
+    /// read-only `conductor_*` tools; no project instructions, memory, MCP, peers or browser; a cost
+    /// cap (`Limits::max_cost_usd`) is required.
+    pub host_tools: Option<Arc<dyn crate::host_tools::HostTools>>,
 }
 
 /// See [`Native::pre_start`].
@@ -965,7 +969,7 @@ pub fn prepare(
     limits: &Limits,
     front: Front,
 ) -> Result<Prepared, String> {
-    let (cli_allow, cli_deny) = (
+    let (mut cli_allow, cli_deny) = (
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
@@ -984,6 +988,20 @@ pub fn prepare(
         Front::Native(n) => n.browser_view.clone(),
         _ => None,
     };
+    let host_tools = match &front {
+        Front::Native(n) => n.host_tools.clone(),
+        _ => None,
+    };
+    let conductor = host_tools.is_some();
+    // the host's read tools run without a dialog (the card is the control for an effect, and none of them has
+    // one); a deny rule or a user/managed PreToolUse hook still wins
+    if let Some(h) = &host_tools {
+        cli_allow.extend(h.specs().into_iter().map(|s| s.name));
+    }
+    // its own budget, capped: never the outcomes' and never unbounded (an unpriced model is refused under a cap)
+    if conductor && limits.max_cost_usd.is_none_or(|v| v.is_nan() || v <= 0.0) {
+        return Err("a conductor session needs a cost cap (max_cost_usd > 0)".into());
+    }
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -1304,6 +1322,9 @@ pub fn prepare(
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
+    if conductor && !matches!(mode, Mode::Default | Mode::Plan | Mode::DontAsk) {
+        return Err("a conductor session runs in default, plan or dontAsk mode".into());
+    }
     if c.confined()
         && matches!(
             mode,
@@ -1946,6 +1967,10 @@ pub fn prepare(
         crate::ctx::load_auto_memory(&h.synthesis, &[&ws.root, &ws.cwd]),
     );
     instructions.extend(crate::ctx::load_rules(&ws.root));
+    if conductor {
+        // repository text is an injection vector into the agent that steers sessions: only the user's own file stays
+        instructions.retain(|i| i.path == user_files[0]);
+    }
     if c.bare {
         instructions.clear();
     }
@@ -1953,7 +1978,7 @@ pub fn prepare(
     let small = crate::memcmd::small_model(&cfg, &res.label, &res.model);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
-            enabled: !c.no_memory && !c.bare,
+            enabled: !c.no_memory && !c.bare && !conductor,
             home: &h,
             repo: &repo,
             prompt: &prompt,
@@ -1983,10 +2008,14 @@ pub fn prepare(
         ));
     }
     // after memory starts: learned skills are installed by `start`
-    let skills = crate::ctx::visible_skills(
-        synthesis_tools::discover_session_skills(env, &ws.root, Some(&sid)),
-        trust == ProjectTrust::Trusted,
-    );
+    let skills = if conductor {
+        vec![] // no Skill tool in this role
+    } else {
+        crate::ctx::visible_skills(
+            synthesis_tools::discover_session_skills(env, &ws.root, Some(&sid)),
+            trust == ProjectTrust::Trusted,
+        )
+    };
     let mut context = SynthesisContext::new(
         instructions,
         &prompt,
@@ -1998,11 +2027,15 @@ pub fn prepare(
     .with_skills(&skills)
     .with_memory(memory_block)
     .with_system_prompt(
-        text_or_file(
-            &c.system_prompt,
-            &c.system_prompt_file,
-            "--system-prompt-file",
-        )?,
+        if conductor {
+            Some(crate::host_tools::RULES.to_string())
+        } else {
+            text_or_file(
+                &c.system_prompt,
+                &c.system_prompt_file,
+                "--system-prompt-file",
+            )?
+        },
         text_or_file(
             &c.append_system_prompt,
             &c.append_system_prompt_file,
@@ -2177,6 +2210,9 @@ pub fn prepare(
         eprintln!("synt: warning: {w}");
         notices.push(w);
     }
+    if conductor {
+        mplan.servers.clear(); // the conductor has no MCP tools
+    }
     if c.confined() && !mplan.servers.is_empty() {
         // D12: an attempt starts no MCP server (stdio servers run outside the sandbox)
         let n = format!(
@@ -2312,7 +2348,7 @@ pub fn prepare(
     }
     let registry = Registry::with_terminal_policy(rt.clone(), make_policy).with_new_tools();
     // an outcome attempt has no browser tools (the browser worker is outside the OS sandbox)
-    let registry = if c.confined() {
+    let registry = if c.confined() || conductor {
         registry
     } else {
         let cfg = browser.config(
@@ -2332,7 +2368,11 @@ pub fn prepare(
         }
         registry.with_browser(cfg)
     };
-    let mut toolbox = ToolBox::new(registry.with_background_on_timeout(is_cli));
+    let mut toolbox = match host_tools {
+        // the host's read-only tools and nothing else: no registry tool exists in this role
+        Some(h) => crate::host_tools::toolbox(h)?,
+        None => ToolBox::new(registry.with_background_on_timeout(is_cli)),
+    };
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
     }
@@ -2349,8 +2389,8 @@ pub fn prepare(
     let gate_cfg = vs.gate(budget.max_verify_attempts);
     let rt_gate = rt.clone();
     // Peer endpoint (off by default). Bound here, inside the runtime; the server starts below.
-    let peers = if c.unattended {
-        None // an unattended session answers nobody and is addressed by nobody
+    let peers = if c.unattended || conductor {
+        None // an unattended session answers nobody and is addressed by nobody; no session addresses the conductor
     } else {
         let _enter = tokio_rt.enter();
         crate::peers::setup(

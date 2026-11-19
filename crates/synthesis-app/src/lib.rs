@@ -45,6 +45,7 @@ pub mod events;
 #[cfg(feature = "test-provider")]
 pub mod fake;
 pub mod host;
+pub mod host_tools;
 pub mod login;
 pub mod mcp;
 pub mod mcpinput;
