@@ -2315,7 +2315,7 @@ pub fn prepare(
     let registry = if c.confined() {
         registry
     } else {
-        registry.with_browser(browser.config(
+        let cfg = browser.config(
             synthesis_tools::BrowserConfig {
                 view: browser_view,
                 ..Default::default()
@@ -2325,7 +2325,12 @@ pub fn prepare(
             browser_host,
             sandbox_mode == SandboxMode::Enforce,
             stdio,
-        ))
+        );
+        // the desktop's Browser tab may start the browser itself (headless; same policy and caps as the agent's)
+        if let Some(tap) = &cfg.view {
+            tap.enable_start(cfg.clone(), artifact_root.join("browser"), env.clone());
+        }
+        registry.with_browser(cfg)
     };
     let mut toolbox = ToolBox::new(registry.with_background_on_timeout(is_cli));
     if let Some(a) = mcp_attach {

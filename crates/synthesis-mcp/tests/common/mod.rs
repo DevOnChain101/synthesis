@@ -12,18 +12,23 @@ pub fn echo_server_path() -> PathBuf {
 }
 
 pub fn example_path(name: &str) -> PathBuf {
-    // target/<profile>/deps/<test-exe> -> target/<profile>/examples/<name>
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    p.pop();
-    p.push("examples");
-    p.push(if cfg!(windows) {
+    // The final example is in target/<profile>/examples, an ancestor's child: the test exe is in
+    // target/<profile>/deps (old layout) or target/<profile>/build/<pkg>/<hash> (new build-dir layout).
+    let file = if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_string()
-    });
-    assert!(p.exists(), "build the example first: {}", p.display());
-    p
+    };
+    let exe = std::env::current_exe().unwrap();
+    exe.ancestors()
+        .map(|a| a.join("examples").join(&file))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "build the example first: {file} not found above {}",
+                exe.display()
+            )
+        })
 }
 
 pub fn echo_cfg(name: &str, extra: &[&str]) -> McpServerConfig {
