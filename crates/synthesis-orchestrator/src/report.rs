@@ -21,6 +21,10 @@ impl AttemptReport {
     }
 }
 
+/// The final assistant message of `session_id`. P2b: show exactly the hashed text, recheck the
+/// hash when it is displayed, and treat it as untrusted (strip terminal escapes, no links, never
+/// pass it to a model).
+///
 /// The final assistant message of `session_id`, `None` when it wrote none (or the store cannot say).
 pub fn attempt_report(store: &Store, session_id: &str) -> Option<AttemptReport> {
     let text = crate::planrun::read_session(store, session_id).0?;

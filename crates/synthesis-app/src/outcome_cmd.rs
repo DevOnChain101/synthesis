@@ -563,6 +563,9 @@ pub fn dispatch<T: Transport>(
                     "contract_version": v.get("contract_version"), "contract_hash": hash}))?;
             } else {
                 p.line(&format!("Created outcome {id} ({}).", text(&v, "state")))?;
+                if read_only {
+                    p.line("Report review is not available yet: the goal will wait in Verifying until you cancel it.")?;
+                }
                 p.line(&format!("Review: synt outcome contract {id}"))?;
                 p.line(&format!(
                     "Approve: synt outcome approve {id} --version {} --hash {hash}",

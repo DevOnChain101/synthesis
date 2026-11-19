@@ -524,12 +524,19 @@ impl<'a> Owner<'a> {
             log(&format!("outcome {id}: commands: {e}"));
         }
         // with a model planner the plan comes from a planning run and the person's approval
-        let planner: &dyn Planner =
-            if self.planner.is_some() && !is_read_only(&ow.w).unwrap_or(false) {
-                &ModelPlanner
-            } else {
-                &StubPlanner
-            };
+        // the kind decides who plans; if it cannot be read, nothing is planned this step
+        let read_only = match is_read_only(&ow.w) {
+            Ok(r) => r,
+            Err(e) => {
+                log(&format!("outcome {id}: cannot read its contract: {e}"));
+                return true;
+            }
+        };
+        let planner: &dyn Planner = if self.planner.is_some() && !read_only {
+            &ModelPlanner
+        } else {
+            &StubPlanner
+        };
         if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, planner) {
             log(&format!("outcome {id}: commands: {e}"));
         }
@@ -857,7 +864,14 @@ impl<'a> Owner<'a> {
         if !root.is_absolute() || !root.is_dir() {
             return Err("workspace must be an existing absolute directory".into());
         }
-        if !read_only {
+        if read_only {
+            let user = crate::homes(&Env::from_process())
+                .map(|h| h.user)
+                .unwrap_or_default();
+            if let Some(why) = read_only_folder_refusal(root, &user, &self.home) {
+                return Err(why);
+            }
+        } else {
             self.wm.verify_base(root, &base_commit).map_err(s)?;
         }
         let art = self.home.join("artifacts");
@@ -920,6 +934,22 @@ impl<'a> Owner<'a> {
                   "disclosure": {"id": DISCLOSURE_ID, "text": INTEGRITY_DISCLOSURE}}),
         )
     }
+}
+
+/// A read-only worker reads its whole folder, so the folder must not be, hold or sit above the
+/// user's home, Synthesis's own home (state, keys) or the filesystem root. `None`: allowed.
+pub(crate) fn read_only_folder_refusal(root: &Path, user: &Path, synt: &Path) -> Option<String> {
+    let real = |p: &Path| synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = real(root);
+    let (user, synt) = (real(user), real(synt));
+    let holds = |h: &Path| !h.as_os_str().is_empty() && h.starts_with(&root);
+    let wide = root.parent().is_none()
+        || holds(&user)
+        || holds(&synt)
+        || (!synt.as_os_str().is_empty() && root.starts_with(&synt));
+    wide.then(|| {
+        "a read-only goal needs a project folder: not your home folder, a folder that holds it, the filesystem root or Synthesis's own folder".into()
+    })
 }
 
 /// The notifications an outcome owes the person now (ADR-021 section 4): ids and codes only, once
@@ -1313,6 +1343,26 @@ async fn wait_for_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ro-folder-refused`: a read-only goal cannot name the home folder, a folder that holds it,
+    /// the filesystem root, or Synthesis's own folder (or anything in it).
+    #[test]
+    fn a_read_only_folder_is_never_home_above_home_root_or_synthesis_state() {
+        let t = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(t.path()).unwrap();
+        let (home, synt) = (base.join("u"), base.join("u/.synt"));
+        let proj = home.join("code/proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&synt).unwrap();
+        let refused = |p: &Path| read_only_folder_refusal(p, &home, &synt).is_some();
+        assert!(!refused(&proj), "a project below home is fine");
+        for bad in [&home, &base, &synt, &synt.join("sessions")] {
+            if bad.exists() {
+                assert!(refused(bad), "{bad:?}");
+            }
+        }
+        assert!(refused(Path::new("/")));
+    }
 
     #[test]
     fn idle_exit_needs_no_outcome_no_client_and_quiet_minutes() {

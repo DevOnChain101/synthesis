@@ -228,7 +228,7 @@ fn without_writable_roots(p: &mut SandboxPolicy) {
 }
 
 /// The tools of a planning run and of a read-only attempt: an allow-list, never a deny-list.
-pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
+pub const READ_ONLY_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
 impl Common {
     /// An outcome attempt or planning run: the confinement of ADR-019 applies.
@@ -329,12 +329,12 @@ pub struct Common {
     /// Internal (the outcome orchestrator's planning run launches `synt run` with it): `--resume`
     /// names the planner session the owner created, in a plain directory it checked out. Confined
     /// like an attempt (no MCP, no browser, no allow rules from settings, no extra directories,
-    /// reads stay in the working directory) and its tools are only Read, Grep, Glob and LS.
+    /// reads stay in the working directory) and its tools are only Read, Grep, Glob.
     #[arg(long, hide = true, requires = "resume", conflicts_with_all = ["attempt_session", "unattended"])]
     pub plan_session: bool,
     /// Internal (the orchestrator launches the attempt of a read-only goal with it, next to
     /// `--attempt-session`): the session runs in place, in the folder itself, with no worktree.
-    /// The tools are only Read, Grep, Glob and LS (an allow-list: no shell, no edit tool, no web,
+    /// The tools are only Read, Grep, Glob (an allow-list: no shell, no edit tool, no web,
     /// no sub-agents) and the sandbox policy has no writable folder.
     #[arg(long, hide = true, requires = "attempt_session")]
     pub read_only_session: bool,
@@ -955,16 +955,24 @@ pub fn workspace_root(cwd: &Path, home: &Path) -> PathBuf {
     if home.starts_with(&root) { real } else { root }
 }
 
+/// `exact`: a read-only attempt's root is the folder itself, never the enclosing repository (its
+/// read scope is the root: a goal on `mono/packages/foo` must not read `mono/`).
 fn open_plain(
     cwd: &Path,
     h: &crate::Homes,
     extra_dirs: &[PathBuf],
     sid: &str,
     artifact_root: &Path,
+    exact: bool,
 ) -> Result<WorkspaceContext, String> {
+    let root = if exact {
+        synthesis_core::canonicalize(cwd).map_err(|e| format!("{}: {e}", cwd.display()))?
+    } else {
+        workspace_root(cwd, &h.user)
+    };
     WorkspaceContext::open(
         format!("ws-{}", &sid[..8]),
-        &workspace_root(cwd, &h.user),
+        &root,
         cwd,
         extra_dirs,
         artifact_root.to_path_buf(),
@@ -1409,7 +1417,14 @@ pub fn prepare(
             ));
         }
         Some(_) => (
-            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+            open_plain(
+                cwd,
+                &h,
+                &extra_dirs,
+                &sid,
+                &artifact_root,
+                c.read_only_session,
+            )?,
             None,
         ),
         None if must_wt || auto_wt => {
@@ -1437,7 +1452,14 @@ pub fn prepare(
                         cwd.display()
                     );
                     (
-                        open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+                        open_plain(
+                            cwd,
+                            &h,
+                            &extra_dirs,
+                            &sid,
+                            &artifact_root,
+                            c.read_only_session,
+                        )?,
                         None,
                     )
                 }
@@ -1445,7 +1467,14 @@ pub fn prepare(
             }
         }
         None => (
-            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+            open_plain(
+                cwd,
+                &h,
+                &extra_dirs,
+                &sid,
+                &artifact_root,
+                c.read_only_session,
+            )?,
             None,
         ),
     };
@@ -1851,7 +1880,8 @@ pub fn prepare(
     );
     // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
     // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
-    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
+    // A read-only attempt always has it: key files and token files in the folder stay unread.
+    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis) || c.read_only_session;
     // Only the user's own allow rules (user/managed settings and flags, never the project's) can
     // lift the read-only-path refusal and the irreversible-action table.
     perms.env.user_allow = user_settings

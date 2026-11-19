@@ -326,6 +326,19 @@ fn ro_create_read_only_goal_in_a_plain_folder_through_the_owner_process() {
         made["id"].as_str().unwrap().to_string(),
         made["contract_hash"].as_str().unwrap().to_string(),
     );
+    let (code, out, err) = r.synt(&[
+        "create",
+        "--kind",
+        "read-only",
+        "--goal",
+        "again",
+        "--max-cost-usd",
+        "1",
+        "--cwd",
+        &plain,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Report review is not available yet"), "{out}");
     let c = r.json(&["contract", &id]);
     assert_eq!(c["contract"]["kind"], "read_only", "{c}");
     assert_eq!(

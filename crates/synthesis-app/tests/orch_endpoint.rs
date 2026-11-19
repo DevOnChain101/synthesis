@@ -335,10 +335,7 @@ fn ro_goal_is_created_in_a_folder_that_is_not_a_git_repository_and_the_kinds_nev
     std::fs::create_dir_all(&plain).unwrap();
     let plain_s = plain.to_string_lossy().to_string();
     c.enable().unwrap();
-    assert_eq!(
-        c.status().unwrap()["features"],
-        serde_json::json!(["read_only_goal"])
-    );
+    assert_eq!(c.status().unwrap()["features"], serde_json::json!([]));
     let ro = Contract::read_only(
         "review it".into(),
         &["names the risks".into()],

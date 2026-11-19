@@ -1433,6 +1433,87 @@ fn ro_worker_has_only_read_tools_cannot_read_secrets_and_its_last_message_is_the
     assert_eq!(a.subject_commit, s.subject_commit);
 }
 
+/// The read scope is the declared folder, not the repository around it: a goal on `mono/pkg` cannot
+/// read `mono/` (a file, `..`, or a symlink to it), and key files inside the folder stay unread.
+#[test]
+fn ro_read_scope_is_the_folder_not_the_enclosing_repository_and_key_files_are_denied() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the read-only attempt cannot run");
+        println!("SKIP: no enforcing sandbox on this host");
+        return;
+    }
+    let mono = std::fs::canonicalize(r.dir.path()).unwrap().join("mono");
+    let pkg = mono.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    g(&mono, &["init", "-q"]);
+    std::fs::write(mono.join("secret.txt"), "PARENTSECRET\n").unwrap();
+    std::fs::write(pkg.join("inside.txt"), "INSIDEOK\n").unwrap();
+    std::fs::write(pkg.join("id_rsa"), "RSASECRET\n").unwrap();
+    std::fs::write(pkg.join("x.pem"), "PEMSECRET\n").unwrap();
+    std::os::unix::fs::symlink("../secret.txt", pkg.join("link")).unwrap();
+    let rd = |id: &str, p: PathBuf| json!({"id": id, "name": "Read", "input": {"file_path": p}});
+    let tools = json!([
+        rd("t1", mono.join("secret.txt")),
+        rd("t2", pkg.join("../secret.txt")),
+        rd("t3", pkg.join("link")),
+        rd("t4", pkg.join("inside.txt")),
+        rd("t5", pkg.join("id_rsa")),
+        rd("t6", pkg.join("x.pem")),
+        rd("t7", mono.join(".git/config")),
+    ]);
+    let script =
+        json!([{"text": "looking", "tools": tools}, {"text": "R"}, {"text": "R"}, {"text": "R"}]);
+    let (_, _, env, settled) = run_read_only(&r, &pkg, script);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert!(
+        matches!(s.end, WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{log}"
+    );
+    let evs = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&env.session_id, 0, 5000)
+        .unwrap();
+    let result = |id: &str| {
+        evs.iter().find_map(|e| match e {
+            synthesis_events::Record::Known(e) => match &e.event {
+                synthesis_events::Event::ToolCompleted {
+                    tool_call_id,
+                    is_error,
+                    preview,
+                    output,
+                    ..
+                } if tool_call_id == id => Some((
+                    *is_error,
+                    format!("{preview}{}", output.clone().unwrap_or_default()),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    for (id, secret) in [
+        ("t1", "PARENTSECRET"),
+        ("t2", "PARENTSECRET"),
+        ("t3", "PARENTSECRET"),
+        ("t5", "RSASECRET"),
+        ("t6", "PEMSECRET"),
+    ] {
+        let (err, shown) = result(id).unwrap_or_else(|| panic!("{id} unanswered: {log}"));
+        assert!(err && !shown.contains(secret), "{id} was read: {shown}");
+    }
+    let (err, shown) = result("t7").expect("t7");
+    assert!(err, "the enclosing repository's .git was read: {shown}");
+    let (err, shown) = result("t4").expect("t4");
+    assert!(
+        !err && shown.contains("INSIDEOK"),
+        "a read inside the folder works: {shown}"
+    );
+}
+
 /// `ro-project-hook-not-run`: in place inside a git repository whose project settings carry a
 /// hook, and with a user MCP server configured, the worker starts neither, and the repository's
 /// tree, index and HEAD are as they were.
@@ -1446,6 +1527,16 @@ fn ro_project_hook_not_run_and_the_repository_is_untouched() {
     }
     let base = std::fs::canonicalize(r.dir.path()).unwrap();
     let (mcp, hook) = (base.join("mcp-started"), base.join("project-hook-ran"));
+    // a USER-level hook too: only `--bare` keeps it from running in the attempt
+    let user_hook = base.join("user-hook-ran");
+    std::fs::write(
+        r.home.join("settings.json"),
+        json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}},
+            "hooks": {"SessionStart": [{"hooks": [{"type": "command",
+                "command": format!("touch {}", user_hook.display())}]}]}})
+        .to_string(),
+    )
+    .unwrap();
     let head = g(&r.repo, &["rev-parse", "HEAD"]);
     let status = g(&r.repo, &["status", "--porcelain", "--ignored"]);
     let (_, _, _, settled) = run_read_only(
