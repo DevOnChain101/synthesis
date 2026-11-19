@@ -47,6 +47,12 @@ Settings stays a popup over the TUI view (gear, Cmd/Ctrl+,), not a mode.
 
 Trade-offs of A against B: the chat and the context are visible together and navigation is a browser-like history; the cost is width (a diff in the centre is narrower than in B; below 1100 px the right column hides, section 10).
 
+### 2.1a Visual rules (owner feedback 2026-11-18)
+
+- Borderless panels: no outline box round a panel or a tab strip. The rail and the right context column sit on the surface tone, the centre on the window ground; the only line is one low-contrast hairline between the centre and the right column. Tab strips have no box: the active tab is in the strong colour with a 2px underline.
+- Controls keep their own affordance (inputs and buttons a subtle border or fill; the focus ring is styled globally, not here).
+- Attention highlight only for owner action: the accent border (or accent count) marks what needs the owner (a pending decision card, the decision popup, an outcome that is blocked, waits for an answer or an ack, the pending count on the Decisions tab). Nothing else in this view uses the accent border.
+
 ### 2.2 Variant B (alternative, not chosen now)
 
 Chat is home; selecting a session replaces the centre with a wide detail (breadcrumb `Chat > outcome > w3`, tabs Transcript, Changes, Activity, Evidence, **Contract**), a right context column (this work item in its outcome, the plan) and the orchestrator composer docked at the bottom with `@w3` prefilled. A pending decision shows as a thin strip "1 decision waiting . Alt+A".
