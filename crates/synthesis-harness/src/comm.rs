@@ -27,6 +27,24 @@ use crate::traits::BoxFut;
 use crate::util::{lock, uuid};
 use synthesis_events::ToolStatus;
 
+/// Proof that the person approved exactly this text (a card they clicked). It is bound to the text's sha256, so
+/// it cannot cover other bytes. Only the approval-card code path may build one: the constructor exists with the
+/// `approval-card` feature (tests, and P3b's card code); a grep test in P3b checks no other module calls it.
+pub struct PersonApproved([u8; 32]);
+
+impl PersonApproved {
+    #[cfg(any(test, feature = "approval-card"))]
+    pub fn for_text(text: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(text.as_bytes()).into())
+    }
+
+    fn covers(&self, text: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        self.0 == <[u8; 32]>::from(Sha256::digest(text.as_bytes()))
+    }
+}
+
 /// Why `send_user_message` refuses a line when the task ended before it arrived.
 pub const NO_TASK_RUNNING: &str = "no task is running";
 
@@ -732,13 +750,19 @@ impl Harness {
             .await
     }
 
-    /// A request the person's conductor relays to the main agent (conductor.md 2.4). `confirmed`: the
-    /// person approved these exact bytes. A fenced `<conductor_message>` block, never an answer.
+    /// A request the person's conductor relays to the main agent (conductor.md 2.4). `approval`: the person
+    /// approved these exact bytes (a [`PersonApproved`] bound to the text's sha256). A fenced
+    /// `<conductor_message>` block, never an answer.
     pub async fn send_conductor_message(
         &self,
         text: String,
-        confirmed: bool,
+        approval: Option<PersonApproved>,
     ) -> Result<(), String> {
+        let confirmed = match &approval {
+            Some(a) if a.covers(&text) => true,
+            Some(_) => return Err("the approval is for other text".into()),
+            None => false,
+        };
         self.send_injected(MAIN, text, "conductor", Origin::Conductor { confirmed })
             .await
     }
@@ -774,6 +798,18 @@ impl Harness {
                     .unwrap_or_else(|| "blocked by a UserPromptSubmit hook".into()));
             }
             let extra = out.additional_context.join("\n");
+            // text the person wrote or approved is delivered as it is: hook context is never put inside its block
+            // or into the judge's user texts
+            if !extra.is_empty()
+                && matches!(
+                    origin,
+                    Origin::Owner { .. } | Origin::Conductor { confirmed: true }
+                )
+            {
+                return Err(
+                    "a UserPromptSubmit hook added context to a message the person approved; not delivered".into(),
+                );
+            }
             if !extra.is_empty() {
                 text = format!("{text}\n\n{extra}");
             }

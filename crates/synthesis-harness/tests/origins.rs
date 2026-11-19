@@ -11,7 +11,7 @@ use common::*;
 use serde_json::json;
 use synthesis_events::Event;
 use synthesis_harness::testing::{Responder, Turn};
-use synthesis_harness::{TaskRequest, ToolBox};
+use synthesis_harness::{PersonApproved, TaskRequest, ToolBox};
 use synthesis_providers::{Block, Content, Request, Role};
 use synthesis_tools::{Registry, SideEffectClass};
 use tokio_util::sync::CancellationToken;
@@ -120,8 +120,8 @@ async fn an_owner_message_lands_fenced_next_to_the_tool_result_and_is_not_the_pe
 async fn a_conductor_message_carries_whether_the_person_confirmed_it() {
     for confirmed in [true, false] {
         let (rig, sent) = run(opts("slept", slow_then_done()), async move |h| {
-            h.send_conductor_message("run the tests".into(), confirmed)
-                .await
+            let a = confirmed.then(|| PersonApproved::for_text("run the tests"));
+            h.send_conductor_message("run the tests".into(), a).await
         })
         .await;
         sent.unwrap();
@@ -161,7 +161,7 @@ async fn an_owner_or_conductor_message_needs_a_running_task() {
     assert!(rig.harness.send_owner_message(1, "x".into()).await.is_err());
     assert!(
         rig.harness
-            .send_conductor_message("x".into(), true)
+            .send_conductor_message("x".into(), Some(PersonApproved::for_text("x")))
             .await
             .is_err()
     );
@@ -194,7 +194,10 @@ async fn the_user_prompt_hook_can_refuse_an_owner_and_a_conductor_message() {
             (
                 rig.harness.send_owner_message(1, "BLOCKME".into()).await,
                 rig.harness
-                    .send_conductor_message("BLOCKME".into(), true)
+                    .send_conductor_message(
+                        "BLOCKME".into(),
+                        Some(PersonApproved::for_text("BLOCKME")),
+                    )
                     .await,
             )
         }
@@ -205,5 +208,70 @@ async fn the_user_prompt_hook_can_refuse_an_owner_and_a_conductor_message() {
         !rig.requests()
             .iter()
             .any(|r| user_texts(r).iter().any(|t| t.contains("BLOCKME")))
+    );
+}
+
+#[tokio::test]
+async fn an_approval_for_other_text_is_refused() {
+    let (rig, sent) = run(opts("slept", slow_then_done()), async |h| {
+        h.send_conductor_message(
+            "rm -rf it".into(),
+            Some(PersonApproved::for_text("run the tests")),
+        )
+        .await
+    })
+    .await;
+    assert!(sent.unwrap_err().contains("other text"));
+    assert!(
+        !rig.requests()
+            .iter()
+            .any(|r| user_texts(r).iter().any(|t| t.contains("rm -rf")))
+    );
+}
+
+/// Hook context is never added to text the person approved (it would sit inside `confirmed_by_person` and in the
+/// judge's user texts); an unconfirmed relay may carry it, and it is not person text.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_cannot_add_context_to_an_approved_or_owner_message() {
+    let mut rig = Rig::build(opts("slept", slow_then_done()), vec![], |h, r| {
+        h.with_hooks(Arc::new(synthesis_hooks::Hooks::new(
+            r.rt.clone(),
+            "s1",
+            r.ws.clone(),
+            serde_json::from_value(json!({"UserPromptSubmit": [{"hooks": [{"type": "command",
+            "command": "cat >/dev/null; echo HOOKCTX"}]}]}))
+            .unwrap(),
+        )))
+    });
+    rig.harness
+        .start_session(&mut rig.session, "startup")
+        .unwrap();
+    let (res, sent) = tokio::join!(
+        rig.harness.run_task(
+            &mut rig.session,
+            TaskRequest::new("go"),
+            CancellationToken::new()
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (
+                rig.harness.send_owner_message(1, "a".into()).await,
+                rig.harness
+                    .send_conductor_message("b".into(), Some(PersonApproved::for_text("b")))
+                    .await,
+                rig.harness.send_conductor_message("c".into(), None).await,
+            )
+        }
+    );
+    res.unwrap();
+    assert!(sent.0.unwrap_err().contains("hook added context"));
+    assert!(sent.1.unwrap_err().contains("hook added context"));
+    sent.2.unwrap();
+    let all: Vec<String> = rig.requests().iter().flat_map(user_texts).collect();
+    assert!(all.iter().any(|t| t.contains("c\n\nHOOKCTX")), "{all:?}");
+    assert!(
+        !all.iter()
+            .any(|t| t.contains("owner_message") || t.contains("confirmed_by_person=\"true\""))
     );
 }

@@ -29,7 +29,12 @@ tokio = { version = "1.54.1", default-features = false, features = ["rt", "macro
 tokio-util = { version = "0.7.20", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# P3b's approval-card code path enables this to build a `PersonApproved`; until then only tests do.
+approval-card = []
+
 [dev-dependencies]
+synthesis-harness = { path = ".", features = ["approval-card"] }
 synthesis-terminal = { path = "../synthesis-terminal" }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }

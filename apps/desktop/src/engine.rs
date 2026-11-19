@@ -498,6 +498,10 @@ impl Engine {
         env: &Env,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let common = &mut o.common;
+        // the project's trust is never the conductor's (`prepare` also drops it): user and managed settings only
+        common.trust_project = false;
+        common.project_exec_inert = false;
+        o.verify = None;
         common.no_session_store = true;
         common.no_worktree = true;
         common.no_memory = true;
@@ -872,9 +876,13 @@ impl Engine {
 
     /// The conductor host relays a line to this session (conductor.md 2.4): delivered at the next safe point of
     /// the running task as a fenced `<conductor_message>` block, never as the person's own line and never as an
-    /// answer. `confirmed`: the person approved these exact bytes. In-process engines only (the stdio engine has
+    /// answer. `approval`: proof the person approved these exact bytes (see `PersonApproved`). In-process engines only (the stdio engine has
     /// no mid-task send yet); `UiMsg::SendFailed` follows when refused.
-    pub fn send_via_conductor(&self, text: String, confirmed: bool) -> Result<(), &'static str> {
+    pub fn send_via_conductor(
+        &self,
+        text: String,
+        approval: Option<synthesis_harness::PersonApproved>,
+    ) -> Result<(), &'static str> {
         if is_command(&text) {
             return Err("commands are not relayed");
         }
@@ -884,7 +892,7 @@ impl Engine {
         };
         let (h, tx) = (live.harness.clone(), self.tx.clone());
         rt.spawn(async move {
-            if let Err(why) = h.send_conductor_message(text.clone(), confirmed).await {
+            if let Err(why) = h.send_conductor_message(text.clone(), approval).await {
                 let _ = tx.unbounded_send(UiMsg::SendFailed {
                     to: "main".into(),
                     text,

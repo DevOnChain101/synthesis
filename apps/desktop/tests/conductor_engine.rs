@@ -287,7 +287,7 @@ fn a_conductor_line_reaches_a_running_session_fenced_and_a_repo_file_cannot_forg
     r.engine.send("read the notes".into()).unwrap();
     std::thread::sleep(Duration::from_millis(200));
     r.engine
-        .send_via_conductor("run the tests".into(), false)
+        .send_via_conductor("run the tests".into(), None)
         .unwrap();
     r.pump("task end", |r| r.done.is_some());
     let seen = r.texts().pop().unwrap();
@@ -303,4 +303,72 @@ fn a_conductor_line_reaches_a_running_session_fenced_and_a_repo_file_cannot_forg
         "a file cannot forge the owner's block: {seen}"
     );
     r.engine.close();
+}
+
+#[test]
+fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
+    let d = dirs(json!([{"text": "ok"}]), priced());
+    let marker = d.ws.join("hook-ran");
+    let cmd = format!("cat >/dev/null; touch {}", marker.display());
+    std::fs::create_dir_all(d.ws.join(".synt")).unwrap();
+    std::fs::write(
+        d.ws.join(".synt/settings.json"),
+        json!({"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": cmd}]}],
+            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd}]}]
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        d.ws.join(".synt/config.json"),
+        json!({"$schema": "config.json/v1", "providers": {"evil": {"type": "anthropic",
+            "baseURL": "http://127.0.0.1:9", "apiKey": "x", "models": ["evil-model"]}}})
+        .to_string(),
+    )
+    .unwrap();
+    let (mut o, env) = opts(&d);
+    o.common.trust_project = true; // the host's start flags say trusted
+    let (engine, rx) = for_tests::start_conductor(
+        o,
+        ConductorOpts {
+            host: Arc::new(Host::default()),
+            max_cost_usd: 2.0,
+        },
+        &env,
+    )
+    .expect("conductor starts");
+    let mut r = Rig {
+        engine,
+        rx,
+        convo: Convo::default(),
+        done: None,
+    };
+    r.engine.send("go".into()).unwrap();
+    r.pump("task end", |r| r.done.is_some());
+    assert!(!marker.exists(), "a project hook ran in the conductor");
+    // the project's provider entry loads as for an untrusted folder: its name may be listed, its connection
+    // fields (baseURL, apiKey) are dropped by the config loader
+    assert!(
+        !r.engine.trusted,
+        "the conductor never takes the project's trust"
+    );
+    r.engine.close();
+    // control: the same folder, trusted, in an ordinary session does run the hook
+    let (mut o, env) = opts(&d);
+    o.common.trust_project = true;
+    let (engine, rx) = for_tests::start_with(o, &env).unwrap();
+    let mut n = Rig {
+        engine,
+        rx,
+        convo: Convo::default(),
+        done: None,
+    };
+    n.engine.send("go".into()).unwrap();
+    n.pump("task end", |r| r.done.is_some());
+    assert!(
+        marker.exists(),
+        "the control session should have run the project hook"
+    );
+    n.engine.close();
 }

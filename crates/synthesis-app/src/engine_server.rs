@@ -1149,11 +1149,17 @@ pub fn serve(
                 let started = start(&srv, &cwd, &spec, None, true);
                 srv.conductor &= started.is_ok();
                 match started {
-                    Ok((l, v, trusted)) => {
+                    Ok((l, mut v, trusted)) => {
                         srv.adopt(l, trusted, &v);
                         srv.cwd = Some(cwd);
                         srv.spec = spec;
                         srv.began = true;
+                        if srv.conductor {
+                            // an engine that ignored `role` (an older one) says neither: the client fails closed
+                            v["role"] = json!(ROLE_CONDUCTOR);
+                            v["tools"] =
+                                json!(stub_specs().into_iter().map(|s| s.name).collect::<Vec<_>>());
+                        }
                         wire.result(id, Ok(v));
                     }
                     Err(e) => wire.result(id, Err(e)),

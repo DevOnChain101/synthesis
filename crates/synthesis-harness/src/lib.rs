@@ -47,7 +47,7 @@ pub use agents::{
     AgentDef, AgentSource, AgentTable, GENERAL_PURPOSE, ModelResolver, from_mode, stricter, to_mode,
 };
 pub use classifier::AutoJudge;
-pub use comm::{AgentInfo, NO_TASK_RUNNING, TaskAgent};
+pub use comm::{AgentInfo, NO_TASK_RUNNING, PersonApproved, TaskAgent};
 pub use context::{RULES, StaticContext, wrap_tool_output};
 pub use harness::{
     AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ImageAttachment, LongTier,

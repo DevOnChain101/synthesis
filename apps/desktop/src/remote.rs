@@ -334,6 +334,25 @@ impl Remote {
                 START_TIMEOUT,
             )
             .map_err(why)?;
+        // fail closed: an engine that ignored `role` (an older one) would run a coding agent with its own tools
+        if let Some(h) = &remote.shared.host {
+            let mut want: Vec<String> = h.specs().into_iter().map(|s| s.name).collect();
+            want.sort();
+            let mut got: Vec<String> = v["tools"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            got.sort();
+            if v["role"] != ROLE_CONDUCTOR || got != want {
+                return Err(
+                    "the engine did not start the conductor role (an older engine?); it is not used".into(),
+                );
+            }
+        }
         // an engine that does not say its mode is not trusted to be in the default one
         let mode = v["mode"]
             .as_str()
@@ -719,7 +738,9 @@ fn drain_stderr(r: std::process::ChildStderr, s: &Shared) {
 fn watchdog(s: &Arc<Shared>, idle: Duration) {
     while !s.dead.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(250));
-        let owes = s.running.load(Ordering::SeqCst) || !lock(&s.waiting).is_empty();
+        // a host call being answered (a card can wait for the person) is this side's wait, not the engine's silence
+        let owes = (s.running.load(Ordering::SeqCst) || !lock(&s.waiting).is_empty())
+            && !s.host_busy.load(Ordering::SeqCst);
         if owes && !s.closing.load(Ordering::SeqCst) && s.idle() > idle {
             s.tell(UiMsg::BadEvent("the engine stopped answering".into()));
             s.kill();
@@ -931,12 +952,17 @@ fn host_call(s: &Arc<Shared>, id: u64, tool: &str, input: Value) -> Verdict {
         };
         // free before the answer is written: the engine's next call can follow it at once
         s.host_busy.store(false, Ordering::SeqCst);
-        if let Ok(line) = serde_json::to_vec(&Request {
-            id,
-            call: Call::HostResult { id, ok, error },
-        }) && let Some(w) = lock(&s.host_out).as_ref()
-        {
-            let _ = w.try_send(line);
+        s.touch();
+        let writer = lock(&s.host_out).clone();
+        if let (Ok(line), Some(w)) = (
+            serde_json::to_vec(&Request {
+                id,
+                call: Call::HostResult { id, ok, error },
+            }),
+            writer,
+        ) {
+            // blocks while the write queue is full (the engine waits for this answer); gone writer = closing
+            let _ = w.send(line);
         }
     });
     Verdict::Fine

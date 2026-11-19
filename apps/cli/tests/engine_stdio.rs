@@ -1106,6 +1106,19 @@ fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
     let id = e.call("start", json!({"cwd": ws, "role": "conductor"}));
     let (_, r) = e.result(id);
     assert!(r["error"].is_null(), "{r}");
+    // the report names the role and its tools: a client of an engine that ignored `role` can tell
+    assert_eq!(r["ok"]["role"], "conductor");
+    assert_eq!(r["ok"]["tools"], json!(["conductor_list"]));
+    // the mode never leaves default, plan and dontAsk, whatever the client sends
+    for m in ["acceptEdits", "auto", "bypassPermissions"] {
+        let id = e.call("set_mode", json!({"mode": m}));
+        let (_, r) = e.result(id);
+        assert!(r["error"].is_string(), "{m}: {r}");
+    }
+    let id = e.call("set_mode", json!({"mode": "plan"}));
+    assert!(e.result(id).1["error"].is_null());
+    let id = e.call("set_mode", json!({"mode": "default"}));
+    assert!(e.result(id).1["error"].is_null());
     e.call("send", json!({"text": "go"}));
     let mut texts = vec![];
     let mut calls = 0;

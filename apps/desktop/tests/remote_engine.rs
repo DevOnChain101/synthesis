@@ -59,9 +59,13 @@ fn fake_engine(mode: &str) {
                 let cd = std::env::args().skip_while(|a| a != "--cd").nth(1);
                 let cwd = cd.as_deref().unwrap_or("/engine/side");
                 let root = req["params"]["cwd"].as_str().filter(|_| cd.is_some());
-                say(
-                    json!({"msg":"result","id":id,"ok":{"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":cwd,"root":root.unwrap_or("/engine/side"),"notices":["n\u{1b}[31m1"]}}),
-                )
+                let mut ok = json!({"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":cwd,"root":root.unwrap_or("/engine/side"),"notices":["n\u{1b}[31m1"]});
+                // a conductor-role engine says so, with its tools; "host-norole" is an older engine that ignores `role`
+                if mode.starts_with("host-") && mode != "host-bare" && mode != "host-norole" {
+                    ok["role"] = json!("conductor");
+                    ok["tools"] = json!(["conductor_list"]);
+                }
+                say(json!({"msg":"result","id":id,"ok":ok}))
             }
             "send" => {
                 say(json!({"msg":"result","id":id,"ok":{}}));
@@ -600,6 +604,11 @@ fn cut_off(e: &Engine, rx: &mut UnboundedReceiver<UiMsg>, what: &str) {
     assert!(e.send("more".into()).is_err(), "{what}");
 }
 
+fn an_engine_that_ignores_the_conductor_role_is_refused_at_start() {
+    let e = start_conductor("host-norole", 0).err().expect("refused");
+    assert!(e.contains("did not start the conductor role"), "{e}");
+}
+
 fn a_host_call_from_an_engine_without_the_conductor_role_kills_it() {
     killed_after_send("host-bare", None);
 }
@@ -788,7 +797,7 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 19] = [
+    let tests: [(&str, fn()); 20] = [
         (
             "files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable",
             files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable,
@@ -796,6 +805,10 @@ fn main() {
         (
             "the_store_methods_are_parsed_bounded_and_made_printable",
             the_store_methods_are_parsed_bounded_and_made_printable,
+        ),
+        (
+            "an_engine_that_ignores_the_conductor_role_is_refused_at_start",
+            an_engine_that_ignores_the_conductor_role_is_refused_at_start,
         ),
         (
             "a_host_call_from_an_engine_without_the_conductor_role_kills_it",

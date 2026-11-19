@@ -444,6 +444,17 @@ pub struct Limits {
     pub no_cost_cap: bool,
 }
 
+/// Clears session `sid`'s learned-skill hook unless disarmed.
+struct LearnedGuard(Option<String>);
+
+impl Drop for LearnedGuard {
+    fn drop(&mut self) {
+        if let Some(sid) = self.0.take() {
+            synthesis_tools::set_learned_skills(&sid, None);
+        }
+    }
+}
+
 pub enum Front {
     /// Events go to stdout (and `tee`); asks are denied with an audit trail.
     Headless {
@@ -999,9 +1010,26 @@ pub fn prepare(
         cli_allow.extend(h.specs().into_iter().map(|s| s.name));
     }
     // its own budget, capped: never the outcomes' and never unbounded (an unpriced model is refused under a cap)
-    if conductor && limits.max_cost_usd.is_none_or(|v| v.is_nan() || v <= 0.0) {
+    if conductor
+        && limits
+            .max_cost_usd
+            .is_none_or(|v| !v.is_finite() || v <= 0.0)
+    {
         return Err("a conductor session needs a cost cap (max_cost_usd > 0)".into());
     }
+    // The conductor never takes the project's trust: project settings, hooks, provider config and MCP load as for
+    // an untrusted folder (user and managed settings only), whatever the host's start flags say.
+    let conductor_common;
+    let c = if conductor {
+        conductor_common = Common {
+            trust_project: false,
+            project_exec_inert: false,
+            ..c.clone()
+        };
+        &conductor_common
+    } else {
+        c
+    };
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -1993,6 +2021,8 @@ pub fn prepare(
         },
         cancel.clone(),
     );
+    // every early return below drops the learned-skill hook (it holds the memory run and its store lock)
+    let mut learned_guard = LearnedGuard(Some(sid.clone()));
     let notes = crate::memory::Notes {
         user: user_files[0].clone(),
         project: crate::memory::project_file(&ws.root),
@@ -2432,6 +2462,9 @@ pub fn prepare(
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
+    if conductor {
+        harness = harness.with_conductor_role();
+    }
     // "Allow always" persists to .synt/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
     if trust == ProjectTrust::Trusted && !inert {
@@ -2509,6 +2542,7 @@ pub fn prepare(
             stop_end.clone(),
         );
     }
+    learned_guard.0 = None; // the session owns the hook now; `Live::close` clears it
     Ok(Prepared {
         harness,
         context,
