@@ -494,7 +494,7 @@ impl OutcomesView {
             .overflow_hidden()
             .rounded(px(10.))
             .border_1()
-            .border_color(hsla(t::ACCENT))
+            .border_color(hsla(t::BORDER))
             .bg(theme::fill(t::SURFACE))
             .child(
                 div()
