@@ -24,7 +24,7 @@ use synthesis_session::{
 use synthesis_orchestrator::gateway::{audit, authorize};
 use synthesis_orchestrator::{Action, Principal};
 
-use crate::proto::{Call, CommandArgs, OutcomeCommand, PROTOCOL};
+use crate::proto::{Call, CommandArgs, FEATURES, OutcomeCommand, PROTOCOL};
 
 /// The gateway's verdict on a call at the link. A denial is audited here as one stderr line of
 /// codes (no outcome row exists to chain it to; an allowed command is audited in the outcome's
@@ -240,6 +240,10 @@ impl Service {
                 let Some(commit) = commit else {
                     return Err("the attempt has no candidate commit yet".into());
                 };
+                // a read-only goal has a report, not a commit: git is never run for it
+                if o.base_commit.is_empty() {
+                    return Err("a read-only goal changes nothing: it has no diff".into());
+                }
                 // repository, base and commit are the owner's records, never a worker's or a caller's
                 let d = synthesis_orchestrator::commit_diff(
                     Path::new(&o.repo_root),
@@ -399,7 +403,7 @@ impl Service {
         )
         .and_then(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
         .ok();
-        json!({"enabled": self.enabled, "protocol": PROTOCOL, "schema": schema,
+        json!({"enabled": self.enabled, "protocol": PROTOCOL, "features": FEATURES, "schema": schema,
                "ready": self.enabled && schema.is_some_and(|v| (SCHEMA_VERSION_OUTCOMES..=SCHEMA_VERSION_SUPPORTED).contains(&v))})
     }
 

@@ -402,6 +402,44 @@ pub struct Contract {
     pub checks: Vec<ContractCheck>,
 }
 
+impl Contract {
+    /// A read-only goal (S1 section 1): the goal, a budget, and optional rubric lines. The criterion
+    /// `report` ("the person accepts the report") is always there; each rubric line is another
+    /// manual criterion `r1..rN`. One worker; no write scope, no checks, `repo.read` only.
+    pub fn read_only(goal: String, rubric: &[String], mut budgets: Budgets) -> Self {
+        budgets.max_parallel_workers = 1;
+        let manual = |id: String, text: &str| ContractCriterion {
+            id,
+            text: text.into(),
+            mandatory: true,
+            manual: true,
+            required_trust: TrustClass::HumanReview,
+            check_ids: vec![],
+        };
+        let mut criteria = vec![manual("report".into(), "The person accepts the report")];
+        criteria.extend(
+            rubric
+                .iter()
+                .enumerate()
+                .map(|(i, t)| manual(format!("r{}", i + 1), t)),
+        );
+        Self {
+            version: 1,
+            kind: ContractKind::ReadOnly,
+            goal,
+            criteria,
+            envelope: Envelope {
+                allowed_paths: vec![],
+                denied_paths: vec![],
+                capabilities: BTreeMap::from([(Capability::RepoRead, CapabilityMode::Allow)]),
+                budgets,
+                quality_gates: vec![],
+            },
+            checks: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
     Version,
@@ -576,21 +614,11 @@ pub(crate) mod fixtures {
 
     /// A valid read-only goal: the implicit `report` criterion and one rubric line.
     pub fn read_only() -> Contract {
-        let mut c = contract(&[]);
-        c.kind = ContractKind::ReadOnly;
-        c.criteria = ["report", "r1"]
-            .iter()
-            .map(|id| ContractCriterion {
-                manual: true,
-                required_trust: TrustClass::HumanReview,
-                ..criterion(id)
-            })
-            .collect();
-        c.envelope.allowed_paths = vec![];
-        c.envelope.denied_paths = vec![];
-        c.envelope.capabilities = BTreeMap::from([(Capability::RepoRead, CapabilityMode::Allow)]);
-        c.envelope.budgets.max_parallel_workers = 1;
-        c
+        Contract::read_only(
+            "review the module".into(),
+            &["names the risks".into()],
+            Budgets::new(2.0),
+        )
     }
 
     pub fn contract(ids: &[&str]) -> Contract {

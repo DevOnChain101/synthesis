@@ -137,6 +137,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
+        kind: ContractKind::Write,
         version: 1,
         goal: "- write hello.txt".into(),
         criteria: vec![ContractCriterion {
@@ -315,7 +316,14 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
             log.contains("sandbox") || log.contains("unattended"),
             "{log}"
         );
-        assert!(!env.git.worktree.join("hello.txt").exists());
+        assert!(
+            !env.git
+                .as_ref()
+                .unwrap()
+                .worktree
+                .join("hello.txt")
+                .exists()
+        );
         return;
     }
     let s = settled.unwrap();
@@ -327,12 +335,12 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
     assert_eq!(s.item, WorkItemState::Verifying, "{log}");
     // the file is in the attempt's worktree and in its commit, not in the user's tree
     assert_eq!(
-        std::fs::read_to_string(env.git.worktree.join("hello.txt")).unwrap(),
+        std::fs::read_to_string(env.git.as_ref().unwrap().worktree.join("hello.txt")).unwrap(),
         "hi\n"
     );
     assert_eq!(
         g(
-            &env.git.worktree,
+            &env.git.as_ref().unwrap().worktree,
             &["show", "--name-only", "--format=", "HEAD"]
         ),
         "hello.txt"
@@ -503,7 +511,14 @@ fn the_worker_cannot_be_given_a_weaker_profile() {
             "{bad:?}: {}",
             String::from_utf8_lossy(&o.stderr)
         );
-        assert!(!env.git.worktree.join("hello.txt").exists());
+        assert!(
+            !env.git
+                .as_ref()
+                .unwrap()
+                .worktree
+                .join("hello.txt")
+                .exists()
+        );
     }
     // --attempt-session needs --unattended and --resume (clap), and a live attempt (the store)
     let o = Command::new(env!("CARGO_BIN_EXE_synt"))
@@ -629,10 +644,22 @@ fn a_write_outside_allowed_paths_blocks_the_attempt_and_becomes_a_decision() {
     assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
     assert_eq!(s.item, WorkItemState::WaitingDecision, "{log}");
     assert!(
-        env.git.worktree.join("src/ok.txt").exists(),
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("src/ok.txt")
+            .exists(),
         "control: {log}"
     );
-    assert!(!env.git.worktree.join("outside.txt").exists());
+    assert!(
+        !env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("outside.txt")
+            .exists()
+    );
     // not in the user's tree either
     assert!(!r.repo.join("outside.txt").exists());
     // a durable, pending decision names what was needed; no live prompt was involved
@@ -789,6 +816,8 @@ fn bypass_git_alias_and_repo_scripts_are_refused_and_nothing_widens() {
         !p.ran
             .2
             .git
+            .as_ref()
+            .unwrap()
             .worktree
             .join(".synt/settings.local.json")
             .exists()
@@ -1008,11 +1037,21 @@ fn user_settings_cannot_widen_the_compiled_envelope_of_an_attempt() {
     let s = settled.unwrap();
     assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
     assert!(
-        env.git.worktree.join("src/ok.txt").exists(),
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("src/ok.txt")
+            .exists(),
         "control: {log}"
     );
     assert!(
-        !env.git.worktree.join("outside.txt").exists(),
+        !env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("outside.txt")
+            .exists(),
         "user allow widened the envelope"
     );
     assert!(

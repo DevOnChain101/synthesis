@@ -18,7 +18,7 @@ use synthesis_session::outcome::{AttemptEnd, AttemptRecord, Effects, OutcomeWrit
 use synthesis_session::{Error as StoreError, ProcessProbe, Store};
 use synthesis_workspace::WorktreeManager;
 
-use crate::{AllocError, AttemptEnv, Profile, finish_attempt};
+use crate::{AllocError, AttemptEnv, Profile, finish_attempt, finish_in_place};
 
 /// How a worker ended, as far as the attempt is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,9 +381,9 @@ impl Runner<'_> {
         env: &AttemptEnv,
         profile: &Profile,
     ) -> Result<Running, RunError> {
-        self.worktrees
-            .mark_started(&env.git)
-            .map_err(AllocError::from)?;
+        if let Some(git) = &env.git {
+            self.worktrees.mark_started(git).map_err(AllocError::from)?;
+        }
         let rev = attempt_row(w, &env.attempt)?.revision;
         w.transition_attempt(
             &env.attempt.id,
@@ -400,7 +400,7 @@ impl Runner<'_> {
         if let Err(e) = w.reserve_budget(&env.attempt.id, env.attempt.fence, profile.max_cost_usd())
         {
             if !matches!(e, StoreError::Stale(_)) {
-                let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
+                let _ = self.settle(w, &env.attempt, env.git.as_ref(), WorkerEnd::Failed);
             }
             return Err(RunError::Store(e));
         }
@@ -419,7 +419,7 @@ impl Runner<'_> {
         if let Err(e) = bound {
             if !matches!(e, StoreError::Stale(_)) {
                 let _ = w.release_budget(&env.attempt.id, env.attempt.fence);
-                let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
+                let _ = self.settle(w, &env.attempt, env.git.as_ref(), WorkerEnd::Failed);
             }
             return Err(RunError::Store(e));
         }
@@ -428,7 +428,7 @@ impl Runner<'_> {
             Err(e) => {
                 // no process ever existed: nothing was spent, the reservation goes back
                 let _ = w.release_budget(&env.attempt.id, env.attempt.fence);
-                let _ = self.settle(w, &env.attempt, &env.git, WorkerEnd::Failed);
+                let _ = self.settle(w, &env.attempt, env.git.as_ref(), WorkerEnd::Failed);
                 return Err(RunError::Io(e));
             }
         };
@@ -514,7 +514,7 @@ impl Runner<'_> {
             Ok(None) => Ok(None),
             Ok(Some(end)) => {
                 run.reaped = true;
-                self.settle(w, &run.env.attempt, &run.env.git, end)
+                self.settle(w, &run.env.attempt, run.env.git.as_ref(), end)
                     .map(Some)
                     .inspect_err(|e| {
                         // the worker is gone; an attempt left `running` would hold its slot forever
@@ -597,9 +597,26 @@ impl Runner<'_> {
         &self,
         w: &mut OutcomeWriter,
         attempt: &AttemptRecord,
-        git: &synthesis_workspace::GitInfo,
-        end: WorkerEnd,
+        git: Option<&synthesis_workspace::GitInfo>,
+        mut end: WorkerEnd,
     ) -> Result<Settled, RunError> {
+        // a read-only attempt (no worktree) hands over the report it wrote; one that wrote none
+        // has nothing to review and fails (the item retries within its budget)
+        let report = match (git, end) {
+            (None, WorkerEnd::Completed | WorkerEnd::Unverified) => {
+                let r = crate::attempt_report(self.store, &attempt.session_id);
+                if r.is_none() {
+                    end = WorkerEnd::Failed;
+                }
+                r
+            }
+            // nothing in place can ask for a decision: nobody could grant what it needed
+            (None, WorkerEnd::Blocked) => {
+                end = WorkerEnd::Failed;
+                None
+            }
+            _ => None,
+        };
         let subject = if end == WorkerEnd::Cancelled {
             // the tree is kept as the worker left it; nothing is committed on a cancel
             let rev = attempt_row(w, attempt)?.revision;
@@ -616,7 +633,7 @@ impl Runner<'_> {
                 &Effects::default(),
             )?;
             None
-        } else {
+        } else if let Some(git) = git {
             Some(finish_attempt(
                 self.worktrees,
                 w,
@@ -624,8 +641,13 @@ impl Runner<'_> {
                 git,
                 end.task_status(),
             )?)
+        } else {
+            // in place: the subject is the report, named by its hash (no commit exists)
+            let subject = report.map(|r| r.subject());
+            finish_in_place(w, attempt, end.task_status(), subject.as_deref())?;
+            subject
         };
-        if end == WorkerEnd::Blocked {
+        if let (WorkerEnd::Blocked, Some(git)) = (end, git) {
             // nobody can be asked inside an attempt: what it needed becomes a durable decision
             let it = w.get_work_item(&attempt.work_item_id)?;
             crate::record_blocked_decision(

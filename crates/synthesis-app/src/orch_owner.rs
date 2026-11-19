@@ -25,14 +25,14 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
-use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
+use synthesis_core::outcome::{Contract, ContractKind, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, ModelPlanner, PlanCfg, PlanRun,
     PlanWait, Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig,
     Scheduler, Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
-    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan, plan_wait,
-    record_planner_failed, recover_attempts, recover_plan_runs, replan_after_revise, replan_open,
-    restore_pause, start_plan_run, wall_secs,
+    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, is_read_only, needs_model_plan,
+    plan_wait, record_planner_failed, recover_attempts, recover_plan_runs, replan_after_revise,
+    replan_open, restore_pause, start_plan_run, wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -524,11 +524,12 @@ impl<'a> Owner<'a> {
             log(&format!("outcome {id}: commands: {e}"));
         }
         // with a model planner the plan comes from a planning run and the person's approval
-        let planner: &dyn Planner = if self.planner.is_some() {
-            &ModelPlanner
-        } else {
-            &StubPlanner
-        };
+        let planner: &dyn Planner =
+            if self.planner.is_some() && !is_read_only(&ow.w).unwrap_or(false) {
+                &ModelPlanner
+            } else {
+                &StubPlanner
+            };
         if let Err(e) = apply_lifecycle(&mut ow.w, &ow.control, planner) {
             log(&format!("outcome {id}: commands: {e}"));
         }
@@ -842,14 +843,23 @@ impl<'a> Owner<'a> {
         pol: &OutcomePolicy,
         by: Principal,
     ) -> Result<Value, String> {
-        if !commit_id(&base_commit) {
+        // a read-only goal runs in place in any folder: no commit, no git (S1 section 2.6); a
+        // write goal keeps the commit rule
+        let read_only = contract.kind == ContractKind::ReadOnly;
+        if read_only {
+            if !base_commit.is_empty() {
+                return Err("a read-only goal has no base commit".into());
+            }
+        } else if !commit_id(&base_commit) {
             return Err("base_commit must be a full lowercase commit id".into());
         }
         let root = Path::new(workspace);
         if !root.is_absolute() || !root.is_dir() {
             return Err("workspace must be an existing absolute directory".into());
         }
-        self.wm.verify_base(root, &base_commit).map_err(s)?;
+        if !read_only {
+            self.wm.verify_base(root, &base_commit).map_err(s)?;
+        }
         let art = self.home.join("artifacts");
         let open = |id: String| {
             WorkspaceContext::open(id, root, root, &[], art.join("outcome"), "orchestrator")

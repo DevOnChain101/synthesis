@@ -91,7 +91,8 @@ pub struct AttemptEnv {
     pub attempt: AttemptRecord,
     pub session_id: String,
     pub context: WorkspaceContext,
-    pub git: GitInfo,
+    /// `None` for a read-only goal: it runs in place, with no worktree and no git call.
+    pub git: Option<GitInfo>,
     /// The worktree already existed (a replay of an interrupted allocation).
     pub adopted: bool,
 }
@@ -121,6 +122,30 @@ impl Allocator<'_> {
         w: &mut OutcomeWriter,
         spec: &AllocSpec<'_>,
         now: OffsetDateTime,
+    ) -> Result<AttemptEnv, AllocError> {
+        self.allocate_with(w, spec, now, false)
+    }
+
+    /// Attempt `ordinal` of a read-only goal (S1 section 2.1): its session works in the outcome's
+    /// folder itself, which can be any directory. No worktree, no branch, no git call, and
+    /// `spec.base_commit` is not used. The same outbox record, idempotency and platform refusal as
+    /// [`Allocator::allocate`]; the caller chooses by the STORED contract's kind, never by a flag
+    /// a surface or a row could set.
+    pub fn allocate_in_place(
+        &self,
+        w: &mut OutcomeWriter,
+        spec: &AllocSpec<'_>,
+        now: OffsetDateTime,
+    ) -> Result<AttemptEnv, AllocError> {
+        self.allocate_with(w, spec, now, true)
+    }
+
+    fn allocate_with(
+        &self,
+        w: &mut OutcomeWriter,
+        spec: &AllocSpec<'_>,
+        now: OffsetDateTime,
+        in_place: bool,
     ) -> Result<AttemptEnv, AllocError> {
         if self.platform.native_windows {
             return Err(AllocError::NativeWindows);
@@ -158,7 +183,7 @@ impl Allocator<'_> {
         if let Some(existing) = stored_attempt
             && existing.state != synthesis_core::outcome::AttemptState::Starting
         {
-            return self.env_of(existing, &outcome_root);
+            return self.env_of(existing, &outcome_root, in_place);
         }
         let outbox = NewOutbox {
             idempotency_key: key.clone(),
@@ -169,6 +194,7 @@ impl Allocator<'_> {
                 "ordinal": spec.ordinal,
                 "source": source,
                 "base_commit": spec.base_commit,
+                "in_place": in_place,
             }),
         };
         w.atomically(|tx| tx.enqueue(&outbox))?;
@@ -178,6 +204,7 @@ impl Allocator<'_> {
             control_session: w.control_session_id().to_string(),
             outcome_root: outcome_root.clone(),
             artifact_root: self.artifact_root.clone(),
+            workspace_id: w.get_outcome(w.id())?.workspace_id,
         };
         w.run_outbox(
             now,
@@ -215,19 +242,56 @@ impl Allocator<'_> {
                 })?,
             Err(e) => return Err(e.into()),
         };
-        self.env_of(attempt, &outcome_root)
+        self.env_of(attempt, &outcome_root, in_place)
     }
 
     /// The environment of a stored attempt, rebuilt from its session row without touching files.
-    fn env_of(&self, attempt: AttemptRecord, repo_root: &Path) -> Result<AttemptEnv, AllocError> {
+    /// A write attempt always has its worktree on record and a read-only one never has: a session
+    /// of the other kind is refused, so no attempt changes kind through its stored rows.
+    fn env_of(
+        &self,
+        attempt: AttemptRecord,
+        repo_root: &Path,
+        in_place: bool,
+    ) -> Result<AttemptEnv, AllocError> {
         let rec = self.store.reader()?.get_session(&attempt.session_id)?;
-        let git: GitInfo = rec
+        let git: Option<GitInfo> = rec
             .git_info
             .as_deref()
-            .and_then(|j| serde_json::from_str(j).ok())
-            .ok_or_else(|| {
-                AllocError::Effect("the attempt's session has no worktree recorded".into())
-            })?;
+            .and_then(|j| serde_json::from_str(j).ok());
+        let Some(git) = git else {
+            if !in_place {
+                return Err(AllocError::Effect(
+                    "the attempt's session has no worktree recorded".into(),
+                ));
+            }
+            if rec.git_info.is_some() || !repo_root.is_dir() {
+                return Err(AllocError::Effect(
+                    "the session of a read-only attempt is not in place".into(),
+                ));
+            }
+            let context = WorkspaceContext::open(
+                rec.workspace_id.clone(),
+                repo_root,
+                repo_root,
+                &[],
+                self.artifact_root.join(&attempt.session_id),
+                &attempt.session_id,
+            )
+            .map_err(|e| AllocError::Workspace(WsError::Invalid(e.to_string())))?;
+            return Ok(AttemptEnv {
+                session_id: attempt.session_id.clone(),
+                attempt,
+                context,
+                git: None,
+                adopted: true,
+            });
+        };
+        if in_place {
+            return Err(AllocError::Effect(
+                "a read-only attempt has a worktree recorded".into(),
+            ));
+        }
         if !git.worktree.is_dir() {
             return Err(AllocError::Effect(format!(
                 "the worktree of this attempt was removed ({}); its commits are on branch {}",
@@ -256,10 +320,14 @@ impl Allocator<'_> {
             session_id: attempt.session_id.clone(),
             attempt,
             context,
-            git,
+            git: Some(git),
             adopted: true,
         })
     }
+}
+
+fn in_place(r: &OutboxRecord) -> bool {
+    r.payload.get("in_place").and_then(Value::as_bool) == Some(true)
 }
 
 fn payload_session(r: &OutboxRecord) -> Option<String> {
@@ -287,6 +355,7 @@ struct WorktreeEffect<'a> {
     control_session: String,
     outcome_root: PathBuf,
     artifact_root: PathBuf,
+    workspace_id: String,
 }
 
 impl OutboxEffect for WorktreeEffect<'_> {
@@ -300,10 +369,14 @@ impl OutboxEffect for WorktreeEffect<'_> {
         let Ok(rec) = self.store.reader()?.get_session(&sid) else {
             return Ok(None);
         };
-        let done = rec
-            .git_info
-            .as_deref()
-            .is_some_and(|j| serde_json::from_str::<GitInfo>(j).is_ok_and(|g| g.worktree.is_dir()));
+        // in place there is no worktree: the idle session row is the last step
+        let done = if in_place(row) {
+            rec.status == synthesis_core::SessionStatus::Idle
+        } else {
+            rec.git_info.as_deref().is_some_and(|j| {
+                serde_json::from_str::<GitInfo>(j).is_ok_and(|g| g.worktree.is_dir())
+            })
+        };
         Ok(done.then(|| json!({"session_id": sid}).to_string()))
     }
 
@@ -328,24 +401,39 @@ impl OutboxEffect for WorktreeEffect<'_> {
         {
             return Err("the recorded source is not the outcome's repository".into());
         }
-        let (alloc, origin) = self
-            .worktrees
-            .allocate_unstarted(
-                Path::new(&source),
-                &sid,
+        let (context, git, origin) = if in_place(row) {
+            let root = Path::new(&source);
+            let context = WorkspaceContext::open(
+                self.workspace_id.clone(),
+                root,
+                root,
+                &[],
                 self.artifact_root.join(&sid),
-                &base,
+                &sid,
             )
             .map_err(|e| e.to_string())?;
-        let Some(git) = alloc.git.clone() else {
-            return Err(AllocError::NotGit(PathBuf::from(&source)).to_string());
+            (context, None, Origin::Created)
+        } else {
+            let (alloc, origin) = self
+                .worktrees
+                .allocate_unstarted(
+                    Path::new(&source),
+                    &sid,
+                    self.artifact_root.join(&sid),
+                    &base,
+                )
+                .map_err(|e| e.to_string())?;
+            let Some(git) = alloc.git.clone() else {
+                return Err(AllocError::NotGit(PathBuf::from(&source)).to_string());
+            };
+            if !self.worktrees.is_managed(&git.repo_root, &git.worktree) {
+                return Err("the worktree is not under the managed worktrees directory".into());
+            }
+            (alloc.context, Some(git), origin)
         };
-        if !self.worktrees.is_managed(&git.repo_root, &git.worktree) {
-            return Err("the worktree is not under the managed worktrees directory".into());
-        }
         let new = NewSession {
             id: Some(sid.clone()),
-            workspace: &alloc.context,
+            workspace: &context,
             model_config_id: "attempt".into(),
             permission_mode: PermissionMode::Default,
             permission_policy_id: "orchestrator".into(),
@@ -370,10 +458,12 @@ impl OutboxEffect for WorktreeEffect<'_> {
             Err(StoreError::AlreadyExists(_)) => {}
             Err(e) => return Err(e.to_string()),
         }
-        let info = serde_json::to_string(&git).map_err(|e| e.to_string())?;
-        self.store
-            .set_git_info_if_unset(&sid, &info)
-            .map_err(|e| e.to_string())?;
+        if let Some(git) = git {
+            let info = serde_json::to_string(&git).map_err(|e| e.to_string())?;
+            self.store
+                .set_git_info_if_unset(&sid, &info)
+                .map_err(|e| e.to_string())?;
+        }
         Ok(json!({"session_id": sid, "adopted": origin == Origin::Adopted}).to_string())
     }
 }

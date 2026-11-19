@@ -21,6 +21,13 @@ use crate::asks::{Ask, AskApproval, Choice};
 pub const PROTOCOL: u32 = 4;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ---- S1 P2a (read-only goals): kept apart from the rest of the file ------------------------------
+/// What this build's `orchestrator.status` says it can do beyond the base protocol, so a surface
+/// shows only the controls that work (PROTOCOL stays 4: an old surface ignores the extra field).
+/// `report_review` and `attempt_message` join with P2b and P2c.
+pub const FEATURES: [&str; 1] = ["read_only_goal"];
+// ---- end S1 P2a -----------------------------------------------------------------------------------
 /// Longest accepted line (a tool result can carry a big file).
 pub const MAX_LINE: usize = 8 << 20;
 

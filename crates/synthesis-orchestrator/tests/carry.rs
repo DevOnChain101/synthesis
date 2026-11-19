@@ -58,7 +58,7 @@ fn attempt(
     };
     let e = r.allocator().allocate(w, &spec, now()).unwrap();
     assert_eq!(
-        g(&e.git.worktree, &["rev-parse", "HEAD"]),
+        g(&e.git.as_ref().unwrap().worktree, &["rev-parse", "HEAD"]),
         from,
         "the attempt starts at the commit it was given"
     );
@@ -71,11 +71,18 @@ fn attempt(
     )
     .unwrap();
     for (p, t) in files {
-        let f = e.git.worktree.join(p);
+        let f = e.git.as_ref().unwrap().worktree.join(p);
         fs::create_dir_all(f.parent().unwrap()).unwrap();
         fs::write(f, t).unwrap();
     }
-    let commit = finish_attempt(&r.wm, w, &e.attempt, &e.git, TaskStatus::Completed).unwrap();
+    let commit = finish_attempt(
+        &r.wm,
+        w,
+        &e.attempt,
+        e.git.as_ref().unwrap(),
+        TaskStatus::Completed,
+    )
+    .unwrap();
     let a = w
         .list_attempts(one)
         .unwrap()

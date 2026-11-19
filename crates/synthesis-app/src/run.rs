@@ -220,6 +220,9 @@ pub fn resolve_governed_sandbox_mode(
     }
 }
 
+/// The tools of a planning run and of a read-only attempt: an allow-list, never a deny-list.
+pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
+
 impl Common {
     /// An outcome attempt or planning run: the confinement of ADR-019 applies.
     pub fn confined(&self) -> bool {
@@ -322,6 +325,12 @@ pub struct Common {
     /// reads stay in the working directory) and its tools are only Read, Grep, Glob and LS.
     #[arg(long, hide = true, requires = "resume", conflicts_with_all = ["attempt_session", "unattended"])]
     pub plan_session: bool,
+    /// Internal (the orchestrator launches the attempt of a read-only goal with it, next to
+    /// `--attempt-session`): the session runs in place, in the folder itself, with no worktree.
+    /// The tools are only Read, Grep, Glob and LS (an allow-list: no shell, no edit tool, no web,
+    /// no sub-agents) and the sandbox policy has no writable folder.
+    #[arg(long, hide = true, requires = "attempt_session")]
+    pub read_only_session: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -1370,7 +1379,8 @@ pub fn prepare(
     if let Some(g) = &gate {
         g()?;
     }
-    let must_wt = c.worktree || c.unattended;
+    // a read-only attempt runs in place, in the folder itself
+    let must_wt = (c.worktree || c.unattended) && !c.read_only_session;
     let auto_wt = governed && !c.no_worktree;
     let (ws, worktree) = match stored_wt {
         Some((rec, Some(info))) => {
@@ -1486,9 +1496,16 @@ pub fn prepare(
     }
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     let state_paths = synthesis_deny.clone();
+    let read_only = c.read_only_session;
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
         let mut p = standard_policy_git(ws, net.clone(), git_dir.as_deref())?;
         p.deny_paths.extend(synthesis_deny.clone());
+        if read_only {
+            // nothing may be written but the private tmp dir; no path is protected inside a
+            // writable root that no longer exists
+            p.writable_roots.clear();
+            p.readonly_paths.clear();
+        }
         p.readable_roots.extend(reads.iter().cloned());
         p.wsl_hide_drives = hide_drives;
         p.limits = res_limits;
@@ -2337,8 +2354,8 @@ pub fn prepare(
         toolbox = a.apply(toolbox);
     }
     // a planning run reads the repository and nothing else: an allow-list, not a deny-list
-    if c.plan_session {
-        toolbox = toolbox.only(&["Read", "Grep", "Glob", "LS"]);
+    if c.plan_session || c.read_only_session {
+        toolbox = toolbox.only(&READ_ONLY_TOOLS);
     }
     // the four Memory* tools exist only while the run has an open store
     if let Some(m) = &memory {
