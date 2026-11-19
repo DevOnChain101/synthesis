@@ -305,6 +305,9 @@ fn a_conductor_line_reaches_a_running_session_fenced_and_a_repo_file_cannot_forg
     r.engine.close();
 }
 
+// unix only: the project hook is a POSIX `cat >/dev/null; touch` command (the control session must run it to prove
+// anything), and no portable hook command is used by the Windows CI of this file
+#[cfg(unix)]
 #[test]
 fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
     let d = dirs(json!([{"text": "ok"}]), priced());
@@ -375,6 +378,9 @@ fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
 
 /// `prepare` alone (no `start_conductor`, no engine server) is enough: with `trust_project: true` and the
 /// conductor front end the project's hook still does not run; the same call without the role runs it.
+// unix only: the project hook is a POSIX `cat >/dev/null; touch` command (the control session must run it to prove
+// anything), and no portable hook command is used by the Windows CI of this file
+#[cfg(unix)]
 #[test]
 fn prepare_alone_drops_the_projects_trust_for_the_conductor_front_end() {
     use synthesis_app::asks::{Ask, Asks, Notify};
