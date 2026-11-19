@@ -32,13 +32,17 @@ fn run(policy: &SandboxPolicy, cwd: &Path, prog: &str, args: &[&str]) -> Output 
 /// The `net_probe` example (target/<profile>/examples): a plain Rust binary to run inside the
 /// sandbox. Not python3/perl: `/usr/bin/*` interpreters are xcrun shims that fail under Seatbelt.
 fn net_probe() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    p.pop();
-    p.push("examples");
-    p.push("net_probe");
-    assert!(p.exists(), "build the example first: {}", p.display());
-    p
+    // An ancestor's child: the test exe is in deps/ (old layout) or build/<pkg>/<hash>/ (new layout).
+    let exe = std::env::current_exe().unwrap();
+    exe.ancestors()
+        .map(|a| a.join("examples/net_probe"))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "build the example first: net_probe not found above {}",
+                exe.display()
+            )
+        })
 }
 
 /// Dirs live under target/, not the system temp dir (which the sandbox always makes writable).
