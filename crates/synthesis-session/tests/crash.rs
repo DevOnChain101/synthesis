@@ -9,14 +9,19 @@ use synthesis_events::{Event, Record};
 use synthesis_session::{Error, OrphanAction, Store, StoreOptions, recover};
 
 fn helper() -> PathBuf {
-    // target/<profile>/deps/<test> -> target/<profile>/examples/crash_writer
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    p.pop();
-    p.push("examples");
-    p.push(format!("crash_writer{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.exists(), "build the example first: {}", p.display());
-    p
+    // target/<profile>/examples/crash_writer is an ancestor's child, whether the test exe is in deps/
+    // (old layout) or in build/<pkg>/<hash>/ (new build-dir layout).
+    let file = format!("crash_writer{}", std::env::consts::EXE_SUFFIX);
+    let exe = std::env::current_exe().unwrap();
+    exe.ancestors()
+        .map(|a| a.join("examples").join(&file))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "build the example first: {file} not found above {}",
+                exe.display()
+            )
+        })
 }
 
 fn spawn(

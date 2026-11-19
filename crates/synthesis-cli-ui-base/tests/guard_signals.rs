@@ -8,18 +8,19 @@ use std::process::{Command, Stdio};
 use synthesis_cli_ui_base::screen::terminal_restore_sequence;
 
 fn probe(arg: &str) -> std::process::Child {
+    // Old layout: target/<profile>/deps/<test>; new build-dir layout: target/<profile>/build/<pkg>/<hash>/...
+    // Either way the final example sits in target/<profile>/examples, an ancestor's child.
     let exe = std::env::current_exe().unwrap();
     let path = exe
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples/guard_probe");
-    assert!(
-        path.exists(),
-        "cargo test builds examples: {} missing",
-        path.display()
-    );
+        .ancestors()
+        .map(|a| a.join("examples/guard_probe"))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "cargo test builds examples: guard_probe not found above {}",
+                exe.display()
+            )
+        });
     Command::new(path)
         .arg(arg)
         .stdout(Stdio::piped())
