@@ -397,6 +397,8 @@ impl Decisions for DecisionDriver {
                             serde_json::json!({"decision_id": d.id, "work_item_id": item_id}),
                         )?;
                     } else if state == DecisionState::NeedsMoreInfo
+                        // a report review is re-checked and re-asked by its verifier (report.rs)
+                        && d.kind != "report_review"
                         && w.verified_resolution(&d.id)?
                             .is_some_and(|r| r.choice == "request_evidence")
                     {

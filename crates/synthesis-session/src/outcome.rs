@@ -4403,7 +4403,7 @@ impl OutcomeTx<'_, '_> {
     /// verify the goal by itself. Anything else is refused.
     pub fn record_citation_check(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
         if e.trust_class != TrustClass::IndependentCheck
-            || e.check_id != "citation_check"
+            || !(e.check_id == "citation_check" || e.check_id.starts_with("citation_check:"))
             || !e.criteria_ids.is_empty()
             || !e.subject_commit.starts_with("report:sha256:")
         {
@@ -4479,6 +4479,14 @@ impl OutcomeTx<'_, '_> {
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
         named.sort_unstable();
+        // a cut report or unchecked citations are never accepted, whatever the card offered
+        if action.get("cut") != Some(&Value::Bool(false))
+            || action.get("too_many") != Some(&Value::Bool(false))
+        {
+            return Err(Error::Invalid(
+                "this report cannot be accepted: it was cut or had too many citations".into(),
+            ));
+        }
         if contract.kind != synthesis_core::outcome::ContractKind::ReadOnly
             || field(&action, "attempt").as_deref() != Some(&attempt)
             || field(&action, "report_sha256").map(|h| format!("report:sha256:{h}"))

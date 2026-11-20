@@ -68,9 +68,12 @@ pub struct Citation {
     pub quote: String,
 }
 
-/// The deliverable: `{report, citations}` as JSON (a code fence around it is tolerated); anything
-/// else is the report as it is, with no citations.
-pub fn parse_report(text: &str) -> (String, Vec<Citation>) {
+/// The deliverable: `{report, citations}` as JSON (a code fence around it is tolerated). Anything
+/// else, including JSON with any other key (it would be hashed but never shown), is the whole
+/// message as the report with no citations, so what the person reads is all that was hashed. The
+/// flag is set when more than [`CITES_MAX`] citations were given (the rest are not checked).
+pub fn parse_report(text: &str) -> (String, Vec<Citation>, bool) {
+    let whole = || (text.to_owned(), vec![], false);
     let t = text.trim();
     let t = t
         .strip_prefix("```json")
@@ -81,36 +84,49 @@ pub fn parse_report(text: &str) -> (String, Vec<Citation>) {
         .ok()
         .and_then(|v| v.as_object().cloned())
     else {
-        return (text.to_owned(), vec![]);
+        return whole();
     };
     let Some(report) = o.get("report").and_then(|r| r.as_str()) else {
-        return (text.to_owned(), vec![]);
+        return whole();
     };
-    let cites = o
-        .get("citations")
-        .and_then(|c| c.as_array())
+    if o.keys().any(|k| k != "report" && k != "citations") {
+        return whole();
+    }
+    let list = o.get("citations").and_then(|c| c.as_array());
+    let cites = list
         .map(|a| {
             a.iter()
                 .take(CITES_MAX)
-                // a malformed entry stays in the list as an empty one, which fails its check
-                .map(|c| Citation {
-                    path: c
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
-                    start_line: c.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0),
-                    end_line: c.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0),
-                    quote: c
-                        .get("quote")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned(),
+                // a malformed entry (or one with other keys) stays as an empty one, which fails its check
+                .map(|c| {
+                    let known = c.as_object().is_some_and(|m| {
+                        m.keys().all(|k| {
+                            matches!(k.as_str(), "path" | "start_line" | "end_line" | "quote")
+                        })
+                    });
+                    let s = |k: &str| {
+                        c.get(k)
+                            .and_then(|v| v.as_str())
+                            .filter(|_| known)
+                            .unwrap_or("")
+                            .to_owned()
+                    };
+                    let n = |k: &str| c.get(k).and_then(|v| v.as_u64()).filter(|_| known);
+                    Citation {
+                        path: s("path"),
+                        start_line: n("start_line").unwrap_or(0),
+                        end_line: n("end_line").unwrap_or(0),
+                        quote: s("quote"),
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
-    (report.to_owned(), cites)
+    (
+        report.to_owned(),
+        cites,
+        list.is_some_and(|a| a.len() > CITES_MAX),
+    )
 }
 
 /// What the owner found when it read one citation.
@@ -171,6 +187,15 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
     if rel.components().any(state) || is_secret_shaped(rel) {
         return no("a secret or state path is never cited");
     }
+    // Windows reads `name.` and `name ` as `name`, and `PROGRA~1` as another name
+    if cfg!(windows)
+        && rel.components().any(|x| {
+            let n = x.as_os_str().to_string_lossy();
+            n.ends_with(['.', ' ']) || n.contains('~')
+        })
+    {
+        return no("the path has a Windows alias form");
+    }
     let quote = norm(&c.quote);
     if quote.is_empty() || c.quote.chars().count() > QUOTE_MAX {
         return no("the quote is empty or longer than 400 characters");
@@ -178,6 +203,9 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
     if c.start_line == 0 || c.end_line < c.start_line || c.end_line - c.start_line >= SPAN_MAX {
         return no("the line range is not valid");
     }
+    // shortcut: each component is checked with lstat and the last is opened O_NOFOLLOW, not
+    // opened with openat per component, so a link swapped in between the check and the open of a
+    // directory on the way is not caught; the checked file is only read and quoted, never written
     let mut p = root.to_path_buf();
     for part in rel.components() {
         p.push(part);
@@ -255,6 +283,146 @@ fn is_review_of(
         && d.binding.get("subject_commit").and_then(|v| v.as_str()) == a.subject_commit.as_deref()
 }
 
+/// The report as a person is shown it, and the citations to check: what [`open_review`] makes
+/// from the message and what a re-check takes from the stored action and brief.
+struct Prepared {
+    sha: String,
+    shown: String,
+    hidden: u64,
+    cut: bool,
+    cites: Vec<Citation>,
+    too_many: bool,
+}
+
+fn cite_json(c: &Citation) -> serde_json::Value {
+    serde_json::json!({"path": c.path, "start_line": c.start_line, "end_line": c.end_line, "quote": c.quote})
+}
+
+/// Checks the citations NOW and stores the citation-check evidence row and a new `report_review`
+/// decision (current binding) in ONE transaction, then opens it. `rebrief` counts how often the
+/// person asked for evidence (carried so the store's limit holds).
+fn issue(
+    w: &mut OutcomeWriter,
+    item: &WorkItemRecord,
+    a: &AttemptRecord,
+    p: &Prepared,
+    rebrief: u64,
+) -> Result<()> {
+    let now = w.now();
+    let o = w.get_outcome(w.id())?;
+    let (contract, ..) = w.get_contract(w.id(), o.contract_version)?;
+    let checks: Vec<(&Citation, Checked)> = p
+        .cites
+        .iter()
+        .map(|c| (c, check_citation(std::path::Path::new(&o.repo_root), c)))
+        .collect();
+    let all_ok = checks.iter().all(|(_, r)| r.ok);
+    // accepting needs the whole report on the card, every citation checked and verified
+    let acceptable = all_ok && !p.cut && !p.too_many;
+    let ids: Vec<&str> = {
+        let mut v: Vec<&str> = contract.criteria.iter().map(|c| c.id.as_str()).collect();
+        v.sort_unstable();
+        v
+    };
+    let action = serde_json::json!({
+        "attempt": a.id, "report_sha256": p.sha, "criteria": ids,
+        "citations": p.cites.iter().map(cite_json).collect::<Vec<_>>(),
+        "too_many": p.too_many, "cut": p.cut,
+    });
+    let policy = crate::compile_envelope(&contract.envelope, &[])
+        .map_or_else(|_| "uncompiled".to_owned(), |c| c.policy_hash());
+    let binding = crate::grants::decision_binding(
+        o.contract_version,
+        o.plan_version.unwrap_or(0),
+        a.subject_commit.as_deref(),
+        &policy,
+        "",
+        a.ordinal,
+        &item.id,
+    );
+    let verified = checks.iter().filter(|(_, r)| r.ok).count();
+    let why_not = if p.too_many {
+        "the report gave more than 200 citations: accepting is not offered"
+    } else if p.cut {
+        "the report is longer than the card can show: accepting is not offered"
+    } else {
+        "a citation did not check out: accepting is not offered; reject it, or ask for evidence"
+    };
+    let mut brief = serde_json::json!({
+        "why": "a read-only worker finished. Its report is the worker's own, untrusted text: nothing is accepted until you say so",
+        "delta_from_contract": "",
+        "alternatives": if acceptable { vec![serde_json::json!({"id": "accept_report",
+            "label": "accept this report: it answers every rubric line above"})] } else { vec![] },
+        "report": p.shown,
+        "rubric": contract.criteria.iter().map(|c| format!("{}: {}", c.id, clean(&c.text))).collect::<Vec<_>>(),
+        "citations": checks.iter().map(|(c, r)| serde_json::json!({
+            "path": clean(&c.path), "lines": format!("{}-{}", c.start_line, c.end_line),
+            "quote": clean(&c.quote), "result": r.why, "file_sha256": r.sha256,
+        })).collect::<Vec<_>>(),
+        "evidence": {"work_item": item.key, "attempt_ordinal": a.ordinal,
+                     "attempt_session": a.session_id, "report_sha256": p.sha,
+                     "checked_at": ts(now),
+                     "citations_verified": if checks.is_empty() { "no citations".to_owned() }
+                         else { format!("{verified} of {}{}", checks.len(), if p.too_many { " (more were given and not checked)" } else { "" }) },
+                     "hidden_characters_replaced": p.hidden, "report_shortened": p.cut},
+        "unknowns": [
+            "the folder was not frozen: citations were read as it is now, at checked_at",
+            if acceptable { "no independent check can judge a report: accepting it is your review" } else { why_not },
+        ],
+        "safe_default": "HOLD",
+    });
+    if rebrief > 0 {
+        brief["rebrief"] = serde_json::json!(rebrief);
+    }
+    let hours = i64::from(w.decision_expiry_hours().min(24));
+    let mut key = format!("report:{}:{}", item.key, a.ordinal);
+    key.truncate(128);
+    let nd = NewDecision {
+        kind: "report_review".into(),
+        dedupe_key: key,
+        brief,
+        binding,
+        expires_at: ts(now + time::Duration::hours(hours)),
+        action: Some(action),
+    };
+    // the first check of an attempt is `citation_check`, each re-check `citation_check:N`
+    let reruns = w
+        .authentic_evidence(w.id())?
+        .iter()
+        .filter(|e| e.work_item_id == item.id && e.check_id.starts_with("citation_check"))
+        .count();
+    let ev = NewEvidence {
+        work_item_id: item.id.clone(),
+        attempt_id: Some(a.id.clone()),
+        trust_class: TrustClass::IndependentCheck,
+        producer: "independent_runner".into(),
+        subject_commit: format!("report:sha256:{}", p.sha),
+        check_id: if reruns == 0 {
+            "citation_check".into()
+        } else {
+            format!("citation_check:{}", reruns + 1)
+        },
+        command_hash: None,
+        criteria_ids: vec![],
+        result: if all_ok && !p.too_many {
+            "passed"
+        } else {
+            "failed"
+        }
+        .into(),
+        exit_code: None,
+        env_fingerprint: "citation-check/1".into(),
+        artifact: None,
+        fence: a.fence,
+        flags: vec![],
+    };
+    let d = w.atomically(|tx| {
+        tx.record_citation_check(&ev)?;
+        Ok(tx.new_decision(&nd)?.0)
+    })?;
+    open(w, &d)
+}
+
 /// The attempt settled with `report` as its subject: checks the citations, then stores the
 /// citation-check evidence row and the `report_review` decision in ONE transaction and opens the
 /// decision. Replays find the decision and do nothing (a crash leaves either nothing or all of
@@ -264,7 +432,7 @@ pub fn open_review(
     item: &WorkItemRecord,
     attempt: &AttemptRecord,
     report: &AttemptReport,
-    now: OffsetDateTime,
+    _now: OffsetDateTime,
 ) -> Result<()> {
     // the caller's record may predate the end of the attempt (its subject is set then)
     let mut a = w
@@ -280,98 +448,17 @@ pub fn open_review(
     if let Some(d) = existing {
         return open(w, &d);
     }
-    let o = w.get_outcome(w.id())?;
-    let (contract, ..) = w.get_contract(w.id(), o.contract_version)?;
-    let (text, cites) = parse_report(&report.text);
+    let (text, cites, too_many) = parse_report(&report.text);
     let (shown, hidden, cut) = show(&text);
-    let checks: Vec<(Citation, Checked)> = cites
-        .into_iter()
-        .map(|c| {
-            let r = check_citation(std::path::Path::new(&o.repo_root), &c);
-            (c, r)
-        })
-        .collect();
-    let passed = checks.iter().all(|(_, r)| r.ok);
-    let ids: Vec<&str> = {
-        let mut v: Vec<&str> = contract.criteria.iter().map(|c| c.id.as_str()).collect();
-        v.sort_unstable();
-        v
+    let p = Prepared {
+        sha: report.sha256.clone(),
+        shown,
+        hidden: hidden as u64,
+        cut,
+        cites,
+        too_many,
     };
-    let action = serde_json::json!({
-        "attempt": a.id, "report_sha256": report.sha256, "criteria": ids,
-    });
-    let policy = crate::compile_envelope(&contract.envelope, &[])
-        .map_or_else(|_| "uncompiled".to_owned(), |c| c.policy_hash());
-    let binding = crate::grants::decision_binding(
-        o.contract_version,
-        o.plan_version.unwrap_or(0),
-        a.subject_commit.as_deref(),
-        &policy,
-        "",
-        a.ordinal,
-        &item.id,
-    );
-    let verified = checks.iter().filter(|(_, r)| r.ok).count();
-    let alternatives = if passed {
-        vec![serde_json::json!({"id": "accept_report",
-            "label": "accept this report: it answers every rubric line above"})]
-    } else {
-        vec![]
-    };
-    let brief = serde_json::json!({
-        "why": "a read-only worker finished. Its report is the worker's own, untrusted text: nothing is accepted until you say so",
-        "delta_from_contract": "",
-        "alternatives": alternatives,
-        "report": shown,
-        "rubric": contract.criteria.iter().map(|c| format!("{}: {}", c.id, clean(&c.text))).collect::<Vec<_>>(),
-        "citations": checks.iter().map(|(c, r)| serde_json::json!({
-            "path": clean(&c.path), "lines": format!("{}-{}", c.start_line, c.end_line),
-            "quote": clean(&c.quote), "result": r.why, "file_sha256": r.sha256,
-        })).collect::<Vec<_>>(),
-        "evidence": {"work_item": item.key, "attempt_ordinal": a.ordinal,
-                     "attempt_session": a.session_id, "report_sha256": report.sha256,
-                     "checked_at": ts(now),
-                     "citations_verified": format!("{verified} of {}", checks.len()),
-                     "hidden_characters_replaced": hidden, "report_shortened": cut},
-        "unknowns": [
-            "the folder was not frozen: citations were read as it is now, at checked_at",
-            if passed { "no independent check can judge a report: accepting it is your review" }
-            else { "a citation did not check out: accepting is not offered; reject it, or ask for evidence" },
-        ],
-        "safe_default": "HOLD",
-    });
-    let hours = i64::from(w.decision_expiry_hours().min(24));
-    let mut key = format!("report:{}:{}", item.key, a.ordinal);
-    key.truncate(128);
-    let nd = NewDecision {
-        kind: "report_review".into(),
-        dedupe_key: key,
-        brief,
-        binding,
-        expires_at: ts(now + time::Duration::hours(hours)),
-        action: Some(action),
-    };
-    let ev = NewEvidence {
-        work_item_id: item.id.clone(),
-        attempt_id: Some(a.id.clone()),
-        trust_class: TrustClass::IndependentCheck,
-        producer: "independent_runner".into(),
-        subject_commit: report.subject(),
-        check_id: "citation_check".into(),
-        command_hash: None,
-        criteria_ids: vec![],
-        result: if passed { "passed" } else { "failed" }.into(),
-        exit_code: None,
-        env_fingerprint: "citation-check/1".into(),
-        artifact: None,
-        fence: a.fence,
-        flags: vec![],
-    };
-    let d = w.atomically(|tx| {
-        tx.record_citation_check(&ev)?;
-        Ok(tx.new_decision(&nd)?.0)
-    })?;
-    open(w, &d)
+    issue(w, item, &a, &p, 0)
 }
 
 /// `preparing` -> `pending` (a replay after a crash between the two steps).
@@ -388,11 +475,51 @@ fn open(w: &mut OutcomeWriter, d: &synthesis_session::outcome::DecisionRecord) -
     Ok(())
 }
 
+/// Asks the question again from what the old decision stored (its verified action and brief):
+/// the citations are checked afresh, against the current contract and binding.
+fn reissue(
+    w: &mut OutcomeWriter,
+    item: &WorkItemRecord,
+    a: &AttemptRecord,
+    old: &synthesis_session::outcome::DecisionRecord,
+    rebrief: u64,
+) -> Result<()> {
+    let action = w
+        .decision_action(&old.id)?
+        .ok_or_else(|| synthesis_session::Error::Invalid("the review has no action".into()))?;
+    let cites = action
+        .get("citations")
+        .and_then(|c| c.as_array())
+        .map(|c| {
+            c.iter()
+                .map(|c| Citation {
+                    path: c["path"].as_str().unwrap_or("").to_owned(),
+                    start_line: c["start_line"].as_u64().unwrap_or(0),
+                    end_line: c["end_line"].as_u64().unwrap_or(0),
+                    quote: c["quote"].as_str().unwrap_or("").to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let p = Prepared {
+        sha: action["report_sha256"].as_str().unwrap_or("").to_owned(),
+        shown: old.brief["report"].as_str().unwrap_or("").to_owned(),
+        hidden: old.brief["evidence"]["hidden_characters_replaced"]
+            .as_u64()
+            .unwrap_or(0),
+        cut: action["cut"].as_bool().unwrap_or(true),
+        cites,
+        too_many: action["too_many"].as_bool().unwrap_or(true),
+    };
+    issue(w, item, a, &p, rebrief)
+}
+
 /// What the verifier says about a read-only goal's item (replaces the independent check, which
 /// cannot judge a report). `Passed` only for a decision that verifies as approved with
 /// `accept_report` (MAC, tamper-checked action) AND every criterion's authentic `human_review`
-/// row for this report. A rejection fails the item (it retries within its budget); a decision
-/// that expired is renewed with the same brief and action, so the question is never lost.
+/// row for this report. A rejection fails the item (it retries within its budget). When no
+/// decision is open (it expired, its binding moved, or the person asked for evidence) the
+/// question is asked again with the citations checked afresh, so it is never lost.
 pub(crate) fn review_verdict(
     w: &mut OutcomeWriter,
     item: &WorkItemRecord,
@@ -439,24 +566,31 @@ pub(crate) fn review_verdict(
             _ => {}
         }
     }
-    // nothing answered yet: an open decision waits; an expired newest one is asked again
+    // nothing answered: an open decision waits, otherwise the newest one is asked again
     let Some(last) = mine.pop() else {
         return Ok(Verdict::Pending);
     };
+    let rebriefs = last.brief["rebrief"].as_u64().unwrap_or(0);
     match w.decision_state(&last.id)? {
         DecisionState::Preparing => open(w, &last)?,
-        DecisionState::Expired => {
-            let action = w.decision_action(&last.id)?;
-            let hours = i64::from(w.decision_expiry_hours().min(24));
-            let (d, _) = w.new_decision(&NewDecision {
-                kind: last.kind.clone(),
-                dedupe_key: last.dedupe_key.clone(),
-                brief: last.brief.clone(),
-                binding: last.binding.clone(),
-                expires_at: ts(w.now() + time::Duration::hours(hours)),
-                action,
-            })?;
-            open(w, &d)?;
+        DecisionState::Expired | DecisionState::Invalidated => {
+            reissue(w, item, attempt, &last, rebriefs)?
+        }
+        DecisionState::NeedsMoreInfo
+            if w.verified_resolution(&last.id)?
+                .map(|r| r.choice)
+                .as_deref()
+                == Some("request_evidence") =>
+        {
+            // the driver leaves it to us: close the card, check again, ask again
+            w.transition_decision(
+                &last.id,
+                last.revision,
+                DecisionState::Invalidated,
+                &serde_json::json!({"rebriefed": last.id}),
+                &Effects::default(),
+            )?;
+            reissue(w, item, attempt, &last, rebriefs + 1)?;
         }
         _ => {}
     }

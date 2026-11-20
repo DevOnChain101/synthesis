@@ -189,7 +189,11 @@ impl OutcomesView {
         let now = now_ms();
         for m in batch {
             match m {
-                Msg::Screen(s) => self.state.set_screen(s),
+                Msg::Screen(s) => {
+                    // a failed or restarted link: what that engine advertised no longer holds
+                    self.state.read_only_goal = false;
+                    self.state.set_screen(s);
+                }
                 Msg::ReadOnlyGoal(on) => self.state.read_only_goal = on,
                 Msg::Snapshot {
                     items,

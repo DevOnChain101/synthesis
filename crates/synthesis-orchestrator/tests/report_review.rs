@@ -495,3 +495,153 @@ fn an_expired_review_is_asked_again_with_the_same_report() {
     assert_eq!(w.decision_state(&fresh.id).unwrap(), DecisionState::Pending);
     assert_eq!(fresh.brief["report"], d.brief["report"]);
 }
+
+fn alternatives(d: &DecisionRecord) -> usize {
+    d.brief["alternatives"].as_array().unwrap().len()
+}
+
+#[test]
+fn a_report_the_person_did_not_fully_see_cannot_be_accepted() {
+    let r = rig();
+    let root = folder(&r);
+    // unknown keys: the whole message is the report, so everything hashed is shown
+    let hidden =
+        json!({"report": "fine", "citations": [], "note": "SECRET INSTRUCTION"}).to_string();
+    let (rep, cites, many) = parse_report(&hidden);
+    assert_eq!(
+        (rep.as_str(), cites.len(), many),
+        (hidden.as_str(), 0, false)
+    );
+    let (w, _, _) = settled(&r, &root, &hidden);
+    let d = review(&w);
+    assert!(
+        d.brief["report"]
+            .as_str()
+            .unwrap()
+            .contains("SECRET INSTRUCTION")
+    );
+    assert_eq!(alternatives(&d), 1);
+    assert_eq!(d.brief["evidence"]["citations_verified"], "no citations");
+    // a report longer than the card shows: accept is not offered and the store refuses it too
+    let r2 = rig();
+    let root2 = folder(&r2);
+    let long = json!({"report": "x".repeat(70_000), "citations": []}).to_string();
+    let (mut w2, _, _) = settled(&r2, &root2, &long);
+    let d2 = review(&w2);
+    assert_eq!(alternatives(&d2), 0);
+    assert_eq!(d2.brief["evidence"]["report_shortened"], true);
+    assert_ne!(
+        answer(&r2, &mut w2, "k", &d2, "accept_report").state,
+        CommandState::Applied
+    );
+    assert_eq!(humans(&w2), 0);
+    // more than 200 citations: flagged, not "N of N"
+    let r3 = rig();
+    let root3 = folder(&r3);
+    let many: Vec<Value> = (0..201)
+        .map(|_| json!({"path": "a.txt", "start_line": 1, "end_line": 1, "quote": "one"}))
+        .collect();
+    let (w3, _, _) = settled(&r3, &root3, &deliverable(Value::Array(many)));
+    let d3 = review(&w3);
+    assert_eq!(alternatives(&d3), 0);
+    assert!(
+        d3.brief["evidence"]["citations_verified"]
+            .as_str()
+            .unwrap()
+            .contains("not checked")
+    );
+}
+
+#[test]
+fn evidence_requested_and_invalidated_reviews_are_checked_again_and_asked_again() {
+    let r = rig();
+    let root = folder(&r);
+    let (mut w, it, mut v) = settled(&r, &root, &deliverable(good()));
+    let d = review(&w);
+    // the person asks for evidence: the card is closed and a new one with a fresh check replaces it
+    let c = answer(&r, &mut w, "k1", &d, "request_evidence");
+    assert_eq!(c.state, CommandState::Applied, "{:?}", c.result);
+    assert_eq!(tick(&mut v, &mut w, &it), Verdict::Pending);
+    let open: Vec<_> = w
+        .list_decisions(w.id())
+        .unwrap()
+        .into_iter()
+        .filter(|x| {
+            x.kind == "report_review" && w.decision_state(&x.id).unwrap() == DecisionState::Pending
+        })
+        .collect();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].brief["rebrief"], 1);
+    assert_eq!(w.decision_state(&d.id).unwrap(), DecisionState::Invalidated);
+    let checks = w
+        .authentic_evidence(w.id())
+        .unwrap()
+        .iter()
+        .filter(|e| e.check_id.starts_with("citation_check"))
+        .count();
+    assert_eq!(checks, 2, "the check ran again");
+    // the new card can be accepted
+    let c = answer(&r, &mut w, "k2", &open[0], "accept_report");
+    assert_eq!(c.state, CommandState::Applied, "{:?}", c.result);
+    assert_eq!(tick(&mut v, &mut w, &it), Verdict::Passed);
+}
+
+#[test]
+fn an_invalidated_review_is_reopened_with_the_current_binding() {
+    let r = rig();
+    let root = folder(&r);
+    let (mut w, it, mut v) = settled(&r, &root, &deliverable(good()));
+    let d = review(&w);
+    w.transition_decision(
+        &d.id,
+        d.revision,
+        DecisionState::Invalidated,
+        &json!({"moved": true}),
+        &Effects::default(),
+    )
+    .unwrap();
+    assert_eq!(tick(&mut v, &mut w, &it), Verdict::Pending);
+    let all: Vec<_> = w
+        .list_decisions(w.id())
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.kind == "report_review")
+        .collect();
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        w.decision_state(&all[1].id).unwrap(),
+        DecisionState::Pending
+    );
+}
+
+/// A crash between the attempt's end and `open_review` leaves the item `running` with no live
+/// attempt (the scheduler frees it for a new attempt); a late `open_review` from the session's
+/// report still opens exactly one review.
+#[test]
+fn open_review_after_a_crash_opens_one_review() {
+    let r = rig();
+    let root = folder(&r);
+    let c = contract_ro();
+    let (mut w, it) = ro_outcome(&r, &root, &c);
+    let env = allocate(&r, &mut w, &it, &root);
+    write_report(&r, &w, &env.session_id, &deliverable(good()));
+    let report = attempt_report(&r.store, &env.session_id).unwrap();
+    let item = w.get_work_item(&it).unwrap();
+    open_review(
+        &mut w,
+        &item,
+        &env.attempt,
+        &report,
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    open_review(
+        &mut w,
+        &item,
+        &env.attempt,
+        &report,
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert_eq!(review(&w).brief["evidence"]["citations_verified"], "1 of 1");
+}
