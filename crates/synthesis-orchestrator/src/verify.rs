@@ -556,10 +556,9 @@ impl IndependentVerifier {
             return Ok(Verdict::Pending);
         };
         // A read-only goal's subject is a report, not a commit: no independent check can judge it.
-        // Only a person's accepted `report_review` can (P2b); until then the item waits, and
-        // nothing here can mark it verified.
+        // Only a person's accepted `report_review` can (S1 section 2.3); until then the item waits.
         if self.contract.kind == ContractKind::ReadOnly {
-            return Ok(Verdict::Pending);
+            return crate::report::review_verdict(w, item, &att);
         }
         let Some(commit) = att.subject_commit.clone() else {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));

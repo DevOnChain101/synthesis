@@ -31,7 +31,7 @@ test-seam = []
 
 [target.'cfg(unix)'.dependencies]
 # kill(2) of the worker's descendants (no unsafe)
-rustix = { version = "1", default-features = false, features = ["process"] }
+rustix = { version = "1", default-features = false, features = ["process", "fs"] }
 
 [dev-dependencies]
 synthesis-orchestrator = { path = ".", features = ["test-seam"] }

@@ -126,6 +126,8 @@ pub struct Detail {
 
 pub struct State {
     pub screen: Screen,
+    /// The engine advertised `read_only_goal` and `report_review` (`orchestrator.status` features).
+    pub read_only_goal: bool,
     pub items: Vec<Item>,
     pub selected: Option<String>,
     pub detail: Option<Detail>,
@@ -207,6 +209,7 @@ impl State {
     pub fn new(screen: Screen) -> Self {
         Self {
             screen,
+            read_only_goal: false,
             items: vec![],
             selected: None,
             detail: None,
