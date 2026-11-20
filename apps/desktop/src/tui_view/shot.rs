@@ -782,6 +782,7 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     url: "https://app.test/dashboard".into(),
                     title: "Dashboard".into(),
                     tabs: vec!["Dashboard".into(), "Sign in".into(), "Docs".into()],
+                    ids: vec!["t0".into(), "t1".into(), "t2".into()],
                     active: 0,
                     offset: 0,
                 };
