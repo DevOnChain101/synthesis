@@ -147,6 +147,8 @@ pub struct State {
     pub remote: bool,
     /// The picker's list is open, with the cursor on an item (`ws_items().len()` is "Choose folder...").
     pub ws_menu: Option<usize>,
+    /// The open kind picker (`+ new`, `n`).
+    pub picker: Option<super::kind_picker::Picker>,
     /// The open "New outcome" or "Revise contract" form.
     pub form: Option<Form>,
     /// The open disclosure of the Off / not-migrated screens.
@@ -181,6 +183,8 @@ pub enum Effect {
     },
     /// Scroll the focused pane by this many lines (negative: up).
     Scroll(i32),
+    /// A new session: the view makes its folder (a scratch one, or the person's choice) and the shell opens it.
+    NewSession,
     /// Read `HEAD` of this folder (the form's base commit).
     Head(String),
     Submit(Submit),
@@ -217,6 +221,7 @@ impl State {
             known: vec![],
             remote: false,
             ws_menu: None,
+            picker: None,
             form: None,
             guide: None,
             gate_refusal: synthesis_app::outcome_policy::gate_refusal().map(String::from),
@@ -636,8 +641,16 @@ impl State {
         if self.guide.is_some() {
             return Some(self.guide_key(k.name));
         }
+        if self.picker.is_some() {
+            return Some(self.picker_key(k.name));
+        }
         if self.screen != Screen::Ready {
             return match (&self.screen, k.name) {
+                // a session needs no orchestrator: the picker also opens on native Windows (goals are refused there)
+                (Screen::Windows, "n") if !k.shift => {
+                    self.open_picker();
+                    Some(vec![])
+                }
                 (Screen::Loading | Screen::Windows, _) => None,
                 (Screen::Off | Screen::NotReady(_), "enter") => {
                     self.open_guide();
@@ -653,7 +666,10 @@ impl State {
                 return Some(vec![]);
             }
             "r" if !k.shift => return Some(vec![Effect::Refresh]),
-            "n" if !k.shift => return Some(self.open_new()),
+            "n" if !k.shift => {
+                self.open_picker();
+                return Some(vec![]);
+            }
             "v" if !k.shift => return Some(self.open_revise()),
             "a" if !k.shift => return Some(self.review_draft()),
             _ => {}

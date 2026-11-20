@@ -222,11 +222,8 @@ impl OutcomesView {
             )
             .child(small_button(
                 "out-new",
-                "New outcome",
-                self.click(cx, |this, cx| {
-                    let e = this.state.open_new();
-                    this.run(e, cx);
-                }),
+                "+ new",
+                self.click(cx, |this, _| this.state.open_picker()),
             ));
         let rows = s
             .items
@@ -674,6 +671,13 @@ impl OutcomesView {
                 h("Esc", "close"),
             ];
         }
+        if s.picker.is_some() {
+            return vec![
+                h("\u{2191}\u{2193} 1-3", "choose"),
+                h("Enter", "start"),
+                h("Esc", "close"),
+            ];
+        }
         if s.guide.is_some() {
             return vec![
                 h("Tab", "next button"),
@@ -706,11 +710,7 @@ impl OutcomesView {
                 h("\u{2191}\u{2193}", "scroll"),
             ]),
         }
-        v.extend([
-            h("n", "new outcome"),
-            h("v", "revise contract"),
-            h("r", "refresh"),
-        ]);
+        v.extend([h("n", "new"), h("v", "revise contract"), h("r", "refresh")]);
         v
     }
 
@@ -847,6 +847,7 @@ impl Render for OutcomesView {
             .child(chrome::footer(&self.hints(), &chips).border_color(rule()))
             .children(self.form_overlay(window, cx))
             .children(self.guide_overlay(cx))
+            .children(self.picker_overlay(cx))
     }
 }
 

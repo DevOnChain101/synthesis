@@ -28,6 +28,7 @@ pub mod form;
 mod form_view;
 mod guide_view;
 pub mod history;
+pub mod kind_picker;
 pub mod link;
 pub mod model;
 pub mod popup;
@@ -68,6 +69,12 @@ pub struct OutcomesView {
     /// Back and forward through the outcomes shown (the title bar's buttons, Alt+Left / Alt+Right).
     hist: history::History,
 }
+
+/// The picker made a folder for a new session: the shell opens it in the TUI view (`TuiView::open_folder`) until the
+/// Super Agent centre hosts sessions (P5).
+pub struct OpenFolder(pub std::path::PathBuf);
+
+impl gpui::EventEmitter<OpenFolder> for OutcomesView {}
 
 /// The text inputs and the two buttons' focus of the form. Lists are one entry per line.
 struct FormUi {
@@ -284,6 +291,7 @@ impl OutcomesView {
                         );
                     }
                 }
+                (Effect::NewSession, _) => self.new_session(cx),
                 (Effect::EnableSetting, _) => {}
                 (Effect::Refresh | Effect::Retry, None) => {}
                 (Effect::Refresh, Some(l)) => l.send(Req::Refresh),
@@ -328,7 +336,7 @@ impl OutcomesView {
 
     /// A form or the disclosure is open: history keys and buttons do nothing.
     fn modal(&self) -> bool {
-        self.state.form.is_some() || self.state.guide.is_some()
+        self.state.form.is_some() || self.state.guide.is_some() || self.state.picker.is_some()
     }
 
     pub fn can_back(&self) -> bool {
@@ -389,6 +397,52 @@ impl OutcomesView {
             }
             Err(e) => self.state.guide_failed(e),
         }
+    }
+
+    /// "New session": with no folder named, a scratch folder under the synt home. For a remote engine (WSL) a local
+    /// scratch folder is no use: the person is asked for a folder.
+    fn new_session(&mut self, cx: &mut Context<Self>) {
+        if self.state.remote {
+            return self.session_in_folder(cx);
+        }
+        let made = match &self.env {
+            Some(env) => {
+                synthesis_app::homes(env).and_then(|h| kind_picker::make_scratch(&h.synthesis))
+            }
+            None => Err("Sample data: nothing was created.".to_string()),
+        };
+        match made {
+            Ok(p) => cx.emit(OpenFolder(p)),
+            Err(e) => {
+                self.state.picker = Some(kind_picker::Picker {
+                    cursor: Some(0),
+                    notice: Some(e),
+                })
+            }
+        }
+    }
+
+    /// The system folder dialog; the chosen folder gets the new session.
+    fn session_in_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Folder for the new session".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(p) = paths.into_iter().next()
+            {
+                this.update(cx, |o, cx| {
+                    o.state.picker = None;
+                    cx.emit(OpenFolder(p));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// A request after a failed link goes after a retry: the worker that ended waits for one, and the

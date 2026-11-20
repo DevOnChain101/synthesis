@@ -351,7 +351,9 @@ fn a_link_that_dies_mid_send_does_not_leave_send_stuck_and_nothing_is_resent() {
 #[test]
 fn new_outcome_opens_the_form_on_the_workspace_and_reads_its_commit_and_the_form_owns_the_keys() {
     let mut s = sample::state();
-    let e = press(&mut s, "n", 0);
+    assert!(press(&mut s, "n", 0).is_empty() && s.form.is_none());
+    press(&mut s, "2", 0);
+    let e = press(&mut s, "enter", 0);
     assert_eq!(e, vec![Effect::Head(sample::workspace())]);
     let f = s.form.as_ref().unwrap();
     assert!(f.is_new() && f.initial.workspace == sample::workspace());
@@ -413,6 +415,8 @@ fn review_and_approve_is_offered_only_for_a_contract_that_waits() {
 fn what_the_worker_says_reaches_an_open_form_and_an_approval_closes_it() {
     let mut s = sample::state();
     press(&mut s, "n", 0);
+    press(&mut s, "2", 0);
+    press(&mut s, "enter", 0);
     s.apply_form(FormMsg::Head {
         ws: sample::workspace(),
         result: Ok("a".repeat(40)),
@@ -595,4 +599,45 @@ fn a_late_migration_reply_is_said_on_the_screen_and_never_lands_in_a_newer_dialo
     assert_eq!(s.guide.as_ref().unwrap().error.as_deref(), Some("this one"));
     s.enabled(2, Ok(()));
     assert!(s.guide.is_none() && s.screen == Screen::Loading);
+}
+
+#[test]
+fn the_kind_picker_preselects_nothing_and_enter_is_a_no_op_until_a_row_is_chosen() {
+    use super::super::kind_picker::{READ_ONLY_SOON, ROWS};
+    let mut s = sample::state();
+    press(&mut s, "n", 0);
+    assert_eq!(s.picker.as_ref().unwrap().cursor, None);
+    assert!(press(&mut s, "enter", 0).is_empty());
+    assert!(s.picker.is_some() && s.form.is_none());
+    // the session row starts a session; the picker closes
+    press(&mut s, "1", 0);
+    assert_eq!(press(&mut s, "enter", 0), vec![Effect::NewSession]);
+    assert!(s.picker.is_none());
+    // the read-only row is refused and the picker stays open with the reason
+    press(&mut s, "n", 0);
+    press(&mut s, "down", 0);
+    press(&mut s, "down", 0);
+    press(&mut s, "down", 0);
+    assert_eq!(s.picker.as_ref().unwrap().cursor, Some(ROWS.len() - 1));
+    assert!(press(&mut s, "enter", 0).is_empty() && s.form.is_none());
+    assert_eq!(
+        s.picker.as_ref().unwrap().notice.as_deref(),
+        Some(READ_ONLY_SOON)
+    );
+    press(&mut s, "escape", 0);
+    assert!(s.picker.is_none());
+}
+
+#[test]
+fn native_windows_refuses_both_goals_but_not_a_session() {
+    use super::super::kind_picker::{Kind, refusal};
+    let w = Screen::Windows;
+    assert_eq!(
+        refusal(Kind::Goal, &w),
+        Some(synthesis_view::outcomes::WSL2_REFUSAL)
+    );
+    assert!(refusal(Kind::ReadOnlyGoal, &w).is_some() && refusal(Kind::Session, &w).is_none());
+    let mut s = State::new(w);
+    press(&mut s, "n", 0);
+    assert!(s.picker.is_some());
 }
