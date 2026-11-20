@@ -7557,6 +7557,7 @@ dependencies = [
  "synthesis-context",
  "synthesis-core",
  "synthesis-events",
+ "synthesis-harness",
  "synthesis-hooks",
  "synthesis-peers",
  "synthesis-permissions",

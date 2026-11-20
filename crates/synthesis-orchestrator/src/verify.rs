@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use synthesis_core::outcome::{
-    AttemptState, Contract, ContractCheck, TrustClass, WorkItemId, WorkItemKind, hidden_char,
-    outside_envelope, validate_contract,
+    AttemptState, Contract, ContractCheck, ContractKind, TrustClass, WorkItemId, WorkItemKind,
+    hidden_char, outside_envelope, validate_contract,
 };
 use synthesis_sandbox::{
     Guarantee, NetworkPolicy, SandboxBackend, SandboxPolicy, SandboxedCommand,
@@ -555,6 +555,12 @@ impl IndependentVerifier {
         else {
             return Ok(Verdict::Pending);
         };
+        // A read-only goal's subject is a report, not a commit: no independent check can judge it.
+        // Only a person's accepted `report_review` can (P2b); until then the item waits, and
+        // nothing here can mark it verified.
+        if self.contract.kind == ContractKind::ReadOnly {
+            return Ok(Verdict::Pending);
+        }
         let Some(commit) = att.subject_commit.clone() else {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));
         };

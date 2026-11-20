@@ -217,6 +217,7 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
     envelope.budgets.max_cost_usd = budget;
     let c = Contract {
         version: prev.map_or(1, |p| p.version),
+        kind: prev.map_or_else(Default::default, |p| p.kind),
         goal,
         criteria,
         envelope,

@@ -63,7 +63,7 @@ const SYSTEM_RULES: &str = "You are the planning step of an automated software o
 
 /// Rules a planning run always has (besides what the contract's envelope compiles to): no shell,
 /// no edits, no web, no sub-agents, and the usual secret files are not read.
-const FIXED_DENY: [&str; 12] = [
+pub(crate) const FIXED_DENY: [&str; 12] = [
     "Bash",
     "Edit",
     "WebFetch",
@@ -481,7 +481,8 @@ pub fn plan_wait_of(r: &Reader, id: &OutcomeId) -> Result<PlanWait, StoreError> 
 /// needs a replan ([`replan_trigger`]), and the model was not asked for this state yet.
 pub fn needs_model_plan(w: &OutcomeWriter) -> Result<bool, StoreError> {
     let o = w.get_outcome(w.id())?;
-    if !w.contract_is_approved(w.id(), o.contract_version)? {
+    // a read-only goal always has the stub plan (one `research` item): no model plans it
+    if !w.contract_is_approved(w.id(), o.contract_version)? || crate::is_read_only(w)? {
         return Ok(false);
     }
     let wants = match o.plan_version {
@@ -572,7 +573,7 @@ fn skip_invalid<T>(r: Result<T, StoreError>) -> Result<Option<T>, StoreError> {
 
 /// The session's last assistant message as text, and its recorded cost (`None` while no usage was
 /// ever recorded: a worker that died before its first call leaves the all-zero default).
-fn read_session(store: &Store, session_id: &str) -> (Option<String>, Option<f64>) {
+pub(crate) fn read_session(store: &Store, session_id: &str) -> (Option<String>, Option<f64>) {
     let Ok(r) = store.reader() else {
         return (None, None);
     };

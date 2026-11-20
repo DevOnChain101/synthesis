@@ -25,19 +25,32 @@ fn two_attempts_get_distinct_environments_and_the_users_tree_is_untouched() {
     let e1 = a.allocate(&mut w, &r.spec(&one, 1), now()).unwrap();
     let e2 = a.allocate(&mut w, &r.spec(&two, 1), now()).unwrap();
     assert_ne!(e1.session_id, e2.session_id);
-    assert_ne!(e1.git.worktree, e2.git.worktree);
-    assert_ne!(e1.git.branch, e2.git.branch);
-    assert_eq!(e1.git.branch, format!("synthesis/{}", e1.session_id));
+    assert_ne!(
+        e1.git.as_ref().unwrap().worktree,
+        e2.git.as_ref().unwrap().worktree
+    );
+    assert_ne!(
+        e1.git.as_ref().unwrap().branch,
+        e2.git.as_ref().unwrap().branch
+    );
+    assert_eq!(
+        e1.git.as_ref().unwrap().branch,
+        format!("synthesis/{}", e1.session_id)
+    );
     assert!(
-        e1.git.worktree.starts_with(r.home.join("worktrees")),
+        e1.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .starts_with(r.home.join("worktrees")),
         "{:?}",
-        e1.git.worktree
+        e1.git.as_ref().unwrap().worktree
     );
     // the explicit cwd of the attempt is its own worktree, never the user's folder or the other's
-    assert_eq!(e1.context.cwd, e1.git.worktree);
+    assert_eq!(e1.context.cwd, e1.git.as_ref().unwrap().worktree);
     assert_ne!(e1.context.cwd, e2.context.cwd);
     assert_ne!(e1.context.cwd, r.repo);
-    assert_eq!(e1.git.baseline, r.head);
+    assert_eq!(e1.git.as_ref().unwrap().baseline, r.head);
     assert_eq!(e1.attempt.fence, 1);
     // stored: the attempt rows, the child sessions with their own cwd, the pinned git info
     for e in [&e1, &e2] {
@@ -51,7 +64,7 @@ fn two_attempts_get_distinct_environments_and_the_users_tree_is_untouched() {
         assert_eq!(s.parent.unwrap().session_id, w.control_session_id());
         let stored: synthesis_workspace::GitInfo =
             serde_json::from_str(&s.git_info.unwrap()).unwrap();
-        assert_eq!(stored, e.git);
+        assert_eq!(Some(stored), e.git);
     }
     assert_eq!(r.worktrees(), 3);
     assert_eq!(r.branches().len(), 2);
@@ -158,11 +171,7 @@ fn a_crash_at_any_step_is_reconciled_without_a_second_worktree() {
         .allocator()
         .allocate(&mut w, &r.spec(&one, 1), now())
         .unwrap();
-    assert_eq!(
-        e.git,
-        alloc.git.unwrap(),
-        "the git info was completed, not replaced"
-    );
+    assert_eq!(e.git, alloc.git, "the git info was completed, not replaced");
     assert_eq!(r.worktrees(), 2);
 
     // (4) dispatching when the process died, the effect fully done: reconciled by the probe
@@ -207,16 +216,20 @@ fn a_replay_of_a_started_attempt_does_not_touch_its_files() {
         &Effects::default(),
     )
     .unwrap();
-    fs::write(e.git.worktree.join("work.txt"), "in progress").unwrap();
-    fs::write(e.git.worktree.join("a.txt"), "edited\n").unwrap();
+    fs::write(
+        e.git.as_ref().unwrap().worktree.join("work.txt"),
+        "in progress",
+    )
+    .unwrap();
+    fs::write(e.git.as_ref().unwrap().worktree.join("a.txt"), "edited\n").unwrap();
     let again = a.allocate(&mut w, &r.spec(&one, 1), now()).unwrap();
     assert_eq!(again.session_id, e.session_id);
     assert_eq!(
-        fs::read_to_string(e.git.worktree.join("work.txt")).unwrap(),
+        fs::read_to_string(e.git.as_ref().unwrap().worktree.join("work.txt")).unwrap(),
         "in progress"
     );
     assert_eq!(
-        fs::read_to_string(e.git.worktree.join("a.txt")).unwrap(),
+        fs::read_to_string(e.git.as_ref().unwrap().worktree.join("a.txt")).unwrap(),
         "edited\n"
     );
 }
@@ -326,21 +339,31 @@ fn finish_commits_the_tree_and_cleanup_keeps_what_would_be_lost() {
         &Effects::default(),
     )
     .unwrap();
-    fs::write(e.git.worktree.join("new.txt"), "x\n").unwrap();
-    let subject = finish_attempt(&r.wm, &mut w, &e.attempt, &e.git, TaskStatus::Completed).unwrap();
+    fs::write(e.git.as_ref().unwrap().worktree.join("new.txt"), "x\n").unwrap();
+    let subject = finish_attempt(
+        &r.wm,
+        &mut w,
+        &e.attempt,
+        e.git.as_ref().unwrap(),
+        TaskStatus::Completed,
+    )
+    .unwrap();
     assert_ne!(subject, r.head);
-    assert_eq!(g(&e.git.worktree, &["rev-parse", "HEAD"]), subject);
+    assert_eq!(
+        g(&e.git.as_ref().unwrap().worktree, &["rev-parse", "HEAD"]),
+        subject
+    );
     let done = w.list_attempts(&one).unwrap().remove(0);
     assert_eq!(
         (done.state, done.subject_commit.as_deref()),
         (AttemptState::Finished, Some(subject.as_str()))
     );
-    let c = cleanup_attempt(&r.wm, &mut w, &done, &e.git).unwrap();
+    let c = cleanup_attempt(&r.wm, &mut w, &done, e.git.as_ref().unwrap()).unwrap();
     assert!(
         matches!(&c, Cleanup::Retained(why) if why.contains("unmerged")),
         "{c:?}"
     );
-    assert!(e.git.worktree.exists());
+    assert!(e.git.as_ref().unwrap().worktree.exists());
     let kept = w.list_attempts(&one).unwrap().remove(0);
     assert!(
         kept.retained_reason
@@ -350,7 +373,7 @@ fn finish_commits_the_tree_and_cleanup_keeps_what_would_be_lost() {
     );
     // a lost attempt with unsaved work is kept as well, never forced
     let e2 = a.allocate(&mut w, &r.spec(&two, 1), now()).unwrap();
-    fs::write(e2.git.worktree.join("a.txt"), "unsaved\n").unwrap();
+    fs::write(e2.git.as_ref().unwrap().worktree.join("a.txt"), "unsaved\n").unwrap();
     w.transition_attempt(
         &e2.attempt.id,
         e2.attempt.revision,
@@ -361,7 +384,7 @@ fn finish_commits_the_tree_and_cleanup_keeps_what_would_be_lost() {
     .unwrap();
     let lost = w.list_attempts(&two).unwrap().remove(0);
     assert!(matches!(
-        cleanup_attempt(&r.wm, &mut w, &lost, &e2.git).unwrap(),
+        cleanup_attempt(&r.wm, &mut w, &lost, e2.git.as_ref().unwrap()).unwrap(),
         Cleanup::Retained(_)
     ));
     // cleanup of an attempt that has not finished is an error, never a deletion
@@ -370,8 +393,8 @@ fn finish_commits_the_tree_and_cleanup_keeps_what_would_be_lost() {
         state: AttemptState::Running,
         ..three
     };
-    assert!(cleanup_attempt(&r.wm, &mut w3, &live, &e.git).is_err());
-    assert!(e.git.worktree.exists());
+    assert!(cleanup_attempt(&r.wm, &mut w3, &live, e.git.as_ref().unwrap()).is_err());
+    assert!(e.git.as_ref().unwrap().worktree.exists());
 }
 
 #[test]
@@ -391,18 +414,25 @@ fn an_untouched_attempt_is_removed_and_dirty_ones_are_not() {
         &Effects::default(),
     )
     .unwrap();
-    let subject = finish_attempt(&r.wm, &mut w, &e.attempt, &e.git, TaskStatus::Completed).unwrap();
+    let subject = finish_attempt(
+        &r.wm,
+        &mut w,
+        &e.attempt,
+        e.git.as_ref().unwrap(),
+        TaskStatus::Completed,
+    )
+    .unwrap();
     assert_eq!(subject, r.head, "unchanged tree: the subject is the base");
     let done = w.list_attempts(&one).unwrap().remove(0);
     assert_eq!(
-        cleanup_attempt(&r.wm, &mut w, &done, &e.git).unwrap(),
+        cleanup_attempt(&r.wm, &mut w, &done, e.git.as_ref().unwrap()).unwrap(),
         Cleanup::Removed
     );
-    assert!(!e.git.worktree.exists());
+    assert!(!e.git.as_ref().unwrap().worktree.exists());
     assert_eq!(r.worktrees(), 1);
     // an attempt that was cancelled with uncommitted work: kept, reason recorded, work intact
     let e2 = a.allocate(&mut w, &r.spec(&two, 1), now()).unwrap();
-    fs::write(e2.git.worktree.join("a.txt"), "unsaved\n").unwrap();
+    fs::write(e2.git.as_ref().unwrap().worktree.join("a.txt"), "unsaved\n").unwrap();
     let rev = e2.attempt.revision;
     w.transition_attempt(
         &e2.attempt.id,
@@ -413,13 +443,13 @@ fn an_untouched_attempt_is_removed_and_dirty_ones_are_not() {
     )
     .unwrap();
     let cancelled = w.list_attempts(&two).unwrap().remove(0);
-    let c = cleanup_attempt(&r.wm, &mut w, &cancelled, &e2.git).unwrap();
+    let c = cleanup_attempt(&r.wm, &mut w, &cancelled, e2.git.as_ref().unwrap()).unwrap();
     assert!(
         matches!(&c, Cleanup::Retained(why) if why.contains("uncommitted")),
         "{c:?}"
     );
     assert_eq!(
-        fs::read_to_string(e2.git.worktree.join("a.txt")).unwrap(),
+        fs::read_to_string(e2.git.as_ref().unwrap().worktree.join("a.txt")).unwrap(),
         "unsaved\n"
     );
 }
@@ -529,7 +559,7 @@ fn the_source_must_be_the_outcomes_repository_and_a_removed_worktree_says_so() {
     .unwrap();
     let lost = w.list_attempts(&one).unwrap().remove(0);
     assert_eq!(
-        cleanup_attempt(&r.wm, &mut w, &lost, &e.git).unwrap(),
+        cleanup_attempt(&r.wm, &mut w, &lost, e.git.as_ref().unwrap()).unwrap(),
         Cleanup::Removed
     );
     let err = r

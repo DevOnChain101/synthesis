@@ -300,6 +300,32 @@ fn an_answer_to_a_decision_of_the_old_version_is_stale_after_the_rebind() {
     assert_eq!(w.decision_state(&d.id).unwrap(), DecisionState::Invalidated);
 }
 
+/// `ro-revise-kind-refused`: a write goal is never revised into a read-only one (the kind is in the
+/// approved body, and a revision that changes it is denied and stores nothing).
+#[test]
+fn ro_revise_kind_refused_a_write_goal_is_never_downgraded_to_read_only() {
+    need_git!();
+    let r = rig();
+    let mut b = blocked(&r);
+    let ro = Contract::read_only("goal".into(), &[], Budgets::new(5.0));
+    let c = revise(&r, &mut b.w, "ro-1", &ro);
+    assert_eq!(c.state, CommandState::Denied, "{:?}", c.result);
+    assert!(
+        c.result
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("kind of a goal never changes"),
+        "{:?}",
+        c.result
+    );
+    assert!(b.w.get_contract(b.w.id(), 2).is_err(), "nothing was stored");
+    assert_eq!(
+        b.w.get_contract(b.w.id(), 1).unwrap().0.kind,
+        ContractKind::Write
+    );
+}
+
 #[test]
 fn only_a_blocked_outcome_is_revised_and_a_revision_must_change_something() {
     need_git!();

@@ -9,6 +9,7 @@
 //!   delegate worker of this session (found by their system prompt), not to the main agent, so
 //!   the order of requests between agents does not matter. Each kind has its own queue; an empty
 //!   queue answers `DECLINED: nothing scripted`.
+//! - `"dump": "tools" | "system" | "messages"`: the text is the request's tool names (comma-joined), system prompt or messages.
 //! - `"seen": {"needle": str, "yes": str, "no": str}`: the text is `yes` when the request's
 //!   messages contain `needle`, else `no` (lets a cross-process test see what a model was shown).
 
@@ -26,6 +27,20 @@ fn turn_of(i: usize, t: &Value, req: Option<&Request>) -> Turn {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // `"dump": "tools" | "system" | "messages"`: the text is what the model was offered (names of the tools,
+    // comma-joined; the system prompt; the messages), so a test can see the tool set and the instructions of a session
+    if let (Some(d), Some(r)) = (t.get("dump").and_then(Value::as_str), req) {
+        text = match d {
+            "tools" => r
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            "messages" => format!("{:?}", r.messages),
+            _ => serde_json::to_string(&r.system).unwrap_or_default(),
+        };
+    }
     if let (Some(s), Some(r)) = (t.get("seen"), req) {
         let get = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("");
         let seen = format!("{:?}", r.messages).contains(get("needle"));
@@ -94,9 +109,19 @@ pub fn load(path: &Path) -> Result<Arc<dyn ModelProvider>, String> {
             .map(|(i, t)| (i, t.clone()))
             .collect()
     };
-    let queues = Mutex::new((queue("responder"), queue("delegate")));
+    // main turns that read the request (`dump`) are served by the responder, in order, like the other agents'
+    let dyn_main = script
+        .iter()
+        .any(|t| role(t).is_none() && t.get("dump").is_some());
+    let main_q: VecDeque<(usize, Value)> = script
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| role(t).is_none())
+        .map(|(i, t)| (i, t.clone()))
+        .collect();
+    let queues = Mutex::new((queue("responder"), queue("delegate"), main_q));
     let mut fake = FakeProvider::new(main);
-    if script.iter().any(|t| role(t).is_some()) {
+    if dyn_main || script.iter().any(|t| role(t).is_some()) {
         fake = fake.with_responder(Arc::new(move |req: &Request| {
             let system = serde_json::to_string(&req.system).unwrap_or_default();
             let mut q = queues.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,6 +129,8 @@ pub fn load(path: &Path) -> Result<Arc<dyn ModelProvider>, String> {
                 &mut q.0
             } else if system.contains("peer delegate worker") {
                 &mut q.1
+            } else if dyn_main {
+                &mut q.2
             } else {
                 return None;
             };

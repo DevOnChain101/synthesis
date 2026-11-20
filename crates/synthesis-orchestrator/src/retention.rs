@@ -25,6 +25,18 @@ pub fn finish_attempt(
         Some(c) => c,
         None => worktrees.head(git)?,
     };
+    finish_in_place(w, attempt, task_status, Some(&subject))?;
+    Ok(subject)
+}
+
+/// Ends an attempt of a read-only goal: nothing was committed, the subject (if any) is the report
+/// (`report:sha256:<hex>`, [`crate::AttemptReport::subject`]).
+pub fn finish_in_place(
+    w: &mut OutcomeWriter,
+    attempt: &AttemptRecord,
+    task_status: TaskStatus,
+    subject: Option<&str>,
+) -> Result<(), AllocError> {
     let current = w
         .list_attempts(&attempt.work_item_id)?
         .into_iter()
@@ -36,12 +48,12 @@ pub fn finish_attempt(
         AttemptState::Finished,
         &AttemptEnd {
             task_status: Some(task_status),
-            subject_commit: Some(subject.clone()),
+            subject_commit: subject.map(str::to_owned),
             retained_reason: None,
         },
         &Effects::default(),
     )?;
-    Ok(subject)
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

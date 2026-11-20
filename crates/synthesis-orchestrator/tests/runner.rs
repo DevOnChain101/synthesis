@@ -117,10 +117,13 @@ fn a_normal_run_commits_the_tree_and_hands_over_to_verification() {
         (WorkerEnd::Completed, WorkItemState::Verifying)
     );
     let commit = s.subject_commit.unwrap();
-    assert_eq!(common::g(&env.git.worktree, &["rev-parse", "HEAD"]), commit);
+    assert_eq!(
+        common::g(&env.git.as_ref().unwrap().worktree, &["rev-parse", "HEAD"]),
+        commit
+    );
     assert_eq!(
         common::g(
-            &env.git.worktree,
+            &env.git.as_ref().unwrap().worktree,
             &["show", "--name-only", "--format=", "HEAD"]
         ),
         "out.txt"
@@ -135,7 +138,7 @@ fn a_normal_run_commits_the_tree_and_hands_over_to_verification() {
     // no owner facts given: nothing is recorded
     assert_eq!((a.sandbox_backend, a.sandbox_guarantee), (None, None));
     // the worker was marked as started before it ran: the worktree is never reset again
-    assert!(r.wm.is_started(&env.git));
+    assert!(r.wm.is_started(env.git.as_ref().unwrap()));
     assert!(
         r.wm.allocate_unstarted(&r.repo, &env.session_id, r.base.join("art"), &r.head)
             .is_err()
@@ -298,7 +301,7 @@ fn cancel_stops_the_worker_and_kills_everything_it_started() {
         (WorkerEnd::Cancelled, WorkItemState::Cancelled, None)
     );
     for f in ["child.pid", "child2.pid"] {
-        let pid: u32 = fs::read_to_string(env.git.worktree.join(f))
+        let pid: u32 = fs::read_to_string(env.git.as_ref().unwrap().worktree.join(f))
             .unwrap()
             .trim()
             .parse()
@@ -314,7 +317,12 @@ fn cancel_stops_the_worker_and_kills_everything_it_started() {
     assert_eq!(a.state, AttemptState::Cancelled);
     assert!(a.retained_reason.unwrap().contains("kept"));
     assert!(
-        env.git.worktree.join("child.pid").exists(),
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("child.pid")
+            .exists(),
         "the tree is kept as it was"
     );
     // the cooperative request was made through the store (the worker polls it)
@@ -462,7 +470,7 @@ fn running_with_worker(
         .allocator()
         .allocate(w, &r.spec(it, ordinal), OffsetDateTime::now_utc())
         .unwrap();
-    r.wm.mark_started(&env.git).unwrap();
+    r.wm.mark_started(env.git.as_ref().unwrap()).unwrap();
     let rev = attempt(w, it, ordinal).revision;
     w.transition_attempt(
         &env.attempt.id,
@@ -545,7 +553,7 @@ fn a_dead_worker_is_lost_and_its_item_freed_without_rerunning_anything() {
         WorkItemState::Leased,
         "other items untouched"
     );
-    assert!(env.git.worktree.exists());
+    assert!(env.git.as_ref().unwrap().worktree.exists());
     // a second restart finds nothing left to do
     assert_eq!(
         recover(
@@ -572,7 +580,10 @@ fn a_dead_worker_is_lost_and_its_item_freed_without_rerunning_anything() {
         .allocate(&mut w, &r.spec(&one, 2), OffsetDateTime::now_utc())
         .unwrap();
     assert_ne!(env2.session_id, env.session_id);
-    assert_ne!(env2.git.worktree, env.git.worktree);
+    assert_ne!(
+        env2.git.as_ref().unwrap().worktree,
+        env.git.as_ref().unwrap().worktree
+    );
 }
 
 #[test]
@@ -656,7 +667,11 @@ fn a_worker_that_finished_before_the_owner_died_is_settled_not_lost() {
     let pid = gone.id();
     gone.wait().unwrap();
     let env = running_with_worker(&r, &mut w, &one, 1, pid, Some("tok"));
-    fs::write(env.git.worktree.join("done.txt"), "finished work").unwrap();
+    fs::write(
+        env.git.as_ref().unwrap().worktree.join("done.txt"),
+        "finished work",
+    )
+    .unwrap();
     // the worker's session ended `completed` in the store
     {
         let mut sw = r.store.open_attempt_session(&w, &env.session_id).unwrap();
@@ -683,7 +698,7 @@ fn a_worker_that_finished_before_the_owner_died_is_settled_not_lost() {
     );
     assert_eq!(
         common::g(
-            &env.git.worktree,
+            &env.git.as_ref().unwrap().worktree,
             &["show", "--name-only", "--format=", "HEAD"]
         ),
         "done.txt"
@@ -860,7 +875,7 @@ fn busy() -> synthesis_session::Error {
 }
 
 fn pid_of(env: &AttemptEnv, file: &str) -> u32 {
-    fs::read_to_string(env.git.worktree.join(file))
+    fs::read_to_string(env.git.as_ref().unwrap().worktree.join(file))
         .unwrap()
         .trim()
         .parse()
@@ -1071,7 +1086,7 @@ fn a_running_attempt_with_no_recorded_worker_is_left_alone_while_its_session_is_
         .allocator()
         .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
         .unwrap();
-    r.wm.mark_started(&env.git).unwrap();
+    r.wm.mark_started(env.git.as_ref().unwrap()).unwrap();
     let rev = attempt(&w, &one, 1).revision;
     w.transition_attempt(
         &env.attempt.id,
