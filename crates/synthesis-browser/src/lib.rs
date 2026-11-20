@@ -273,7 +273,7 @@ impl PageView {
     pub const MAX_TABS: usize = PERSON_MAX_TABS;
 
     /// The person's tab actions are refused (never queued) while a tool call of the agent is in flight, and the
-    /// check is made again right before each change (see [`BrowserRuntime::not_busy`]): the agent's current tab must
+    /// check is made again right before each change (see `not_busy`): the agent's current tab must
     /// not change under a call. `id` is the tab's [`TabInfo::id`] from the list the person saw: another tab at that
     /// index (the list changed) is refused.
     pub async fn select_tab(&self, index: usize, id: &str) -> Result<()> {
