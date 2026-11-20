@@ -24,6 +24,8 @@ pub enum BrowserError {
     /// destroyed. Launch a new browser.
     Compromised,
     Io(String),
+    /// The person's input while the agent is using the browser.
+    Busy,
 }
 
 impl fmt::Display for BrowserError {
@@ -42,6 +44,7 @@ impl fmt::Display for BrowserError {
                 "browser session was torn down after event loss (policy could not be enforced); launch a new browser",
             ),
             Self::Io(m) => write!(f, "io error: {m}"),
+            Self::Busy => f.write_str("the agent is using this tab"),
         }
     }
 }

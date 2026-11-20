@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 use synthesis_browser::{
-    BrowserOptions, BrowserRuntime, FrameStream, UrlPolicy, ViewMetrics, WaitFor, WaitUntil,
+    BrowserError, BrowserOptions, BrowserRuntime, FrameStream, PageButton, PageInput, PageView,
+    UrlPolicy, ViewMetrics, WaitFor, WaitUntil,
 };
 use synthesis_config::Env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -58,6 +59,17 @@ const FLOOD: &str = r#"<html><body><script>
 setInterval(()=>{for(let i=0;i<5000;i++){console.log('flood'+i)}},1);</script></body></html>"#;
 /// Repaints forever, so the screencast always has a new frame to send (Chrome sends only on change).
 /// A page whose every pixel is this colour (rgb 30,144,255), with a text line to see sharpness in the shots.
+/// Absolutely placed controls (CSS px): button (100,100)-(200,140), text field (100,200)-(300,230), password field
+/// (100,300)-(300,330), a link to a denied host (100,400)-(300,440), a link to /form (100,500)-(300,540); 3000 px tall.
+const INPUT: &str = r#"<html><body style="margin:0;height:3000px"><style>*{position:absolute;margin:0;box-sizing:border-box}</style>
+<button style="left:100px;top:100px;width:100px;height:40px" onclick="out.textContent+=' clicked'">Go</button>
+<input id="t" style="left:100px;top:200px;width:200px;height:30px" oninput="out.textContent+=' typed:'+this.value">
+<input id="p" type="password" style="left:100px;top:300px;width:200px;height:30px" oninput="out.textContent+=' pw:'+this.value">
+<a href="http://denied.invalid/x" style="left:100px;top:400px;width:200px;height:40px">denied</a>
+<a href="/form" style="left:100px;top:500px;width:200px;height:40px">form</a>
+<input name="cardnumber" style="left:100px;top:600px;width:200px;height:30px">
+<p id="out" style="left:400px;top:100px">ready</p>
+<script>window.onscroll=()=>out.textContent+=' scrolled'</script></body></html>"#;
 const SOLID: &str = "<html><body style=\"margin:0;background:rgb(30,144,255)\"><p style=\"font:16px sans-serif;margin:8px\">solid</p></body></html>";
 const ANIM: &str = r#"<html><body><script>let n=0;
 setInterval(()=>{document.body.style.background='rgb('+(n++*7%256)+',80,160)'},20);</script></body></html>"#;
@@ -167,6 +179,7 @@ async fn serve() -> String {
                         "<title>Read</title><p id=b></p><script>document.getElementById('b').textContent='cookies:'+document.cookie</script>".to_owned(),
                     ),
                     "/anim" => ("200 OK", "", "text/html", ANIM.to_owned()),
+                    "/input" => ("200 OK", "", "text/html", INPUT.to_owned()),
                     "/solid" => ("200 OK", "", "text/html", SOLID.to_owned()),
                     "/flood" => ("200 OK", "", "text/html", FLOOD.to_owned()),
                     "/api/login" => (
@@ -1934,5 +1947,153 @@ async fn fit_body() {
     rt.view(false, 0, 0).await.unwrap();
     let shot = rt.screenshot(false).await.unwrap();
     assert_eq!(png_size(&shot.png), (1280, 800));
+    rt.close().await.unwrap();
+}
+
+/// B3: the person's clicks, keys, paste and wheel reach the page through `PageView`; a password field and the agent's
+/// own calls shut them out; a link the person clicks meets the URL policy like any page-made navigation.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_persons_input_reaches_the_page() {
+    traced("the_persons_input_reaches_the_page", input_body()).await;
+}
+
+async fn input_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = std::sync::Arc::new(launch(local_opts(art.path()), &env).await);
+    rt.navigate(&format!("{base}/input"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let pv = PageView::new(rt.clone());
+    let click = |x: f64, y: f64| {
+        let pv = pv.clone();
+        async move {
+            for down in [true, false] {
+                let ev = PageInput::Button {
+                    down,
+                    x,
+                    y,
+                    button: PageButton::Left,
+                    clicks: 1,
+                    mods: 0,
+                };
+                pv.input(ev).await.unwrap();
+            }
+        }
+    };
+    let key = |k: &str| PageInput::Key {
+        key: k.into(),
+        mods: 0,
+    };
+    let has = |t: &str| rt.wait_for(WaitFor::Text(t.into()), Duration::from_secs(5));
+
+    click(120., 110.).await;
+    has("clicked").await.unwrap();
+
+    // keys and text go to the focused field
+    click(150., 215.).await;
+    pv.input(key("h")).await.unwrap();
+    pv.input(key("i")).await.unwrap();
+    has("typed:hi").await.unwrap();
+    pv.input(PageInput::Text("\u{e9}".into())).await.unwrap();
+    has("typed:hi\u{e9}").await.unwrap();
+    // select all then a key replaces the text
+    pv.input(PageInput::Key {
+        key: "a".into(),
+        mods: synthesis_browser::CTRL | synthesis_browser::META,
+    })
+    .await
+    .unwrap();
+    pv.input(key("z")).await.unwrap();
+    has("typed:z").await.unwrap();
+    // an over-long paste and a pointer outside the page are refused before Chrome sees them
+    let long = PageInput::Text("x".repeat(synthesis_browser::MAX_TEXT + 1));
+    assert!(pv.input(long).await.is_err());
+    let off = PageInput::Move {
+        x: -5.,
+        y: 0.,
+        buttons: 0,
+    };
+    assert!(pv.input(off).await.is_err());
+
+    // the wheel scrolls the page
+    pv.input(PageInput::Wheel {
+        x: 500.,
+        y: 300.,
+        dx: 0.,
+        dy: 400.,
+        mods: 0,
+    })
+    .await
+    .unwrap();
+    has("scrolled").await.unwrap();
+
+    // while the agent acts the person's input is refused, and it works again after
+    {
+        let _agent = rt.agent_busy();
+        let r = pv.input(key("q")).await;
+        assert!(matches!(r, Err(BrowserError::Busy)), "{r:?}");
+        let r = pv
+            .input(PageInput::Move {
+                x: 1.,
+                y: 1.,
+                buttons: 0,
+            })
+            .await;
+        assert!(matches!(r, Err(BrowserError::Busy)), "{r:?}");
+    }
+    pv.input(PageInput::Move {
+        x: 1.,
+        y: 1.,
+        buttons: 0,
+    })
+    .await
+    .unwrap();
+
+    // the page was scrolled by 400: the password field is now at y 300 - 400 < 0, so scroll back first
+    pv.input(PageInput::Wheel {
+        x: 500.,
+        y: 300.,
+        dx: 0.,
+        dy: -400.,
+        mods: 0,
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    click(150., 315.).await;
+    for ev in [key("s"), PageInput::Text("secret".into())] {
+        let r = pv.input(ev).await;
+        assert!(matches!(r, Err(BrowserError::Refused(_))), "{r:?}");
+    }
+    assert!(
+        rt.wait_for(WaitFor::Text("pw:".into()), Duration::from_millis(800))
+            .await
+            .is_err(),
+        "nothing was typed into the password field"
+    );
+    // the pointer still works there, and the field gives the keys back once another field has the focus
+    click(150., 215.).await;
+    pv.input(key("k")).await.unwrap();
+
+    // a link to a denied host: the click is input, the navigation is judged by the policy as ever
+    click(150., 420.).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // (Chrome shows its error page, opaque origin "null": the request never left)
+    assert_ne!(rt.page_origin().await.unwrap(), "http://denied.invalid");
+    // a link to an allowed page navigates
+    rt.navigate(&format!("{base}/input"), WaitUntil::Load)
+        .await
+        .unwrap();
+    // a new document: the cached isolated world is renewed, typing works, a card-like name is still refused
+    click(150., 215.).await;
+    pv.input(key("k")).await.unwrap();
+    has("typed:k").await.unwrap();
+    click(150., 615.).await;
+    let r = pv.input(key("4")).await;
+    assert!(matches!(r, Err(BrowserError::Refused(_))), "{r:?}");
+    click(150., 520.).await;
+    has("Contact").await.unwrap();
     rt.close().await.unwrap();
 }

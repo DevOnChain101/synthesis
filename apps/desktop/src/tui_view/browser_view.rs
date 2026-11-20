@@ -1,7 +1,8 @@
 //! The Browser tab as a page view (spec `docs/specs/terminal-browser.md` 2.3, 2.6, PR B2, VIEW ONLY): the live
 //! frames of the session's browser (`BrowserRuntime::view` / `frames`) drawn 1:1 in device pixels into the pane (the page's viewport follows the pane, so it needs no letterbox), a URL bar
 //! whose navigation passes the browser's own `UrlPolicy`, back / forward / reload, the browser's tabs and the
-//! agent cursor. Nothing the person does in the pane reaches the page (input is B3); the pane says so.
+//! agent cursor. The person's clicks, wheel, keys and paste reach the page (B3) only while the page holds the pane's
+//! focus and only as `PageView::input`; the agent never goes through this path (see the spec, B3).
 //!
 //! Frames are the person's own view: they bypass `guard_capture`, and they never go anywhere but the pane's one
 //! decoded slot (never an event, the store, a log or the model). Decoding runs off the UI thread, the frame
@@ -11,6 +12,7 @@
 //! which asks the engine's launcher; the pane never launches anything itself). Until then the tab says there is no
 //! browser, offers Start (or says why it cannot) and keeps its earlier body (the saved screenshots and the call list).
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -18,11 +20,14 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{Receiver, Sender, channel};
 use futures::future::BoxFuture;
 use gpui::{
-    AnyElement, AvailableSpace, Bounds, Context, Corners, Entity, Focusable as _, RenderImage,
-    Window, canvas, div, point, prelude::*, px, size,
+    AnyElement, AvailableSpace, Bounds, Context, Corners, Entity, FocusHandle, Focusable as _,
+    Keystroke, MouseButton, RenderImage, Window, canvas, div, point, prelude::*, px, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use synthesis_browser::{BrowserError, Frame, PageView, UrlPolicy, ViewMetrics};
+use synthesis_browser::{
+    ALT, BrowserError, CTRL, Frame, META, PageButton, PageInput, PageView, SHIFT, UrlPolicy,
+    ViewMetrics,
+};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_harness::sanitize_for_display;
 use synthesis_tools::BrowserTap;
@@ -96,6 +101,152 @@ pub fn place(ox: f32, oy: f32, fw: f32, fh: f32, scale: f32) -> Option<(f32, f32
     }
     let snap = |v: f32| (v * scale).round() / scale;
     Some((snap(ox), snap(oy), fw / scale, fh / scale))
+}
+
+/// Where the pane's page area is in the window (logical pixels): left, top, width, height.
+type Stage = (f32, f32, f32, f32);
+
+/// A window position as CSS pixels of the page. The viewport is the pane at 1:1 (`ViewMetrics`), so this is the offset
+/// from the pane's corner. Outside the page: `None`, or with `clamp` (a button released after a drag out) the nearest edge.
+pub fn to_page(pos: (f32, f32), (ox, oy, w, h): Stage, clamp: bool) -> Option<(f64, f64)> {
+    let (vw, vh) = (w.floor(), h.floor());
+    let (x, y) = (pos.0 - ox, pos.1 - oy);
+    if ![x, y, vw, vh].iter().all(|v| v.is_finite()) || vw < 1. || vh < 1. {
+        return None;
+    }
+    let inside = (0. ..vw).contains(&x) && (0. ..vh).contains(&y);
+    if !inside && !clamp {
+        return None;
+    }
+    Some((
+        f64::from(x.clamp(0., vw - 1.)),
+        f64::from(y.clamp(0., vh - 1.)),
+    ))
+}
+
+/// What a keystroke means while the page holds the pane's focus.
+#[derive(Debug, PartialEq)]
+pub enum PageKey {
+    /// Esc: the page gives the keys back.
+    Release,
+    /// The paste chord: the pane reads the clipboard (only now) and sends it as text.
+    Paste,
+    Send(PageInput),
+    /// Not the page's (an app chord): the rest of the window sees it.
+    Pass,
+    /// A key the page has no mapping for: swallowed, so it cannot reach the chat input by accident.
+    Ignore,
+}
+
+/// `mac`: Cmd is the shortcut key (else Ctrl). Every shortcut but select all, undo, redo and paste stays the app's.
+pub fn page_key(ks: &Keystroke, mac: bool) -> PageKey {
+    let m = &ks.modifiers;
+    let mods = [
+        (m.alt, ALT),
+        (m.control, CTRL),
+        (m.platform, META),
+        (m.shift, SHIFT),
+    ]
+    .into_iter()
+    .fold(0, |a, (on, bit)| if on { a | bit } else { a });
+    let key = ks.key.as_str();
+    if key == "escape" && !m.alt && !m.platform {
+        return PageKey::Release;
+    }
+    // Ctrl+C on macOS stays the app's: it interrupts the agent
+    if mac && m.control && key == "c" {
+        return PageKey::Pass;
+    }
+    if if mac { m.platform } else { m.control } {
+        return match key {
+            "v" => PageKey::Paste,
+            "a" | "z" => PageKey::Send(PageInput::Key {
+                key: key.into(),
+                mods,
+            }),
+            _ => PageKey::Pass,
+        };
+    }
+    let named = match key {
+        "enter" => "Enter",
+        "tab" => "Tab",
+        "escape" => "Escape",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        "space" => " ",
+        _ => "",
+    };
+    let one = |s: &str| (s.chars().count() == 1).then(|| s.chars().next()).flatten();
+    let sent = if !named.is_empty() {
+        Some(named.to_owned())
+    } else if m.control || m.platform {
+        // a chord: the key itself, no text
+        one(key).map(String::from)
+    } else {
+        // the character that was typed (shift, Option and layouts included); outside ASCII it goes in as text
+        match ks.key_char.as_deref().and_then(one) {
+            Some(c) if c.is_ascii() && !c.is_ascii_control() => Some(c.to_string()),
+            Some(c) if !c.is_control() => return PageKey::Send(PageInput::Text(c.to_string())),
+            _ => None,
+        }
+    };
+    sent.map_or(PageKey::Ignore, |key| {
+        PageKey::Send(PageInput::Key { key, mods })
+    })
+}
+
+/// Input waiting for the browser: moves and wheel turns merge into the one behind them (latest wins), so a flood of
+/// pointer events is one call in flight and at most one waiting; the rest is bounded.
+#[derive(Default)]
+struct InputQueue {
+    q: VecDeque<PageInput>,
+    running: bool,
+}
+
+const MAX_PENDING: usize = 64;
+
+impl InputQueue {
+    /// Queues `ev`; true when the caller must start the sender (none runs).
+    fn push(&mut self, ev: PageInput) -> bool {
+        match (self.q.back_mut(), &ev) {
+            (Some(last @ PageInput::Move { .. }), PageInput::Move { .. }) => *last = ev,
+            (
+                Some(PageInput::Wheel { dx, dy, mods, .. }),
+                PageInput::Wheel {
+                    dx: ax,
+                    dy: ay,
+                    mods: m2,
+                    ..
+                },
+            ) if mods == m2 => {
+                (*dx, *dy) = (*dx + ax, *dy + ay);
+            }
+            _ => {
+                if self.q.len() >= MAX_PENDING {
+                    self.q
+                        .retain(|e| !matches!(e, PageInput::Move { .. } | PageInput::Wheel { .. }));
+                }
+                if self.q.len() < MAX_PENDING {
+                    self.q.push_back(ev);
+                }
+            }
+        }
+        !std::mem::replace(&mut self.running, true)
+    }
+
+    fn pop(&mut self) -> Option<PageInput> {
+        let e = self.q.pop_front();
+        self.running = e.is_some();
+        e
+    }
 }
 
 /// What the person typed in the URL bar as an address: no scheme means https. `localhost:3000` is a host and a
@@ -255,6 +406,8 @@ pub trait Source: Send + Sync + 'static {
     fn frames(&self) -> Option<Box<dyn Feed>>;
     fn page(&self) -> BoxFuture<'static, Result<PageState, String>>;
     fn act(&self, a: Act) -> BoxFuture<'static, Result<(), String>>;
+    /// The person's input to the page.
+    fn input(&self, ev: PageInput) -> BoxFuture<'static, Result<(), String>>;
 }
 
 /// The real thing: the browser the agent launched, found through the tap (weakly: the pane never keeps Chrome alive) and
@@ -264,6 +417,14 @@ pub struct RuntimeSource(pub Arc<BrowserTap>);
 impl RuntimeSource {
     fn pv(&self) -> Option<PageView> {
         self.0.view()
+    }
+}
+
+fn button_of(b: MouseButton) -> PageButton {
+    match b {
+        MouseButton::Right => PageButton::Right,
+        MouseButton::Middle => PageButton::Middle,
+        _ => PageButton::Left,
     }
 }
 
@@ -355,6 +516,16 @@ impl Source for RuntimeSource {
             .map_err(why)
         })
     }
+
+    fn input(&self, ev: PageInput) -> BoxFuture<'static, Result<(), String>> {
+        let rt = self.pv();
+        Box::pin(async move {
+            rt.ok_or("the browser is closed")?
+                .input(ev)
+                .await
+                .map_err(why)
+        })
+    }
 }
 
 // ---- the pane's state -------------------------------------------------------------------------------------
@@ -403,6 +574,13 @@ pub struct BrowserPane {
     painted: Option<Arc<RenderImage>>,
     /// The page viewport the pane wants (its size at the window's scale), reported by the drawing code.
     fit: Arc<watch::Sender<Option<ViewMetrics>>>,
+    /// Where the page area is, reported by the drawing code (to map the pointer).
+    stage: Arc<Mutex<Option<Stage>>>,
+    inputs: Arc<Mutex<InputQueue>>,
+    /// The page area's focus: while it holds it, keys go to the page.
+    pub focus: Option<FocusHandle>,
+    /// `focus` is held (read each frame): the accent border and the footer follow it.
+    pub captured: bool,
 }
 
 impl Default for BrowserPane {
@@ -419,6 +597,10 @@ impl Default for BrowserPane {
             refusal: None,
             painted: None,
             fit: Arc::new(watch::channel(None).0),
+            stage: Arc::default(),
+            inputs: Arc::default(),
+            focus: None,
+            captured: false,
         }
     }
 }
@@ -427,6 +609,10 @@ impl Drop for BrowserPane {
     fn drop(&mut self) {
         self.sync(false);
     }
+}
+
+fn lock_q(m: &Mutex<InputQueue>) -> MutexGuard<'_, InputQueue> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn lock(m: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -592,6 +778,63 @@ impl BrowserPane {
                 self.act(Act::Go(url));
             }
         }
+    }
+
+    /// The person's input for the page (from this pane's own handlers, never the agent).
+    /// Nothing is sent without a browser; a flood is merged (`InputQueue`); a refusal (the agent is using the tab, a
+    /// password field) shows under the bar and drops what was waiting.
+    pub fn input(&mut self, ev: PageInput) {
+        let Some(l) = &self.link else { return };
+        if !lock_q(&self.inputs).push(ev) {
+            return;
+        }
+        let (src, shared, q, mut wake) = (
+            l.src.clone(),
+            self.shared.clone(),
+            self.inputs.clone(),
+            self.wake.clone(),
+        );
+        l.handle.spawn(async move {
+            loop {
+                let Some(ev) = lock_q(&q).pop() else { break };
+                let r = src.input(ev).await;
+                let busy = BrowserError::Busy.to_string();
+                let mut sh = lock(&shared);
+                match r {
+                    Ok(()) if sh.note.as_deref() == Some(&busy) => sh.note = None,
+                    Ok(()) => continue,
+                    Err(e) => {
+                        sh.note = Some(e);
+                        lock_q(&q).q.clear();
+                    }
+                }
+                drop(sh);
+                let _ = wake.try_send(());
+            }
+        });
+    }
+
+    /// The pane shows a note under the bar (a refusal of input or of an action).
+    pub fn has_note(&self) -> bool {
+        lock(&self.shared).note.is_some()
+    }
+
+    /// The person's paste: text over the browser's limit is not sent, and the pane says so.
+    pub fn paste(&mut self, t: String) {
+        if t.chars().count() > synthesis_browser::MAX_TEXT {
+            lock(&self.shared).note = Some(format!(
+                "the clipboard text is longer than {} characters: not pasted",
+                synthesis_browser::MAX_TEXT
+            ));
+            let _ = self.wake.try_send(());
+        } else {
+            self.input(PageInput::Text(t));
+        }
+    }
+
+    /// The pointer at `pos` (window pixels) as page input; `None` when it is not over the page.
+    pub fn pointer(&self, pos: (f32, f32), clamp: bool) -> Option<(f64, f64)> {
+        to_page(pos, (*self.stage.lock().ok()?)?, clamp)
     }
 
     /// The bar text changed: a refusal (and its "Open in your browser" button) is about the old text.
@@ -830,6 +1073,8 @@ impl TuiView {
             .detach();
             bp.bar = Some(bar);
         }
+        let focus = bp.focus.get_or_insert_with(|| cx.focus_handle());
+        bp.captured = focus.is_focused(window);
         // the page's address in the bar, unless the person is typing in it
         if let (Some(bar), Some(p)) = (bp.bar.clone(), page)
             && p.url != bp.bar_url
@@ -837,6 +1082,98 @@ impl TuiView {
         {
             bp.bar_url = p.url.clone();
             bar.update(cx, |s, cx| s.set_value(p.url, window, cx));
+        }
+    }
+
+    /// A press on the page: the page takes the keys, the press goes in (only inside the page).
+    fn browser_press(
+        &mut self,
+        e: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let bp = &mut self.ts.bv;
+        if let Some(f) = &bp.focus {
+            window.focus(f, cx);
+        }
+        if let Some((x, y)) = bp.pointer((e.position.x.into(), e.position.y.into()), false) {
+            bp.input(PageInput::Button {
+                down: true,
+                x,
+                y,
+                button: button_of(e.button),
+                clicks: u8::try_from(e.click_count).unwrap_or(3),
+                mods: 0,
+            });
+        }
+        cx.notify();
+    }
+
+    /// A release, also one that ended outside the page (a drag), so the page never sees a button stuck down.
+    fn browser_release(&mut self, e: &gpui::MouseUpEvent) {
+        let bp = &mut self.ts.bv;
+        if let Some((x, y)) = bp.pointer((e.position.x.into(), e.position.y.into()), true) {
+            bp.input(PageInput::Button {
+                down: false,
+                x,
+                y,
+                button: button_of(e.button),
+                clicks: u8::try_from(e.click_count).unwrap_or(3),
+                mods: 0,
+            });
+        }
+    }
+
+    /// The window's key hook, for the page: `Some(consumed)` when the page holds the keys, `None` when it does not (or
+    /// a dialog owns the keyboard) and for app chords. The URL bar and the chat input never get here with the page
+    /// focused: focus is one place.
+    pub(super) fn browser_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let held = self
+            .ts
+            .bv
+            .focus
+            .as_ref()
+            .is_some_and(|f| f.is_focused(window));
+        if !held
+            || self
+                .live
+                .as_ref()
+                .is_some_and(|l| !l.live.dialogs.is_empty())
+        {
+            return None;
+        }
+        if !self.shown || self.ts.tab != ChatTab::Browser || !self.ts.bv.is_attached() {
+            // the tab or view was left with the page still holding the keys: the prompt takes them back
+            self.focus_prompt(window, cx);
+            return None;
+        }
+        match page_key(ks, cfg!(target_os = "macos")) {
+            PageKey::Pass => None,
+            PageKey::Ignore => Some(true),
+            PageKey::Release => {
+                self.focus_prompt(window, cx);
+                cx.notify();
+                Some(true)
+            }
+            PageKey::Send(ev) => {
+                self.ts.bv.input(ev);
+                Some(true)
+            }
+            PageKey::Paste => {
+                // the clipboard is read here, on the person's own paste chord, and nowhere else; not while the
+                // pane shows a refusal (the agent is using the tab, a password field): nothing would arrive
+                if !self.ts.bv.has_note()
+                    && let Some(t) = cx.read_from_clipboard().and_then(|c| c.text())
+                {
+                    self.ts.bv.paste(t);
+                }
+                Some(true)
+            }
         }
     }
 
@@ -952,12 +1289,6 @@ impl TuiView {
                 .min_w(px(0.))
                 .children(bp.bar.as_ref().map(Input::new)),
         );
-        bar = bar.child(
-            div()
-                .id("bv-view-only")
-                .debug_selector(|| "browser-view-only".to_string())
-                .child(panes::badge("view only".into(), dim())),
-        );
         let mut col = div().flex().flex_col().gap(px(8.)).size_full().child(bar);
         if let Some(p) = page.as_ref().filter(|p| p.tabs.len() > 1) {
             col = col.child(div().flex().gap(px(4.)).overflow_hidden().children(
@@ -1042,7 +1373,9 @@ impl TuiView {
             .as_ref()
             .and_then(|l| l.live.view.panes.pointer.clone())
             .filter(|p| p.ts.is_some_and(|ts| panes::pointer_alpha(now - ts) > 0.0));
-        let stage = div()
+        let captured = bp.captured;
+        let mut stage = div()
+            .id("bv-stage")
             .debug_selector(|| "browser-stage".to_string())
             .relative()
             .flex_1()
@@ -1050,10 +1383,81 @@ impl TuiView {
             .w_full()
             .rounded(px(6.))
             .border_1()
-            .border_color(hsla(t::BORDER))
+            // the one accent border: only while the page takes the keys
+            .border_color(hsla(if captured { t::ACCENT } else { t::BORDER }))
             .bg(hsla(t::BG))
             .overflow_hidden();
+        if let Some(f) = &bp.focus {
+            stage = stage.track_focus(f);
+        }
+        let stage = stage
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|t, e: &gpui::MouseDownEvent, w, cx| t.browser_press(e, w, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|t, e: &gpui::MouseDownEvent, w, cx| t.browser_press(e, w, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|t, e: &gpui::MouseDownEvent, w, cx| t.browser_press(e, w, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(|t, e: &gpui::MouseUpEvent, _, _| t.browser_release(e)),
+            )
+            .on_mouse_move(cx.listener(|t, e: &gpui::MouseMoveEvent, _, _| {
+                let held = |b| u8::from(e.pressed_button == Some(b));
+                let buttons = held(MouseButton::Left)
+                    | held(MouseButton::Right) << 1
+                    | held(MouseButton::Middle) << 2;
+                if let Some((x, y)) =
+                    t.ts.bv
+                        .pointer((e.position.x.into(), e.position.y.into()), false)
+                {
+                    t.ts.bv.input(PageInput::Move { x, y, buttons });
+                }
+            }))
+            .on_scroll(cx.listener(|t, e: &gpui::ScrollEvent, _, _| {
+                if let Some((x, y)) =
+                    t.ts.bv
+                        .pointer((e.position.x.into(), e.position.y.into()), false)
+                {
+                    let d = e.delta.pixel_delta(px(16.));
+                    // GPUI: positive y moves the content down; the page scrolls the other way
+                    let (dx, dy) = (-f64::from(f32::from(d.x)), -f64::from(f32::from(d.y)));
+                    t.ts.bv.input(PageInput::Wheel {
+                        x,
+                        y,
+                        dx,
+                        dy,
+                        mods: 0,
+                    });
+                }
+            }));
         let fit = bp.fit.clone();
+        let stage_at = bp.stage.clone();
         let frame_d = frame.clone();
         // The canvas is always there: it reports the pane's size (the page's viewport follows it) and paints the frame.
         let stage = stage.child(
@@ -1063,6 +1467,14 @@ impl TuiView {
                         f64::from(f32::from(b.size.width)),
                         f64::from(f32::from(b.size.height)),
                     );
+                    if let Ok(mut s) = stage_at.lock() {
+                        *s = Some((
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height),
+                        ));
+                    }
                     let want = ViewMetrics::fit(w, h, f64::from(window.scale_factor()));
                     fit.send_if_modified(|c| (*c != want).then(|| *c = want).is_some());
                     frame_d
@@ -1101,11 +1513,11 @@ impl TuiView {
                     |e| format!("Frame not shown: {e}"),
                 ))
         });
-        col = col.child(
-            div().text_size(px(12.)).text_color(dim()).child(
-                "View only: clicks and keys are not sent to the page yet. The agent works in this browser and can read the pages open in it.",
-            ),
-        );
+        col = col.child(div().text_size(px(12.)).text_color(dim()).child(if captured {
+            "Typing goes to the page. Esc gives the keys back. Paste sends your clipboard to the page."
+        } else {
+            "Click the page to click, scroll and type in it. The agent works in this browser too and can read the pages open in it."
+        }));
         Some(
             div()
                 .debug_selector(|| "tab-pane".to_string())
@@ -1177,6 +1589,10 @@ pub struct FakeSource {
     pub view_fails: std::sync::atomic::AtomicUsize,
     /// The page viewport of every `view(true)` call, in order.
     pub fits: Mutex<Vec<Option<ViewMetrics>>>,
+    /// What `input` answers (`None`: accepted).
+    pub input_err: Mutex<Option<String>>,
+    /// How long one `input` call takes.
+    pub input_delay: Mutex<Duration>,
     flight: Arc<(
         std::sync::atomic::AtomicUsize,
         std::sync::atomic::AtomicUsize,
@@ -1194,6 +1610,8 @@ impl FakeSource {
             view_delay: Mutex::default(),
             view_fails: Default::default(),
             fits: Mutex::default(),
+            input_err: Mutex::default(),
+            input_delay: Mutex::default(),
             flight: Arc::default(),
         })
     }
@@ -1276,6 +1694,17 @@ impl Source for FakeSource {
             self.page.lock().unwrap().active = i;
         }
         Box::pin(async { Ok(()) })
+    }
+    fn input(&self, ev: PageInput) -> BoxFuture<'static, Result<(), String>> {
+        self.log(format!("input {ev:?}"));
+        let (err, delay) = (
+            self.input_err.lock().unwrap().clone(),
+            *self.input_delay.lock().unwrap(),
+        );
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            err.map_or(Ok(()), Err)
+        })
     }
 }
 
@@ -1495,6 +1924,166 @@ mod tests {
         drop(bp);
         wait("view(false) on drop", || {
             fake.calls().last().is_some_and(|c| c == "view(false)")
+        });
+    }
+
+    #[test]
+    fn the_pointer_maps_one_to_one_into_the_page() {
+        let stage = (100.5, 40., 900.7, 600.2); // the viewport is the floor of the pane: 900 x 600
+        assert_eq!(to_page((100.5, 40.), stage, false), Some((0., 0.)));
+        assert_eq!(to_page((400.5, 240.), stage, false), Some((300., 200.)));
+        // outside: nothing, except the release of a drag, which lands on the nearest edge
+        assert_eq!(to_page((100., 100.), stage, false), None);
+        assert_eq!(to_page((100.5 + 900., 100.), stage, false), None);
+        assert_eq!(to_page((5000., -9.), stage, true), Some((899., 0.)));
+        // nothing for a pane that has no size or a position that is not a number
+        assert_eq!(to_page((1., 1.), (0., 0., 0., 10.), true), None);
+        assert_eq!(to_page((f32::NAN, 1.), stage, true), None);
+    }
+
+    fn ks(key: &str, ch: Option<&str>, mods: &str) -> Keystroke {
+        let mut k = Keystroke {
+            key: key.into(),
+            key_char: ch.map(Into::into),
+            ..Default::default()
+        };
+        k.modifiers.control = mods.contains('c');
+        k.modifiers.platform = mods.contains('m');
+        k.modifiers.shift = mods.contains('s');
+        k.modifiers.alt = mods.contains('a');
+        k
+    }
+
+    fn key(k: &str, mods: u8) -> PageKey {
+        PageKey::Send(PageInput::Key {
+            key: k.into(),
+            mods,
+        })
+    }
+
+    #[test]
+    fn keys_map_with_modifiers_special_keys_and_app_chords() {
+        // typing: the typed character, shift included; outside ASCII it is text
+        assert_eq!(page_key(&ks("a", Some("a"), ""), true), key("a", 0));
+        assert_eq!(page_key(&ks("a", Some("A"), "s"), true), key("A", SHIFT));
+        assert_eq!(page_key(&ks("space", Some(" "), ""), true), key(" ", 0));
+        assert_eq!(
+            page_key(&ks("e", Some("\u{e9}"), "a"), true),
+            PageKey::Send(PageInput::Text("\u{e9}".into()))
+        );
+        // special keys keep their modifiers
+        assert_eq!(page_key(&ks("enter", None, ""), true), key("Enter", 0));
+        assert_eq!(page_key(&ks("tab", None, "s"), true), key("Tab", SHIFT));
+        assert_eq!(
+            page_key(&ks("left", None, "a"), true),
+            key("ArrowLeft", ALT)
+        );
+        assert_eq!(
+            page_key(&ks("pagedown", None, ""), true),
+            key("PageDown", 0)
+        );
+        // Esc gives the keys back (Ctrl+Esc too); a key with no mapping is swallowed
+        assert_eq!(page_key(&ks("escape", None, ""), true), PageKey::Release);
+        assert_eq!(page_key(&ks("escape", None, "c"), false), PageKey::Release);
+        assert_eq!(page_key(&ks("f5", None, ""), true), PageKey::Ignore);
+        // shortcuts: Cmd on macOS, Ctrl elsewhere; only select all, undo, redo and paste are the page's
+        assert_eq!(page_key(&ks("a", None, "m"), true), key("a", META));
+        assert_eq!(page_key(&ks("z", None, "ms"), true), key("z", META | SHIFT));
+        assert_eq!(page_key(&ks("v", None, "m"), true), PageKey::Paste);
+        assert_eq!(page_key(&ks("v", None, "c"), false), PageKey::Paste);
+        for (k, m, mac) in [
+            ("1", "m", true),
+            (",", "m", true),
+            ("c", "m", true),
+            ("1", "c", false),
+            ("b", "c", false),
+        ] {
+            assert_eq!(page_key(&ks(k, None, m), mac), PageKey::Pass, "{k} {m}");
+        }
+        // a Ctrl chord on macOS (not the shortcut key) is the page's, without text, except Ctrl+C (interrupts the agent)
+        assert_eq!(page_key(&ks("d", None, "c"), true), key("d", CTRL));
+        assert_eq!(page_key(&ks("c", None, "c"), true), PageKey::Pass);
+        // Ctrl+Cmd or Cmd+Option typing never turns into text
+        assert_eq!(
+            page_key(&ks("x", Some("\u{2248}"), "m"), false),
+            key("x", META)
+        );
+    }
+
+    fn mv(x: f64) -> PageInput {
+        PageInput::Move {
+            x,
+            y: 0.,
+            buttons: 0,
+        }
+    }
+
+    #[test]
+    fn a_flood_of_pointer_events_is_merged_and_bounded() {
+        let mut q = InputQueue::default();
+        assert!(q.push(mv(0.)), "the first starts the sender");
+        for i in 1..1000 {
+            assert!(!q.push(mv(f64::from(i))));
+        }
+        assert_eq!(q.q, [mv(999.)], "latest wins");
+        let w = |dy| PageInput::Wheel {
+            x: 1.,
+            y: 1.,
+            dx: 0.,
+            dy,
+            mods: 0,
+        };
+        q.push(w(3.));
+        q.push(w(4.));
+        assert_eq!(q.q.len(), 2);
+        assert_eq!(q.q[1], w(7.), "wheel turns add up");
+        // presses and keys keep their order and are bounded
+        let k = |n: usize| PageInput::Key {
+            key: n.to_string(),
+            mods: 0,
+        };
+        for n in 0..500 {
+            q.push(k(n));
+        }
+        assert_eq!(q.q.len(), MAX_PENDING);
+        assert!(
+            !q.q.iter()
+                .any(|e| matches!(e, PageInput::Move { .. } | PageInput::Wheel { .. }))
+        );
+        // drained: the next push starts a sender again
+        while q.pop().is_some() {}
+        assert!(q.push(mv(1.)));
+    }
+
+    #[test]
+    fn input_reaches_the_source_and_a_refusal_is_shown_and_clears() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSource::new(sample_jpeg(8, 8), PageState::default());
+        let mut bp = BrowserPane::default();
+        bp.input(mv(1.)); // not attached: nothing, no panic
+        bp.attach(fake.clone(), rt.handle().clone());
+        *fake.input_err.lock().unwrap() = Some(BrowserError::Busy.to_string());
+        bp.input(mv(2.));
+        wait("the refusal", || bp.snapshot().3.is_some());
+        assert_eq!(
+            bp.snapshot().3.as_deref(),
+            Some("the agent is using this tab")
+        );
+        *fake.input_err.lock().unwrap() = None;
+        bp.input(mv(3.));
+        wait("the status to clear", || bp.snapshot().3.is_none());
+        assert_eq!(fake.calls().len(), 2);
+        // a paste over the limit is not sent and says why; one within it goes
+        bp.paste("x".repeat(synthesis_browser::MAX_TEXT + 1));
+        assert!(bp.has_note());
+        assert_eq!(fake.calls().len(), 2);
+        bp.paste("ok".into());
+        wait("the paste", || {
+            fake.calls().iter().any(|c| c.contains("Text(<2 chars>)"))
         });
     }
 
