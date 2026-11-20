@@ -1921,3 +1921,376 @@ async fn browser_mouse_is_gated_like_click_on_a_loopback_page_the_person_opened(
     assert_eq!(person.asked.lock().unwrap().len(), 1);
     reg.close_session("mouse2");
 }
+
+// ---- payment guard (owner decision 2026-11-20) --------------------------------------------------
+
+const PAY_PAGE: &str = r#"<html><head><title>Cart</title></head><body>
+<h2>Pay attention to the total</h2><p>Total: $12.50</p>
+<button onclick="document.title='ordered'">Place order</button>
+<button onclick="document.title='shopping'">Continue shopping</button>
+<div id="big" style="position:absolute;left:300px;top:20px;width:200px;height:60px" onclick="document.title='pointed'">x</div>
+</body></html>"#;
+const CARD_PAGE: &str = r#"<html><body><label>Card <input id="c" autocomplete="cc-number"></label>
+<form onsubmit="document.title='submitted';return false"><label>Email <input id="e"></label>
+<button type="submit">Place order</button></form></body></html>"#;
+
+/// The person, scripted for payment approvals: answers and records every request.
+#[derive(Debug, Default)]
+struct Payer {
+    yes: bool,
+    asked: Mutex<Vec<synthesis_tools::PaymentRequest>>,
+}
+
+impl BrowserHost for Payer {
+    fn login<'a>(
+        &'a self,
+        _: &'a LoginRequest,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("not in this test".into()) })
+    }
+    fn confirm_profile<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a [String],
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_secret<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn confirm_payment<'a>(
+        &'a self,
+        req: &'a synthesis_tools::PaymentRequest,
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        self.asked.lock().unwrap().push(req.clone());
+        Box::pin(async move { self.yes })
+    }
+}
+
+fn pay_registry(host: Option<Arc<dyn BrowserHost>>) -> Registry {
+    Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            policy: UrlPolicy {
+                allow_private_network: true,
+                ..Default::default()
+            },
+            no_sandbox: no_sandbox(),
+            host,
+            ..Default::default()
+        })
+}
+
+async fn title(reg: &Registry, c: &ToolContext) -> String {
+    let t = text(&reg.execute("browser_snapshot", json!({}), c).await);
+    t.lines()
+        .find_map(|l| l.strip_prefix("title: "))
+        .unwrap_or("")
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn payment_actions_ask_every_time_refuse_without_a_person_and_ignore_modes() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(PAY_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(Payer {
+        yes: true,
+        ..Default::default()
+    });
+    let reg = pay_registry(Some(person.clone()));
+    let mut c = ctx(d.path(), "pay1");
+    c.permission_mode = PermissionMode::BypassPermissions; // a mode never answers for the person
+    let go = |u: String| reg.execute("browser_navigate", json!({"url": u}), &c);
+    ok(&go(format!("{base}/checkout")).await, "navigate");
+    let place = json!({"role": "button", "name": "Place order"});
+    // not a payment action: no ask
+    let o = reg
+        .execute(
+            "browser_click",
+            json!({"role": "button", "name": "Continue shopping"}),
+            &c,
+        )
+        .await;
+    ok(&o, "continue shopping");
+    assert!(person.asked.lock().unwrap().is_empty());
+    assert_eq!(title(&reg, &c).await, "shopping");
+    // a payment action asks, with the origin, label and amount
+    let o = reg.execute("browser_click", place.clone(), &c).await;
+    ok(&o, "place order");
+    {
+        let a = person.asked.lock().unwrap();
+        assert_eq!(a.len(), 1);
+        assert!(a[0].origin.starts_with("http://127.0.0.1:"), "{:?}", a[0]);
+        assert_eq!(a[0].label, "Place order");
+        assert_eq!(a[0].amount.as_deref(), Some("Total: $12.50"));
+    }
+    assert_eq!(title(&reg, &c).await, "ordered");
+    // one-shot: the same action asks again
+    ok(
+        &reg.execute("browser_click", place.clone(), &c).await,
+        "again",
+    );
+    assert_eq!(person.asked.lock().unwrap().len(), 2);
+    // a pointer by position on a payment page asks as well
+    let o = reg
+        .execute(
+            "browser_mouse",
+            json!({"action": "click", "x": 350, "y": 40}),
+            &c,
+        )
+        .await;
+    ok(&o, "point");
+    assert_eq!(person.asked.lock().unwrap().len(), 3);
+    assert_eq!(title(&reg, &c).await, "pointed");
+    // a hover asks nothing
+    ok(
+        &reg.execute(
+            "browser_mouse",
+            json!({"action": "move", "x": 350, "y": 40}),
+            &c,
+        )
+        .await,
+        "hover",
+    );
+    assert_eq!(person.asked.lock().unwrap().len(), 3);
+    // a sub-agent is refused even though a person could answer
+    let mut sub = ctx(d.path(), "pay1");
+    sub.sub_agent = true;
+    let o = reg.execute("browser_click", place.clone(), &sub).await;
+    assert!(
+        o.is_error && text(&o).contains("nobody can be asked"),
+        "{o:?}"
+    );
+    assert_eq!(person.asked.lock().unwrap().len(), 3);
+    reg.close_session("pay1");
+
+    // the person says no: refused, not clicked, and not asked again after two refusals
+    let no = Arc::new(Payer::default());
+    let reg = pay_registry(Some(no.clone()));
+    let c = ctx(d.path(), "pay2");
+    ok(
+        &reg.execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/checkout")}),
+            &c,
+        )
+        .await,
+        "navigate",
+    );
+    for _ in 0..3 {
+        let o = reg.execute("browser_click", place.clone(), &c).await;
+        assert!(o.is_error && o.meta["error"] == "refused", "{o:?}");
+    }
+    assert_eq!(no.asked.lock().unwrap().len(), 2);
+    assert_eq!(title(&reg, &c).await, "Cart");
+    reg.close_session("pay2");
+
+    // no host (headless): refused with a clear message
+    let reg = pay_registry(None);
+    let c = ctx(d.path(), "pay3");
+    ok(
+        &reg.execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/checkout")}),
+            &c,
+        )
+        .await,
+        "navigate",
+    );
+    let o = reg.execute("browser_click", place, &c).await;
+    assert!(
+        o.is_error && text(&o).contains("nobody can be asked"),
+        "{o:?}"
+    );
+    assert_eq!(title(&reg, &c).await, "Cart");
+    // the same page off a payment path: only the label counts, and a coordinate click is not asked
+    ok(
+        &reg.execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/products")}),
+            &c,
+        )
+        .await,
+        "navigate",
+    );
+    ok(
+        &reg.execute(
+            "browser_mouse",
+            json!({"action": "click", "x": 350, "y": 40}),
+            &c,
+        )
+        .await,
+        "point off a payment page",
+    );
+    reg.close_session("pay3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_field_asks_before_it_is_filled() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(CARD_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(Payer::default());
+    let reg = pay_registry(Some(person.clone()));
+    let c = ctx(d.path(), "pay4");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+            .await,
+        "navigate",
+    );
+    let tree = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    let (card, mail) = (
+        ref_of(&tree, "textbox \"Card\""),
+        ref_of(&tree, "textbox \"Email\""),
+    );
+    ok(
+        &reg.execute("browser_fill", json!({"ref": mail, "value": "a@b.c"}), &c)
+            .await,
+        "email is not a card field",
+    );
+    assert!(person.asked.lock().unwrap().is_empty());
+    let o = reg
+        .execute("browser_fill", json!({"ref": card, "value": "4242"}), &c)
+        .await;
+    assert!(o.is_error && text(&o).contains("did not approve"), "{o:?}");
+    assert_eq!(person.asked.lock().unwrap().len(), 1);
+    reg.close_session("pay4");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_card_data_never_reaches_the_approval_and_enter_reads_the_submit_button() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(CARD_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(Payer {
+        yes: true,
+        ..Default::default()
+    });
+    let reg = pay_registry(Some(person.clone()));
+    let c = ctx(d.path(), "pay5");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+            .await,
+        "navigate",
+    );
+    let tree = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    let (card, mail) = (
+        ref_of(&tree, "textbox \"Card\""),
+        ref_of(&tree, "textbox \"Email\""),
+    );
+    for v in ["4111111111111111", "4000000000000002"] {
+        ok(
+            &reg.execute("browser_fill", json!({"ref": card, "value": v}), &c)
+                .await,
+            "card",
+        );
+    }
+    {
+        let a = person.asked.lock().unwrap();
+        assert_eq!(a.len(), 2);
+        // the second ask happened with the first number in the field: it must not be in anything shown
+        assert!(!format!("{:?}", a[1]).contains("4111"), "{:?}", a[1]);
+    }
+    // a printable key into the card field asks; into the email field it does not
+    ok(
+        &reg.execute("browser_fill", json!({"ref": mail, "value": "a@b.c"}), &c)
+            .await,
+        "email",
+    );
+    assert_eq!(person.asked.lock().unwrap().len(), 2);
+    // Enter in the email field submits a form whose button says "Place order": asks, on a page that is not payment
+    let o = reg
+        .execute("browser_press_key", json!({"key": "Enter"}), &c)
+        .await;
+    ok(&o, "enter");
+    let a = person.asked.lock().unwrap().len();
+    assert_eq!(a, 3, "Enter asked");
+    reg.close_session("pay5");
+}
+
+const EDIT_PAGE: &str = r#"<html><body><div contenteditable="true">SECRETNOTE $5.00</div>
+<button>Place order</button></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn editable_text_never_becomes_the_amount_and_changing_paths_cannot_flood_the_person() {
+    if !have_browser() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let base = serve_html(EDIT_PAGE).await;
+    let yes = Arc::new(Payer {
+        yes: true,
+        ..Default::default()
+    });
+    let reg = pay_registry(Some(yes.clone()));
+    let c = ctx(d.path(), "pay6");
+    ok(
+        &reg.execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/checkout")}),
+            &c,
+        )
+        .await,
+        "navigate",
+    );
+    ok(
+        &reg.execute(
+            "browser_click",
+            json!({"role": "button", "name": "Place order"}),
+            &c,
+        )
+        .await,
+        "click",
+    );
+    {
+        let a = yes.asked.lock().unwrap();
+        assert_eq!(a.len(), 1);
+        assert!(
+            a[0].amount.is_none() && !format!("{:?}", a[0]).contains("SECRETNOTE"),
+            "{:?}",
+            a[0]
+        );
+    }
+    reg.close_session("pay6");
+
+    // the person keeps saying no while the page keeps changing its path: asked a bounded number of times
+    let no = Arc::new(Payer::default());
+    let reg = pay_registry(Some(no.clone()));
+    let c = ctx(d.path(), "pay7");
+    for i in 0..9 {
+        ok(
+            &reg.execute(
+                "browser_navigate",
+                json!({"url": format!("{base}/checkout/{i}")}),
+                &c,
+            )
+            .await,
+            "navigate",
+        );
+        let o = reg
+            .execute(
+                "browser_click",
+                json!({"role": "button", "name": "Place order"}),
+                &c,
+            )
+            .await;
+        assert!(o.is_error && o.meta["error"] == "refused", "{o:?}");
+    }
+    assert_eq!(no.asked.lock().unwrap().len(), 5);
+    reg.close_session("pay7");
+}

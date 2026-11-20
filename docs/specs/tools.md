@@ -40,6 +40,8 @@ Rules:
 
 `browser_mouse` is decided exactly like `browser_click`: the same External class and modes, and a deny or ask rule written for `browser_click` also binds `browser_mouse`; an allow rule for `browser_click` does not allow it (nor does any rule for the mouse bind the click). Its approval row shows the action, the point and the last page origin. It is never in the classifier's non-sensitive list. Its result and `browser.action` name the element under an x,y point and the page origin.
 
+Payment guard (owner decision 2026-11-20): `browser_click`, `browser_mouse` (click, double_click, right_click, drag), `browser_fill`, `browser_fill_secret` and `browser_press_key` (Enter/Space) first check whether the target or page looks like paying or committing consent (checkout, place order, subscribe, authorize, card fields, any coordinate action on a payment-like page). A hit needs the person's own one-shot approval (`BrowserHost::confirm_payment`: origin, label, action, amount), which no allow rule, "always allow", mode or sub-agent covers; nobody to ask means REFUSED. Heuristic; limits in terminal-browser.md.
+
 ¹ Task runs a sub-agent whose own calls are gated one by one. The class drives defaults; permission rules still decide (Node's READ_ONLY_TOOLS/EDIT_TOOLS sets [from-node permissions.js:11-12] are ported verbatim for the `Permissions::check` port).
 
 ## 3. Execution pipeline (per call, calls in one batch run sequentially [from-node agent.js:3489-3508])
