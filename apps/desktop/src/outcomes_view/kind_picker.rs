@@ -1,7 +1,7 @@
 //! The kind picker `+ new` (and `n`) opens (`docs/specs/super-agent-s1.md` section 1, phase P1): New session,
 //! New goal (writes), New goal (read-only). Nothing is preselected and Enter does nothing until a row is chosen
 //! (arrows, 1-3 or a click). The goal rows only enter the existing outcome form; the read-only row is shown but
-//! disabled until the engine advertises `read_only_goal` (P2b; `synthesis_app::proto::FEATURES` is empty).
+//! disabled until the engine advertises `read_only_goal` (`orchestrator.status` features, set by P2b).
 //! Row, hover and keyboard styling follows the Super Agent views' flat theme tokens (no borders on rows).
 
 use std::path::{Path, PathBuf};
@@ -60,11 +60,11 @@ pub const READ_ONLY_SOON: &str =
 const NOT_READY: &str = "Goals need Super Agent turned on and connected.";
 
 /// Why `kind` cannot be started now (the row is then shown disabled), or `None`.
-pub fn refusal(kind: Kind, screen: &Screen) -> Option<&'static str> {
+pub fn refusal(kind: Kind, screen: &Screen, read_only_goal: bool) -> Option<&'static str> {
     match (kind, screen) {
         (Kind::Session, _) => None,
         (_, Screen::Windows) => Some(WSL2_REFUSAL),
-        (Kind::ReadOnlyGoal, _) => Some(READ_ONLY_SOON),
+        (Kind::ReadOnlyGoal, _) if !read_only_goal => Some(READ_ONLY_SOON),
         (_, Screen::Ready) => None,
         _ => Some(NOT_READY),
     }
@@ -89,7 +89,7 @@ impl State {
             return vec![];
         };
         let kind = ROWS[i];
-        if let Some(why) = refusal(kind, &self.screen) {
+        if let Some(why) = refusal(kind, &self.screen, self.read_only_goal) {
             if let Some(p) = self.picker.as_mut() {
                 p.notice = Some(why.into());
             }
@@ -153,7 +153,7 @@ impl OutcomesView {
     pub(super) fn picker_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let p = self.state.picker.as_ref()?;
         let rows = ROWS.iter().enumerate().map(|(i, k)| {
-            let off = refusal(*k, &self.state.screen);
+            let off = refusal(*k, &self.state.screen, self.state.read_only_goal);
             let on = p.cursor == Some(i);
             let main = div()
                 .id(("out-kind", i))

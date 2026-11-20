@@ -225,7 +225,7 @@ fn off_by_default_every_method_but_status_is_refused_and_nothing_is_created() {
         (json!(false), json!(false))
     );
     assert_eq!(st["protocol"], PROTOCOL);
-    assert_eq!(st["features"], json!([]));
+    assert_eq!(st["features"], json!(["read_only_goal", "report_review"]));
     assert!(matches!(c.outcomes(None), Err(ClientError::Refused(e)) if e.contains("off")));
     assert!(
         c.command("start", "11111111-1111-4111-8111-111111111111", None, "k")

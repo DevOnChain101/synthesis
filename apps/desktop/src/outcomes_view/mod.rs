@@ -190,6 +190,7 @@ impl OutcomesView {
         for m in batch {
             match m {
                 Msg::Screen(s) => self.state.set_screen(s),
+                Msg::ReadOnlyGoal(on) => self.state.read_only_goal = on,
                 Msg::Snapshot {
                     items,
                     selected,

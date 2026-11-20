@@ -177,6 +177,11 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
         audit_in(tx, c)?;
         let to = tx.resolve_decision(&r, &current)?;
+        // a read-only goal's accepted report: its review evidence is written with the answer
+        if d.kind == "report_review" && to == DecisionState::Approved && r.choice == "accept_report"
+        {
+            tx.accept_report(&r.decision_id)?;
+        }
         let mut body =
             json!({"decision_id": r.decision_id, "state": to, "revision": r.decision_revision + 1});
         let note = match r.choice.as_str() {
@@ -194,7 +199,8 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
         Ok((CommandState::Applied, body))
     });
     match run {
-        Err(e) if refused(&e) => deny(w, c, e),
+        // a tampered report_review action is refused (the answer is rolled back), not retried for ever
+        Err(e) if refused(&e) || matches!(e, StoreError::Tampered(_)) => deny(w, c, e),
         other => other,
     }
 }

@@ -643,8 +643,13 @@ impl Runner<'_> {
             )?)
         } else {
             // in place: the subject is the report, named by its hash (no commit exists)
-            let subject = report.map(|r| r.subject());
+            let subject = report.as_ref().map(|r| r.subject());
             finish_in_place(w, attempt, end.task_status(), subject.as_deref())?;
+            if let Some(r) = &report {
+                // citations checked and the person's `report_review` opened, before the item waits
+                let it = w.get_work_item(&attempt.work_item_id)?;
+                crate::open_review(w, &it, attempt, r, time::OffsetDateTime::now_utc())?;
+            }
             subject
         };
         if let (WorkerEnd::Blocked, Some(git)) = (end, git) {

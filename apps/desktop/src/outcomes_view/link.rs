@@ -90,6 +90,8 @@ pub enum FormMsg {
 
 pub enum Msg {
     Screen(Screen),
+    /// What the connected engine advertised (`read_only_goal` with `report_review`).
+    ReadOnlyGoal(bool),
     Snapshot {
         items: Vec<Item>,
         selected: Option<String>,
@@ -280,6 +282,14 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                 let mut c = OutcomeClient::new(link, Surface::Superagent);
                 let screen = match c.status() {
                     Ok(s) if s.get("ready") == Some(&Value::Bool(true)) => {
+                        let has = |f: &str| {
+                            s.get("features")
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(f)))
+                        };
+                        let _ = out.unbounded_send(Msg::ReadOnlyGoal(
+                            has("read_only_goal") && has("report_review"),
+                        ));
                         match serve(&mut c, rx, out, HINT_WAIT, &|ws| {
                             synthesis_view::project::head_commit(std::path::Path::new(ws), env)
                         }) {

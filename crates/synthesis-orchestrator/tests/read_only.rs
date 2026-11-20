@@ -368,7 +368,11 @@ fn ro_report_is_the_subject_and_nothing_here_verifies_it() {
     for _ in 0..3 {
         assert_eq!(v.verify(&mut w, &item).unwrap(), Verdict::Pending);
     }
-    assert!(w.authentic_evidence(w.id()).unwrap().is_empty());
+    // P2b: the settle wrote the owner's citation check and nothing else; it is not human review
+    let ev = w.authentic_evidence(w.id()).unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].check_id, "citation_check");
+    assert_ne!(ev[0].trust_class, TrustClass::HumanReview);
     assert_ne!(w.get_outcome(w.id()).unwrap().state, OutcomeState::Verified);
     assert_eq!(tree(&root), vec![("a.txt".to_string(), b"one\n".to_vec())]);
 }

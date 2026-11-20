@@ -73,7 +73,10 @@ pub use planrun::{
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};
 pub use recover::{RecoveryReport, recover_attempts, recover_item};
-pub use report::{AttemptReport, attempt_report, is_read_only};
+pub use report::{
+    AttemptReport, Checked, Citation, attempt_report, check_citation, is_read_only, open_review,
+    parse_report,
+};
 pub use retention::{Cleanup, cleanup_attempt, finish_attempt, finish_in_place, retention_due};
 pub use runner::{
     CancelFlag, RunError, Runner, Running, Settled, Spawn, SyntSpawn, WorkerEnd, map_exit,
