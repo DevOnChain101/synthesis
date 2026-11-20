@@ -23,8 +23,9 @@ use gpui::{
     App, AppContext as _, AsyncApp, Bounds, ClipboardItem, Context, Div, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollEvent, StatefulInteractiveElement as _, Styled as _, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, WeakEntity, Window, canvas, div, point, px, size,
+    Pixels, Point, Render, ScrollEvent, StatefulInteractiveElement as _, Styled as _, Task,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, WeakEntity, Window, anchored, canvas,
+    deferred, div, point, px, size,
 };
 use synthesis_cli_ui_render::theme as t;
 
@@ -38,6 +39,21 @@ use crate::theme::hsla;
 const FONT_PX: f32 = 13.;
 const LINE_H: f32 = 17.;
 const PAD: f32 = 6.;
+/// The context menu: Copy and nothing else (no paste, no select all, no links: those stay on their chords).
+const MENU: [&str; 1] = ["Copy"];
+/// Autoscroll while a drag is held past the grid edge: at most this many lines per tick, one tick per `AUTO_MS`.
+const AUTO_LINES: i32 = 6;
+const AUTO_MS: u64 = 50;
+
+/// Lines to scroll for a pointer `dy` pixels past the grid (negative: above the top, positive: below the
+/// bottom, 0: inside). Positive result scrolls back into the history. One line per cell of distance, 1..=6.
+fn autoscroll_step(dy: f32, ch: f32) -> i32 {
+    if dy == 0. {
+        return 0;
+    }
+    let n = ((dy.abs() / ch.max(1.)).ceil() as i32).clamp(1, AUTO_LINES);
+    if dy < 0. { n } else { -n }
+}
 /// Personal shells per pane (spec 1.7).
 pub const MAX_SHELLS: usize = 8;
 
@@ -91,6 +107,11 @@ pub struct TermPane {
     geo: Rc<StdCell<Geo>>,
     marked: Option<String>,
     drag: bool,
+    /// The next autoscroll tick while a selection drag is held past the grid, and where the pointer was.
+    auto: Option<Task<()>>,
+    last_pos: Point<Pixels>,
+    /// The Copy menu, open at this window point.
+    menu: Option<Point<Pixels>>,
     scroll_acc: f32,
     /// A one-line problem (a paste too large, the shell not reading) and the link waiting for a yes.
     notice: Option<String>,
@@ -160,6 +181,9 @@ impl TermPane {
             geo: Rc::default(),
             marked: None,
             drag: false,
+            auto: None,
+            last_pos: Point::default(),
+            menu: None,
             scroll_acc: 0.,
             notice: None,
             link: None,
@@ -437,6 +461,9 @@ impl TermPane {
     pub fn key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) -> KeyOutcome {
         let mac = cfg!(target_os = "macos");
         let (key, m) = (ks.key.as_str(), &ks.modifiers);
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
         if (m.control && !m.alt && !m.shift && matches!(key, "1" | "2" | "3" | "4" | "5"))
             || (m.control && key == "escape")
         {
@@ -520,6 +547,7 @@ impl TermPane {
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.menu = None;
         let Some(s) = self.session() else { return };
         let (col, row, right) = self.cell_at(e.position);
         let mode = s.mode();
@@ -534,6 +562,11 @@ impl TermPane {
                 self.send(&b, cx);
             }
             self.drag = true;
+            return;
+        }
+        if e.button == MouseButton::Right {
+            self.menu = Some(e.position);
+            cx.notify();
             return;
         }
         if e.button != MouseButton::Left {
@@ -584,7 +617,47 @@ impl TermPane {
             return;
         }
         s.select_to(col, row, right);
+        self.last_pos = e.position;
+        self.autoscroll(cx);
         cx.notify();
+    }
+
+    /// While the drag is past the grid's top or bottom edge: scrolls the history, extends the selection to
+    /// the edge row and arms the next tick (the pointer may be still, so no move event comes).
+    fn autoscroll(&mut self, cx: &mut Context<Self>) {
+        let g = self.geo.get();
+        let (top, bottom) = (g.origin.y, g.origin.y + px(g.ch * g.rows as f32));
+        let y = self.last_pos.y;
+        let dy = if y < top {
+            f32::from(y - top)
+        } else if y > bottom {
+            f32::from(y - bottom)
+        } else {
+            0.
+        };
+        let step = autoscroll_step(dy, g.ch);
+        let Some(s) = self.session() else { return };
+        if step == 0 || !self.drag || s.mode().intersects(TermMode::MOUSE_MODE) {
+            return;
+        }
+        s.scroll(step);
+        let (col, row, right) = self.cell_at(self.last_pos);
+        s.select_to(col, row, right);
+        if self.auto.is_none() {
+            self.auto = Some(
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(AUTO_MS))
+                        .await;
+                    this.update(cx, |p, cx| {
+                        p.auto = None;
+                        p.autoscroll(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            );
+        }
     }
 
     fn mouse_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
@@ -1096,6 +1169,49 @@ impl Render for TermPane {
         if let Some(n) = self.notice.clone() {
             col = col.child(bar(n, vec![]));
         }
+        if let Some(at) = self.menu {
+            let has = self.session().is_some_and(|s| s.selected_text().is_some());
+            col = col.child(deferred(
+                anchored().position(at).child(
+                    div()
+                        .debug_selector(|| "term-menu".to_string())
+                        .occlude()
+                        .p(px(4.))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(hsla(t::BORDER))
+                        .bg(hsla(t::ELEVATED))
+                        // a press on the menu is not a press on the grid (it would close the menu first)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(MENU.iter().map(|label| {
+                            let row = div()
+                                .id("term-menu-copy")
+                                .px(px(10.))
+                                .py(px(3.))
+                                .rounded(px(4.))
+                                .child(*label);
+                            if !has {
+                                return row.text_color(crate::widgets::chrome::dim());
+                            }
+                            row.cursor_pointer()
+                                .text_color(hsla(t::TEXT_STRONG))
+                                .hover(|d| {
+                                    d.bg(crate::widgets::chrome::with_alpha(
+                                        hsla(t::TEXT_STRONG),
+                                        0.08,
+                                    ))
+                                })
+                                .on_click(cx.listener(|p, _, _, cx| {
+                                    p.copy(cx);
+                                    p.menu = None;
+                                    cx.notify();
+                                }))
+                        })),
+                ),
+            ));
+        }
         col
     }
 }
@@ -1313,7 +1429,44 @@ impl TuiView {
 
 #[cfg(test)]
 mod tests {
-    use super::link_ok;
+    use super::{MENU, autoscroll_step, link_ok};
+    use crate::term::session::Session;
+    use alacritty_terminal::selection::SelectionType;
+
+    #[test]
+    fn autoscroll_steps_follow_the_distance_and_are_clamped() {
+        assert_eq!(autoscroll_step(0., 17.), 0);
+        assert_eq!(autoscroll_step(-1., 17.), 1);
+        assert_eq!(autoscroll_step(-17., 17.), 1);
+        assert_eq!(autoscroll_step(-18., 17.), 2);
+        assert_eq!(autoscroll_step(40., 17.), -3);
+        assert_eq!(autoscroll_step(-10_000., 17.), 6);
+        assert_eq!(autoscroll_step(10_000., 17.), -6);
+        assert_eq!(autoscroll_step(5., 0.), -5);
+    }
+
+    #[test]
+    fn the_menu_has_exactly_one_item_and_it_is_copy() {
+        assert_eq!(MENU, ["Copy"]);
+    }
+
+    #[test]
+    fn double_click_takes_a_word_and_triple_a_line_with_wide_characters() {
+        let s = Session::scripted(16, 3, "日本語 abc\r\nxy-z foo".as_bytes(), "t");
+        // either cell of a wide character (the glyph or its spacer) selects the whole word
+        for col in [2, 3] {
+            s.select_start(SelectionType::Semantic, col, 0, false);
+            assert_eq!(s.selected_text().as_deref(), Some("日本語"), "col {col}");
+        }
+        s.select_start(SelectionType::Semantic, 8, 0, false);
+        assert_eq!(s.selected_text().as_deref(), Some("abc"));
+        // a click on the blank past the text selects the blank run, never the next line
+        s.select_start(SelectionType::Lines, 5, 0, false);
+        assert_eq!(s.selected_text().as_deref(), Some("日本語 abc\n"));
+        // dragging a triple click down takes the next line too
+        s.select_to(0, 1, false);
+        assert_eq!(s.selected_text().as_deref(), Some("日本語 abc\nxy-z foo\n"));
+    }
 
     #[test]
     fn a_link_is_shown_exactly_as_it_opens_and_tricks_are_refused() {
