@@ -215,6 +215,14 @@ pub struct StartOpts {
     pub verify: Option<TrustCheck>,
 }
 
+/// The conductor role of the Super Agent (super-agent-s1.md 4.1): the engine whose only tools are the
+/// host's read-only `conductor_*` tools. Its spend is its own, capped, and never an outcome's.
+pub struct ConductorOpts {
+    pub host: Arc<dyn synthesis_app::host_tools::HostTools>,
+    /// `synt.conductor.max_cost_usd`; a model with no price is refused under it.
+    pub max_cost_usd: f64,
+}
+
 /// One row of the MCP panel.
 #[derive(Debug, Clone)]
 pub struct McpInfo {
@@ -269,6 +277,8 @@ pub struct Engine {
     pub notes: synthesis_app::memory::Notes,
     /// A `!cmd` ended and the model should read its output (the window starts that turn).
     followup: Arc<std::sync::atomic::AtomicBool>,
+    /// The conductor role: its mode never leaves default, plan and dontAsk.
+    conductor: bool,
     /// Where the session's browser is found by the Browser tab (empty in remote mode: no pane there yet).
     browser: Arc<synthesis_tools::BrowserTap>,
 }
@@ -349,7 +359,21 @@ impl Engine {
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let (tx, rx) = unbounded();
         let (remote, v) = crate::remote::Remote::connect(launcher, project, tx.clone(), spec)?;
-        Ok((Self::from_report(remote, &v, project, tx), rx))
+        Ok((Self::from_report(remote, &v, project, tx, false), rx))
+    }
+
+    /// [`Engine::start_remote`] with the conductor role: the engine's tools are `host`'s, called over the link
+    /// (the launcher must give the engine its own `--max-cost-usd`).
+    pub fn start_remote_conductor(
+        launcher: &crate::remote::Launcher,
+        project: &Path,
+        spec: &crate::remote::StartSpec,
+        host: Arc<dyn synthesis_app::host_tools::HostTools>,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        let (tx, rx) = unbounded();
+        let (remote, v) =
+            crate::remote::Remote::connect_with(launcher, project, tx.clone(), spec, Some(host))?;
+        Ok((Self::from_report(remote, &v, project, tx, true), rx))
     }
 
     /// The window's view of a remote session from the engine's start report.
@@ -358,6 +382,7 @@ impl Engine {
         v: &Value,
         project: &Path,
         tx: UnboundedSender<UiMsg>,
+        conductor: bool,
     ) -> Self {
         let text = |k: &str| v[k].as_str().map(sanitize_for_display).unwrap_or_default();
         let list = |k: &str| {
@@ -410,6 +435,7 @@ impl Engine {
                 long_term: false,
             },
             followup: Arc::default(),
+            conductor,
             browser: Arc::default(),
         }
     }
@@ -437,7 +463,7 @@ impl Engine {
             Ok(v) => {
                 let project = PathBuf::from(&self.cwd);
                 let distro = self.remote_distro.take();
-                let mut e = Self::from_report(remote, &v, &project, tx);
+                let mut e = Self::from_report(remote, &v, &project, tx, self.conductor);
                 e.remote_distro = distro;
                 Ok((e, rx, None, v))
             }
@@ -457,6 +483,38 @@ impl Engine {
     pub(crate) fn start_with(
         o: StartOpts,
         env: &Env,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Self::start_role(o, env, None)
+    }
+
+    /// The conductor engine: the chat's model session, with no file, shell, web or MCP tool, no project
+    /// instructions or memory, no peers, no worktree and no stored transcript until P3b adds the store kind.
+    /// Blocking, like `start_with`. Tests only until P3b: the product start goes through `driver.rs` behind the WSL
+    /// gate like every local start.
+    #[cfg(any(feature = "shot", feature = "local-engine-for-tests"))]
+    pub(crate) fn start_conductor(
+        mut o: StartOpts,
+        c: ConductorOpts,
+        env: &Env,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        let common = &mut o.common;
+        // the project's trust is never the conductor's (`prepare` also drops it): user and managed settings only
+        common.trust_project = false;
+        common.project_exec_inert = false;
+        o.verify = None;
+        common.no_session_store = true;
+        common.no_worktree = true;
+        common.no_memory = true;
+        common.peers = false;
+        common.permission_mode = Some(synthesis_app::run::ModeArg::Default);
+        o.resume = None;
+        Self::start_role(o, env, Some(c))
+    }
+
+    fn start_role(
+        o: StartOpts,
+        env: &Env,
+        conductor: Option<ConductorOpts>,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let StartOpts {
             project,
@@ -502,18 +560,17 @@ impl Engine {
             // `synt stop` on this in-process session: cancel it without exiting the app
             on_stop: Some(stop_callback(tx.clone())),
             browser_view: Some(browser.clone()),
+            host_tools: conductor.as_ref().map(|c| c.host.clone()),
+        };
+        let limits = Limits {
+            max_cost_usd: conductor.as_ref().map(|c| c.max_cost_usd),
+            ..Limits::default()
         };
         let t_prepare = crate::trace::span(
             env,
             "start_with: prepare (config, MCP, memory, skills, store)",
         );
-        let p = prepare(
-            &common,
-            &project,
-            env,
-            &Limits::default(),
-            Front::Native(native),
-        )?;
+        let p = prepare(&common, &project, env, &limits, Front::Native(native))?;
         // the configuration is loaded now and no hook has run yet: it must still be what the person approved
         if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
             return Err(trust_changed_error(&files));
@@ -618,6 +675,7 @@ impl Engine {
             memory_report: (info.notes.clone().hook().report)(),
             notes: info.notes,
             followup: Arc::default(),
+            conductor: limits.max_cost_usd.is_some(),
             browser,
         };
         Ok((engine, rx))
@@ -699,6 +757,9 @@ impl Engine {
     }
 
     pub fn set_mode(&self, mode: Mode) {
+        if self.conductor && !matches!(mode, Mode::Default | Mode::Plan | Mode::DontAsk) {
+            return;
+        }
         match (&self.live, &self.remote) {
             (Some(l), _) => {
                 let _ = l.harness.set_mode(mode, false);
@@ -715,6 +776,9 @@ impl Engine {
     /// Enters bypassPermissions after the person said yes to the confirmation dialog; the core still takes the
     /// flag from here only and answers with its own error otherwise.
     pub fn enable_bypass(&self) -> Result<(), String> {
+        if self.conductor {
+            return Err("a conductor session never runs in bypassPermissions".into());
+        }
         self.live()?
             .harness
             .set_mode(Mode::BypassPermissions, true)
@@ -805,6 +869,35 @@ impl Engine {
         rt.spawn(async move {
             if let Err(why) = h.send_user_message(&to, text.clone()).await {
                 let _ = tx.unbounded_send(UiMsg::SendFailed { to, text, why });
+            }
+        });
+        Ok(())
+    }
+
+    /// The conductor host relays a line to this session (conductor.md 2.4): delivered at the next safe point of
+    /// the running task as a fenced `<conductor_message>` block, never as the person's own line and never as an
+    /// answer. `approval`: proof the person approved these exact bytes (see `PersonApproved`). In-process engines only (the stdio engine has
+    /// no mid-task send yet); `UiMsg::SendFailed` follows when refused.
+    pub fn send_via_conductor(
+        &self,
+        text: String,
+        approval: Option<synthesis_harness::PersonApproved>,
+    ) -> Result<(), &'static str> {
+        if is_command(&text) {
+            return Err("commands are not relayed");
+        }
+        let live = self.live()?;
+        let Some(rt) = &live.tokio else {
+            return Err("the engine is closed");
+        };
+        let (h, tx) = (live.harness.clone(), self.tx.clone());
+        rt.spawn(async move {
+            if let Err(why) = h.send_conductor_message(text.clone(), approval).await {
+                let _ = tx.unbounded_send(UiMsg::SendFailed {
+                    to: "main".into(),
+                    text,
+                    why,
+                });
             }
         });
         Ok(())
@@ -1447,5 +1540,13 @@ pub mod for_tests {
         env: &Env,
     ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         Engine::start_with(o, env)
+    }
+
+    pub fn start_conductor(
+        o: StartOpts,
+        c: ConductorOpts,
+        env: &Env,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start_conductor(o, c, env)
     }
 }

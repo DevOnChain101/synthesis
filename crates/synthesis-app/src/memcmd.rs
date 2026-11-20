@@ -1051,7 +1051,7 @@ pub struct StartArgs<'a> {
 /// setting all mean "no memory this run".
 pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>>, Option<String>) {
     // a hook left by an earlier session in this process must not outlive its store
-    synthesis_tools::set_learned_skills(None);
+    synthesis_tools::set_learned_skills(a.sid, None);
     let settings = a.home.synthesis.join("settings.json");
     if !a.enabled || !enabled(&settings) || disabled_here(&settings, a.repo) {
         return (None, None);
@@ -1093,7 +1093,7 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
     };
     let run = Arc::new(run);
     let for_skills = run.clone();
-    synthesis_tools::set_learned_skills(Some(Arc::new(move || learned(&for_skills))));
+    synthesis_tools::set_learned_skills(a.sid, Some(Arc::new(move || learned(&for_skills))));
     (Some(run), block)
 }
 

@@ -51,7 +51,7 @@ printf '%s\n' \
  | synt engine --stdio --no-cost-cap
 ```
 
-Expect: a `hello` line with `protocol` 4, a result for id 1 with `"enabled":true` and a `schema` of `null` or 4, and an error for id 2 saying commands are accepted only on the orchestrator endpoint. (This is the link an agent shell could open: it can read, it cannot queue a command.)
+Expect: a `hello` line with `protocol` 5, a result for id 1 with `"enabled":true` and a `schema` of `null` or 4, and an error for id 2 saying commands are accepted only on the orchestrator endpoint. (This is the link an agent shell could open: it can read, it cannot queue a command.)
 
 ## 5. Kill it and let it come back
 

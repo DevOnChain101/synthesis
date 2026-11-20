@@ -432,7 +432,7 @@ impl Live {
         rt.shutdown_background();
         // the global hook holds the memory run, and with it the event sink and the session
         // store's write lock: the restarted session (resume, new folder) must be able to open it
-        synthesis_tools::set_learned_skills(None);
+        synthesis_tools::set_learned_skills(&self.sid, None);
         // what the window shows: the worktree report, and anything that did not end cleanly
         if problems.is_empty() {
             finished

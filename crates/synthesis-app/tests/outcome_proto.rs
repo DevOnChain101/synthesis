@@ -794,7 +794,7 @@ fn a_reply_that_is_about_another_command_or_lies_about_order_is_not_believed() {
 // (`a_default_open_stays_at_v4_...`, `a_binary_that_supports_v4_refuses_v5_...`)
 #[test]
 fn an_engine_of_another_protocol_is_refused_at_connect() {
-    for p in [3, 5] {
+    for p in [3, 4, 6] {
         let hello = format!("{{\"msg\":\"hello\",\"version\":\"{VERSION}\",\"protocol\":{p}}}\n");
         let e = Stdio::connect(Cursor::new(hello.into_bytes()), Sink::default())
             .err()

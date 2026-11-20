@@ -78,7 +78,7 @@ Get-Content "$env:SYNT_HOME\run\orch.json"
 Get-Content "$env:USERPROFILE\orch-serve.err"
 ```
 
-Expect: the process keeps running (it stops by itself only after `idle_exit_minutes`, default 10, with no client). `run\` holds `orch.key`, `orch.lock`, `orch.json`. Per the code, `orch.json` is `{"endpoint":"\\\\.\\pipe\\synthesis-peer-<32 hex>","pid":<n>,"protocol":4}`: the endpoint must be a named pipe starting `\\.\pipe\synthesis-peer-` (a planted entry with any other name is ignored). Per the code `serve` does NOT refuse on native Windows; the WSL2 refusal lives in `synt outcome <mutating command>` (A7) and in attempt allocation. Record whether the process started or refused, and the stderr text (the "cycle: outcome orchestration is not enabled for this store" line is expected, as in the smoke). Also record who can read `run\`: `icacls "$env:SYNT_HOME\run"` and `icacls "$env:SYNT_HOME\run\orch.key"` (the docs say the profile ACL protects them; there is no documented expected ACL text). Paste back: all output. `[G4]`
+Expect: the process keeps running (it stops by itself only after `idle_exit_minutes`, default 10, with no client). `run\` holds `orch.key`, `orch.lock`, `orch.json`. Per the code, `orch.json` is `{"endpoint":"\\\\.\\pipe\\synthesis-peer-<32 hex>","pid":<n>,"protocol":5}`: the endpoint must be a named pipe starting `\\.\pipe\synthesis-peer-` (a planted entry with any other name is ignored). Per the code `serve` does NOT refuse on native Windows; the WSL2 refusal lives in `synt outcome <mutating command>` (A7) and in attempt allocation. Record whether the process started or refused, and the stderr text (the "cycle: outcome orchestration is not enabled for this store" line is expected, as in the smoke). Also record who can read `run\`: `icacls "$env:SYNT_HOME\run"` and `icacls "$env:SYNT_HOME\run\orch.key"` (the docs say the profile ACL protects them; there is no documented expected ACL text). Paste back: all output. `[G4]`
 
 **A5. A second orchestrator on the same home.**
 
@@ -97,7 +97,7 @@ Set-Content -Encoding ascii "$env:USERPROFILE\req.jsonl" $req
 Get-Content "$env:USERPROFILE\req.jsonl" | synt engine --stdio --no-cost-cap
 ```
 
-Expect (same as smoke section 4): a `hello` line with `protocol` 4, a result for id 1 (`"enabled":true`, `schema` null or 4), and an error for id 2 saying commands are accepted only on the orchestrator endpoint. If the engine does not start on native Windows at all, record that text. Paste back: output. `[G4]`
+Expect (same as smoke section 4): a `hello` line with `protocol` 5, a result for id 1 (`"enabled":true`, `schema` null or 4), and an error for id 2 saying commands are accepted only on the orchestrator endpoint. If the engine does not start on native Windows at all, record that text. Paste back: output. `[G4]`
 
 **A7. `synt outcome` on native Windows.**
 

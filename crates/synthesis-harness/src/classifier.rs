@@ -72,6 +72,12 @@ pub(crate) fn user_texts(history: &[Message], request: &str) -> Vec<String> {
     v
 }
 
+/// A line that reached the running task: it goes before the task's own request, which stays last.
+pub(crate) fn add_user_text(texts: &mut Vec<String>, text: &str) {
+    let at = texts.len().saturating_sub(1);
+    texts.insert(at, cap(text, TEXT_CAP));
+}
+
 /// Paths (workspace-relative), sizes and short sha256 prefixes of the files the agent wrote this
 /// task: what a command in the pending action may be about to run.
 fn written_digest(task: &TaskRun) -> String {
@@ -299,6 +305,13 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_line_that_reached_the_task_goes_before_its_request() {
+        let mut v = vec!["earlier".to_string(), "the request".to_string()];
+        super::add_user_text(&mut v, "mid-task");
+        assert_eq!(v, ["earlier", "mid-task", "the request"]);
+    }
+
     use super::image_sensitive;
 
     #[test]
