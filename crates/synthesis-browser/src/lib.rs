@@ -6,6 +6,7 @@ mod capture;
 mod cdp;
 mod discover;
 mod error;
+mod input;
 mod policy;
 pub mod profile;
 mod redact;
@@ -17,6 +18,7 @@ mod untrusted;
 pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
+pub use input::{ALT, CTRL, MAX_TEXT, META, PageButton, PageInput, SHIFT};
 pub use policy::{Origin, Resolver, UrlPolicy, loopback_target};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use screencast::{Frame, FrameMeta, FrameStream};
@@ -31,7 +33,7 @@ use snapshot::RefTable;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use synthesis_config::Env;
@@ -254,6 +256,11 @@ impl PageView {
     pub async fn select_tab(&self, index: usize) -> Result<()> {
         self.0.select_tab(index).await
     }
+    /// The person's click, wheel, key or paste in the pane. It is input, not navigation: a link it follows meets
+    /// the same network policy as any page-made navigation (no person grant).
+    pub async fn input(&self, ev: PageInput) -> Result<()> {
+        self.0.input(ev).await
+    }
 }
 
 pub struct BrowserRuntime {
@@ -281,7 +288,22 @@ pub struct BrowserRuntime {
     /// The tab (session) whose viewport follows the person's pane, and how: the agent's own capture puts the
     /// configured viewport back around itself.
     fitted: Mutex<Option<(String, ViewMetrics)>>,
+    /// Tool calls of the agent in flight (`agent_busy`).
+    agent_busy: AtomicUsize,
 }
+
+/// Held for the length of one agent tool call.
+pub struct AgentBusy<'a>(&'a AtomicUsize);
+
+impl Drop for AgentBusy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The focused element (through open shadow roots) is a password, one-time-code or card field, or a frame/embed the
+/// script cannot look into: `true`. Only a plain `false` lets a key through.
+const TYPING_BLOCKED_JS: &str = "(()=>{let e=document.activeElement;while(e&&e.shadowRoot&&e.shadowRoot.activeElement)e=e.shadowRoot.activeElement;if(!e)return false;if(/^(IFRAME|FRAME|EMBED|OBJECT)$/.test(e.tagName))return true;const a=((e.getAttribute&&e.getAttribute('autocomplete'))||'').toLowerCase();return e.tagName==='INPUT'&&(e.type==='password'||/(^|\\s)(cc-[a-z-]+|one-time-code|current-password|new-password)(\\s|$)/.test(a))})()";
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
@@ -980,6 +1002,7 @@ impl BrowserRuntime {
             filled: Mutex::default(),
             view_lock: tokio::sync::Mutex::new(()),
             fitted: Mutex::default(),
+            agent_busy: AtomicUsize::new(0),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -1674,17 +1697,83 @@ impl BrowserRuntime {
     }
 
     pub async fn press_key(&self, key: &str) -> Result<()> {
-        let (k, code, vk, text) =
-            key_def(key).ok_or_else(|| BrowserError::Page(format!("unsupported key `{key}`")))?;
+        let events = input::key_events(key, 0)
+            .ok_or_else(|| BrowserError::Page(format!("unsupported key `{key}`")))?;
         let tab = self.current()?;
-        let mut down = json!({"type": if text.is_some() { "keyDown" } else { "rawKeyDown" }, "key": k, "code": code, "windowsVirtualKeyCode": vk});
-        if let Some(t) = &text {
-            down["text"] = json!(t);
+        for e in events {
+            self.call(&tab, "Input.dispatchKeyEvent", e).await?;
         }
-        self.call(&tab, "Input.dispatchKeyEvent", down).await?;
-        let up = json!({"type": "keyUp", "key": k, "code": code, "windowsVirtualKeyCode": vk});
-        self.call(&tab, "Input.dispatchKeyEvent", up).await?;
         Ok(())
+    }
+
+    /// Marks a tool call of the agent in flight: while any is, the person's input to the page is refused (never
+    /// interleaved with the agent's clicks and keys).
+    pub fn agent_busy(&self) -> AgentBusy<'_> {
+        self.agent_busy.fetch_add(1, Ordering::SeqCst);
+        AgentBusy(&self.agent_busy)
+    }
+
+    /// The person's input (`PageView::input` only). Refused while the agent acts; keys and text never reach a
+    /// password, one-time-code or card field (B4 masks person-typed values; until it lands they are dropped).
+    pub(crate) async fn input(&self, ev: PageInput) -> Result<()> {
+        if self.agent_busy.load(Ordering::SeqCst) > 0 {
+            return Err(BrowserError::Busy);
+        }
+        let tab = self.current()?;
+        if let PageInput::Text(t) = &ev {
+            PageInput::check_text(t)?;
+        }
+        if ev.types() && self.typing_blocked(&tab).await? {
+            return Err(BrowserError::Refused(
+                "the view does not type into a password, one-time-code or card field, or into an embedded frame".into(),
+            ));
+        }
+        match &ev {
+            PageInput::Key { key, mods } => {
+                let events = input::key_events(key, *mods)
+                    .ok_or_else(|| BrowserError::Page(format!("unsupported key `{key}`")))?;
+                for e in events {
+                    self.call(&tab, "Input.dispatchKeyEvent", e).await?;
+                }
+            }
+            PageInput::Text(t) => {
+                self.call(&tab, "Input.insertText", json!({"text": t}))
+                    .await?;
+            }
+            _ => {
+                if let Some(p) = ev.mouse_params()? {
+                    self.call(&tab, "Input.dispatchMouseEvent", p).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True unless the focused element is clearly harmless to type into. Asked in an isolated world (the page's own
+    /// scripts cannot answer for it); any failure to ask counts as blocked.
+    async fn typing_blocked(&self, tab: &Tab) -> Result<bool> {
+        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or(BrowserError::Closed)?;
+        let world = self
+            .call(
+                tab,
+                "Page.createIsolatedWorld",
+                json!({"frameId": frame, "worldName": "synthesis-input"}),
+            )
+            .await?;
+        let Some(ctx) = world["executionContextId"].as_i64() else {
+            return Ok(true);
+        };
+        let r = self
+            .call(
+                tab,
+                "Runtime.evaluate",
+                json!({"expression": TYPING_BLOCKED_JS, "contextId": ctx, "returnByValue": true}),
+            )
+            .await?;
+        Ok(r["result"]["value"] != json!(false))
     }
 
     pub async fn wait_for(&self, what: WaitFor, timeout: Duration) -> Result<()> {

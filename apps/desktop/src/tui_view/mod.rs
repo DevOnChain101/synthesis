@@ -1674,6 +1674,91 @@ mod tests {
         assert!(view.read_with(vcx, |t, _| t.attention()).is_some());
     }
 
+    /// The page takes keys only while it holds the focus; Esc gives them back; a pending dialog and app chords keep
+    /// theirs; while the agent is using the tab the keys are dropped with a status and nothing queues.
+    #[gpui::test]
+    fn the_page_gets_keys_only_while_it_holds_the_focus(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        use browser_view::{FakeSource, PageState, sample_jpeg};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        view.update(vcx, |t, _| t.set_live(l));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSource::new(sample_jpeg(8, 8), PageState::default());
+        view.update_in(vcx, |t, window, cx| {
+            t.ts.tab = ChatTab::Browser;
+            t.ts.bv.attach(fake.clone(), rt.handle().clone());
+            let f = cx.focus_handle();
+            window.focus(&f, cx);
+            t.ts.bv.focus = Some(f);
+        });
+        let key = |vcx: &mut gpui::VisualTestContext, k: &'static str| {
+            let mut ks = gpui::Keystroke::parse(k).unwrap();
+            ks.key_char = (k.chars().count() == 1).then(|| k.to_string());
+            view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+        };
+        let inputs = || {
+            fake.calls()
+                .into_iter()
+                .filter(|c| c.starts_with("input"))
+                .count()
+        };
+        let settle = |n: usize| {
+            for _ in 0..200 {
+                if inputs() >= n {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("input {n} never arrived: {:?}", fake.calls());
+        };
+        // focused: consumed and sent
+        assert!(key(vcx, "a"));
+        settle(1);
+        // an app chord is not the page's
+        assert!(!key(
+            vcx,
+            if cfg!(target_os = "macos") {
+                "cmd-1"
+            } else {
+                "ctrl-1"
+            }
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(inputs(), 1);
+        // the agent is using the tab: the status shows, the key is dropped
+        *fake.input_err.lock().unwrap() = Some("the agent is using this tab".into());
+        assert!(key(vcx, "b"));
+        settle(2);
+        for _ in 0..200 {
+            if view.read_with(vcx, |t, _| t.ts.bv.snapshot().3.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            view.read_with(vcx, |t, _| t.ts.bv.snapshot().3).as_deref(),
+            Some("the agent is using this tab")
+        );
+        // Esc gives the keys back; the next key is not the page's
+        assert!(key(vcx, "escape"));
+        assert!(!view.update_in(vcx, |t, window, _| {
+            t.ts.bv.focus.as_ref().unwrap().is_focused(window)
+        }));
+        let _ = key(vcx, "c");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(inputs(), 2, "{:?}", fake.calls());
+        drop(rt);
+    }
+
     /// The keys of a pending approval: ignored under Settings; on screen they answer it (the guard for text
     /// typed ahead is the test below); Esc rejects at once.
     #[gpui::test]

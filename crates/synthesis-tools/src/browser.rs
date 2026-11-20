@@ -397,6 +397,7 @@ macro_rules! browser_tool {
                     Ok(rt) => rt,
                     Err(e) => return e,
                 };
+                let _busy = rt.agent_busy(); // the person's input to the page waits for the agent's call
                 // a loopback page the person opened is not the agent's to read or act on until the person approves it
                 if $wire != "browser_close"
                     && let Err(e) =
@@ -433,6 +434,7 @@ pub(crate) fn navigate<'a>(
             Ok(rt) => rt,
             Err(e) => return e,
         };
+        let _busy = rt.agent_busy();
         if let Err(e) = approve_loopback(sh, ctx, &rt, str_field(input, "url")).await {
             return fail(wire, e.into());
         }
@@ -656,6 +658,7 @@ pub(crate) fn fill_secret<'a>(
             Ok(rt) => rt,
             Err(e) => return e,
         };
+        let _busy = rt.agent_busy();
         if let Err(e) = approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await {
             return fail("browser_fill_secret", e.into());
         }

@@ -948,6 +948,10 @@ impl TuiView {
         if !self.active || self.bar_focused(window, cx) {
             return false;
         }
+        // the Browser tab's page takes the keys while it holds the focus (a dialog still owns the keyboard first)
+        if let Some(done) = self.browser_key(ks, window, cx) {
+            return done;
+        }
         // the Terminal tab's shell takes every key it can (a dialog still owns the keyboard first)
         if self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
             && let Some(done) = self.term_key(ks, window, cx)
