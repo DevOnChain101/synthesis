@@ -38,7 +38,7 @@ Rules:
 | Execute | Bash, KillShell, terminal_spawn, terminal_signal, verify_run, git_revert |
 | External | WebFetch, WebSearch, browser_navigate, browser_click, browser_mouse, browser_fill, browser_login, browser_fill_secret, mcp__* |
 
-`browser_mouse` is decided exactly like `browser_click`: the same External class and modes, and a deny, ask or allow rule written for `browser_click` also binds `browser_mouse` (not the other way round). It is never in the classifier's non-sensitive list. Its result and `browser.action` name the element under an x,y point and the page origin.
+`browser_mouse` is decided exactly like `browser_click`: the same External class and modes, and a deny or ask rule written for `browser_click` also binds `browser_mouse`; an allow rule for `browser_click` does not allow it (nor does any rule for the mouse bind the click). Its approval row shows the action, the point and the last page origin. It is never in the classifier's non-sensitive list. Its result and `browser.action` name the element under an x,y point and the page origin.
 
 ¹ Task runs a sub-agent whose own calls are gated one by one. The class drives defaults; permission rules still decide (Node's READ_ONLY_TOOLS/EDIT_TOOLS sets [from-node permissions.js:11-12] are ported verbatim for the `Permissions::check` port).
 

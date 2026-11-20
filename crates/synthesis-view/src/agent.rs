@@ -535,7 +535,7 @@ impl AgentPanes {
                     self.browser.push(BrowserCall {
                         id: tool_call_id.clone(),
                         name: name.clone(),
-                        summary: browser_summary(name, input),
+                        summary: browser_summary(name, input, &self.url),
                         state: CmdState::Running,
                         ts,
                         duration_ms: 0,
@@ -778,7 +778,27 @@ fn title_of(out: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.chars().take(120).collect())
 }
 
-fn browser_summary(name: &str, input: &Value) -> String {
+/// `scheme://host[:port]` of a URL as typed, or empty.
+fn origin_of(url: &str) -> &str {
+    let rest = url.find("://").map_or(0, |i| i + 3);
+    let end = url[rest..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| rest + i);
+    if rest == 0 { "" } else { &url[..end] }
+}
+
+/// `page` is the last page the agent navigated to: a mouse action shows it, so an x,y click names where it lands.
+fn browser_summary(name: &str, input: &Value, page: &str) -> String {
+    if name == "browser_mouse" {
+        let o = origin_of(page);
+        let s = summarize_tool(name, input);
+        let full = if o.is_empty() {
+            s
+        } else {
+            format!("{s} on {o}")
+        };
+        return full.chars().take(120).collect();
+    }
     let s = |k: &str| input.get(k).and_then(Value::as_str);
     let t = match name {
         "browser_navigate" => s("url"),
@@ -786,7 +806,6 @@ fn browser_summary(name: &str, input: &Value) -> String {
             s("element").or_else(|| s("ref")).or_else(|| s("selector"))
         }
         "browser_press_key" => s("key"),
-        "browser_mouse" => s("action"),
         _ => None,
     };
     t.map_or_else(
@@ -798,6 +817,20 @@ fn browser_summary(name: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mouse_call_shows_the_action_the_point_and_the_last_page_origin() {
+        let i = json!({"action": "drag", "x": 10.4, "y": 20, "to_x": 300, "to_y": 5});
+        assert_eq!(
+            browser_summary("browser_mouse", &i, "https://a.example:8443/p?q=1#h"),
+            "drag (10, 20) -> (300, 5) on https://a.example:8443"
+        );
+        assert_eq!(
+            browser_summary("browser_mouse", &json!({"action": "wheel", "dy": 400}), ""),
+            "wheel by (0, 400)"
+        );
+        assert_eq!(origin_of("not a url"), "");
+    }
     use serde_json::json;
 
     fn ev(seq: u64, agent: Option<&str>, ty: &str, payload: Value) -> Envelope {

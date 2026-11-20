@@ -995,8 +995,9 @@ async fn mouse_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
             .await
             .and_then(|u| url::Url::parse(&u).ok())
             .map_or(String::new(), |u| u.origin().ascii_serialization());
+        // the origin first: the 80-character clip of the target keeps it
         format!(
-            "{el} at {} on {origin}",
+            "{origin} {el} at {}",
             shown(&MouseTarget::Point(spot.x, spot.y))
         )
     } else {

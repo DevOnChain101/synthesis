@@ -3,7 +3,7 @@
 //! the path is cut into a bounded number of steps and nothing here navigates (a navigation a click causes meets
 //! the same `UrlPolicy` interception as `click`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -143,29 +143,51 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-/// Best effort: Escape, then the release of the held button at the last point sent.
-async fn release_held(cdp: &Cdp, tab: &Tab) {
-    let Some(((x, y), button)) = lock(&tab.pressed).take() else {
+/// Best effort: Escape, then the release of the held button at the last point sent. The record is cleared only
+/// once the release went through, so a call dropped (or a send that failed) in the middle leaves it for the next
+/// attempt. `send(kind, params)` is the CDP call (`Input.dispatchKeyEvent` for "key", `Input.dispatchMouseEvent`).
+async fn release_with<F, Fut>(pressed: &Mutex<Held>, mut send: F)
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let Some(((x, y), button)) = *lock(pressed) else {
         return;
     };
     for t in ["keyDown", "keyUp"] {
         let k = json!({"type": t, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27});
-        let _ = cdp
-            .send(Some(&tab.session), "Input.dispatchKeyEvent", k)
-            .await;
+        let _ = send("key", k).await;
     }
-    let up = ev("mouseReleased", (x, y), button, 0, 1);
-    let _ = cdp
-        .send(Some(&tab.session), "Input.dispatchMouseEvent", up)
-        .await;
+    if send("mouse", ev("mouseReleased", (x, y), button, 0, 1))
+        .await
+        .is_ok()
+    {
+        *lock(pressed) = None;
+    }
+}
+
+async fn release_held(cdp: &Cdp, tab: &Tab) {
+    release_with(&tab.pressed, |kind, params| {
+        let m = if kind == "key" {
+            "Input.dispatchKeyEvent"
+        } else {
+            "Input.dispatchMouseEvent"
+        };
+        async move { cdp.send(Some(&tab.session), m, params).await.map(drop) }
+    })
+    .await;
 }
 
 impl BrowserRuntime {
     /// Like `click`'s aim: the element's box centre after scrolling it into view. A centre that is still outside
     /// the viewport (an element larger than it, or a page that did not scroll) is an error, not a clamped guess.
-    async fn ref_point(&self, tab: &Tab, r: &str, vp: (u32, u32)) -> Result<P> {
+    async fn ref_point(&self, tab: &Tab, r: &str, vp: (u32, u32), scroll: bool) -> Result<P> {
         let oid = self.object_for(tab, r).await?;
-        let f = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,r.width*r.height]}";
+        let f = if scroll {
+            "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,r.width*r.height]}"
+        } else {
+            "function(){const r=this.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,r.width*r.height]}"
+        };
         let v = self
             .call(
                 tab,
@@ -188,7 +210,7 @@ impl BrowserRuntime {
     async fn point(&self, tab: &Tab, t: &MouseTarget, vp: (u32, u32)) -> Result<P> {
         match t {
             MouseTarget::Point(x, y) => check_point((*x, *y), vp),
-            MouseTarget::Ref(r) => self.ref_point(tab, r, vp).await,
+            MouseTarget::Ref(r) => self.ref_point(tab, r, vp, true).await,
         }
     }
 
@@ -212,6 +234,11 @@ impl BrowserRuntime {
             .await
             .ok()?;
         let name = d["node"]["nodeName"].as_str()?.to_lowercase();
+        let ok =
+            |s: &str| s.len() <= 30 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        if !ok(&name) {
+            return None;
+        }
         let attrs = d["node"]["attributes"].as_array()?;
         let id = attrs
             .chunks(2)
@@ -264,12 +291,12 @@ impl BrowserRuntime {
     pub async fn mouse(&self, op: &MouseOp) -> Result<Spot> {
         let tab = self.current()?;
         let _one = tab.mouse_lock.lock().await;
-        // a button an earlier call left down (cancelled, or its release failed) comes up first
-        release_held(&self.cdp, &tab).await;
         let _guard = ReleaseOnDrop {
             cdp: self.cdp.clone(),
             tab: tab.clone(),
         };
+        // a button an earlier call left down (cancelled, or its release failed) comes up first
+        release_held(&self.cdp, &tab).await;
         let vp = self.viewport(&tab).await;
         // the pointer's last place, inside the viewport (it may have been resized since)
         let last = *lock(&tab.mouse);
@@ -317,8 +344,8 @@ impl BrowserRuntime {
             Plan::Move(p) | Plan::Click { at: p, .. } | Plan::Drag(_, p) | Plan::Wheel(p, ..) => p,
         };
         let r = match (plan, op) {
-            (Plan::Drag(a, b), MouseOp::Drag(start, _)) => {
-                self.drag(&tab, from, a, b, start, vp).await
+            (Plan::Drag(a, b), MouseOp::Drag(start, stop)) => {
+                self.drag(&tab, from, (a, b), (start, stop), vp).await
             }
             _ => {
                 let mut r = Ok(());
@@ -354,27 +381,30 @@ impl BrowserRuntime {
         })
     }
 
-    /// A drag: glide to the start, measure an element start again just before the press (the page may have moved
-    /// during the glide), press, move with the button down, release.
+    /// A drag: glide to the start, then measure element ends again without scrolling (the page may have moved
+    /// during the glide, and scrolling the start into view may have moved the end), press, move with the button
+    /// down, release.
     async fn drag(
         &self,
         tab: &Tab,
         from: P,
-        mut a: P,
-        b: P,
-        start: &MouseTarget,
+        (mut a, mut b): (P, P),
+        (start, stop): (&MouseTarget, &MouseTarget),
         vp: (u32, u32),
     ) -> Result<()> {
         for e in glide(from, a, false) {
             self.send_mouse(tab, e).await?;
         }
         if let MouseTarget::Ref(r) = start {
-            let now = self.ref_point(tab, r, vp).await?;
+            let now = self.ref_point(tab, r, vp, false).await?;
             if now != a {
                 self.send_mouse(tab, ev("mouseMoved", now, "none", 0, 0))
                     .await?;
             }
             a = now;
+        }
+        if let MouseTarget::Ref(r) = stop {
+            b = self.ref_point(tab, r, vp, false).await?;
         }
         for e in drag_tail(a, b) {
             self.send_mouse(tab, e).await?;
@@ -502,5 +532,45 @@ mod tests {
             v,
             [json!({"type": "mouseWheel", "x": 1.0, "y": 2.0, "deltaX": 3.0, "deltaY": -4.0})]
         );
+    }
+
+    #[tokio::test]
+    async fn the_held_record_is_cleared_only_after_the_release_went_through() {
+        let held = |p: &Mutex<Held>| lock(p).is_some();
+        let p: Mutex<Held> = Mutex::new(Some(((1.0, 2.0), "left")));
+        // the release fails: still held, so the next attempt tries again
+        release_with(&p, |k, _| async move {
+            if k == "mouse" {
+                Err(BrowserError::Closed)
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert!(held(&p));
+        // the call is dropped while the release is on the wire: still held
+        let r = tokio::time::timeout(
+            Duration::from_millis(30),
+            release_with(&p, |k, _| async move {
+                if k == "mouse" {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }),
+        )
+        .await;
+        assert!(r.is_err() && held(&p));
+        // it goes through: cleared, and the release is at the last point, the key first
+        let sent = Mutex::new(vec![]);
+        release_with(&p, |k, v| {
+            lock(&sent).push((k, v["type"].as_str().unwrap().to_owned(), v["x"].clone()));
+            async { Ok(()) }
+        })
+        .await;
+        assert!(!held(&p));
+        let sent = lock(&sent).clone();
+        assert_eq!(sent[0].0, "key");
+        assert_eq!(sent.last().unwrap().1, "mouseReleased");
+        assert_eq!(sent.last().unwrap().2, json!(1.0));
     }
 }

@@ -5132,15 +5132,17 @@ fn browser_mouse_is_decided_like_browser_click_in_every_mode() {
 }
 
 #[test]
-fn rules_on_browser_click_bind_browser_mouse_too() {
+fn deny_and_ask_rules_on_browser_click_bind_browser_mouse_but_allow_does_not() {
     let f = fx();
     let m = json!({ "action": "drag", "x": 5, "y": 5, "to_x": 9, "to_y": 9 });
     let deny = f.with(rules(&[], &["browser_click"], &[]), Mode::Default);
     assert_eq!(d(&deny, "browser_mouse", m.clone()), D);
     let ask = f.with(rules(&[], &[], &["browser_click"]), Mode::Auto);
     assert_eq!(d(&ask, "browser_mouse", m.clone()), Q);
+    // an allow rule on the click does not allow the mouse
     let allow = f.with(rules(&["browser_click"], &[], &[]), Mode::Default);
-    assert_eq!(d(&allow, "browser_mouse", m.clone()), A);
+    assert_eq!(d(&allow, "browser_mouse", m.clone()), Q);
+    assert_eq!(d(&allow, "browser_click", json!({ "ref": "e1" })), A);
     // the other way round does not hold: a rule on the mouse leaves clicks alone
     let only_mouse = f.with(rules(&[], &["browser_mouse"], &[]), Mode::Default);
     assert_eq!(d(&only_mouse, "browser_mouse", m), D);
