@@ -82,6 +82,8 @@ fn capped(mut p: PageState) -> PageState {
             .min(p.tabs.len() - MAX_TABS);
         p.tabs = p.tabs.split_off(start);
         p.tabs.truncate(MAX_TABS);
+        p.ids = p.ids.split_off(start.min(p.ids.len()));
+        p.ids.truncate(MAX_TABS);
         p.offset = start;
     }
     p.tabs.iter_mut().for_each(|t| *t = clip(t, MAX_TEXT));
@@ -132,6 +134,11 @@ pub enum PageKey {
     /// The paste chord: the pane reads the clipboard (only now) and sends it as text.
     Paste,
     Send(PageInput),
+    /// The mod key (Cmd on macOS, else Ctrl) with T / W, and Ctrl+Tab (`true`: with Shift, backwards): the tabs. Only
+    /// while the page holds the keys, so Ctrl+T elsewhere stays the target cycle.
+    NewTab,
+    CloseTab,
+    CycleTab(bool),
     /// Not the page's (an app chord): the rest of the window sees it.
     Pass,
     /// A key the page has no mapping for: swallowed, so it cannot reach the chat input by accident.
@@ -153,6 +160,9 @@ pub fn page_key(ks: &Keystroke, mac: bool) -> PageKey {
     if key == "escape" && !m.alt && !m.platform {
         return PageKey::Release;
     }
+    if key == "tab" && m.control && !m.alt && !m.platform {
+        return PageKey::CycleTab(m.shift);
+    }
     // Ctrl+C on macOS stays the app's: it interrupts the agent
     if mac && m.control && key == "c" {
         return PageKey::Pass;
@@ -160,6 +170,8 @@ pub fn page_key(ks: &Keystroke, mac: bool) -> PageKey {
     if if mac { m.platform } else { m.control } {
         return match key {
             "v" => PageKey::Paste,
+            "t" if !m.alt && !m.shift => PageKey::NewTab,
+            "w" if !m.alt && !m.shift => PageKey::CloseTab,
             "a" | "z" => PageKey::Send(PageInput::Key {
                 key: key.into(),
                 mods,
@@ -377,6 +389,9 @@ pub struct PageState {
     pub title: String,
     /// Titles (or URLs) of the browser's tabs, oldest first.
     pub tabs: Vec<String>,
+    /// The browser's id of each tab in `tabs`: sent back with a switch or close, so an index that points at another
+    /// tab by then (the agent or a popup changed the list) is refused instead of acted on.
+    pub ids: Vec<String>,
     /// Index (in the browser's tab order) of the active tab.
     pub active: usize,
     /// Index of `tabs[0]` in the browser's tab order: only [`MAX_TABS`] are kept, a window that holds the active tab.
@@ -389,7 +404,19 @@ pub enum Act {
     Back,
     Forward,
     Reload,
-    Tab(usize),
+    /// Switch to the tab at this index of the browser's order, which must still have this id.
+    Tab(usize, String),
+    /// A blank tab, made current.
+    NewTab,
+    Close(usize, String),
+}
+
+/// The tab Ctrl+Tab (`back`: Ctrl+Shift+Tab) goes to, in the browser's own index; `None` with fewer than two tabs.
+pub fn next_tab(p: &PageState, back: bool) -> Option<Act> {
+    let n = p.tabs.len();
+    let at = p.active.checked_sub(p.offset).filter(|a| *a < n)?;
+    let to = if back { (at + n - 1) % n } else { (at + 1) % n };
+    (n > 1).then(|| Act::Tab(p.offset + to, p.ids.get(to).cloned().unwrap_or_default()))
 }
 
 pub trait Feed: Send {
@@ -481,6 +508,7 @@ impl Source for RuntimeSource {
                     .get(at)
                     .map(|t| show(&t.page.title))
                     .unwrap_or_default(),
+                ids: tabs.iter().map(|t| t.id.clone()).collect(),
                 tabs: tabs
                     .iter()
                     .map(|t| {
@@ -511,7 +539,9 @@ impl Source for RuntimeSource {
                 Act::Back => rt.back().await.map(drop),
                 Act::Forward => rt.forward().await.map(drop),
                 Act::Reload => rt.reload().await.map(drop),
-                Act::Tab(i) => rt.select_tab(i).await,
+                Act::Tab(i, id) => rt.select_tab(i, &id).await,
+                Act::NewTab => rt.new_tab(None).await.map(drop),
+                Act::Close(i, id) => rt.close_tab(i, &id).await,
             }
             .map_err(why)
         })
@@ -537,6 +567,8 @@ struct Shared {
     page: Option<PageState>,
     /// The last action (or the view itself) failed: shown under the bar.
     note: Option<String>,
+    /// A new tab was made (not refused): the address bar takes the focus.
+    focus_bar: bool,
 }
 
 struct Link {
@@ -814,6 +846,11 @@ impl BrowserPane {
         });
     }
 
+    /// True once after a new tab was really opened (a refusal, busy or the cap, leaves the focus alone).
+    pub fn take_focus_bar(&self) -> bool {
+        std::mem::take(&mut lock(&self.shared).focus_bar)
+    }
+
     /// The pane shows a note under the bar (a refusal of input or of an action).
     pub fn has_note(&self) -> bool {
         lock(&self.shared).note.is_some()
@@ -842,18 +879,39 @@ impl BrowserPane {
         self.refusal = None;
     }
 
+    /// Closes the active tab (the browser keeps the last one).
+    pub fn close_active(&mut self) {
+        if let Some(p) = self.snapshot().2 {
+            let id = p.ids.get(p.active.saturating_sub(p.offset)).cloned();
+            self.act(Act::Close(p.active, id.unwrap_or_default()));
+        }
+    }
+
+    /// Ctrl+Tab: the next (or previous) tab.
+    pub fn cycle(&mut self, back: bool) {
+        if let Some(a) = self.snapshot().2.and_then(|p| next_tab(&p, back)) {
+            self.act(a);
+        }
+    }
+
     pub fn act(&mut self, a: Act) {
         let Some(l) = &self.link else { return };
         let (src, shared, mut wake) = (l.src.clone(), self.shared.clone(), self.wake.clone());
         let again = l.retarget.clone();
         l.handle.spawn(async move {
-            let switched = matches!(a, Act::Tab(_));
+            let opened = a == Act::NewTab;
+            let switched = matches!(a, Act::Tab(..) | Act::NewTab | Act::Close(..));
             let r = src.act(a).await;
             // the view never follows a tab by itself: after a switch the worker points it at the new one
             if r.is_ok() && switched {
                 again.notify_one();
             }
-            lock(&shared).note = r.err();
+            let ok_new = r.is_ok() && opened;
+            {
+                let mut sh = lock(&shared);
+                sh.focus_bar |= ok_new;
+                sh.note = r.err();
+            }
             if let Ok(p) = src.page().await {
                 lock(&shared).page = Some(capped(p));
             }
@@ -1073,6 +1131,11 @@ impl TuiView {
             .detach();
             bp.bar = Some(bar);
         }
+        if bp.take_focus_bar()
+            && let Some(b) = &bp.bar
+        {
+            window.focus(&b.read(cx).focus_handle(cx), cx);
+        }
         let focus = bp.focus.get_or_insert_with(|| cx.focus_handle());
         bp.captured = focus.is_focused(window);
         // the page's address in the bar, unless the person is typing in it
@@ -1164,6 +1227,20 @@ impl TuiView {
                 self.ts.bv.input(ev);
                 Some(true)
             }
+            PageKey::NewTab => {
+                self.browser_new_tab(cx);
+                Some(true)
+            }
+            PageKey::CloseTab => {
+                self.ts.bv.close_active();
+                cx.notify();
+                Some(true)
+            }
+            PageKey::CycleTab(back) => {
+                self.ts.bv.cycle(back);
+                cx.notify();
+                Some(true)
+            }
             PageKey::Paste => {
                 // the clipboard is read here, on the person's own paste chord, and nowhere else; not while the
                 // pane shows a refusal (the agent is using the tab, a password field): nothing would arrive
@@ -1175,6 +1252,12 @@ impl TuiView {
                 Some(true)
             }
         }
+    }
+
+    /// A blank tab; the address bar takes the focus once the browser has really opened it (`take_focus_bar`).
+    fn browser_new_tab(&mut self, cx: &mut Context<Self>) {
+        self.ts.bv.act(Act::NewTab);
+        cx.notify();
     }
 
     /// The URL bar holds the keys: the window-wide key hook leaves them alone.
@@ -1290,34 +1373,79 @@ impl TuiView {
                 .children(bp.bar.as_ref().map(Input::new)),
         );
         let mut col = div().flex().flex_col().gap(px(8.)).size_full().child(bar);
-        if let Some(p) = page.as_ref().filter(|p| p.tabs.len() > 1) {
-            col = col.child(div().flex().gap(px(4.)).overflow_hidden().children(
-                p.tabs.iter().enumerate().map(|(n, title)| {
-                    let i = p.offset + n; // the browser's own index
-                    let on = i == p.active;
-                    div()
-                        .id(("bv-tab", i))
-                        .px(px(10.))
-                        .h(px(24.))
-                        .flex()
-                        .items_center()
-                        .max_w(px(180.))
-                        .truncate()
-                        .rounded(px(5.))
-                        .text_size(px(12.))
-                        .cursor_pointer()
-                        .text_color(if on { strong() } else { dim() })
-                        .when(on, |d| d.bg(hsla(t::ELEVATED)))
-                        .when(!on, |d| {
-                            d.hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.ts.bv.act(Act::Tab(i));
-                            cx.notify();
-                        }))
-                        .child(title.clone())
-                }),
-            ));
+        if let Some(p) = page.as_ref() {
+            let many = p.tabs.len() > 1;
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .overflow_hidden()
+                    .children(p.tabs.iter().enumerate().map(|(n, title)| {
+                        let i = p.offset + n; // the browser's own index
+                        let on = i == p.active;
+                        let id = p.ids.get(n).cloned().unwrap_or_default();
+                        let id2 = id.clone();
+                        div()
+                            .id(("bv-tab", i))
+                            .pl(px(10.))
+                            .pr(px(4.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .max_w(px(180.))
+                            .rounded(px(5.))
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .text_color(if on { strong() } else { dim() })
+                            .when(on, |d| d.bg(hsla(t::ELEVATED)))
+                            .when(!on, |d| {
+                                d.hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ts.bv.act(Act::Tab(i, id.clone()));
+                                cx.notify();
+                            }))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(title.clone()))
+                            .when(many, |d| {
+                                d.child(
+                                    div()
+                                        .id(("bv-tab-x", i))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(18.))
+                                        .flex_none()
+                                        .rounded(px(4.))
+                                        .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.12)))
+                                        // the click must not also select the tab behind it
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.ts.bv.act(Act::Close(i, id2.clone()));
+                                            cx.notify();
+                                        }))
+                                        .child(icon("close", 12., dim())),
+                                )
+                            })
+                    }))
+                    .child(
+                        div()
+                            .id("bv-new-tab")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .flex_none()
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.08)))
+                            .on_click(cx.listener(|this, _, _, cx| this.browser_new_tab(cx)))
+                            .child(icon("plus", 14., dim())),
+                    ),
+            );
         }
         if let Some(r) = &bp.refusal {
             let mut row = div()
@@ -1690,9 +1818,22 @@ impl Source for FakeSource {
     }
     fn act(&self, a: Act) -> BoxFuture<'static, Result<(), String>> {
         self.log(format!("{a:?}"));
-        if let Act::Tab(i) = a {
-            self.page.lock().unwrap().active = i;
+        let mut p = self.page.lock().unwrap();
+        match a {
+            Act::Tab(i, _) => p.active = i,
+            Act::NewTab => {
+                p.tabs.push("New tab".into());
+                p.ids.push("new".into());
+                p.active = p.tabs.len() - 1;
+            }
+            Act::Close(i, _) => {
+                p.tabs.remove(i);
+                p.ids.remove(i);
+                p.active = p.active.min(p.tabs.len() - 1);
+            }
+            _ => {}
         }
+        drop(p);
         Box::pin(async { Ok(()) })
     }
     fn input(&self, ev: PageInput) -> BoxFuture<'static, Result<(), String>> {
@@ -1878,6 +2019,62 @@ mod tests {
     }
 
     #[test]
+    fn tab_titles_lose_bidi_and_invisible_controls() {
+        let s = sanitize_for_display("evil\u{202e}gpj.exe\u{200b}\u{2066}x");
+        assert!(
+            !s.chars()
+                .any(|c| matches!(c, '\u{202e}' | '\u{200b}' | '\u{2066}')),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn a_tab_action_carries_the_id_the_person_saw() {
+        let p = PageState {
+            tabs: vec!["a".into(), "b".into()],
+            ids: vec!["ia".into(), "ib".into()],
+            active: 1,
+            ..Default::default()
+        };
+        // Ctrl+Tab from the last wraps to the first: index and id of THAT tab travel together
+        assert_eq!(next_tab(&p, false), Some(Act::Tab(0, "ia".into())));
+    }
+
+    #[test]
+    fn tab_chords_and_cycling() {
+        let k = |key: &str, mods: &str| ks(key, None, mods);
+        assert_eq!(page_key(&k("t", "m"), true), PageKey::NewTab);
+        assert_eq!(page_key(&k("w", "m"), true), PageKey::CloseTab);
+        assert_eq!(page_key(&k("t", "c"), false), PageKey::NewTab);
+        // macOS: Ctrl+T / Ctrl+C are not the tabs' (Ctrl+C interrupts the agent)
+        assert_eq!(page_key(&k("c", "c"), true), PageKey::Pass);
+        assert_ne!(page_key(&k("t", "c"), true), PageKey::NewTab);
+        assert_eq!(page_key(&k("tab", "c"), true), PageKey::CycleTab(false));
+        assert_eq!(page_key(&k("tab", "cs"), false), PageKey::CycleTab(true));
+        // Esc still gives the keys back
+        assert_eq!(page_key(&k("escape", "c"), true), PageKey::Release);
+        let p = PageState {
+            tabs: vec!["a".into(), "b".into(), "c".into()],
+            ids: vec!["ia".into(), "ib".into(), "ic".into()],
+            active: 5,
+            offset: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            (next_tab(&p, false), next_tab(&p, true)),
+            (
+                Some(Act::Tab(3, "ia".into())),
+                Some(Act::Tab(4, "ib".into()))
+            )
+        );
+        let one = PageState {
+            tabs: vec!["a".into()],
+            ..Default::default()
+        };
+        assert_eq!(next_tab(&one, false), None);
+    }
+
+    #[test]
     fn the_view_runs_only_while_the_pane_is_shown() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -1888,6 +2085,7 @@ mod tests {
             url: "https://a.test/".into(),
             title: "A".into(),
             tabs: vec!["A".into(), "B".into()],
+            ids: vec!["ia".into(), "ib".into()],
             active: 0,
             offset: 0,
         };
@@ -1907,9 +2105,19 @@ mod tests {
         bp.sync(true);
         assert_eq!(fake.calls(), ["view(true)"]);
         // a tab switch re-points the view
-        bp.act(Act::Tab(1));
+        bp.act(Act::Tab(1, "ib".into()));
         wait("the re-target", || fake.calls().len() == 3);
-        assert_eq!(fake.calls(), ["view(true)", "Tab(1)", "view(true)"]);
+        assert_eq!(fake.calls(), ["view(true)", "Tab(1, \"ib\")", "view(true)"]);
+        // a new tab and a close re-point it too
+        bp.act(Act::NewTab);
+        wait("the re-target", || fake.calls().len() == 5);
+        assert_eq!(bp.snapshot().2.unwrap().tabs.len(), 3);
+        bp.close_active();
+        wait("the re-target", || fake.calls().len() == 7);
+        assert_eq!(
+            &fake.calls()[3..],
+            ["NewTab", "view(true)", "Close(2, \"new\")", "view(true)"]
+        );
         // hidden (another tab, another session): view(false) and no pixels held
         bp.sync(false);
         wait("view(false)", || {
@@ -1919,7 +2127,7 @@ mod tests {
         // dropping a shown pane turns the view off too
         bp.sync(true);
         wait("view(true) again", || {
-            fake.calls().iter().filter(|c| *c == "view(true)").count() == 3
+            fake.calls().iter().filter(|c| *c == "view(true)").count() == 5
         });
         drop(bp);
         wait("view(false) on drop", || {
@@ -2121,6 +2329,7 @@ mod tests {
             url: long.clone(),
             title: long.clone(),
             tabs: vec![long; 100],
+            ids: (0..100).map(|i| format!("id{i}")).collect(),
             active: 0,
             offset: 0,
         });
@@ -2141,6 +2350,7 @@ mod tests {
             url: format!("https://a.test/{}", "x".repeat(50_000)),
             title: "t".repeat(50_000),
             tabs: vec!["a".into(), "b".repeat(50_000)],
+            ids: vec![],
             active: 0,
             offset: 0,
         };
