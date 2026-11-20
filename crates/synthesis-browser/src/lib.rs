@@ -6,6 +6,7 @@ mod capture;
 mod cdp;
 mod discover;
 mod error;
+mod mouse;
 mod policy;
 pub mod profile;
 mod redact;
@@ -17,6 +18,7 @@ mod untrusted;
 pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
+pub use mouse::{MAX_WHEEL, MouseOp, MouseTarget};
 pub use policy::{Origin, Resolver, UrlPolicy, loopback_target};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use screencast::{Frame, FrameMeta, FrameStream};
@@ -163,6 +165,11 @@ pub struct Spot {
 struct Tab {
     session: String,
     refs: Mutex<RefTable>,
+    /// Where the agent's mouse last was (`mouse.rs`).
+    mouse: Mutex<Option<(f64, f64)>>,
+    /// One mouse action at a time per tab, and the button an unfinished one holds (`mouse.rs`).
+    mouse_lock: tokio::sync::Mutex<()>,
+    pressed: Mutex<mouse::Held>,
 }
 
 #[derive(Default)]
@@ -1062,6 +1069,9 @@ impl BrowserRuntime {
         let tab = Arc::new(Tab {
             session,
             refs: Mutex::default(),
+            mouse: Mutex::default(),
+            mouse_lock: tokio::sync::Mutex::default(),
+            pressed: Mutex::default(),
         });
         for m in [
             "Page.enable",

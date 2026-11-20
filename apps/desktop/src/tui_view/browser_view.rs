@@ -1139,7 +1139,8 @@ fn prepare_page(
     let at = Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
     let cursor = pointer
         .zip(pointer.and_then(|p| panes::cursor_on(p, d.w, d.h)))
-        .map(|(p, (fx, fy))| {
+        .map(|(p, to)| {
+            let (fx, fy) = panes::glide(p.from, to, now - p.ts.unwrap_or(now), motion);
             let alpha = panes::pointer_alpha(now - p.ts.unwrap_or(now));
             let mut el = div()
                 .relative()

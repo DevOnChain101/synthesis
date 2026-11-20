@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use synthesis_browser::profile::{self, DONE_FILE};
 use synthesis_browser::secret::{self, SecretSpec};
 use synthesis_browser::{
-    BrowserError, BrowserOptions, BrowserRuntime, Os, PageInfo, UntrustedText, UrlPolicy, WaitFor,
-    WaitUntil,
+    BrowserError, BrowserOptions, BrowserRuntime, MouseOp, MouseTarget, Os, PageInfo,
+    UntrustedText, UrlPolicy, WaitFor, WaitUntil,
 };
 use synthesis_config::Env;
 use synthesis_core::ToolContext;
@@ -525,6 +525,7 @@ async fn approve_loopback(
 }
 browser_tool!(snapshot, "browser_snapshot", snap);
 browser_tool!(click, "browser_click", click_body);
+browser_tool!(mouse, "browser_mouse", mouse_body);
 browser_tool!(fill, "browser_fill", fill_body);
 browser_tool!(press_key, "browser_press_key", key);
 browser_tool!(wait_for, "browser_wait_for", wait);
@@ -870,6 +871,150 @@ async fn click_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     )))
 }
 
+/// A mouse target as the model gave it (`prefix` is "" or "to_"): ref, role+name or x+y.
+#[derive(Debug, PartialEq)]
+enum Aim<'a> {
+    Ref(&'a str),
+    Role(&'a str, &'a str),
+    Point(f64, f64),
+}
+
+fn aim<'a>(input: &'a Value, prefix: &str) -> Result<Option<Aim<'a>>, String> {
+    let f = |k: &str| input.get(format!("{prefix}{k}"));
+    let s = |k: &str| f(k).and_then(Value::as_str).filter(|v| !v.is_empty());
+    let n = |k: &str| match f(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .map(Some)
+            .ok_or(format!("\"{prefix}{k}\" must be a finite number.")),
+    };
+    let (x, y) = (n("x")?, n("y")?);
+    let given = [
+        s("ref").is_some(),
+        s("role").is_some() || s("name").is_some(),
+        x.is_some() || y.is_some(),
+    ];
+    match (given, s("ref"), s("role"), s("name"), x, y) {
+        ([false, false, false], ..) => Ok(None),
+        ([true, false, false], Some(r), ..) => Ok(Some(Aim::Ref(r))),
+        ([false, true, false], _, Some(role), Some(name), ..) => Ok(Some(Aim::Role(role, name))),
+        ([false, false, true], _, _, _, Some(x), Some(y)) => Ok(Some(Aim::Point(x, y))),
+        _ => Err(format!(
+            "give exactly one of: {p}ref, {p}role with {p}name, or {p}x with {p}y.",
+            p = prefix
+        )),
+    }
+}
+
+async fn target(rt: &BrowserRuntime, a: Aim<'_>) -> Result<MouseTarget, String> {
+    Ok(match a {
+        Aim::Ref(r) => MouseTarget::Ref(r.to_owned()),
+        Aim::Role(role, name) => MouseTarget::Ref(ref_by_role(rt, role, name).await?),
+        Aim::Point(x, y) => MouseTarget::Point(x, y),
+    })
+}
+
+fn shown(t: &MouseTarget) -> String {
+    match t {
+        MouseTarget::Ref(r) => r.clone(),
+        MouseTarget::Point(x, y) => format!("({}, {})", x.round(), y.round()),
+    }
+}
+
+/// `browser_mouse`: the agent's pointer. Goes through the same gates as `browser_click` (`browser_tool!`).
+async fn mouse_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
+    let act = str_field(input, "action").ok_or("\"action\" is required.")?;
+    let from = match aim(input, "")? {
+        Some(a) => Some(target(rt, a).await?),
+        None => None,
+    };
+    let need = |t: Option<MouseTarget>| t.ok_or("give ref, role and name, or x and y.");
+    let (op, kind) = match act {
+        "move" => (MouseOp::Move(need(from.clone())?), "hover"),
+        "click" => (MouseOp::Click(need(from.clone())?), "click"),
+        "double_click" => (MouseOp::DoubleClick(need(from.clone())?), "double_click"),
+        "right_click" => (MouseOp::RightClick(need(from.clone())?), "right_click"),
+        "drag" => {
+            let to = match aim(input, "to_")? {
+                Some(a) => target(rt, a).await?,
+                None => {
+                    return Err(
+                        "drag needs the end: to_ref, to_role and to_name, or to_x and to_y.".into(),
+                    );
+                }
+            };
+            (MouseOp::Drag(need(from.clone())?, to), "drag")
+        }
+        "wheel" => {
+            let d = |k: &str| match input.get(k) {
+                None | Some(Value::Null) => Ok(0.0),
+                Some(v) => v
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or(format!("\"{k}\" must be a finite number.")),
+            };
+            let m = synthesis_browser::MAX_WHEEL;
+            let (dx, dy) = (d("dx")?.clamp(-m, m), d("dy")?.clamp(-m, m));
+            if dx == 0.0 && dy == 0.0 {
+                return Err("wheel needs a non-zero dx or dy.".into());
+            }
+            (MouseOp::Wheel(from.clone(), dx, dy), "scroll")
+        }
+        _ => {
+            return Err(
+                "action is one of move, click, double_click, right_click, drag, wheel.".into(),
+            );
+        }
+    };
+    let spot = rt.mouse(&op).await?;
+    let at = match &op {
+        MouseOp::Drag(a, b) => format!("{} to {}", shown(a), shown(b)),
+        MouseOp::Wheel(_, dx, dy) => format!("by ({dx}, {dy})"),
+        MouseOp::Move(t) | MouseOp::Click(t) | MouseOp::DoubleClick(t) | MouseOp::RightClick(t) => {
+            shown(t)
+        }
+    };
+    // a point names no element: say which one is under it and on which origin (what a reviewer needs)
+    let by_point = match &op {
+        MouseOp::Drag(_, t) => matches!(t, MouseTarget::Point(..)),
+        MouseOp::Wheel(None, ..) => true,
+        MouseOp::Wheel(Some(t), ..)
+        | MouseOp::Move(t)
+        | MouseOp::Click(t)
+        | MouseOp::DoubleClick(t)
+        | MouseOp::RightClick(t) => matches!(t, MouseTarget::Point(..)),
+    };
+    let label = if by_point {
+        let el = rt
+            .element_at(spot.x, spot.y)
+            .await
+            .unwrap_or_else(|| "?".into());
+        let origin = current_page(rt)
+            .await
+            .and_then(|u| url::Url::parse(&u).ok())
+            .map_or(String::new(), |u| u.origin().ascii_serialization());
+        // the origin first: the 80-character clip of the target keeps it
+        format!(
+            "{origin} {el} at {}",
+            shown(&MouseTarget::Point(spot.x, spot.y))
+        )
+    } else {
+        match &op {
+            MouseOp::Drag(_, b) => shown(b),
+            _ => from.as_ref().map_or_else(|| act.to_owned(), shown),
+        }
+    };
+    Ok(
+        ToolOutput::text(format!("Mouse {act} {at}.")).with_meta(action(
+            kind,
+            Some(spot),
+            Some(&label),
+        )),
+    )
+}
+
 async fn fill_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     let Some(r) = str_field(input, "ref") else {
         return Err(if input.get("selector").is_some() {
@@ -1129,6 +1274,43 @@ mod png_tests {
         p.extend([0, 0, 5, 0, 0, 0, 2, 208]);
         assert_eq!(super::png_size(&p), (1280, 720));
         assert_eq!(super::png_size(b"nope"), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    #[test]
+    fn a_target_is_exactly_one_of_ref_role_name_or_a_finite_point() {
+        assert_eq!(aim(&json!({}), ""), Ok(None));
+        assert_eq!(aim(&json!({"ref": "e1"}), ""), Ok(Some(Aim::Ref("e1"))));
+        assert_eq!(
+            aim(&json!({"role": "button", "name": "Go"}), ""),
+            Ok(Some(Aim::Role("button", "Go")))
+        );
+        assert_eq!(
+            aim(&json!({"x": 1.5, "y": 2}), ""),
+            Ok(Some(Aim::Point(1.5, 2.0)))
+        );
+        assert_eq!(
+            aim(&json!({"to_x": 1, "to_y": 2}), "to_"),
+            Ok(Some(Aim::Point(1.0, 2.0)))
+        );
+        for bad in [
+            json!({"x": 1}),
+            json!({"y": 1}),
+            json!({"role": "button"}),
+            json!({"ref": "e1", "x": 1, "y": 1}),
+            json!({"ref": "e1", "role": "a", "name": "b"}),
+            json!({"x": "1", "y": 1}),
+            json!({"x": null, "y": 1}),
+            json!({"x": true, "y": 1}),
+        ] {
+            assert!(aim(&bad, "").is_err(), "{bad}");
+        }
+        // the end of a drag is not read from the start's keys
+        assert_eq!(aim(&json!({"x": 1, "y": 2}), "to_"), Ok(None));
     }
 }
 

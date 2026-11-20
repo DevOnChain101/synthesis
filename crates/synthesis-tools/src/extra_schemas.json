@@ -41,6 +41,30 @@
     }
   },
   {
+    "name": "browser_mouse",
+    "description": "Moves and controls the mouse pointer on the current page. action: move (hover), click, double_click, right_click, drag (from the target to to_*), wheel (scroll by dx, dy at the target or where the pointer is). Aim with a ref from browser_snapshot, with role and name, or with x and y in CSS pixels of the viewport (0,0 is the top left; a point outside the viewport is refused). Wheel deltas are clamped to +-5000. Use browser_click for a plain click on an element.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "enum": ["move", "click", "double_click", "right_click", "drag", "wheel"] },
+        "ref": { "type": "string", "description": "Element ref such as e12." },
+        "role": { "type": "string", "description": "Accessibility role (use with name)." },
+        "name": { "type": "string", "description": "Accessible name (use with role)." },
+        "x": { "type": "number", "description": "Viewport x in CSS pixels (use with y)." },
+        "y": { "type": "number", "description": "Viewport y in CSS pixels (use with x)." },
+        "to_ref": { "type": "string", "description": "drag: end element ref." },
+        "to_role": { "type": "string", "description": "drag: end role (use with to_name)." },
+        "to_name": { "type": "string", "description": "drag: end accessible name." },
+        "to_x": { "type": "number", "description": "drag: end x (use with to_y)." },
+        "to_y": { "type": "number", "description": "drag: end y." },
+        "dx": { "type": "number", "description": "wheel: horizontal delta in pixels (positive scrolls right)." },
+        "dy": { "type": "number", "description": "wheel: vertical delta in pixels (positive scrolls down)." }
+      },
+      "required": ["action"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "browser_fill",
     "description": "Replaces the content of a text field (by ref from browser_snapshot) with value. Set sensitive: true for passwords, tokens and other secrets: the value is then never echoed, logged or stored in events.",
     "input_schema": {

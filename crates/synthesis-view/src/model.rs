@@ -228,6 +228,35 @@ fn truthy_str<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
+/// `browser_mouse`: the action and where it goes, from the input alone (numbers, the ref or role and name).
+fn mouse_summary(input: &Value) -> String {
+    let n = |k: &str| {
+        input
+            .get(k)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+    };
+    let at = |p: &str| match (n(&format!("{p}x")), n(&format!("{p}y"))) {
+        (Some(x), Some(y)) => Some(format!("({}, {})", x.round(), y.round())),
+        _ => truthy_str(input, &format!("{p}ref")).map(str::to_owned),
+    };
+    let mut out = truthy_str(input, "action").unwrap_or("?").to_owned();
+    if let Some(a) = at("") {
+        out += &format!(" {a}");
+    }
+    if let Some(b) = at("to_") {
+        out += &format!(" -> {b}");
+    }
+    if n("dx").is_some() || n("dy").is_some() {
+        out += &format!(
+            " by ({}, {})",
+            n("dx").unwrap_or(0.0),
+            n("dy").unwrap_or(0.0)
+        );
+    }
+    out
+}
+
 pub fn summarize_tool(name: &str, input: &Value) -> String {
     let s = |k: &str| str_of(input, k);
     let first = |a: &'static str, b: &'static str| -> String {
@@ -284,6 +313,7 @@ pub fn summarize_tool(name: &str, input: &Value) -> String {
                 80,
             )
         }
+        "browser_mouse" => short(&mouse_summary(input), 80),
         "SendMessage" => short(
             &format!(
                 "→ {}: {}",
