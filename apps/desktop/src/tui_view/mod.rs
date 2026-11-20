@@ -85,7 +85,7 @@ pub const ICONS: [&str; 28] = [
     "link",
     "database",
     "arrow-up",
-    "x",
+    "close",
 ];
 
 /// The tabs of the centre panel (`STATE.bottomTabs`).

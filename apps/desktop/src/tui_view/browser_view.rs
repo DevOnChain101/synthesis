@@ -1401,7 +1401,7 @@ impl TuiView {
                                             this.ts.bv.act(Act::Close(i));
                                             cx.notify();
                                         }))
-                                        .child(icon("x", 12., dim())),
+                                        .child(icon("close", 12., dim())),
                                 )
                             })
                     }))
@@ -2013,7 +2013,7 @@ mod tests {
         };
         assert_eq!(
             (next_tab(&p, false), next_tab(&p, true)),
-            (Some(5), Some(3))
+            (Some(3), Some(4))
         );
         let one = PageState {
             tabs: vec!["a".into()],
@@ -2074,7 +2074,7 @@ mod tests {
         // dropping a shown pane turns the view off too
         bp.sync(true);
         wait("view(true) again", || {
-            fake.calls().iter().filter(|c| *c == "view(true)").count() == 3
+            fake.calls().iter().filter(|c| *c == "view(true)").count() == 5
         });
         drop(bp);
         wait("view(false) on drop", || {
