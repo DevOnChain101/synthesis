@@ -7,6 +7,7 @@ mod cdp;
 mod discover;
 mod error;
 mod input;
+mod mouse;
 mod policy;
 pub mod profile;
 mod redact;
@@ -19,6 +20,7 @@ pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
 pub use input::{ALT, CTRL, MAX_TEXT, META, PageButton, PageInput, SHIFT};
+pub use mouse::{MAX_WHEEL, MouseOp, MouseTarget};
 pub use policy::{Origin, Resolver, UrlPolicy, loopback_target};
 pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use screencast::{Frame, FrameMeta, FrameStream};
@@ -167,6 +169,11 @@ struct Tab {
     refs: Mutex<RefTable>,
     /// The isolated world of `typing_blocked` (execution context id), made once and renewed when it is gone.
     input_world: Mutex<Option<i64>>,
+    /// Where the agent's mouse last was (`mouse.rs`).
+    mouse: Mutex<Option<(f64, f64)>>,
+    /// One mouse action at a time per tab, and the button an unfinished one holds (`mouse.rs`).
+    mouse_lock: tokio::sync::Mutex<()>,
+    pressed: Mutex<mouse::Held>,
 }
 
 #[derive(Default)]
@@ -1089,6 +1096,9 @@ impl BrowserRuntime {
             session,
             refs: Mutex::default(),
             input_world: Mutex::default(),
+            mouse: Mutex::default(),
+            mouse_lock: tokio::sync::Mutex::default(),
+            pressed: Mutex::default(),
         });
         for m in [
             "Page.enable",

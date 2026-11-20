@@ -15,6 +15,9 @@ enum Kind {
     Scroll,
     Navigate,
     Press,
+    DoubleClick,
+    RightClick,
+    Drag,
     Other,
 }
 
@@ -27,6 +30,9 @@ impl Kind {
             "scroll" => Self::Scroll,
             "navigate" => Self::Navigate,
             "press" => Self::Press,
+            "double_click" => Self::DoubleClick,
+            "right_click" => Self::RightClick,
+            "drag" => Self::Drag,
             _ => Self::Other,
         }
     }
@@ -39,6 +45,9 @@ impl Kind {
             Self::Scroll => "scroll",
             Self::Navigate => "navigate",
             Self::Press => "press",
+            Self::DoubleClick => "double_click",
+            Self::RightClick => "right_click",
+            Self::Drag => "drag",
             Self::Other => "other",
         }
     }
@@ -107,6 +116,13 @@ mod tests {
             "other"
         );
         assert_eq!(ev("browser_click", json!({})).0, "other");
+    }
+
+    #[test]
+    fn the_mouse_gestures_are_in_the_fixed_set() {
+        for k in ["double_click", "right_click", "drag", "hover", "scroll"] {
+            assert_eq!(ev("browser_mouse", json!({"action": k})).0, k);
+        }
     }
 
     #[test]
