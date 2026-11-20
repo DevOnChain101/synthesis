@@ -1706,7 +1706,7 @@ async fn an_agent_only_session_reads_console_network_and_tabs_without_a_prompt()
     reg.close_session("rw-agent");
 }
 
-const MOUSE_PAGE: &str = r#"<html><head><title>Mouse</title><style>body{margin:0}
+const MOUSE_PAGE: &str = r#"<html><head><title>Mouse</title><style>body{margin:0;user-select:none}
 #m{position:absolute;left:100px;top:100px;width:100px;height:40px;background:#ccc}
 #h{position:absolute;left:300px;top:100px;width:20px;height:20px;background:red}
 #tall{position:absolute;top:0;left:0;width:1px;height:4000px}</style></head><body>
