@@ -331,6 +331,8 @@ fn citations_that_escape_the_folder_are_refused() {
         "link.txt",
         "sub/up/outside.txt",
         ".env",
+        &format!(".{}/x", "synthesis"),
+        ".SYNT/x",
         "a.txt\\..\\x",
         "C:x",
         "",
@@ -644,4 +646,122 @@ fn open_review_after_a_crash_opens_one_review() {
     )
     .unwrap();
     assert_eq!(review(&w).brief["evidence"]["citations_verified"], "1 of 1");
+}
+
+/// A finished attempt with a report and no review (a store that did not come from this settle):
+/// the verifier fails it so a new attempt makes one, instead of waiting for ever.
+#[test]
+fn the_verifier_fails_a_finished_report_that_has_no_review() {
+    let r = rig();
+    let root = folder(&r);
+    let c = contract_ro();
+    let (mut w, it) = ro_outcome(&r, &root, &c);
+    let env = allocate(&r, &mut w, &it, &root);
+    write_report(&r, &w, &env.session_id, &deliverable(good()));
+    let report = attempt_report(&r.store, &env.session_id).unwrap();
+    {
+        let rev = w.list_attempts(&it).unwrap()[0].revision;
+        w.transition_attempt(
+            &env.attempt.id,
+            rev,
+            AttemptState::Running,
+            &AttemptEnd::default(),
+            &Effects::default(),
+        )
+        .unwrap();
+    }
+    finish_in_place(
+        &mut w,
+        &env.attempt,
+        WorkerEnd::Completed.task_status(),
+        Some(&report.subject()),
+    )
+    .unwrap();
+    for to in [WorkItemState::Running, WorkItemState::Verifying] {
+        let rev = w.get_work_item(&it).unwrap().revision;
+        w.transition_work_item(&it, rev, to, &Effects::default())
+            .unwrap();
+    }
+    assert!(w.list_decisions(w.id()).unwrap().is_empty());
+    let mut v = IndependentVerifier::for_outcome(
+        &w,
+        root,
+        r.home.clone(),
+        Arc::new(Idle),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(matches!(tick(&mut v, &mut w, &it), Verdict::Failed(_)));
+}
+
+/// kill -9 after the review was opened and before the attempt was finished: recovery settles it
+/// and finds the same review.
+#[test]
+fn kill_9_after_the_review_is_opened_keeps_one_review() {
+    let r = rig();
+    let root = folder(&r);
+    let c = contract_ro();
+    let (mut w, it) = ro_outcome(&r, &root, &c);
+    let env = allocate(&r, &mut w, &it, &root);
+    let rev = w.list_attempts(&it).unwrap()[0].revision;
+    w.transition_attempt(
+        &env.attempt.id,
+        rev,
+        AttemptState::Running,
+        &AttemptEnd::default(),
+        &Effects::default(),
+    )
+    .unwrap();
+    let rev = w.get_work_item(&it).unwrap().revision;
+    w.transition_work_item(&it, rev, WorkItemState::Running, &Effects::default())
+        .unwrap();
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    w.record_worker(&env.attempt.id, env.attempt.fence, pid, Some("tok"))
+        .unwrap();
+    write_report(&r, &w, &env.session_id, &deliverable(good()));
+    let mut sw = r.store.open_attempt_session(&w, &env.session_id).unwrap();
+    for to in [
+        SessionStatus::Running,
+        SessionStatus::Verifying,
+        SessionStatus::Completed,
+    ] {
+        sw.update_status(to, None).unwrap();
+    }
+    drop(sw);
+    let report = attempt_report(&r.store, &env.session_id).unwrap();
+    let item = w.get_work_item(&it).unwrap();
+    open_review(
+        &mut w,
+        &item,
+        &env.attempt,
+        &report,
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    let id = w.id().clone();
+    drop(w);
+    let mut w = r.store.open_outcome(&id, &policy()).unwrap();
+    let rep = recover_attempts(
+        &r.store,
+        &r.wm,
+        &OsProbe,
+        &mut w,
+        OffsetDateTime::now_utc(),
+        Duration::from_secs(120),
+        3,
+        Platform {
+            native_windows: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(rep.settled.len(), 1, "{rep:?}");
+    assert_eq!(
+        w.get_work_item(&it).unwrap().state,
+        WorkItemState::Verifying
+    );
+    let d = review(&w);
+    assert_eq!(w.decision_state(&d.id).unwrap(), DecisionState::Pending);
+    assert_eq!(w.authentic_evidence(w.id()).unwrap().len(), 1);
 }

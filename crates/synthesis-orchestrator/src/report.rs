@@ -177,9 +177,12 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
         return no("the path is not a plain path inside the folder");
     }
     let state = |x: Component| {
-        x.as_os_str()
-            .to_str()
-            .is_none_or(|n| matches!(n.to_ascii_lowercase().as_str(), ".git" | ".synt"))
+        x.as_os_str().to_str().is_none_or(|n| {
+            matches!(
+                n.to_ascii_lowercase().as_str(),
+                ".git" | ".synt" | ".synthesis" // the legacy state folder may still be on disk
+            )
+        })
     };
     if rel.components().any(state) || is_secret_shaped(rel) {
         return no("a secret or state path is never cited");
@@ -565,7 +568,9 @@ pub(crate) fn review_verdict(
     }
     // nothing answered: an open decision waits, otherwise the newest one is asked again
     let Some(last) = mine.pop() else {
-        return Ok(Verdict::Pending);
+        // no review exists for a finished attempt (the settle opens it before finishing, so this is
+        // a store from elsewhere): fail it so a new attempt makes one, never wait for ever
+        return Ok(Verdict::Failed("the report has no review".into()));
     };
     let rebriefs = last.brief["rebrief"].as_u64().unwrap_or(0);
     match w.decision_state(&last.id)? {
