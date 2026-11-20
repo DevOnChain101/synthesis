@@ -63,7 +63,7 @@ fn fake_engine(mode: &str) {
                 // a conductor-role engine says so, with its tools; "host-norole" is an older engine that ignores `role`
                 if mode.starts_with("host-") && mode != "host-bare" && mode != "host-norole" {
                     ok["role"] = json!("conductor");
-                    ok["tools"] = json!(["conductor_list"]);
+                    ok["tools"] = json!(synthesis_app::conductor::TOOLS);
                 }
                 say(json!({"msg":"result","id":id,"ok":ok}))
             }
@@ -79,16 +79,16 @@ fn fake_engine(mode: &str) {
                     "event-flood" => (0..20_000).for_each(|_| println!("{EVENT}")),
                     "forged-restart" => say(json!({"msg":"restarted"})),
                     "host-bare" | "host-ok" => {
-                        say(json!({"msg":"host.call","id":1,"tool":"conductor_list","input":{}}))
+                        say(json!({"msg":"host.call","id":1,"tool":"conductor_list_sessions","input":{}}))
                     }
                     "host-twice" => (1..=2).for_each(|i| {
-                        say(json!({"msg":"host.call","id":i,"tool":"conductor_list","input":{}}))
+                        say(json!({"msg":"host.call","id":i,"tool":"conductor_list_sessions","input":{}}))
                     }),
                     "host-unknown-tool" => {
                         say(json!({"msg":"host.call","id":1,"tool":"Bash","input":{"command":"ls"}}))
                     }
                     "host-big" => say(
-                        json!({"msg":"host.call","id":1,"tool":"conductor_list","input":{"x":"a".repeat(70_000)}}),
+                        json!({"msg":"host.call","id":1,"tool":"conductor_list_sessions","input":{"x":"a".repeat(70_000)}}),
                     ),
                     "hello-flood" => (0..150).for_each(|_| {
                         say(json!({"msg":"hello","version":VERSION,"protocol":PROTOCOL}))
@@ -559,12 +559,12 @@ fn a_refused_restart_leaves_the_session_running() {
     drop(e);
 }
 
-/// A host that answers `conductor_list` after `ms`.
+/// A host that answers a call after `ms`.
 struct SlowHost(u64);
 
 impl synthesis_app::host_tools::HostTools for SlowHost {
     fn specs(&self) -> Vec<synthesis_tools::ToolSpec> {
-        synthesis_app::host_tools::stub_specs()
+        synthesis_app::conductor::specs()
     }
 
     fn call<'a>(

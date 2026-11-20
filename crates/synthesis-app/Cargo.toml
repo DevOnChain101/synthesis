@@ -26,7 +26,8 @@ synthesis-core = { path = "../synthesis-core" }
 synthesis-egress = { path = "../synthesis-egress" }
 dunce = "1.0.5"
 synthesis-events = { path = "../synthesis-events" }
-synthesis-harness = { path = "../synthesis-harness" }
+# the approval-card code (conductor/exec.rs) builds the person's approval token; tests/person_approved_guard.rs allows only that file
+synthesis-harness = { path = "../synthesis-harness", features = ["approval-card", "approval-card-in-release"] }
 synthesis-hooks = { path = "../synthesis-hooks" }
 synthesis-mcp = { path = "../synthesis-mcp" }
 synthesis-orchestrator = { path = "../synthesis-orchestrator" }
