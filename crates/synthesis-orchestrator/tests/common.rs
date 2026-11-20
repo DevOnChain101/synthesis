@@ -77,6 +77,7 @@ pub fn contract() -> Contract {
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "goal".into(),
         criteria: vec![crit("c1")],

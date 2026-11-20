@@ -16,7 +16,9 @@ use clap::{Args, Subcommand};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use synthesis_config::Env;
-use synthesis_core::outcome::{Contract, ContractCheck, ContractCriterion, Envelope};
+use synthesis_core::outcome::{
+    Budgets, Contract, ContractCheck, ContractCriterion, ContractKind, Envelope,
+};
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
@@ -44,6 +46,12 @@ pub struct OutcomeArgs {
     pub cmd: OutcomeCmd,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum KindArg {
+    Write,
+    ReadOnly,
+}
+
 #[derive(Subcommand)]
 pub enum OutcomeCmd {
     /// Create an outcome (contract v1, waiting for your approval).
@@ -51,19 +59,33 @@ pub enum OutcomeCmd {
         /// What must be true when it is done.
         #[arg(long)]
         goal: String,
+        /// `write` (default): a worktree, checks and a git repository. `read-only`: the worker
+        /// only reads the folder (any directory) and sends back a report that you review; it
+        /// takes `--max-cost-usd` and optional `--rubric` lines instead of the definition files.
+        #[arg(long, value_enum, default_value = "write")]
+        kind: KindArg,
         /// JSON array of criteria (`id`, `text`, optional `mandatory`, `required_trust`, `check_ids`).
         #[arg(long, value_name = "FILE")]
-        criteria_file: PathBuf,
+        criteria_file: Option<PathBuf>,
         /// JSON envelope (`allowed_paths`, `denied_paths`, `capabilities`, `budgets`).
         #[arg(long, value_name = "FILE")]
-        envelope_file: PathBuf,
+        envelope_file: Option<PathBuf>,
         /// JSON array of frozen checks (`id`, `command`) run on a fresh checkout of the result.
         #[arg(long, value_name = "FILE")]
         checks_file: Option<PathBuf>,
         /// Full commit id the work starts from (for example the output of `git rev-parse HEAD`).
         #[arg(long)]
-        base_commit: String,
-        /// Repository folder (default: the current directory).
+        base_commit: Option<String>,
+        /// Read-only only: what you accept to spend, in USD.
+        #[arg(long)]
+        max_cost_usd: Option<f64>,
+        /// Read-only only: attempts allowed, the first included (default 3).
+        #[arg(long)]
+        max_attempts: Option<u32>,
+        /// Read-only only: a line you will judge the report by (repeatable).
+        #[arg(long = "rubric", value_name = "LINE")]
+        rubric: Vec<String>,
+        /// Folder (default: the current directory); a git repository for a write goal.
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -466,18 +488,61 @@ pub fn dispatch<T: Transport>(
     match cmd {
         OutcomeCmd::Create {
             goal,
+            kind,
             criteria_file,
             envelope_file,
             checks_file,
             base_commit,
+            max_cost_usd,
+            max_attempts,
+            rubric,
             cwd,
         } => {
-            let criteria: Vec<ContractCriterion> = read_json(&criteria_file, "criteria")?;
-            let envelope: Envelope = read_json(&envelope_file, "envelope")?;
-            let checks: Vec<ContractCheck> = match checks_file {
-                Some(f) => read_json(&f, "checks")?,
-                None => vec![],
+            // a read-only goal is the goal and a budget; the other kind needs its definition files
+            let read_only = kind == KindArg::ReadOnly;
+            let contract = if read_only {
+                if criteria_file.is_some()
+                    || envelope_file.is_some()
+                    || checks_file.is_some()
+                    || base_commit.is_some()
+                {
+                    return Err("a read-only goal takes no criteria, envelope or checks file and no base commit: use --max-cost-usd and --rubric".into());
+                }
+                let cost = max_cost_usd.ok_or("a read-only goal needs --max-cost-usd")?;
+                let mut budgets = Budgets::new(cost);
+                budgets.max_attempts_per_work_item =
+                    max_attempts.unwrap_or(budgets.max_attempts_per_work_item);
+                Contract::read_only(goal, &rubric, budgets)
+            } else {
+                if max_cost_usd.is_some() || max_attempts.is_some() || !rubric.is_empty() {
+                    return Err(
+                        "--max-cost-usd, --max-attempts and --rubric are for --kind read-only"
+                            .into(),
+                    );
+                }
+                let (Some(criteria_file), Some(envelope_file)) = (criteria_file, envelope_file)
+                else {
+                    return Err("a write goal needs --criteria-file and --envelope-file".into());
+                };
+                let criteria: Vec<ContractCriterion> = read_json(&criteria_file, "criteria")?;
+                let envelope: Envelope = read_json(&envelope_file, "envelope")?;
+                let checks: Vec<ContractCheck> = match checks_file {
+                    Some(f) => read_json(&f, "checks")?,
+                    None => vec![],
+                };
+                Contract {
+                    kind: ContractKind::Write,
+                    version: 1,
+                    goal,
+                    criteria,
+                    envelope,
+                    checks,
+                }
             };
+            let base_commit = base_commit.unwrap_or_default();
+            if !read_only && base_commit.is_empty() {
+                return Err("a write goal needs --base-commit".into());
+            }
             let dir = match cwd {
                 Some(d) => d,
                 None => launch_dir()?,
@@ -485,13 +550,6 @@ pub fn dispatch<T: Transport>(
             let dir = synthesis_core::canonicalize(&dir)
                 .map_err(|x| format!("{}: {x}", dir.display()))?;
             let ws = dir.to_str().ok_or("the folder path is not valid UTF-8")?;
-            let contract = Contract {
-                version: 1,
-                goal,
-                criteria,
-                envelope,
-                checks,
-            };
             let v = c.create(ws, &base_commit, contract).map_err(e)?;
             let (id, hash) = (text(&v, "id"), text(&v, "contract_hash"));
             // both are printed in commands to paste: a shape the server does not make is not shown
@@ -505,6 +563,9 @@ pub fn dispatch<T: Transport>(
                     "contract_version": v.get("contract_version"), "contract_hash": hash}))?;
             } else {
                 p.line(&format!("Created outcome {id} ({}).", text(&v, "state")))?;
+                if read_only {
+                    p.line("Report review is not available yet: the goal will wait in Verifying until you cancel it.")?;
+                }
                 p.line(&format!("Review: synt outcome contract {id}"))?;
                 p.line(&format!(
                     "Approve: synt outcome approve {id} --version {} --hash {hash}",

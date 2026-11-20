@@ -269,6 +269,101 @@ fn create_approve_start_status_cancel_through_the_owner_process() {
     assert_eq!(r.json(&["status", &id])["outcome"]["state"], "cancelled");
 }
 
+/// A read-only goal: the goal and a budget, in a folder that is not a git repository; the plan is
+/// one `research` item, and the contract the person approves says what kind it is.
+#[test]
+fn ro_create_read_only_goal_in_a_plain_folder_through_the_owner_process() {
+    let r = rig(true);
+    let (code, _, err) = r.synt(&["enable", "--yes"]);
+    assert_eq!(code, 0, "{err}");
+    let plain = r.base.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let plain = plain.to_string_lossy().into_owned();
+    // the other kind's inputs are refused, and a budget is required
+    for extra in [
+        vec!["--base-commit", r.head.as_str()],
+        vec!["--criteria-file", "x.json"],
+        vec!["--envelope-file", "x.json"],
+        vec![],
+    ] {
+        let mut a = vec![
+            "create",
+            "--kind",
+            "read-only",
+            "--goal",
+            "g",
+            "--cwd",
+            plain.as_str(),
+        ];
+        a.extend(extra.iter().copied());
+        let (code, out, err) = r.synt(&a);
+        assert_eq!(code, 2, "{a:?}: {out} {err}");
+    }
+    let (code, ..) = r.synt(&[
+        "create",
+        "--goal",
+        "g",
+        "--max-cost-usd",
+        "1",
+        "--cwd",
+        &plain,
+    ]);
+    assert_eq!(code, 2, "a write goal takes no read-only options");
+    let made = r.json(&[
+        "create",
+        "--kind",
+        "read-only",
+        "--goal",
+        "review the folder",
+        "--max-cost-usd",
+        "1.5",
+        "--rubric",
+        "names the risks",
+        "--cwd",
+        &plain,
+    ]);
+    let (id, hash) = (
+        made["id"].as_str().unwrap().to_string(),
+        made["contract_hash"].as_str().unwrap().to_string(),
+    );
+    let (code, out, err) = r.synt(&[
+        "create",
+        "--kind",
+        "read-only",
+        "--goal",
+        "again",
+        "--max-cost-usd",
+        "1",
+        "--cwd",
+        &plain,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Report review is not available yet"), "{out}");
+    let c = r.json(&["contract", &id]);
+    assert_eq!(c["contract"]["kind"], "read_only", "{c}");
+    assert_eq!(
+        c["contract"]["criteria"].as_array().unwrap().len(),
+        2,
+        "{c}"
+    );
+    let (code, out, err) = r.synt(&["approve", &id, "--version", "1", "--hash", &hash]);
+    assert!(
+        code == 0 && out.starts_with("outcome.contract.approve: done"),
+        "{out} {err}"
+    );
+    let (code, out, err) = r.synt(&["start", &id]);
+    assert!(
+        code == 0 && out.starts_with("outcome.start: done"),
+        "{out} {err}"
+    );
+    let s = r.json(&["status", &id]);
+    let items = s["work_items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{s}");
+    assert_eq!(items[0]["key"], "research", "{s}");
+    let (code, ..) = r.synt(&["cancel", &id]);
+    assert_eq!(code, 0);
+}
+
 fn seeded(r: &Rig) -> (String, String) {
     let store = Store::open(
         &r.home,
@@ -282,6 +377,7 @@ fn seeded(r: &Rig) -> (String, String) {
     let mut caps = BTreeMap::new();
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     let contract = Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "decide".into(),
         criteria: vec![ContractCriterion {

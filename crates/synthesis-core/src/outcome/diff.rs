@@ -57,6 +57,7 @@ fn limit_up<T: PartialOrd>(old: Option<T>, new: Option<T>) -> bool {
 pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
     let Contract {
         version: _,
+        kind: ok,
         goal: og,
         criteria: oc,
         envelope: oe,
@@ -64,6 +65,7 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
     } = old;
     let Contract {
         version: _,
+        kind: nk,
         goal: ng,
         criteria: nc,
         envelope: ne,
@@ -81,6 +83,17 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
         }
     };
     put(&mut d, "goal", "", Some(og.clone()), Some(ng.clone()));
+    // never a quiet change: the store refuses a revision that changes the kind, and the diff says so
+    put(
+        &mut d,
+        "kind",
+        "",
+        Some(format!("{ok:?}")),
+        Some(format!("{nk:?}")),
+    );
+    if ok != nk {
+        d.weakens.push("the kind of the goal changed".into());
+    }
 
     let by = |v: &[super::ContractCriterion]| {
         v.iter()

@@ -25,14 +25,14 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
-use synthesis_core::outcome::{Contract, DecisionState, OutcomeId, OutcomeState};
+use synthesis_core::outcome::{Contract, ContractKind, DecisionState, OutcomeId, OutcomeState};
 use synthesis_orchestrator::{
     Allocator, Control, DecisionDriver, IndependentVerifier, ModelPlanner, PlanCfg, PlanRun,
     PlanWait, Planner, Platform, ProcessHost, ReasonCode, Runner, SandboxRunner, SchedConfig,
     Scheduler, Stop, StubPlanner, SyntSpawn, answered_plans, answered_waiting, apply_lifecycle,
-    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, needs_model_plan, plan_wait,
-    record_planner_failed, recover_attempts, recover_plan_runs, replan_after_revise, replan_open,
-    restore_pause, start_plan_run, wall_secs,
+    apply_queued_with, awaiting_rebrief, awaiting_replan, conclude, is_read_only, needs_model_plan,
+    plan_wait, record_planner_failed, recover_attempts, recover_plan_runs, replan_after_revise,
+    replan_open, restore_pause, start_plan_run, wall_secs,
 };
 use synthesis_peers::net::{Listener, prepare_run_dir};
 use synthesis_peers::{platform_ok, run_dir};
@@ -524,7 +524,15 @@ impl<'a> Owner<'a> {
             log(&format!("outcome {id}: commands: {e}"));
         }
         // with a model planner the plan comes from a planning run and the person's approval
-        let planner: &dyn Planner = if self.planner.is_some() {
+        // the kind decides who plans; if it cannot be read, nothing is planned this step
+        let read_only = match is_read_only(&ow.w) {
+            Ok(r) => r,
+            Err(e) => {
+                log(&format!("outcome {id}: cannot read its contract: {e}"));
+                return true;
+            }
+        };
+        let planner: &dyn Planner = if self.planner.is_some() && !read_only {
             &ModelPlanner
         } else {
             &StubPlanner
@@ -842,14 +850,31 @@ impl<'a> Owner<'a> {
         pol: &OutcomePolicy,
         by: Principal,
     ) -> Result<Value, String> {
-        if !commit_id(&base_commit) {
+        // a read-only goal runs in place in any folder: no commit, no git (S1 section 2.6); a
+        // write goal keeps the commit rule
+        let read_only = contract.kind == ContractKind::ReadOnly;
+        if read_only {
+            if !base_commit.is_empty() {
+                return Err("a read-only goal has no base commit".into());
+            }
+        } else if !commit_id(&base_commit) {
             return Err("base_commit must be a full lowercase commit id".into());
         }
         let root = Path::new(workspace);
         if !root.is_absolute() || !root.is_dir() {
             return Err("workspace must be an existing absolute directory".into());
         }
-        self.wm.verify_base(root, &base_commit).map_err(s)?;
+        if read_only {
+            // an unknown home gives an empty path, which the check refuses
+            let user = crate::homes(&Env::from_process())
+                .map(|h| h.user)
+                .unwrap_or_default();
+            if let Some(why) = read_only_folder_refusal(root, &user, &self.home) {
+                return Err(why);
+            }
+        } else {
+            self.wm.verify_base(root, &base_commit).map_err(s)?;
+        }
         let art = self.home.join("artifacts");
         let open = |id: String| {
             WorkspaceContext::open(id, root, root, &[], art.join("outcome"), "orchestrator")
@@ -910,6 +935,41 @@ impl<'a> Owner<'a> {
                   "disclosure": {"id": DISCLOSURE_ID, "text": INTEGRITY_DISCLOSURE}}),
         )
     }
+}
+
+/// A read-only worker reads its whole folder, so the folder must not be, hold or sit above the
+/// user's home, Synthesis's own home (state, keys) or the filesystem root, and must not be, hold or
+/// sit inside a credential store (`~/.config`, `~/.docker`, `~/Library`, `~/.kube` ...: the
+/// `--sandbox-read` check). An unknown home fails closed. `None`: allowed. Used when the goal is
+/// created and again when an attempt starts (the folder may have been swapped for a symlink).
+pub(crate) fn read_only_folder_refusal(root: &Path, user: &Path, synt: &Path) -> Option<String> {
+    if user.as_os_str().is_empty() {
+        return Some("cannot tell where your home folder is (HOME or USERPROFILE is not set), so no folder can be checked".into());
+    }
+    let real = |p: &Path| synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = match synthesis_core::canonicalize(root) {
+        Ok(r) => r,
+        Err(e) => return Some(format!("{}: {e}", root.display())),
+    };
+    let (user, synt) = (real(user), real(synt));
+    let mut deny = synthesis_sandbox::credential_dirs(&user);
+    deny.extend(synthesis_sandbox::synthesis_state_paths(&synt));
+    let policy = synthesis_sandbox::SandboxPolicy {
+        deny_paths: deny,
+        ..Default::default()
+    };
+    let credential = policy.check_read_root(&root).err();
+    let holds = |h: &Path| !h.as_os_str().is_empty() && h.starts_with(&root);
+    let wide = root.parent().is_none()
+        || holds(&user)
+        || holds(&synt)
+        || (!synt.as_os_str().is_empty() && root.starts_with(&synt));
+    (wide || credential.is_some()).then(|| {
+        format!(
+            "a read-only goal needs a project folder: not your home folder, a folder that holds it, the filesystem root, a credential folder or Synthesis's own folder{}",
+            credential.map_or(String::new(), |c| format!(" ({c})"))
+        )
+    })
 }
 
 /// The notifications an outcome owes the person now (ADR-021 section 4): ids and codes only, once
@@ -1303,6 +1363,46 @@ async fn wait_for_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ro-folder-refused`: a read-only goal cannot name the home folder, a folder that holds it,
+    /// the filesystem root, or Synthesis's own folder (or anything in it).
+    #[test]
+    fn a_read_only_folder_is_never_home_above_home_root_or_synthesis_state() {
+        let t = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(t.path()).unwrap();
+        let (home, synt) = (base.join("u"), base.join("u/.synt"));
+        let proj = home.join("code/proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&synt).unwrap();
+        let refused = |p: &Path| read_only_folder_refusal(p, &home, &synt).is_some();
+        assert!(!refused(&proj), "a project below home is fine");
+        for bad in [&home, &base, &synt, &synt.join("sessions")] {
+            if bad.exists() {
+                assert!(refused(bad), "{bad:?}");
+            }
+        }
+        assert!(refused(Path::new("/")));
+        // credential stores chosen directly, and a folder that holds one
+        for d in [".config", ".docker", ".kube", "Library", ".config/gh"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
+        for d in [".config", ".docker", ".kube", "Library", ".config/gh"] {
+            assert!(refused(&home.join(d)), "{d}");
+        }
+        // an unknown home fails closed
+        assert!(
+            read_only_folder_refusal(&proj, Path::new(""), &synt)
+                .is_some_and(|m| m.contains("home folder"))
+        );
+        // a project folder reached through a symlink to home is home
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            assert!(refused(&link));
+        }
+    }
 
     #[test]
     fn idle_exit_needs_no_outcome_no_client_and_quiet_minutes() {

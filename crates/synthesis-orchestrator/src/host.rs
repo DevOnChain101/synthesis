@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use synthesis_config::is_invisible_or_blank;
-use synthesis_core::outcome::Contract;
+use synthesis_core::outcome::{Contract, ContractKind};
 use synthesis_session::outcome::{OutcomePolicy, OutcomeWriter, WorkItemRecord};
 use time::OffsetDateTime;
 
@@ -120,21 +120,37 @@ impl WorkerHost for ProcessHost<'_> {
         spent_usd: f64,
         share: u32,
     ) -> Result<Running, SchedError> {
+        // the kind comes from the approved contract this host was built from, never from a row
+        let in_place = self.contract.kind == ContractKind::ReadOnly;
         // after a person's answer to a blocked attempt, the work of that attempt is the start
-        let start = start_commit(w, &item.id, ordinal, &self.source, &self.base_commit)?;
-        let env = self.allocator.allocate(
-            w,
-            &AllocSpec {
-                item: &item.id,
-                ordinal,
-                source: &self.source,
-                base_commit: &start,
-                worker_kind: self.worker_kind,
-            },
-            OffsetDateTime::now_utc(),
-        )?;
+        // (a read-only goal has no commit: nothing is carried and git is never called)
+        let start = if in_place {
+            String::new()
+        } else {
+            start_commit(w, &item.id, ordinal, &self.source, &self.base_commit)?
+        };
+        let spec = AllocSpec {
+            item: &item.id,
+            ordinal,
+            source: &self.source,
+            base_commit: &start,
+            worker_kind: self.worker_kind,
+        };
+        let now = OffsetDateTime::now_utc();
+        let env = if in_place {
+            self.allocator.allocate_in_place(w, &spec, now)?
+        } else {
+            self.allocator.allocate(w, &spec, now)?
+        };
         let mut prompt = format!("{}\n\nWork item: {}", self.contract.goal, item.key);
         prompt.extend(plan_text_block(&item.spec));
+        if in_place {
+            // the rubric the person approved: what the report will be judged against
+            prompt.push_str("\n\nThe person will judge your report against:");
+            for k in &self.contract.criteria {
+                prompt.push_str(&format!("\n- {}", k.text));
+            }
+        }
         let choices = crate::decided_choices(w, &item.id, env.attempt.ordinal)?;
         if !choices.is_empty() {
             prompt.push_str(

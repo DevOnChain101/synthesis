@@ -615,6 +615,12 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
     .to_vec()
 }
 
+/// The credential stores under `home` the standard policy hides (for callers that must reason about a
+/// profile other than the process's own).
+pub fn credential_dirs(home: &Path) -> Vec<PathBuf> {
+    credential_paths(home, None, None)
+}
+
 /// Credential / secret stores under a user profile that the standard policy hides.
 fn credential_paths(home: &Path, appdata: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = [

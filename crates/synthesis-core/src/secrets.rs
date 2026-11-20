@@ -28,18 +28,29 @@ pub fn is_secret_path(path: &Path) -> bool {
             ".git-credentials",
             ".htpasswd",
             ".dockerconfigjson",
+            ".pypirc",
             "kubeconfig",
         ]
         .contains(&n)
         || n.ends_with(".tfvars")
         || n.starts_with("secrets.")
         || {
-            // `.kube/config` compared lowercase like the rest (case-insensitive volumes)
+            // `<dir>/<file>` pairs compared lowercase like the rest (case-insensitive volumes):
+            // kube and docker client configs, `gh` hosts, and `.git/config` (remote URLs can carry a token)
             let mut c = path
                 .components()
                 .rev()
                 .map(|c| c.as_os_str().to_ascii_lowercase());
-            c.next().is_some_and(|f| f == "config") && c.next().is_some_and(|d| d == ".kube")
+            let (f, d) = (c.next(), c.next());
+            matches!(
+                (
+                    f.as_deref().and_then(|s| s.to_str()),
+                    d.as_deref().and_then(|s| s.to_str())
+                ),
+                (Some("config"), Some(".kube" | ".git"))
+                    | (Some("config.json"), Some(".docker"))
+                    | (Some("hosts.yml"), Some("gh"))
+            )
         }
 }
 
@@ -108,6 +119,28 @@ pub fn names_secret(segment_or_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn token_carrying_client_configs_are_secret_paths() {
+        for p in [
+            "a/.pypirc",
+            "a/.git/config",
+            "a/.GIT/Config",
+            "h/.docker/config.json",
+            "h/.config/gh/hosts.yml",
+            "h/.kube/config",
+        ] {
+            assert!(super::is_secret_path(std::path::Path::new(p)), "{p}");
+        }
+        for p in [
+            "a/config",
+            "a/src/config.json",
+            "a/.git/HEAD",
+            "a/hosts.yml",
+        ] {
+            assert!(!super::is_secret_path(std::path::Path::new(p)), "{p}");
+        }
+    }
+
     use super::*;
 
     #[test]

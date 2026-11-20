@@ -97,6 +97,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "goal".into(),
         criteria: vec![ContractCriterion {
@@ -322,6 +323,35 @@ fn create_approve_and_cancel_go_through_the_owner() {
     c.command("cancel", &id, None, "cx1").unwrap();
     wait_applied(&mut c, &id, "cx1");
     assert_eq!(c.outcome(&id).unwrap().state, "cancelled");
+}
+
+/// A read-only goal needs no git: any folder, an empty base commit; and the kinds never mix (a
+/// write goal cannot be created without its commit, nor a read-only one with one).
+#[test]
+fn ro_goal_is_created_in_a_folder_that_is_not_a_git_repository_and_the_kinds_never_mix() {
+    let p = start();
+    let mut c = p.client(Surface::Cli);
+    let plain = p._tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let plain_s = plain.to_string_lossy().to_string();
+    c.enable().unwrap();
+    assert_eq!(c.status().unwrap()["features"], serde_json::json!([]));
+    let ro = Contract::read_only(
+        "review it".into(),
+        &["names the risks".into()],
+        Budgets::new(2.0),
+    );
+    let made = c.create(&plain_s, "", ro.clone()).unwrap();
+    let id = made["id"].as_str().unwrap().to_string();
+    assert_eq!(c.outcome(&id).unwrap().state, "contract_pending");
+    let stored = c.contract(&id, None).unwrap();
+    assert_eq!(stored["contract"]["kind"], "read_only", "{stored}");
+    // a read-only goal has no commit, and a write goal without one is not made
+    let e = err_text(c.create(&plain_s, &"a".repeat(40), ro));
+    assert!(e.contains("no base commit"), "{e}");
+    let e = err_text(c.create(&plain_s, "", contract()));
+    assert!(e.contains("commit id"), "{e}");
+    assert_eq!(c.outcomes(None).unwrap().len(), 1);
 }
 
 #[test]

@@ -220,6 +220,16 @@ pub fn resolve_governed_sandbox_mode(
     }
 }
 
+/// A read-only attempt's sandbox: nothing may be written but the private tmp dir (`tmp_dir`); no
+/// path is protected inside a writable root that no longer exists.
+fn without_writable_roots(p: &mut SandboxPolicy) {
+    p.writable_roots.clear();
+    p.readonly_paths.clear();
+}
+
+/// The tools of a planning run and of a read-only attempt: an allow-list, never a deny-list.
+pub const READ_ONLY_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
+
 impl Common {
     /// An outcome attempt or planning run: the confinement of ADR-019 applies.
     pub fn confined(&self) -> bool {
@@ -319,9 +329,15 @@ pub struct Common {
     /// Internal (the outcome orchestrator's planning run launches `synt run` with it): `--resume`
     /// names the planner session the owner created, in a plain directory it checked out. Confined
     /// like an attempt (no MCP, no browser, no allow rules from settings, no extra directories,
-    /// reads stay in the working directory) and its tools are only Read, Grep, Glob and LS.
+    /// reads stay in the working directory) and its tools are only Read, Grep, Glob.
     #[arg(long, hide = true, requires = "resume", conflicts_with_all = ["attempt_session", "unattended"])]
     pub plan_session: bool,
+    /// Internal (the orchestrator launches the attempt of a read-only goal with it, next to
+    /// `--attempt-session`): the session runs in place, in the folder itself, with no worktree.
+    /// The tools are only Read, Grep, Glob (an allow-list: no shell, no edit tool, no web,
+    /// no sub-agents) and the sandbox policy has no writable folder.
+    #[arg(long, hide = true, requires = "attempt_session")]
+    pub read_only_session: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -954,16 +970,24 @@ pub fn workspace_root(cwd: &Path, home: &Path) -> PathBuf {
     if home.starts_with(&root) { real } else { root }
 }
 
+/// `exact`: a read-only attempt's root is the folder itself, never the enclosing repository (its
+/// read scope is the root: a goal on `mono/packages/foo` must not read `mono/`).
 fn open_plain(
     cwd: &Path,
     h: &crate::Homes,
     extra_dirs: &[PathBuf],
     sid: &str,
     artifact_root: &Path,
+    exact: bool,
 ) -> Result<WorkspaceContext, String> {
+    let root = if exact {
+        synthesis_core::canonicalize(cwd).map_err(|e| format!("{}: {e}", cwd.display()))?
+    } else {
+        workspace_root(cwd, &h.user)
+    };
     WorkspaceContext::open(
         format!("ws-{}", &sid[..8]),
-        &workspace_root(cwd, &h.user),
+        &root,
         cwd,
         extra_dirs,
         artifact_root.to_path_buf(),
@@ -1395,6 +1419,12 @@ pub fn prepare(
         })
         .collect();
 
+    // the folder was checked when the goal was made; check again, a path can be swapped for a symlink since
+    if c.read_only_session
+        && let Some(why) = crate::orch_owner::read_only_folder_refusal(cwd, &h.user, &h.synthesis)
+    {
+        return Err(why);
+    }
     if c.confined() && !c.add_dir.is_empty() {
         return Err("an outcome attempt works in its worktree only: --add-dir is refused".into());
     }
@@ -1419,7 +1449,8 @@ pub fn prepare(
     if let Some(g) = &gate {
         g()?;
     }
-    let must_wt = c.worktree || c.unattended;
+    // a read-only attempt runs in place, in the folder itself
+    let must_wt = (c.worktree || c.unattended) && !c.read_only_session;
     let auto_wt = governed && !c.no_worktree;
     let (ws, worktree) = match stored_wt {
         Some((rec, Some(info))) => {
@@ -1441,7 +1472,14 @@ pub fn prepare(
             ));
         }
         Some(_) => (
-            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+            open_plain(
+                cwd,
+                &h,
+                &extra_dirs,
+                &sid,
+                &artifact_root,
+                c.read_only_session,
+            )?,
             None,
         ),
         None if must_wt || auto_wt => {
@@ -1469,7 +1507,14 @@ pub fn prepare(
                         cwd.display()
                     );
                     (
-                        open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+                        open_plain(
+                            cwd,
+                            &h,
+                            &extra_dirs,
+                            &sid,
+                            &artifact_root,
+                            c.read_only_session,
+                        )?,
                         None,
                     )
                 }
@@ -1477,7 +1522,14 @@ pub fn prepare(
             }
         }
         None => (
-            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+            open_plain(
+                cwd,
+                &h,
+                &extra_dirs,
+                &sid,
+                &artifact_root,
+                c.read_only_session,
+            )?,
             None,
         ),
     };
@@ -1535,9 +1587,13 @@ pub fn prepare(
     }
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     let state_paths = synthesis_deny.clone();
+    let read_only = c.read_only_session;
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
         let mut p = standard_policy_git(ws, net.clone(), git_dir.as_deref())?;
         p.deny_paths.extend(synthesis_deny.clone());
+        if read_only {
+            without_writable_roots(&mut p);
+        }
         p.readable_roots.extend(reads.iter().cloned());
         p.wsl_hide_drives = hide_drives;
         p.limits = res_limits;
@@ -1879,7 +1935,8 @@ pub fn prepare(
     );
     // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
     // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
-    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
+    // A read-only attempt always has it: key files and token files in the folder stay unread.
+    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis) || c.read_only_session;
     // Only the user's own allow rules (user/managed settings and flags, never the project's) can
     // lift the read-only-path refusal and the irreversible-action table.
     perms.env.user_allow = user_settings
@@ -2407,8 +2464,8 @@ pub fn prepare(
         toolbox = a.apply(toolbox);
     }
     // a planning run reads the repository and nothing else: an allow-list, not a deny-list
-    if c.plan_session {
-        toolbox = toolbox.only(&["Read", "Grep", "Glob", "LS"]);
+    if c.plan_session || c.read_only_session {
+        toolbox = toolbox.only(&READ_ONLY_TOOLS);
     }
     // the four Memory* tools exist only while the run has an open store
     if let Some(m) = &memory {
@@ -3374,6 +3431,73 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 
 #[cfg(test)]
 mod tests {
+    /// `ro-sandbox-no-writable-root`: under the policy of a read-only attempt the OS sandbox lets a
+    /// command write the private tmp dir and nothing in the folder (the control writes before it).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_attempts_sandbox_has_no_writable_folder() {
+        use synthesis_sandbox::{NetworkPolicy, SandboxedCommand};
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("folder");
+        std::fs::create_dir_all(&root).unwrap();
+        let ws =
+            synthesis_core::WorkspaceContext::open("w", &root, &root, &[], base.join("art"), "s")
+                .unwrap();
+        let mut p = synthesis_tools::standard_policy_git(&ws, NetworkPolicy::Deny, None).unwrap();
+        assert!(
+            p.writable_roots.contains(&root),
+            "control: a write attempt may write the folder"
+        );
+        super::without_writable_roots(&mut p);
+        // as `SandboxRunner` does for its checkout: the folder is mounted, read-only (on Linux the
+        // sandbox hides what is not listed, and a folder under /tmp would be a private tmpfs copy)
+        p.readable_roots.push(root.clone());
+        assert!(p.writable_roots.is_empty());
+        let run = |cmd: &str| {
+            let w = synthesis_sandbox::detect().wrap(
+                &p,
+                &SandboxedCommand {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), cmd.into()],
+                    env: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+                    cwd: Some(root.clone()),
+                    clear_env: true,
+                },
+            );
+            let w = match w {
+                Ok(w) => w,
+                Err(e) => {
+                    assert!(
+                        std::env::var_os("SYNT_REQUIRE_BWRAP").is_none_or(|v| v.is_empty()),
+                        "SYNT_REQUIRE_BWRAP is set but the host cannot confine: {e}"
+                    );
+                    return None;
+                }
+            };
+            let mut c = std::process::Command::new(&w.program);
+            c.args(&w.args)
+                .env_clear()
+                .envs(w.env.iter().map(|(k, v)| (k, v)));
+            if let Some(d) = &w.cwd {
+                c.current_dir(d);
+            }
+            Some(c.output().unwrap().status.success())
+        };
+        let Some(tmp_ok) = run(&format!("echo x > {}/ok", base.join("art/tmp").display())) else {
+            println!("SKIP: this host has no enforcing sandbox");
+            return;
+        };
+        assert!(tmp_ok, "control: the private tmp dir is writable");
+        assert_eq!(run("echo x > a.txt"), Some(false));
+        assert_eq!(run("touch b.txt"), Some(false));
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "nothing was written"
+        );
+    }
+
     #[test]
     fn resource_limits_apply_settings_over_the_defaults() {
         let d = super::resource_limits(&Default::default());
