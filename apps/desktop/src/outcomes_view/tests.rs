@@ -334,7 +334,7 @@ fn the_new_outcome_form_is_keyboard_first_keeps_what_was_typed_and_sends_only_fr
     let _g = theme::opacity_guard();
     let (shell, v) = open(cx, 1400., 900.);
     let o = view(&shell, v);
-    v.simulate_keystrokes("n");
+    v.simulate_keystrokes("n 2 enter");
     v.run_until_parked();
     // the form is there with its base commit read (the sample answers locally), the goal field has the keys
     assert!(v.debug_bounds("out-form").is_some() && v.debug_bounds("out-form-confirm").is_some());
@@ -388,7 +388,7 @@ fn a_complete_new_outcome_form_builds_a_contract_and_the_sample_sends_nothing(
     let _g = theme::opacity_guard();
     let (shell, v) = open(cx, 1400., 900.);
     let o = view(&shell, v);
-    v.simulate_keystrokes("n");
+    v.simulate_keystrokes("n 2 enter");
     v.run_until_parked();
     // goal, criteria, checks, budget, scope
     for text in ["Move login", "Login works", "cargo test", "5", "auth/**"] {
@@ -473,7 +473,7 @@ fn the_form_fits_both_window_sizes(cx: &mut TestAppContext) {
     for (w, h) in [(1400., 900.), (1100., 700.)] {
         let (shell, v) = open(cx, w, h);
         let o = view(&shell, v);
-        v.simulate_keystrokes("n");
+        v.simulate_keystrokes("n 2 enter");
         v.run_until_parked();
         for sel in ["out-form", "out-form-confirm", "out-form-cancel"] {
             let b = bounds(v, sel);
@@ -698,7 +698,7 @@ fn the_form_shows_a_read_only_picker_and_a_pick_fills_the_field(cx: &mut TestApp
     let (shell, v) = open(cx, 1400., 900.);
     let o = view(&shell, v);
     o.update(v, |o, _| o.state.known = vec!["/w/lib".into()]);
-    v.simulate_keystrokes("n");
+    v.simulate_keystrokes("n 2 enter");
     v.run_until_parked();
     assert!(v.debug_bounds("out-form-ws").is_some());
     // local: no text field for the folder, the list opens from the button

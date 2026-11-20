@@ -763,6 +763,15 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &outcomes,
+            window,
+            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, window, cx| {
+                s.go(View::Tui, window, cx);
+                s.tui.update(cx, |t, cx| t.open_folder(&e.0, cx));
+            },
+        )
+        .detach();
         cx.observe_window_activation(window, |s: &mut Shell, window, cx| {
             s.outcomes
                 .update(cx, |o, cx| o.window_activation_changed(window, cx))
