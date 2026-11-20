@@ -49,13 +49,23 @@ fn fake_engine(mode: &str) {
         let id = req["id"].clone();
         match req["method"].as_str().unwrap() {
             "start" => {
+                // the conductor role is asked for exactly by the host- modes that are not "host-bare"
+                let role = req["params"]["role"].as_str();
+                if (mode.starts_with("host-") && mode != "host-bare") != (role == Some("conductor"))
+                {
+                    std::process::exit(9);
+                }
                 // as a fake wsl.exe: `cwd` is what `--cd` set, `root` what `start` asked for
                 let cd = std::env::args().skip_while(|a| a != "--cd").nth(1);
                 let cwd = cd.as_deref().unwrap_or("/engine/side");
                 let root = req["params"]["cwd"].as_str().filter(|_| cd.is_some());
-                say(
-                    json!({"msg":"result","id":id,"ok":{"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":cwd,"root":root.unwrap_or("/engine/side"),"notices":["n\u{1b}[31m1"]}}),
-                )
+                let mut ok = json!({"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":cwd,"root":root.unwrap_or("/engine/side"),"notices":["n\u{1b}[31m1"]});
+                // a conductor-role engine says so, with its tools; "host-norole" is an older engine that ignores `role`
+                if mode.starts_with("host-") && mode != "host-bare" && mode != "host-norole" {
+                    ok["role"] = json!("conductor");
+                    ok["tools"] = json!(["conductor_list"]);
+                }
+                say(json!({"msg":"result","id":id,"ok":ok}))
             }
             "send" => {
                 say(json!({"msg":"result","id":id,"ok":{}}));
@@ -68,6 +78,18 @@ fn fake_engine(mode: &str) {
                     "hang" => std::thread::sleep(Duration::from_secs(600)),
                     "event-flood" => (0..20_000).for_each(|_| println!("{EVENT}")),
                     "forged-restart" => say(json!({"msg":"restarted"})),
+                    "host-bare" | "host-ok" => {
+                        say(json!({"msg":"host.call","id":1,"tool":"conductor_list","input":{}}))
+                    }
+                    "host-twice" => (1..=2).for_each(|i| {
+                        say(json!({"msg":"host.call","id":i,"tool":"conductor_list","input":{}}))
+                    }),
+                    "host-unknown-tool" => {
+                        say(json!({"msg":"host.call","id":1,"tool":"Bash","input":{"command":"ls"}}))
+                    }
+                    "host-big" => say(
+                        json!({"msg":"host.call","id":1,"tool":"conductor_list","input":{"x":"a".repeat(70_000)}}),
+                    ),
                     "hello-flood" => (0..150).for_each(|_| {
                         say(json!({"msg":"hello","version":VERSION,"protocol":PROTOCOL}))
                     }),
@@ -79,6 +101,9 @@ fn fake_engine(mode: &str) {
                 say(
                     json!({"msg":"ask.approval","id":"a1","agent_id":null,"tool":"Bash","input":{},"dialog":"permission","prompt":"p","reason":"r","origin":null,"suggestions":[]}),
                 );
+            }
+            "host.result" => {
+                say(json!({"msg":"notice","text":format!("host.result:{}", req["params"])}))
             }
             "workspaces.list" => {
                 let many: Vec<Value> = (0..300)
@@ -534,6 +559,84 @@ fn a_refused_restart_leaves_the_session_running() {
     drop(e);
 }
 
+/// A host that answers `conductor_list` after `ms`.
+struct SlowHost(u64);
+
+impl synthesis_app::host_tools::HostTools for SlowHost {
+    fn specs(&self) -> Vec<synthesis_tools::ToolSpec> {
+        synthesis_app::host_tools::stub_specs()
+    }
+
+    fn call<'a>(
+        &'a self,
+        _: &'a str,
+        _: Value,
+    ) -> synthesis_tools::BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(self.0)).await;
+            Ok(json!({"sessions": []}))
+        })
+    }
+}
+
+fn start_conductor(mode: &str, ms: u64) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
+    Engine::start_remote_conductor(
+        &launcher(mode),
+        &std::env::temp_dir(),
+        &Default::default(),
+        std::sync::Arc::new(SlowHost(ms)),
+    )
+}
+
+/// Waits for the task to end with an error (the engine was cut off).
+fn cut_off(e: &Engine, rx: &mut UnboundedReceiver<UiMsg>, what: &str) {
+    e.send("go".into()).unwrap();
+    let t0 = Instant::now();
+    loop {
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "{what}: no TaskDone"
+        );
+        if matches!(next(rx, what), UiMsg::TaskDone(Err(_))) {
+            break;
+        }
+    }
+    assert!(e.send("more".into()).is_err(), "{what}");
+}
+
+fn an_engine_that_ignores_the_conductor_role_is_refused_at_start() {
+    let e = start_conductor("host-norole", 0).err().expect("refused");
+    assert!(e.contains("did not start the conductor role"), "{e}");
+}
+
+fn a_host_call_from_an_engine_without_the_conductor_role_kills_it() {
+    killed_after_send("host-bare", None);
+}
+
+fn the_conductor_roles_host_calls_are_answered_and_every_misuse_kills_the_engine() {
+    // answered: the engine sees `host.result` with the host's answer
+    let (e, mut rx) = start_conductor("host-ok", 0).expect("starts");
+    e.send("go".into()).unwrap();
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "no host.result");
+        if let UiMsg::BadEvent(t) = next(&mut rx, "host.result") {
+            assert!(t.contains("host.result:") && t.contains("sessions"), "{t}");
+            break;
+        }
+    }
+    drop(e);
+    // a second call while one is outstanding, a tool outside the role's set, an input over the limit
+    for (mode, ms) in [
+        ("host-twice", 1500),
+        ("host-unknown-tool", 0),
+        ("host-big", 0),
+    ] {
+        let (e, mut rx) = start_conductor(mode, ms).expect("starts");
+        cut_off(&e, &mut rx, mode);
+    }
+}
+
 fn a_restart_the_client_did_not_ask_for_kills_the_engine() {
     killed_after_send("forged-restart", None);
 }
@@ -694,7 +797,7 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 17] = [
+    let tests: [(&str, fn()); 20] = [
         (
             "files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable",
             files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable,
@@ -702,6 +805,18 @@ fn main() {
         (
             "the_store_methods_are_parsed_bounded_and_made_printable",
             the_store_methods_are_parsed_bounded_and_made_printable,
+        ),
+        (
+            "an_engine_that_ignores_the_conductor_role_is_refused_at_start",
+            an_engine_that_ignores_the_conductor_role_is_refused_at_start,
+        ),
+        (
+            "a_host_call_from_an_engine_without_the_conductor_role_kills_it",
+            a_host_call_from_an_engine_without_the_conductor_role_kills_it,
+        ),
+        (
+            "the_conductor_roles_host_calls_are_answered_and_every_misuse_kills_the_engine",
+            the_conductor_roles_host_calls_are_answered_and_every_misuse_kills_the_engine,
         ),
         (
             "a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines",

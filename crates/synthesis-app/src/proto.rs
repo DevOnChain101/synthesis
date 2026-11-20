@@ -17,8 +17,9 @@ use synthesis_tools::NeedsUser;
 
 use crate::asks::{Ask, AskApproval, Choice};
 
-/// Bumped when a message changes shape. The version handshake is exact: both numbers must match.
-pub const PROTOCOL: u32 = 4;
+/// Bumped when a message changes shape (5: `start.role` and `host.call`/`host.result`, so an older engine, which
+/// would ignore `role` and start a full coding session, fails at hello, before `start`). The version handshake is exact: both numbers must match.
+pub const PROTOCOL: u32 = 5;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
@@ -49,6 +50,10 @@ pub enum Call {
         /// Start on this `provider/model`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// P3a: `"conductor"` starts the conductor role (super-agent-s1.md 4.1); only such an engine may
+        /// send `host.call`. Anything else is refused. The engine's own `--max-cost-usd` is its cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
     /// Starts a task; `{msg:"task_done"}` follows when it ended.
     Send {
@@ -383,7 +388,20 @@ pub enum Call {
     Cancel,
     #[serde(alias = "shutdown")]
     Close,
+    // ---- P3a: the conductor role's answer to `host.call` (kept apart from the outcome variants) ----
+    /// The host's answer to the engine's outstanding `host.call` `id`. No reply is written to it.
+    #[serde(rename = "host.result")]
+    HostResult {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ok: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
+
+/// The only `start.role` there is.
+pub const ROLE_CONDUCTOR: &str = "conductor";
 
 /// What every mutating outcome call carries: the retry key (same key, same stored result, one effect)
 /// and the surface it comes from (self-asserted until the orchestrator endpoint authenticates clients).
@@ -529,6 +547,7 @@ impl Call {
             | Call::Compact { .. }
             | Call::Clear
             | Call::Cancel
+            | Call::HostResult { .. }
             | Call::Close => None,
         }
     }
@@ -671,6 +690,11 @@ pub enum Out {
     /// Something the engine wants shown (a dropped oversized event, ...).
     #[serde(rename = "notice")]
     Notice { text: String },
+    // ---- P3a: only an engine started with `role: "conductor"` may send this (hostile otherwise) ----
+    /// The conductor engine calls one of the host's tools; the client answers with `host.result`. At most one
+    /// is outstanding, the tool must be one of the role's, and `input` is at most `host_tools::MAX_INPUT`.
+    #[serde(rename = "host.call")]
+    HostCall { id: u64, tool: String, input: Value },
 }
 
 impl Out {
@@ -914,6 +938,7 @@ mod tests {
                 cwd: "/w".into(),
                 resume: None,
                 model: None,
+                role: None,
             },
         })
         .unwrap();
@@ -1049,7 +1074,13 @@ mod tests {
                 .unwrap_err()
                 .contains("protocol 3")
         );
-        assert_eq!(PROTOCOL, 4);
+        let v4 = format!(r#"{{"msg":"hello","version":"{VERSION}","protocol":4}}"#);
+        assert!(
+            check_hello(v4.as_bytes())
+                .unwrap_err()
+                .contains("protocol 4")
+        );
+        assert_eq!(PROTOCOL, 5);
         assert!(check_hello(br#"{"msg":"task_done","error":null}"#).is_err());
         assert!(check_hello(b"garbage").is_err());
     }

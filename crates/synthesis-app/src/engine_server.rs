@@ -22,7 +22,8 @@ use crate::engine_methods::{
 };
 use crate::engine_ops::{self, Tokens};
 use crate::host::{CancelSlot, Info, Live, lock};
-use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, Request, read_line};
+use crate::host_tools::{Relay, stub_specs};
+use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, ROLE_CONDUCTOR, Request, read_line};
 use crate::run::{Common, Front, Limits, Native, prepare};
 use crate::trust::{Grant, TRUST_CHANGED, TrustCheck, launch_common, root_of, trust_changed_error};
 use synthesis_view::workspaces::fold_dir;
@@ -144,6 +145,8 @@ struct Oob {
     /// still waits in the queue is applied to that send when the worker starts it (a cancel is never lost).
     sends_queued: AtomicU64,
     cancel_upto: AtomicU64,
+    /// P3a: the conductor role's calls to the client (`host.call`), answered here by `host.result`.
+    host: Arc<Relay>,
 }
 
 /// One engine process: one folder, one session at a time (restarted in place by the methods below).
@@ -159,6 +162,8 @@ struct Srv<'a> {
     /// A session was started once: `start` is one-shot, whatever happens to it later.
     began: bool,
     spec: Spec,
+    /// P3a: started with `role: "conductor"`; the session's tools are the client's, over `host.call`.
+    conductor: bool,
     /// The session-only trust of this process (carried across its restarts, gone with it).
     grant: Option<Grant>,
     /// Is the live session running with the folder trusted.
@@ -245,7 +250,20 @@ fn start(
         return Err("start: cwd must be an existing absolute folder path on this machine".into());
     }
     let h = crate::homes(srv.env)?;
+    // a conductor session is never resumed (it is not stored): a restart of it (`trust.set`, `model.set`) is a fresh one
+    let spec = &Spec {
+        resume: spec.resume.clone().filter(|_| !srv.conductor),
+        ..spec.clone()
+    };
     let mut c = srv.common.clone();
+    if srv.conductor {
+        // the conductor's own session: no transcript yet (P3b adds the store kind), no worktree, memory or peers
+        c.no_session_store = true;
+        c.no_worktree = true;
+        c.no_memory = true;
+        c.peers = false;
+        c.permission_mode = Some(crate::run::ModeArg::Default);
+    }
     if let Some(id) = &spec.resume {
         srv.ctx(&h).check_resumable(id, cwd)?;
         // checked above: the same folder, so the workspace filter of `--resume` may stay off
@@ -269,6 +287,15 @@ fn start(
         &h.synthesis,
         user,
     );
+    // the conductor runs as in an untrusted folder whatever the launch rules decided: report and adopt that
+    let (mut c, verify) = (c, verify);
+    let verify = if srv.conductor {
+        c.trust_project = false;
+        c.project_exec_inert = false;
+        None
+    } else {
+        verify
+    };
     let trusted = c.trust_project;
     let notify: crate::asks::Notify = {
         let wire = srv.wire.clone();
@@ -284,6 +311,9 @@ fn start(
         }),
         on_stop: None,
         browser_view: None,
+        host_tools: srv
+            .conductor
+            .then(|| srv.oob.host.clone() as Arc<dyn crate::host_tools::HostTools>),
     };
     let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
@@ -1000,6 +1030,19 @@ fn read_requests(mut input: impl BufRead, wire: &Wire, oob: &Oob, queue: &mpsc::
                 }
                 wire.result(id, Ok(json!({})));
             }
+            Call::HostResult {
+                id: call,
+                ok,
+                error,
+            } => {
+                oob.host.deliver(
+                    call,
+                    match error {
+                        Some(e) => Err(e),
+                        None => Ok(ok.unwrap_or(Value::Null)),
+                    },
+                );
+            }
             Call::Answer { id: ask, choice } => {
                 let ok = oob.asks.answer(&ask, choice);
                 wire.result(id, Ok(json!({"accepted": ok})));
@@ -1047,6 +1090,16 @@ pub fn serve(
         cancel: Mutex::new(None),
         sends_queued: AtomicU64::new(0),
         cancel_upto: AtomicU64::new(0),
+        host: Arc::new(Relay::new(stub_specs, {
+            let wire = wire.clone();
+            Box::new(move |id, tool, input| {
+                wire.msg(&Out::HostCall {
+                    id,
+                    tool: tool.into(),
+                    input,
+                })
+            })
+        })),
     });
     let (queue, work) = mpsc::sync_channel::<Item>(QUEUE);
     {
@@ -1064,6 +1117,7 @@ pub fn serve(
         cwd: None,
         began: false,
         spec: Spec::default(),
+        conductor: false,
         grant: None,
         trusted: false,
         compacting: Arc::default(),
@@ -1091,15 +1145,39 @@ pub fn serve(
         let id = req.id;
         match req.call {
             Call::Start { .. } if srv.began => wire.result(id, Err("already started".into())),
-            Call::Start { cwd, resume, model } => {
+            Call::Start { role, .. } if role.as_deref().is_some_and(|r| r != ROLE_CONDUCTOR) => {
+                wire.result(id, Err("start: unknown role".into()))
+            }
+            Call::Start {
+                cwd,
+                resume,
+                model,
+                role,
+            } => {
                 let cwd = PathBuf::from(cwd);
+                if role.is_some() && resume.is_some() {
+                    wire.result(
+                        id,
+                        Err("start: a conductor session is never resumed".into()),
+                    );
+                    continue;
+                }
                 let spec = Spec { resume, model };
-                match start(&srv, &cwd, &spec, None, true) {
-                    Ok((l, v, trusted)) => {
+                srv.conductor = role.is_some();
+                let started = start(&srv, &cwd, &spec, None, true);
+                srv.conductor &= started.is_ok();
+                match started {
+                    Ok((l, mut v, trusted)) => {
                         srv.adopt(l, trusted, &v);
                         srv.cwd = Some(cwd);
                         srv.spec = spec;
                         srv.began = true;
+                        if srv.conductor {
+                            // an engine that ignored `role` (an older one) says neither: the client fails closed
+                            v["role"] = json!(ROLE_CONDUCTOR);
+                            v["tools"] =
+                                json!(stub_specs().into_iter().map(|s| s.name).collect::<Vec<_>>());
+                        }
                         wire.result(id, Ok(v));
                     }
                     Err(e) => wire.result(id, Err(e)),
@@ -1295,6 +1373,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
+            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
         });
         // a queue of one that nobody reads: the worker is stuck on a slow call
         let (q, rx) = mpsc::sync_channel(1);
@@ -1353,6 +1432,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
+            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
         });
         let (q, rx) = mpsc::sync_channel(8);
         let input = std::io::Cursor::new(
