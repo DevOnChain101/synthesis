@@ -1372,7 +1372,8 @@ impl TuiView {
                 .min_w(px(0.))
                 .children(bp.bar.as_ref().map(Input::new)),
         );
-        let mut col = div().flex().flex_col().gap(px(8.)).size_full().child(bar);
+        // the tab strip sits above the address row, like a browser's own
+        let mut col = div().flex().flex_col().gap(px(8.)).size_full();
         if let Some(p) = page.as_ref() {
             let many = p.tabs.len() > 1;
             col = col.child(
@@ -1447,6 +1448,7 @@ impl TuiView {
                     ),
             );
         }
+        col = col.child(bar);
         if let Some(r) = &bp.refusal {
             let mut row = div()
                 .flex()
