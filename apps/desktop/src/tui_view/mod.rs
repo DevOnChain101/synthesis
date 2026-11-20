@@ -57,7 +57,7 @@ const TOOLS_MAX_H: f32 = 5. * 21.4 + 8.;
 pub const MONO: &str = crate::brand::MONO_FONT;
 
 /// Icons the view draws (checked by a test).
-pub const ICONS: [&str; 27] = [
+pub const ICONS: [&str; 28] = [
     "book-open",
     "search",
     "replace",
@@ -85,6 +85,7 @@ pub const ICONS: [&str; 27] = [
     "link",
     "database",
     "arrow-up",
+    "x",
 ];
 
 /// The tabs of the centre panel (`STATE.bottomTabs`).

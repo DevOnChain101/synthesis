@@ -1950,6 +1950,56 @@ async fn fit_body() {
     rt.close().await.unwrap();
 }
 
+/// The person's tabs through `PageView`: new, switch, close; refused while the agent acts, over the cap, for a URL the
+/// policy refuses, and for the last tab.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_person_opens_switches_and_closes_tabs() {
+    traced(
+        "the_person_opens_switches_and_closes_tabs",
+        person_tabs_body(),
+    )
+    .await;
+}
+
+async fn person_tabs_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = std::sync::Arc::new(launch(local_opts(art.path()), &env).await);
+    rt.navigate(&format!("{base}/form"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let pv = PageView::new(rt.clone());
+    assert!(pv.close_tab(0).await.is_err(), "the last tab stays");
+    pv.new_tab(None).await.unwrap();
+    let tabs = pv.tabs().await.unwrap();
+    assert_eq!((tabs.len(), tabs[1].active), (2, true));
+    // a refused URL creates no tab
+    assert!(pv.new_tab(Some("file:///etc/passwd")).await.is_err());
+    assert_eq!(pv.tabs().await.unwrap().len(), 2);
+    pv.select_tab(0).await.unwrap();
+    assert!(pv.tabs().await.unwrap()[0].active);
+    {
+        let _agent = rt.agent_busy();
+        for r in [
+            pv.new_tab(None).await.map(drop),
+            pv.select_tab(1).await,
+            pv.close_tab(1).await,
+        ] {
+            assert!(matches!(r, Err(BrowserError::Busy)), "{r:?}");
+        }
+    }
+    assert!(pv.tabs().await.unwrap()[0].active, "refused: nothing moved");
+    while pv.tabs().await.unwrap().len() < PageView::MAX_TABS {
+        pv.new_tab(None).await.unwrap();
+    }
+    assert!(pv.new_tab(None).await.is_err(), "capped");
+    pv.close_tab(1).await.unwrap();
+    assert_eq!(pv.tabs().await.unwrap().len(), PageView::MAX_TABS - 1);
+    pv.view(true, 640, 400).await.unwrap(); // re-armed on the current tab
+    rt.close().await.unwrap();
+}
+
 /// B3: the person's clicks, keys, paste and wheel reach the page through `PageView`; a password field and the agent's
 /// own calls shut them out; a link the person clicks meets the URL policy like any page-made navigation.
 #[tokio::test(flavor = "multi_thread")]

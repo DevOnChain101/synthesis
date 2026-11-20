@@ -263,8 +263,47 @@ impl PageView {
     pub async fn tabs(&self) -> Result<Vec<TabInfo>> {
         self.0.tabs().await
     }
+    /// Tabs the person's pane may have open at once (the agent's own `new_tab` has no such cap).
+    pub const MAX_TABS: usize = 12;
+
+    /// The person's tab actions are refused (never queued) while a tool call of the agent is in flight: it targets
+    /// the current tab, which must not change under it.
+    fn person_ok(&self) -> Result<()> {
+        if self.0.agent_busy.load(Ordering::SeqCst) > 0 {
+            return Err(BrowserError::Busy);
+        }
+        Ok(())
+    }
     pub async fn select_tab(&self, index: usize) -> Result<()> {
+        self.person_ok()?;
         self.0.select_tab(index).await
+    }
+    /// A new tab that becomes current (the caller re-arms the view). A `url` is checked like the person's own
+    /// navigation BEFORE the tab exists; without one the tab is `about:blank`.
+    pub async fn new_tab(&self, url: Option<&str>) -> Result<PageInfo> {
+        self.person_ok()?;
+        if let Some(u) = url {
+            self.0.nav_allowed(u, true)?;
+        }
+        if self.0.tabs().await?.len() >= Self::MAX_TABS {
+            return Err(BrowserError::Refused(format!(
+                "at most {} tabs",
+                Self::MAX_TABS
+            )));
+        }
+        let info = self.0.new_tab(None).await?;
+        match url {
+            Some(u) => self.navigate(u, WaitUntil::DomContentLoaded).await,
+            None => Ok(info),
+        }
+    }
+    /// Closes a tab; the last one stays (a browser without a tab has nothing to show).
+    pub async fn close_tab(&self, index: usize) -> Result<()> {
+        self.person_ok()?;
+        if self.0.tabs().await?.len() <= 1 {
+            return Err(BrowserError::Refused("the last tab stays open".into()));
+        }
+        self.0.close_tab(index).await
     }
     /// The person's click, wheel, key or paste in the pane. It is input, not navigation: a link it follows meets
     /// the same network policy as any page-made navigation (no person grant).

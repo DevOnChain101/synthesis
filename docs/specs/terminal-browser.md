@@ -310,8 +310,18 @@ the UI says so, and "Open in your browser" hands a refused or personal URL to th
   your browser" button (http/https only, the person's click only, `open` / `xdg-open` / `explorer.exe` by absolute path),
   never offered for a URL the agent produced.
 - Back/forward/reload: `Page.getNavigationHistory` / `navigateToHistoryEntry` / `Page.reload`; each is checked like a
-  navigation. Tabs: a strip from the runtime's `Tabs.order` when there is more than one; switching is person input. No
-  "new tab" button in v1 (pages open popups; the agent opens tabs).
+  navigation. Tabs: a strip from the runtime's `Tabs.order` (title or host, the active one highlighted, a close "x" while
+  there is more than one, and a "+"); new, switch and close are person actions through `PageView` only
+  (`new_tab`, `select_tab`, `close_tab`). Refused, never queued, while an agent browser tool call is in flight
+  (`Busy`: the agent's current tab is the selected one and must not move under a call); at most 12 tabs
+  (`PageView::MAX_TABS`, the agent's own `new_tab` is not capped); the last tab cannot be closed; a new tab is
+  `about:blank`, and a URL given to `PageView::new_tab` goes through the person-navigation `UrlPolicy` check before
+  the tab exists (the "+" opens a blank tab and puts the focus in the address bar, whose Enter is the usual
+  navigation). After select, new and close the pane re-arms the screencast on the current tab. Chords, only while the
+  page holds the keys (Cmd on macOS, Ctrl elsewhere): mod+T new tab, mod+W close the active tab, Ctrl+Tab and
+  Ctrl+Shift+Tab next and previous (all platforms). Elsewhere Ctrl+T stays the target cycle; Esc and Ctrl+Esc still give
+  the keys back and Ctrl+C on macOS stays the app's. Limit: the busy check is made when the action starts, so an agent
+  call that begins in the same instant can still see its tab change.
 - WebSocket and WebTransport stay blocked as documented in SECURITY.md (constructor replaced; WebTransport at script level
   only). This is the main UX gap of person browsing and is an owner question (section 5).
 
