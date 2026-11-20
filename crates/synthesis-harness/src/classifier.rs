@@ -315,6 +315,7 @@ mod tests {
         }
         for n in [
             "browser_click",
+            "browser_mouse",
             "browser_something_new",
             "Bash",
             "WebFetch",

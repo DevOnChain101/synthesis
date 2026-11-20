@@ -976,9 +976,34 @@ async fn mouse_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
             shown(t)
         }
     };
-    let label = match &op {
-        MouseOp::Drag(_, b) => shown(b),
-        _ => from.as_ref().map_or_else(|| act.to_owned(), shown),
+    // a point names no element: say which one is under it and on which origin (what a reviewer needs)
+    let by_point = match &op {
+        MouseOp::Drag(_, t) => matches!(t, MouseTarget::Point(..)),
+        MouseOp::Wheel(None, ..) => true,
+        MouseOp::Wheel(Some(t), ..)
+        | MouseOp::Move(t)
+        | MouseOp::Click(t)
+        | MouseOp::DoubleClick(t)
+        | MouseOp::RightClick(t) => matches!(t, MouseTarget::Point(..)),
+    };
+    let label = if by_point {
+        let el = rt
+            .element_at(spot.x, spot.y)
+            .await
+            .unwrap_or_else(|| "?".into());
+        let origin = current_page(rt)
+            .await
+            .and_then(|u| url::Url::parse(&u).ok())
+            .map_or(String::new(), |u| u.origin().ascii_serialization());
+        format!(
+            "{el} at {} on {origin}",
+            shown(&MouseTarget::Point(spot.x, spot.y))
+        )
+    } else {
+        match &op {
+            MouseOp::Drag(_, b) => shown(b),
+            _ => from.as_ref().map_or_else(|| act.to_owned(), shown),
+        }
     };
     Ok(
         ToolOutput::text(format!("Mouse {act} {at}.")).with_meta(action(

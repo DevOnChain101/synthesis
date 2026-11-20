@@ -1812,6 +1812,75 @@ async fn browser_mouse_hovers_double_right_clicks_drags_and_wheels_in_a_real_pag
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_drag_lets_go_of_the_button() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(MOUSE_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let reg = registry(false, true);
+    let c = ctx(d.path(), "mouse3");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+            .await,
+        "navigate",
+    );
+    // the pointer starts at the drag's start, so the press comes at once
+    ok(
+        &reg.execute(
+            "browser_mouse",
+            json!({"action": "move", "x": 310, "y": 110}),
+            &c,
+        )
+        .await,
+        "move",
+    );
+    // the cancel arrives while the pointer is on its way; the button must come up (the page logs the mouseup)
+    let stop = c.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        stop.cancel();
+    });
+    let o = reg
+        .execute(
+            "browser_mouse",
+            json!({"action": "drag", "x": 310, "y": 110, "to_x": 1200, "to_y": 700}),
+            &c,
+        )
+        .await;
+    eprintln!("cancelled drag: {}", text(&o));
+    let c2 = ctx(d.path(), "mouse3");
+    ok(
+        &reg.execute(
+            "browser_wait_for",
+            json!({"text": "drag-start", "timeout_ms": 5000}),
+            &c2,
+        )
+        .await,
+        "the press reached the page before the cancel",
+    );
+    let o = reg
+        .execute(
+            "browser_wait_for",
+            json!({"text": "drag-end", "timeout_ms": 5000}),
+            &c2,
+        )
+        .await;
+    ok(&o, "the held button was released after the cancel");
+    // and the next call starts clean: a move reports no drag
+    ok(
+        &reg.execute(
+            "browser_mouse",
+            json!({"action": "move", "x": 5, "y": 5}),
+            &c2,
+        )
+        .await,
+        "move after",
+    );
+    reg.close_session("mouse3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_mouse_is_gated_like_click_on_a_loopback_page_the_person_opened() {
     if !have_browser() {
         return;

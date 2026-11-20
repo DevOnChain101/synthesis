@@ -958,6 +958,8 @@ impl Permissions {
                 || read_family
                 || (rt == "Edit" && EDIT_TOOLS.contains(&tool))
                 || (matches!(rt, "Task" | "Agent") && matches!(tool, "Task" | "Agent"))
+                // `browser_mouse` does what `browser_click` does and more: a rule on the click binds it too
+                || (rt == "browser_click" && tool == "browser_mouse")
         };
         if !named {
             return false;

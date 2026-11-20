@@ -3,10 +3,12 @@
 //! the path is cut into a bounded number of steps and nothing here navigates (a navigation a click causes meets
 //! the same `UrlPolicy` interception as `click`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::cdp::Cdp;
 use crate::{BrowserError, BrowserRuntime, Result, Spot, Tab, lock};
 
 /// Largest wheel delta of one call, per axis, in CSS pixels.
@@ -84,6 +86,14 @@ fn glide(from: P, to: P, held: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Press at `a`, move to `b` with the button down, release.
+fn drag_tail(a: P, b: P) -> Vec<Value> {
+    let mut v = vec![ev("mousePressed", a, "left", 1, 1)];
+    v.extend(glide(a, b, true));
+    v.push(ev("mouseReleased", b, "left", 0, 1));
+    v
+}
+
 /// The CDP events of `plan`, starting with the pointer at `from`.
 fn events(plan: Plan, from: P) -> Vec<Value> {
     match plan {
@@ -99,9 +109,7 @@ fn events(plan: Plan, from: P) -> Vec<Value> {
         }
         Plan::Drag(a, b) => {
             let mut v = glide(from, a, false);
-            v.push(ev("mousePressed", a, "left", 1, 1));
-            v.extend(glide(a, b, true));
-            v.push(ev("mouseReleased", b, "left", 0, 1));
+            v.extend(drag_tail(a, b));
             v
         }
         Plan::Wheel((x, y), dx, dy) => {
@@ -110,8 +118,51 @@ fn events(plan: Plan, from: P) -> Vec<Value> {
     }
 }
 
+/// A press that was sent and not yet released: where the pointer last was, and the button.
+pub(crate) type Held = Option<(P, &'static str)>;
+
+/// Cancels a drag the call did not finish (the future was dropped by a cancel or a timeout): Escape (ends a native
+/// drag), then the button comes up where the pointer last was. Does nothing when nothing is held.
+struct ReleaseOnDrop {
+    cdp: Arc<Cdp>,
+    tab: Arc<Tab>,
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        if lock(&self.tab.pressed).is_none() {
+            return;
+        }
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let (cdp, tab) = (self.cdp.clone(), self.tab.clone());
+            rt.spawn(async move {
+                let _one = tab.mouse_lock.lock().await;
+                release_held(&cdp, &tab).await;
+            });
+        }
+    }
+}
+
+/// Best effort: Escape, then the release of the held button at the last point sent.
+async fn release_held(cdp: &Cdp, tab: &Tab) {
+    let Some(((x, y), button)) = lock(&tab.pressed).take() else {
+        return;
+    };
+    for t in ["keyDown", "keyUp"] {
+        let k = json!({"type": t, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27});
+        let _ = cdp
+            .send(Some(&tab.session), "Input.dispatchKeyEvent", k)
+            .await;
+    }
+    let up = ev("mouseReleased", (x, y), button, 0, 1);
+    let _ = cdp
+        .send(Some(&tab.session), "Input.dispatchMouseEvent", up)
+        .await;
+}
+
 impl BrowserRuntime {
-    /// Like `click`'s aim: the element's box centre after scrolling it into view, kept inside the viewport.
+    /// Like `click`'s aim: the element's box centre after scrolling it into view. A centre that is still outside
+    /// the viewport (an element larger than it, or a page that did not scroll) is an error, not a clamped guess.
     async fn ref_point(&self, tab: &Tab, r: &str, vp: (u32, u32)) -> Result<P> {
         let oid = self.object_for(tab, r).await?;
         let f = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,r.width*r.height]}";
@@ -130,8 +181,8 @@ impl BrowserRuntime {
         if !(p[2].as_f64().unwrap_or(0.0) > 0.0 && x.is_finite() && y.is_finite()) {
             return Err(BrowserError::Page(format!("element {r} is not visible")));
         }
-        let top = |n: u32| f64::from(n.max(1)) - 1.0;
-        Ok((x.clamp(0.0, top(vp.0)), y.clamp(0.0, top(vp.1))))
+        check_point((x, y), vp)
+            .map_err(|_| BrowserError::Page(format!("element {r} is not inside the viewport")))
     }
 
     async fn point(&self, tab: &Tab, t: &MouseTarget, vp: (u32, u32)) -> Result<P> {
@@ -141,9 +192,84 @@ impl BrowserRuntime {
         }
     }
 
-    /// Runs one mouse action on the current tab and returns where the pointer ended.
+    /// The tag (and id) of the element at a viewport point, from the DOM (no page script), for a label.
+    pub async fn element_at(&self, x: f64, y: f64) -> Option<String> {
+        let tab = self.current().ok()?;
+        let n = self
+            .call(
+                &tab,
+                "DOM.getNodeForLocation",
+                json!({"x": x.round() as i64, "y": y.round() as i64}),
+            )
+            .await
+            .ok()?;
+        let d = self
+            .call(
+                &tab,
+                "DOM.describeNode",
+                json!({"backendNodeId": n["backendNodeId"]}),
+            )
+            .await
+            .ok()?;
+        let name = d["node"]["nodeName"].as_str()?.to_lowercase();
+        let attrs = d["node"]["attributes"].as_array()?;
+        let id = attrs
+            .chunks(2)
+            .find(|c| c[0] == "id")
+            .and_then(|c| c.get(1)?.as_str())
+            .filter(|i| {
+                i.len() <= 30
+                    && i.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+            });
+        Some(id.map_or(name.clone(), |i| format!("{name}#{i}")))
+    }
+
+    /// One CDP mouse event, remembering a held button so a cancelled call can let it go.
+    async fn send_mouse(&self, tab: &Tab, e: Value) -> Result<()> {
+        let at = (
+            e["x"].as_f64().unwrap_or(0.0),
+            e["y"].as_f64().unwrap_or(0.0),
+        );
+        let moved = e["type"] == "mouseMoved";
+        match e["type"].as_str() {
+            // marked BEFORE it is sent: a call dropped while the press is on the wire still lets go
+            Some("mousePressed") => {
+                let b = if e["button"] == "right" {
+                    "right"
+                } else {
+                    "left"
+                };
+                *lock(&tab.pressed) = Some((at, b));
+            }
+            Some("mouseMoved") => {
+                if let Some(h) = lock(&tab.pressed).as_mut() {
+                    h.0 = at;
+                }
+            }
+            _ => {}
+        }
+        let released = e["type"] == "mouseReleased";
+        self.call(tab, "Input.dispatchMouseEvent", e).await?;
+        if released {
+            *lock(&tab.pressed) = None;
+        }
+        if moved {
+            tokio::time::sleep(STEP_PAUSE).await;
+        }
+        Ok(())
+    }
+
+    /// Runs one mouse action on the current tab and returns where the pointer ended. One at a time per tab.
     pub async fn mouse(&self, op: &MouseOp) -> Result<Spot> {
         let tab = self.current()?;
+        let _one = tab.mouse_lock.lock().await;
+        // a button an earlier call left down (cancelled, or its release failed) comes up first
+        release_held(&self.cdp, &tab).await;
+        let _guard = ReleaseOnDrop {
+            cdp: self.cdp.clone(),
+            tab: tab.clone(),
+        };
         let vp = self.viewport(&tab).await;
         // the pointer's last place, inside the viewport (it may have been resized since)
         let last = *lock(&tab.mouse);
@@ -168,8 +294,9 @@ impl BrowserRuntime {
                 double: false,
             },
             MouseOp::Drag(a, b) => {
-                let a = self.point(&tab, a, vp).await?;
-                Plan::Drag(a, self.point(&tab, b, vp).await?)
+                // the end first: scrolling the start into view last keeps the start where it was measured
+                let b = self.point(&tab, b, vp).await?;
+                Plan::Drag(self.point(&tab, a, vp).await?, b)
             }
             MouseOp::Wheel(t, dx, dy) => {
                 if !(dx.is_finite() && dy.is_finite()) {
@@ -189,19 +316,24 @@ impl BrowserRuntime {
         let end = match plan {
             Plan::Move(p) | Plan::Click { at: p, .. } | Plan::Drag(_, p) | Plan::Wheel(p, ..) => p,
         };
-        for e in events(plan, from) {
-            let moved = e["type"] == "mouseMoved";
-            if let Err(err) = self.call(&tab, "Input.dispatchMouseEvent", e).await {
-                if matches!(plan, Plan::Drag(..)) {
-                    // never leave the button held
-                    let up = ev("mouseReleased", end, "left", 0, 1);
-                    let _ = self.call(&tab, "Input.dispatchMouseEvent", up).await;
+        let r = match (plan, op) {
+            (Plan::Drag(a, b), MouseOp::Drag(start, _)) => {
+                self.drag(&tab, from, a, b, start, vp).await
+            }
+            _ => {
+                let mut r = Ok(());
+                for e in events(plan, from) {
+                    r = self.send_mouse(&tab, e).await;
+                    if r.is_err() {
+                        break;
+                    }
                 }
-                return Err(err);
+                r
             }
-            if moved {
-                tokio::time::sleep(STEP_PAUSE).await;
-            }
+        };
+        if let Err(e) = r {
+            release_held(&self.cdp, &tab).await;
+            return Err(e);
         }
         *lock(&tab.mouse) = Some(end);
         if !self.opts.headless {
@@ -220,6 +352,34 @@ impl BrowserRuntime {
             w: vp.0,
             h: vp.1,
         })
+    }
+
+    /// A drag: glide to the start, measure an element start again just before the press (the page may have moved
+    /// during the glide), press, move with the button down, release.
+    async fn drag(
+        &self,
+        tab: &Tab,
+        from: P,
+        mut a: P,
+        b: P,
+        start: &MouseTarget,
+        vp: (u32, u32),
+    ) -> Result<()> {
+        for e in glide(from, a, false) {
+            self.send_mouse(tab, e).await?;
+        }
+        if let MouseTarget::Ref(r) = start {
+            let now = self.ref_point(tab, r, vp).await?;
+            if now != a {
+                self.send_mouse(tab, ev("mouseMoved", now, "none", 0, 0))
+                    .await?;
+            }
+            a = now;
+        }
+        for e in drag_tail(a, b) {
+            self.send_mouse(tab, e).await?;
+        }
+        Ok(())
     }
 }
 
