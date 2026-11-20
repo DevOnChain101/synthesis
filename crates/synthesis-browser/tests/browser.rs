@@ -1970,32 +1970,93 @@ async fn person_tabs_body() {
         .await
         .unwrap();
     let pv = PageView::new(rt.clone());
-    assert!(pv.close_tab(0).await.is_err(), "the last tab stays");
-    pv.new_tab(None).await.unwrap();
+    let id = |i: usize| {
+        let pv = pv.clone();
+        async move { pv.tabs().await.unwrap()[i].id.clone() }
+    };
+    let first = id(0).await;
+    assert!(pv.close_tab(0, &first).await.is_err(), "the last tab stays");
+    // the URL loads in the NEW tab; the first keeps its page
+    pv.new_tab(Some(&format!("{base}/login"))).await.unwrap();
     let tabs = pv.tabs().await.unwrap();
     assert_eq!((tabs.len(), tabs[1].active), (2, true));
+    assert!(tabs[0].page.url.expose().ends_with("/form"));
+    assert!(tabs[1].page.url.expose().ends_with("/login"));
     // a refused URL creates no tab
     assert!(pv.new_tab(Some("file:///etc/passwd")).await.is_err());
     assert_eq!(pv.tabs().await.unwrap().len(), 2);
-    pv.select_tab(0).await.unwrap();
+    // a stale id (another tab at that index) is refused, for select and close
+    let second = id(1).await;
+    assert!(matches!(
+        pv.select_tab(0, &second).await,
+        Err(BrowserError::Refused(_))
+    ));
+    assert!(matches!(
+        pv.close_tab(0, &second).await,
+        Err(BrowserError::Refused(_))
+    ));
+    assert_eq!(pv.tabs().await.unwrap().len(), 2);
+    pv.select_tab(0, &first).await.unwrap();
     assert!(pv.tabs().await.unwrap()[0].active);
     {
         let _agent = rt.agent_busy();
         for r in [
             pv.new_tab(None).await.map(drop),
-            pv.select_tab(1).await,
-            pv.close_tab(1).await,
+            pv.select_tab(1, &second).await,
+            pv.close_tab(1, &second).await,
         ] {
             assert!(matches!(r, Err(BrowserError::Busy)), "{r:?}");
         }
     }
     assert!(pv.tabs().await.unwrap()[0].active, "refused: nothing moved");
+    // The agent starts a call WHILE a person action is under way: once its guard is held, nothing may change the
+    // current tab (the check is made again right before every change). Varied delays hit different stages.
+    let active = || {
+        let pv = pv.clone();
+        async move {
+            let t = pv.tabs().await.unwrap();
+            t.into_iter().find(|t| t.active).map(|t| t.id)
+        }
+    };
+    for n in 0..24u64 {
+        // start from [first, other] with `first` current
+        loop {
+            let t = pv.tabs().await.unwrap();
+            if t.len() > 2 {
+                pv.close_tab(t.len() - 1, &t[t.len() - 1].id).await.unwrap();
+            } else if t.len() < 2 {
+                pv.new_tab(None).await.unwrap();
+            } else {
+                break;
+            }
+        }
+        let t = pv.tabs().await.unwrap();
+        pv.select_tab(0, &t[0].id).await.unwrap();
+        let other = t[1].id.clone();
+        let op = {
+            let pv = pv.clone();
+            tokio::spawn(async move {
+                match n % 3 {
+                    0 => pv.select_tab(1, &other).await,
+                    1 => pv.new_tab(None).await.map(drop),
+                    _ => pv.close_tab(1, &other).await,
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(n * 3)).await;
+        let agent = rt.agent_busy();
+        let held = active().await; // what the agent's call would target
+        let r = op.await.unwrap();
+        assert_eq!(active().await, held, "op {n} moved the agent's tab: {r:?}");
+        drop(agent);
+    }
     while pv.tabs().await.unwrap().len() < PageView::MAX_TABS {
         pv.new_tab(None).await.unwrap();
     }
     assert!(pv.new_tab(None).await.is_err(), "capped");
-    pv.close_tab(1).await.unwrap();
-    assert_eq!(pv.tabs().await.unwrap().len(), PageView::MAX_TABS - 1);
+    let (second, n) = (id(1).await, PageView::MAX_TABS);
+    pv.close_tab(1, &second).await.unwrap();
+    assert_eq!(pv.tabs().await.unwrap().len(), n - 1);
     pv.view(true, 640, 400).await.unwrap(); // re-armed on the current tab
     rt.close().await.unwrap();
 }

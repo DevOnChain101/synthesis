@@ -145,6 +145,9 @@ pub struct PageSnapshot {
 #[derive(Clone, Debug)]
 pub struct TabInfo {
     pub index: usize,
+    /// The browser's own id of the page (not page content): the person's pane sends it back with a tab action, so
+    /// an action meant for one tab is refused when the list changed and another tab sits at that index.
+    pub id: String,
     pub page: PageInfo,
     pub active: bool,
 }
@@ -164,6 +167,9 @@ pub struct Spot {
     pub w: u32,
     pub h: u32,
 }
+
+/// Tabs the person's pane may have open at once.
+const PERSON_MAX_TABS: usize = 12;
 
 struct Tab {
     session: String,
@@ -264,46 +270,23 @@ impl PageView {
         self.0.tabs().await
     }
     /// Tabs the person's pane may have open at once (the agent's own `new_tab` has no such cap).
-    pub const MAX_TABS: usize = 12;
+    pub const MAX_TABS: usize = PERSON_MAX_TABS;
 
-    /// The person's tab actions are refused (never queued) while a tool call of the agent is in flight: it targets
-    /// the current tab, which must not change under it.
-    fn person_ok(&self) -> Result<()> {
-        if self.0.agent_busy.load(Ordering::SeqCst) > 0 {
-            return Err(BrowserError::Busy);
-        }
-        Ok(())
-    }
-    pub async fn select_tab(&self, index: usize) -> Result<()> {
-        self.person_ok()?;
-        self.0.select_tab(index).await
+    /// The person's tab actions are refused (never queued) while a tool call of the agent is in flight, and the
+    /// check is made again right before each change (see [`BrowserRuntime::not_busy`]): the agent's current tab must
+    /// not change under a call. `id` is the tab's [`TabInfo::id`] from the list the person saw: another tab at that
+    /// index (the list changed) is refused.
+    pub async fn select_tab(&self, index: usize, id: &str) -> Result<()> {
+        self.0.select_tab_as(index, Some(id), true).await
     }
     /// A new tab that becomes current (the caller re-arms the view). A `url` is checked like the person's own
-    /// navigation BEFORE the tab exists; without one the tab is `about:blank`.
+    /// navigation BEFORE the tab exists and loads in that very tab; without one the tab is `about:blank`.
     pub async fn new_tab(&self, url: Option<&str>) -> Result<PageInfo> {
-        self.person_ok()?;
-        if let Some(u) = url {
-            self.0.nav_allowed(u, true)?;
-        }
-        if self.0.tabs().await?.len() >= Self::MAX_TABS {
-            return Err(BrowserError::Refused(format!(
-                "at most {} tabs",
-                Self::MAX_TABS
-            )));
-        }
-        let info = self.0.new_tab(None).await?;
-        match url {
-            Some(u) => self.navigate(u, WaitUntil::DomContentLoaded).await,
-            None => Ok(info),
-        }
+        self.0.new_tab_as(url, true).await
     }
     /// Closes a tab; the last one stays (a browser without a tab has nothing to show).
-    pub async fn close_tab(&self, index: usize) -> Result<()> {
-        self.person_ok()?;
-        if self.0.tabs().await?.len() <= 1 {
-            return Err(BrowserError::Refused("the last tab stays open".into()));
-        }
-        self.0.close_tab(index).await
+    pub async fn close_tab(&self, index: usize, id: &str) -> Result<()> {
+        self.0.close_tab_as(index, Some(id), true).await
     }
     /// The person's click, wheel, key or paste in the pane. It is input, not navigation: a link it follows meets
     /// the same network policy as any page-made navigation (no person grant).
@@ -1268,18 +1251,28 @@ impl BrowserRuntime {
     async fn navigate_as(&self, url: &str, until: WaitUntil, person: bool) -> Result<PageInfo> {
         self.nav_allowed(url, person)?;
         let tab = self.current()?;
-        let _nav = self.mark_navigation(&tab, url, person);
+        self.navigate_tab(&tab, url, until, person).await
+    }
+
+    /// Navigates `tab` itself, never whichever tab is current when the call gets here.
+    async fn navigate_tab(
+        &self,
+        tab: &Arc<Tab>,
+        url: &str,
+        until: WaitUntil,
+        person: bool,
+    ) -> Result<PageInfo> {
+        self.nav_allowed(url, person)?;
+        let _nav = self.mark_navigation(tab, url, person);
         let mut rx = self.cdp.subscribe();
-        let r = self
-            .call(&tab, "Page.navigate", json!({"url": url}))
-            .await?;
+        let r = self.call(tab, "Page.navigate", json!({"url": url})).await?;
         if let Some(e) = r["errorText"].as_str() {
             return Err(BrowserError::Page(e.to_owned()));
         }
         if r.get("loaderId").is_none() {
-            return self.info(&tab).await; // same-document navigation: no load event
+            return self.info(tab).await; // same-document navigation: no load event
         }
-        self.finish_load(&mut rx, &tab, until).await
+        self.finish_load(&mut rx, tab, until).await
     }
 
     /// The person's navigation may reach its loopback target until the guard drops; the agent's navigation takes the
@@ -1394,6 +1387,7 @@ impl BrowserRuntime {
             .enumerate()
             .map(|(index, t)| TabInfo {
                 index,
+                id: t["targetId"].as_str().unwrap_or_default().to_owned(),
                 active: cur.as_deref() == t["targetId"].as_str(),
                 page: PageInfo {
                     url: UntrustedText::new(redact_url(t["url"].as_str().unwrap_or(""))),
@@ -1411,9 +1405,38 @@ impl BrowserRuntime {
             .ok_or_else(|| BrowserError::Page(format!("no tab at index {index}")))
     }
 
+    /// The person's tab actions (`person`) refuse while a tool call of the agent is in flight. Called again right
+    /// before every change (and under the `tabs` lock before `current` is written), so an agent call that starts
+    /// between the first check and the change is seen: the agent's call targets `current` as it starts.
+    fn not_busy(&self, person: bool) -> Result<()> {
+        if person && self.agent_busy.load(Ordering::SeqCst) > 0 {
+            return Err(BrowserError::Busy);
+        }
+        Ok(())
+    }
+
     /// Opens a tab in this session's context and makes it current; navigates when `url` is given.
     pub async fn new_tab(&self, url: Option<&str>) -> Result<PageInfo> {
+        self.new_tab_as(url, false).await
+    }
+
+    /// `person`: the person's "+" (only `PageView` says so): refused while the agent acts, capped, and `url` is
+    /// checked as the person's navigation before the tab exists. The URL loads in the NEW tab, never in whichever
+    /// tab is current by then.
+    async fn new_tab_as(&self, url: Option<&str>, person: bool) -> Result<PageInfo> {
         self.live()?;
+        self.not_busy(person)?;
+        if person {
+            if let Some(u) = url {
+                self.nav_allowed(u, true)?;
+            }
+            if self.page_targets().await?.len() >= PERSON_MAX_TABS {
+                return Err(BrowserError::Refused(format!(
+                    "at most {PERSON_MAX_TABS} tabs"
+                )));
+            }
+            self.not_busy(person)?;
+        }
         let r = self
             .cdp
             .send(
@@ -1429,29 +1452,73 @@ impl BrowserRuntime {
         let tab = self.attach(&id).await?;
         {
             let mut t = lock(&self.tabs);
+            if self.not_busy(person).is_err() {
+                drop(t);
+                // the agent began meanwhile: its tab stays current; the unused new tab goes
+                let _ = self
+                    .cdp
+                    .send(None, "Target.closeTarget", json!({"targetId": id}))
+                    .await;
+                return Err(BrowserError::Busy);
+            }
             if !t.order.contains(&id) {
                 t.order.push(id.clone());
             }
             t.current = Some(id);
         }
         match url {
-            Some(u) => self.navigate(u, WaitUntil::Load).await,
+            Some(u) => {
+                let until = if person {
+                    WaitUntil::DomContentLoaded
+                } else {
+                    WaitUntil::Load
+                };
+                self.navigate_tab(&tab, u, until, person).await
+            }
             None => self.info(&tab).await,
         }
     }
 
     pub async fn select_tab(&self, index: usize) -> Result<()> {
+        self.select_tab_as(index, None, false).await
+    }
+
+    /// `expect`: the target id the caller saw at `index`; another tab there is refused.
+    async fn select_tab_as(&self, index: usize, expect: Option<&str>, person: bool) -> Result<()> {
+        self.not_busy(person)?;
         let id = self.target_at(index).await?;
+        if expect.is_some_and(|e| e != id) {
+            return Err(BrowserError::Refused(
+                "the tabs changed: nothing was switched".into(),
+            ));
+        }
         self.attach(&id).await?;
+        self.not_busy(person)?;
         self.cdp
             .send(None, "Target.activateTarget", json!({"targetId": id}))
             .await?;
-        lock(&self.tabs).current = Some(id);
+        let mut t = lock(&self.tabs);
+        self.not_busy(person)?;
+        t.current = Some(id);
         Ok(())
     }
 
     pub async fn close_tab(&self, index: usize) -> Result<()> {
+        self.close_tab_as(index, None, false).await
+    }
+
+    async fn close_tab_as(&self, index: usize, expect: Option<&str>, person: bool) -> Result<()> {
+        self.not_busy(person)?;
         let id = self.target_at(index).await?;
+        if expect.is_some_and(|e| e != id) {
+            return Err(BrowserError::Refused(
+                "the tabs changed: nothing was closed".into(),
+            ));
+        }
+        if person && self.page_targets().await?.len() <= 1 {
+            return Err(BrowserError::Refused("the last tab stays open".into()));
+        }
+        self.not_busy(person)?;
         self.cdp
             .send(None, "Target.closeTarget", json!({"targetId": id}))
             .await?;

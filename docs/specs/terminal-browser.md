@@ -320,8 +320,11 @@ the UI says so, and "Open in your browser" hands a refused or personal URL to th
   navigation). After select, new and close the pane re-arms the screencast on the current tab. Chords, only while the
   page holds the keys (Cmd on macOS, Ctrl elsewhere): mod+T new tab, mod+W close the active tab, Ctrl+Tab and
   Ctrl+Shift+Tab next and previous (all platforms). Elsewhere Ctrl+T stays the target cycle; Esc and Ctrl+Esc still give
-  the keys back and Ctrl+C on macOS stays the app's. Limit: the busy check is made when the action starts, so an agent
-  call that begins in the same instant can still see its tab change.
+  the keys back and Ctrl+C on macOS stays the app's. The busy check is made again right before each change and, for the tab switch and a new tab, under the `tabs` lock
+  right before `current` is written, so an agent call that starts meanwhile is seen (the agent reads `current` as its call
+  starts); a new tab made in vain is closed again. A new tab's URL loads in that tab by its id, never in the current
+  one. Every switch and close carries the target id the person saw (`TabInfo.id`) and is refused when another tab now
+  sits at that index. Limit: once `Target.closeTarget` is sent for a close, the cleanup of `current` cannot be refused.
 - WebSocket and WebTransport stay blocked as documented in SECURITY.md (constructor replaced; WebTransport at script level
   only). This is the main UX gap of person browsing and is an owner question (section 5).
 
