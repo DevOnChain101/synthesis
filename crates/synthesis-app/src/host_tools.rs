@@ -2,7 +2,7 @@
 //! only tools are `conductor_*`, run by the host through [`HostTools`]. The set is read-only by
 //! type: [`toolbox`] refuses a spec that is not `Read`, not `conductor_*` or not closed
 //! (`additionalProperties: false`), so no file, shell, web, MCP, browser or mutating tool can be
-//! registered in this role. The real tool set is P3b; [`ReadOnlyStub`] is the placeholder.
+//! registered in this role. The real tool set is `conductor::specs`, served by `conductor::ConductorHost`.
 
 use std::sync::Arc;
 
@@ -173,34 +173,6 @@ impl HostTools for Relay {
     }
 }
 
-/// P3a placeholder set: one read tool that lists nothing. P3b replaces it with the conductor host's tools.
-pub fn stub_specs() -> Vec<ToolSpec> {
-    vec![ToolSpec {
-        name: "conductor_list".into(),
-        description: "List the sessions this window owns (none yet).".into(),
-        input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}),
-        side_effect: SideEffectClass::Read,
-        runtime: ToolRuntime::Builtin,
-    }]
-}
-
-pub struct ReadOnlyStub;
-
-impl HostTools for ReadOnlyStub {
-    fn specs(&self) -> Vec<ToolSpec> {
-        stub_specs()
-    }
-
-    fn call<'a>(&'a self, name: &'a str, _: Value) -> BoxFuture<'a, Result<Value, String>> {
-        Box::pin(async move {
-            match name {
-                "conductor_list" => Ok(json!({"sessions": []})),
-                _ => Err(format!("unknown tool \"{name}\"")),
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +230,7 @@ mod tests {
         let sent = Arc::new(std::sync::Mutex::new(vec![]));
         let s2 = sent.clone();
         let relay = Arc::new(Relay::new(
-            stub_specs,
+            crate::conductor::specs,
             Box::new(move |id, tool, _| {
                 s2.lock().unwrap().push((id, tool.to_string()));
                 true
@@ -283,10 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stub_lists_only_itself_and_results_are_capped() {
-        let tb = toolbox(Arc::new(ReadOnlyStub)).unwrap();
-        let names: Vec<_> = tb.specs().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, ["conductor_list"]);
+    fn results_are_capped_on_a_character_boundary() {
         let big = "é".repeat(MAX_RESULT);
         let c = cap(&big);
         assert!(c.len() < MAX_RESULT + 32 && c.ends_with("[... truncated ...]"));

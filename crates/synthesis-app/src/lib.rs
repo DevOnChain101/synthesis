@@ -34,6 +34,7 @@ macro_rules! out {
 
 pub mod agents;
 pub mod asks;
+pub mod conductor;
 pub mod ctx;
 pub mod doctor;
 pub mod egress;

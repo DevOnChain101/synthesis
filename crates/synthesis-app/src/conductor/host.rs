@@ -1,0 +1,730 @@
+//! The conductor host: the one policy point behind the conductor's tools (conductor.md 2.2). The model's calls
+//! only read host-built digests or store a proposal; nothing here starts, sends, stops or writes. Turns start
+//! only from the person's line ([`ConductorHost::person_turn`]); news from sessions becomes host notes.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+use synthesis_harness::fence;
+use synthesis_tools::{BoxFuture, ToolSpec};
+
+use super::MESSAGE_WORKER_ENABLED;
+use super::config::Confirm;
+use super::digest::{Digests, TITLE_MAX, hidden, valid_id};
+use super::limits::*;
+use super::proposal::{Alt, Payload, Proposal, State};
+use super::reads::{ConductorReads, SessionRow};
+use super::tools::*;
+use crate::host_tools::HostTools;
+
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+/// Where audit-only events go (the conductor session's event log).
+pub type Audit = Arc<dyn Fn(&Value) + Send + Sync>;
+
+pub struct HostConfig {
+    pub max_sessions: usize,
+    pub confirm: Confirm,
+    /// The user's home directory and `$SYNT_HOME`: a new session or goal may not use them or what holds them.
+    pub home: PathBuf,
+    pub synt_home: PathBuf,
+    /// `provider/model` ids a proposed session may name.
+    pub models: Vec<String>,
+    /// Exact secret values (API keys) the digests mask on top of the built-in patterns.
+    pub secrets: Vec<String>,
+}
+
+#[derive(Default)]
+pub(super) struct St {
+    turn: Turn,
+    tainted: bool,
+    sources: Vec<String>,
+    proposals: Vec<Proposal>,
+    next: u64,
+    sends: SendLog,
+    notes: Vec<String>,
+    notes_tainted: bool,
+    ended: bool,
+}
+
+pub struct ConductorHost {
+    cfg: HostConfig,
+    reads: Arc<dyn ConductorReads>,
+    digests: Digests,
+    clock: Clock,
+    audit: Audit,
+    st: Mutex<St>,
+}
+
+fn system_clock() -> Clock {
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    })
+}
+
+enum Resolved {
+    One(SessionRow),
+    NotFound,
+    Ambiguous(Vec<SessionRow>),
+}
+
+/// `s<N>`, `@s<N>` or a session id prefix of at least 8 hex digits, among live own sessions. Exactly one match,
+/// or it fails: no recency or best-match tie-break (conductor.md 3.3). An outcome attempt's id is not in `rows`.
+fn resolve(rows: &[SessionRow], token: &str) -> Resolved {
+    let t = token.trim_start_matches('@');
+    let is_handle = t
+        .strip_prefix('s')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let is_sid = t.len() >= 8 && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+    let hits: Vec<&SessionRow> = rows
+        .iter()
+        .filter(|r| r.live)
+        .filter(|r| (is_handle && r.handle == t) || (is_sid && r.sid.starts_with(t)))
+        .collect();
+    match hits.as_slice() {
+        [] => Resolved::NotFound,
+        [one] => Resolved::One((*one).clone()),
+        many => Resolved::Ambiguous(many.iter().map(|r| (*r).clone()).collect()),
+    }
+}
+
+fn parse<T: DeserializeOwned>(input: Value) -> Result<T, String> {
+    serde_json::from_value(input).map_err(|e| format!("invalid input: {e}"))
+}
+
+/// A person-visible text field: not empty, within `max` bytes, no hidden or control characters (T11).
+fn check_text(field: &str, s: &str, max: usize) -> Result<(), String> {
+    if s.trim().is_empty() || s.len() > max {
+        return Err(format!("{field} must be 1..={max} bytes"));
+    }
+    if s.chars().any(hidden) {
+        return Err(format!(
+            "{field} holds hidden or control characters: refused"
+        ));
+    }
+    Ok(())
+}
+
+impl ConductorHost {
+    pub fn new(cfg: HostConfig, reads: Arc<dyn ConductorReads>) -> Self {
+        let digests = Digests::new(cfg.secrets.clone());
+        Self {
+            cfg,
+            reads,
+            digests,
+            clock: system_clock(),
+            audit: Arc::new(|_| {}),
+            st: Mutex::new(St::default()),
+        }
+    }
+
+    pub fn with_clock(mut self, c: Clock) -> Self {
+        self.clock = c;
+        self
+    }
+
+    pub fn with_audit(mut self, a: Audit) -> Self {
+        self.audit = a;
+        self
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, St> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The person typed a line: a new conductor turn. Resets the turn's limits and taint, and returns the text
+    /// the model reads: the pending host notes, fenced, then the person's line. This is the only way a turn starts.
+    pub fn person_turn(&self, line: &str) -> String {
+        let mut st = self.lock();
+        self.sweep(&mut st);
+        st.turn = Turn::default();
+        st.tainted = std::mem::take(&mut st.notes_tainted);
+        st.sources = if st.tainted {
+            vec!["host_note".into()]
+        } else {
+            vec![]
+        };
+        let mut out = String::new();
+        for n in st.notes.drain(..) {
+            out += &format!("<host_note>\n{}\n</host_note>\n", fence("host_note", &n));
+        }
+        out + line
+    }
+
+    /// News for the conductor's next turn (a session finished, needs the person, ...). It never starts a turn.
+    /// `session_text`: the news carries text from a session, which taints the next turn.
+    pub fn push_news(&self, text: &str, session_text: bool) {
+        let mut st = self.lock();
+        st.notes.push(self.digests.clean(text, 512));
+        st.notes_tainted |= session_text;
+    }
+
+    /// The conductor session ended: every shown proposal expires (4.3).
+    pub fn end(&self) {
+        let mut st = self.lock();
+        st.ended = true;
+        for i in 0..st.proposals.len() {
+            if st.proposals[i].state == State::Shown {
+                self.set_state(&mut st, i, State::Expired, None);
+            }
+        }
+    }
+
+    pub fn proposals(&self) -> Vec<Proposal> {
+        let mut st = self.lock();
+        self.sweep(&mut st);
+        st.proposals.clone()
+    }
+
+    pub fn proposal(&self, id: &str) -> Option<Proposal> {
+        self.proposals().into_iter().find(|p| p.id == id)
+    }
+
+    /// The person pressed Cancel (or dismissed the card). Not an effect, so it needs no click token.
+    pub fn cancel(&self, id: &str) -> Result<(), String> {
+        let mut st = self.lock();
+        self.sweep(&mut st);
+        match st.proposals.iter().position(|p| p.id == id) {
+            Some(i) if st.proposals[i].state == State::Shown => {
+                self.set_state(&mut st, i, State::Cancelled, None);
+                Ok(())
+            }
+            Some(_) => Err("that proposal is no longer open".into()),
+            None => Err("unknown proposal".into()),
+        }
+    }
+
+    // ---- state helpers (the lock is held) ----
+
+    fn sweep(&self, st: &mut St) {
+        let now = (self.clock)();
+        for i in 0..st.proposals.len() {
+            if st.proposals[i].state == State::Shown
+                && now.saturating_sub(st.proposals[i].created) >= PROPOSAL_TTL_SECS
+            {
+                self.set_state(st, i, State::Expired, None);
+            }
+        }
+    }
+
+    fn set_state(&self, st: &mut St, i: usize, state: State, detail: Option<String>) {
+        let p = &mut st.proposals[i];
+        p.state = state;
+        p.detail = detail.map(|d| self.digests.clean(&d, 200));
+        let note = format!(
+            "proposal {} is {}",
+            p.id,
+            serde_json::to_value(state)
+                .unwrap_or_default()
+                .as_str()
+                .unwrap_or("")
+        );
+        let ev = self.audit_event(&st.proposals[i]);
+        // the person's own click or the clock decided: the note names no session text, so it taints nothing
+        st.notes.push(note);
+        (self.audit)(&ev);
+    }
+
+    fn audit_event(&self, p: &Proposal) -> Value {
+        let mut payload = serde_json::to_value(&p.payload).unwrap_or_default();
+        self.digests.redactor().redact_value(&mut payload);
+        json!({"event": "conductor.proposal", "id": p.id, "state": p.state, "payload_sha256": p.payload_sha256,
+               "tainted": p.tainted, "taint_sources": p.taint_sources, "payload": payload})
+    }
+
+    fn taint(&self, st: &mut St, source: String) {
+        st.tainted = true;
+        if !st.sources.contains(&source) && st.sources.len() < 32 {
+            st.sources.push(source);
+        }
+    }
+
+    // ---- validation shared by propose and the click ----
+
+    /// Absolute, existing, not a filesystem root, not the home directory or a directory that holds it, not
+    /// under `$SYNT_HOME`. Returns the canonical path.
+    pub(super) fn check_folder(&self, f: &str) -> Result<String, String> {
+        check_text("folder", f, 1024)?;
+        let p = Path::new(f);
+        if !p.is_absolute() {
+            return Err("folder must be an absolute path".into());
+        }
+        let c = dunce::canonicalize(p).map_err(|_| "folder does not exist".to_string())?;
+        let home = dunce::canonicalize(&self.cfg.home)
+            .map_err(|_| "the home directory cannot be checked: folder refused".to_string())?;
+        if !c.is_dir() || c.parent().is_none() || c == home || home.starts_with(&c) {
+            return Err("folder is not a usable workspace (a filesystem root, the home directory or a directory that holds it)".into());
+        }
+        if dunce::canonicalize(&self.cfg.synt_home).is_ok_and(|s| c.starts_with(s)) {
+            return Err("folder is inside the Synthesis home: refused".into());
+        }
+        c.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| "folder is not valid text".into())
+    }
+
+    pub(super) fn check_session_room(&self) -> Result<(), String> {
+        let live = self.reads.sessions().iter().filter(|r| r.live).count();
+        if live >= self.cfg.max_sessions {
+            return Err(format!(
+                "limit: {} live sessions already (the most is {})",
+                live, self.cfg.max_sessions
+            ));
+        }
+        Ok(())
+    }
+
+    /// Does this payload still hold? Called when proposed and again at the click.
+    pub(super) fn revalidate(&self, p: &Payload) -> Result<(), String> {
+        match p {
+            Payload::CreateSession {
+                first_message,
+                folder,
+                model,
+                title,
+            } => {
+                check_text("first_message", first_message, FIRST_MESSAGE_MAX)?;
+                if let Some(f) = folder {
+                    self.check_folder(f)?;
+                }
+                if let Some(m) = model
+                    && !self.cfg.models.contains(m)
+                {
+                    return Err("model is not one of the listed models".into());
+                }
+                if let Some(t) = title {
+                    check_text("title", t, TITLE_MAX)?;
+                }
+                self.check_session_room()
+            }
+            Payload::CreateGoal {
+                goal_kind,
+                contract,
+                folder,
+                base_commit,
+            } => {
+                check_text("contract", contract, CONTRACT_MAX)?;
+                self.check_folder(folder)?;
+                use synthesis_view::outcomes::is_hex;
+                match (goal_kind.as_str(), base_commit.as_deref()) {
+                    ("read_only", Some(_)) => Err("a read-only goal has no base commit".into()),
+                    ("write" | "read_only", None) => Ok(()),
+                    ("write", Some(c)) if is_hex(c, 40) || is_hex(c, 64) => Ok(()),
+                    ("write", Some(_)) => {
+                        Err("base_commit must be a lowercase hex commit id".into())
+                    }
+                    _ => Err("kind must be write or read_only".into()),
+                }
+            }
+            Payload::SendMessage {
+                session, sid, text, ..
+            } => {
+                check_text("text", text, TEXT_MAX)?;
+                self.live_session(session, sid)
+            }
+            Payload::Interrupt { session, sid } | Payload::Close { session, sid } => {
+                self.live_session(session, sid)
+            }
+            Payload::PauseOutcome { outcome } => self
+                .reads
+                .outcome(outcome)
+                .map(|_| ())
+                .ok_or_else(|| "not_found: no such outcome".into()),
+        }
+    }
+
+    fn live_session(&self, handle: &str, sid: &str) -> Result<(), String> {
+        match resolve(&self.reads.sessions(), handle) {
+            Resolved::One(r) if r.sid == sid => Ok(()),
+            _ => Err("the session ended or changed".into()),
+        }
+    }
+
+    // ---- the click side (used by the executor only) ----
+
+    /// Claims a shown proposal for execution (so a second click finds it taken), re-validates it, and
+    /// charges the rate limit. `edit`: the person changed the card's text; the new bytes are validated and
+    /// become the proposal's payload. Returns the payload to run.
+    pub(super) fn claim(&self, id: &str, edit: Option<String>) -> Result<Proposal, String> {
+        let mut st = self.lock();
+        self.sweep(&mut st);
+        let i = st
+            .proposals
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or("unknown proposal")?;
+        if st.proposals[i].state != State::Shown {
+            return Err("that proposal is no longer open".into());
+        }
+        let mut payload = st.proposals[i].payload.clone();
+        if st.proposals[i].payload_sha256 != payload.sha256() {
+            self.set_state(&mut st, i, State::Stale, Some("the card changed".into()));
+            return Err("stale: the proposal changed".into());
+        }
+        let edited = edit.is_some();
+        if let Some(t) = edit {
+            match &mut payload {
+                Payload::CreateSession {
+                    first_message: x, ..
+                }
+                | Payload::SendMessage { text: x, .. }
+                | Payload::CreateGoal { contract: x, .. } => *x = t,
+                _ => return Err("this card has no text to edit".into()),
+            }
+        }
+        if let Err(e) = self.revalidate(&payload) {
+            // an edit that does not validate leaves the card open; anything else means it went stale
+            if edited {
+                return Err(e);
+            }
+            self.set_state(&mut st, i, State::Stale, Some(e.clone()));
+            return Err(format!("stale: {e}"));
+        }
+        if let Payload::SendMessage { sid, .. } = &payload {
+            let now = (self.clock)();
+            if !st.sends.allows(sid, now) {
+                return Err(format!(
+                    "limit: {MAX_SENDS_PER_TARGET} sends to one session in 10 minutes"
+                ));
+            }
+            st.sends.record(sid, now);
+        }
+        let p = &mut st.proposals[i];
+        p.payload = payload;
+        p.payload_sha256 = p.payload.sha256();
+        self.set_state(
+            &mut st,
+            i,
+            if edited {
+                State::Edited
+            } else {
+                State::Accepted
+            },
+            None,
+        );
+        Ok(st.proposals[i].clone())
+    }
+
+    /// The effect failed after the claim.
+    pub(super) fn failed(&self, id: &str, why: &str) {
+        let mut st = self.lock();
+        if let Some(i) = st.proposals.iter().position(|p| p.id == id) {
+            self.set_state(&mut st, i, State::Failed, Some(why.into()));
+        }
+    }
+
+    // ---- the tools ----
+
+    fn dispatch(&self, name: &str, input: Value) -> Result<Value, String> {
+        if !TOOLS.contains(&name) {
+            return Err(format!("unknown tool \"{}\"", self.digests.clean(name, 64)));
+        }
+        {
+            let mut st = self.lock();
+            if st.ended {
+                return Err("the conductor session has ended".into());
+            }
+            if st.turn.calls >= MAX_CALLS_PER_TURN {
+                return Err(format!(
+                    "limit: at most {MAX_CALLS_PER_TURN} tool calls per turn; ask the person to continue"
+                ));
+            }
+            st.turn.calls += 1;
+        }
+        match name {
+            "conductor_list_sessions" => {
+                parse::<serde_json::Map<String, Value>>(input)
+                    .ok()
+                    .filter(|m| m.is_empty())
+                    .ok_or("invalid input: this tool takes no fields")?;
+                let rows = self.reads.sessions();
+                self.taint(&mut self.lock(), "sessions".into());
+                Ok(self.digests.session_rows(&rows))
+            }
+            "conductor_list_outcomes" => {
+                let a: ListOutcomes = parse(input)?;
+                if a.state.as_deref().is_some_and(|s| !valid_id(s)) {
+                    return Err("invalid input: state".into());
+                }
+                let rows = self.reads.outcomes(a.state.as_deref());
+                self.taint(&mut self.lock(), "outcomes".into());
+                Ok(self.digests.outcome_rows(&rows))
+            }
+            "conductor_read_digest" => self.read_digest(parse::<ReadDigest>(input)?.target),
+            "conductor_propose_session" => self.propose_session(parse(input)?),
+            "conductor_propose_goal" => self.propose_goal(parse(input)?),
+            "conductor_propose_assignment" => self.propose_assignment(parse(input)?),
+            _ => self.propose_stop(parse(input)?),
+        }
+    }
+
+    fn read_digest(&self, t: DigestTarget) -> Result<Value, String> {
+        let nf = |what: &str| format!("not_found: no such {what}");
+        let id_ok = |s: &str| {
+            if valid_id(s) {
+                Ok(())
+            } else {
+                Err("invalid input: id".to_string())
+            }
+        };
+        let (v, source) = match t {
+            DigestTarget::Session(SessionT { session }) => {
+                id_ok(&session)?;
+                let Resolved::One(row) = resolve(&self.reads.sessions(), &session) else {
+                    return Err(nf("live session"));
+                };
+                let rep = self
+                    .reads
+                    .session_report(&row.handle)
+                    .ok_or_else(|| nf("session"))?;
+                (
+                    self.digests.session_digest(&row, &rep),
+                    format!("session:{}", row.handle),
+                )
+            }
+            DigestTarget::Outcome(OutcomeT { outcome }) => {
+                id_ok(&outcome)?;
+                let r = self.reads.outcome(&outcome).ok_or_else(|| nf("outcome"))?;
+                (
+                    self.digests.outcome_digest(&r),
+                    format!("outcome:{outcome}"),
+                )
+            }
+            DigestTarget::Item(ItemT { work_item }) => {
+                id_ok(&work_item)?;
+                let r = self.reads.item(&work_item).ok_or_else(|| nf("work item"))?;
+                (self.digests.item_digest(&r), format!("item:{work_item}"))
+            }
+            DigestTarget::Report(ReportT { report }) => {
+                id_ok(&report)?;
+                let text = self.reads.report(&report).ok_or_else(|| nf("report"))?;
+                (
+                    self.digests.report_digest(&report, &text),
+                    format!("report:{report}"),
+                )
+            }
+        };
+        self.taint(&mut self.lock(), source);
+        Ok(v)
+    }
+
+    /// Stores the proposal and answers at once. Taint and the forced-card reasons are recorded here.
+    fn store(&self, payload: Payload, extra_forced: Option<&str>) -> Result<Value, String> {
+        let mut st = self.lock();
+        self.sweep(&mut st);
+        let is_goal = matches!(payload, Payload::CreateGoal { .. });
+        if st.turn.proposals >= MAX_PROPOSALS_PER_TURN
+            || (is_goal && st.turn.goals >= MAX_GOALS_PER_TURN)
+        {
+            return Err(format!(
+                "limit: at most {MAX_PROPOSALS_PER_TURN} proposals ({MAX_GOALS_PER_TURN} goal) per turn"
+            ));
+        }
+        if st
+            .proposals
+            .iter()
+            .filter(|p| p.state == State::Shown)
+            .count()
+            >= MAX_OPEN_PROPOSALS
+        {
+            return Err(format!(
+                "limit: {MAX_OPEN_PROPOSALS} proposals are waiting for the person"
+            ));
+        }
+        let mut forced = vec![];
+        if st.tainted {
+            forced.push("the conductor read session content since your last line".to_string());
+        }
+        forced.extend(extra_forced.map(str::to_string));
+        let auto_eligible = forced.is_empty()
+            && payload.action().is_some_and(|a| match &self.cfg.confirm {
+                Confirm::All => false,
+                Confirm::Auto(set) => set.contains(&a),
+            });
+        st.next += 1;
+        let id = format!("p{}", st.next);
+        let p = Proposal {
+            id: id.clone(),
+            payload_sha256: payload.sha256(),
+            payload,
+            tainted: st.tainted,
+            taint_sources: st.sources.clone(),
+            card_forced: forced,
+            auto_eligible,
+            state: State::Shown,
+            created: (self.clock)(),
+            detail: None,
+        };
+        st.turn.proposals += 1;
+        st.turn.goals += u32::from(is_goal);
+        (self.audit)(&self.audit_event(&p));
+        st.proposals.push(p);
+        Ok(json!({"proposal_id": id, "state": "shown"}))
+    }
+
+    fn propose_session(&self, a: ProposeSession) -> Result<Value, String> {
+        let payload = Payload::CreateSession {
+            folder: a
+                .folder
+                .as_deref()
+                .map(|f| self.check_folder(f))
+                .transpose()?,
+            first_message: a.first_message,
+            model: a.model,
+            title: a.title,
+        };
+        self.revalidate(&payload)?;
+        let forced = matches!(
+            &payload,
+            Payload::CreateSession {
+                folder: Some(_),
+                ..
+            }
+        )
+        .then_some("the workspace was chosen by the conductor");
+        self.store(payload, forced)
+    }
+
+    fn propose_goal(&self, a: ProposeGoal) -> Result<Value, String> {
+        let payload = Payload::CreateGoal {
+            goal_kind: a.kind,
+            folder: self.check_folder(&a.folder)?,
+            contract: a.contract,
+            base_commit: a.base_commit,
+        };
+        self.revalidate(&payload)?;
+        self.store(payload, None)
+    }
+
+    fn propose_assignment(&self, a: ProposeAssignment) -> Result<Value, String> {
+        check_text("text", &a.text, TEXT_MAX)?;
+        if a.alternatives.len() > MAX_ALTERNATIVES || !a.alternatives.iter().all(|x| valid_id(x)) {
+            return Err("invalid input: alternatives".into());
+        }
+        let described = match a.basis.as_str() {
+            "explicit" => false,
+            "described" => true,
+            _ => return Err("invalid input: basis must be explicit or described".into()),
+        };
+        let target = match a.target {
+            AssignTarget::Item(_) if !MESSAGE_WORKER_ENABLED => {
+                return Err("message_worker is not available yet: it needs the live worker inbox (P2c). Ask the person to message the worker in its session.".into());
+            }
+            AssignTarget::Item(_) => unreachable!("message_worker has no card until P2c"),
+            AssignTarget::Session(SessionT { session }) => session,
+        };
+        if a.brief_change {
+            return Err("invalid input: brief_change is for a work item".into());
+        }
+        if !valid_id(target.trim_start_matches('@')) {
+            return Err("invalid input: session".into());
+        }
+        let rows = self.reads.sessions();
+        let row = match resolve(&rows, &target) {
+            Resolved::One(r) => r,
+            Resolved::NotFound => {
+                return Err("not_found: no live session with that handle or id".into());
+            }
+            Resolved::Ambiguous(c) => return Err(self.ambiguous(&c)),
+        };
+        // `alternatives` names the other sessions the model could not rule out: ask the person, no card (3.3)
+        let mut named = vec![row.clone()];
+        for x in &a.alternatives {
+            match resolve(&rows, x) {
+                Resolved::One(r) => named.push(r),
+                _ => return Err("not_found: an alternative is not a live session".into()),
+            }
+        }
+        let mut handles: Vec<&str> = named.iter().map(|r| r.handle.as_str()).collect();
+        handles.sort_unstable();
+        handles.dedup();
+        if handles.len() > 1 {
+            return Err(self.ambiguous(&named));
+        }
+        if !self.lock().sends.allows(&row.sid, (self.clock)()) {
+            return Err(format!(
+                "limit: {MAX_SENDS_PER_TARGET} sends to one session in 10 minutes"
+            ));
+        }
+        let alternatives = rows
+            .iter()
+            .filter(|r| r.live && r.handle != row.handle)
+            .map(|r| Alt {
+                handle: r.handle.clone(),
+                title: self.digests.clean(&r.title, TITLE_MAX),
+            })
+            .collect();
+        let payload = Payload::SendMessage {
+            session: row.handle,
+            sid: row.sid,
+            text: a.text,
+            basis: a.basis,
+            alternatives,
+        };
+        self.store(
+            payload,
+            described.then_some("the target was not named by you"),
+        )
+    }
+
+    fn ambiguous(&self, rows: &[SessionRow]) -> String {
+        let c: Vec<String> = rows
+            .iter()
+            .map(|r| format!("{} \"{}\"", r.handle, self.digests.clean(&r.title, 60)))
+            .collect();
+        format!(
+            "ambiguous: more than one session could fit ({}); ask the person which one",
+            c.join(", ")
+        )
+    }
+
+    fn propose_stop(&self, a: ProposeStop) -> Result<Value, String> {
+        let payload = match (a.session, a.outcome, a.how.as_str()) {
+            (Some(s), None, how @ ("interrupt" | "close")) => {
+                if !valid_id(s.trim_start_matches('@')) {
+                    return Err("invalid input: session".into());
+                }
+                let Resolved::One(r) = resolve(&self.reads.sessions(), &s) else {
+                    return Err("not_found: no live session with that handle or id".into());
+                };
+                if how == "close" {
+                    Payload::Close {
+                        session: r.handle,
+                        sid: r.sid,
+                    }
+                } else {
+                    Payload::Interrupt {
+                        session: r.handle,
+                        sid: r.sid,
+                    }
+                }
+            }
+            (None, Some(o), "pause") => {
+                if !valid_id(&o) {
+                    return Err("invalid input: outcome".into());
+                }
+                Payload::PauseOutcome { outcome: o }
+            }
+            _ => return Err(
+                "invalid input: a session with how interrupt|close, or an outcome with how pause"
+                    .into(),
+            ),
+        };
+        self.revalidate(&payload)?;
+        self.store(payload, None)
+    }
+}
+
+impl HostTools for ConductorHost {
+    fn specs(&self) -> Vec<ToolSpec> {
+        specs()
+    }
+
+    fn call<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        let r = self.dispatch(name, input);
+        Box::pin(async move { r })
+    }
+}

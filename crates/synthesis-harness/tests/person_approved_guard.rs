@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// `src` files (relative to the repo root) that may call the constructor. Empty until P3b's card code lands.
-const ALLOWED: &[&str] = &[];
+/// `src` files (relative to the repo root) that may call the constructor. Only the conductor's executor, which runs after the person's click.
+const ALLOWED: &[&str] = &["crates/synthesis-app/src/conductor/exec.rs"];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {

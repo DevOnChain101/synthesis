@@ -16,13 +16,14 @@ use synthesis_harness::sanitize_for_display;
 use synthesis_permissions::Mode;
 
 use crate::asks::Asks;
+use crate::conductor::specs as conductor_specs;
 use crate::engine_fs::{self, Images, Put};
 use crate::engine_methods::{
     Ctx, Mode as TrustMode, check_id, check_instructions, check_key, check_model,
 };
 use crate::engine_ops::{self, Tokens};
 use crate::host::{CancelSlot, Info, Live, lock};
-use crate::host_tools::{Relay, stub_specs};
+use crate::host_tools::Relay;
 use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, ROLE_CONDUCTOR, Request, read_line};
 use crate::run::{Common, Front, Limits, Native, prepare};
 use crate::trust::{Grant, TRUST_CHANGED, TrustCheck, launch_common, root_of, trust_changed_error};
@@ -1090,7 +1091,7 @@ pub fn serve(
         cancel: Mutex::new(None),
         sends_queued: AtomicU64::new(0),
         cancel_upto: AtomicU64::new(0),
-        host: Arc::new(Relay::new(stub_specs, {
+        host: Arc::new(Relay::new(conductor_specs, {
             let wire = wire.clone();
             Box::new(move |id, tool, input| {
                 wire.msg(&Out::HostCall {
@@ -1175,8 +1176,12 @@ pub fn serve(
                         if srv.conductor {
                             // an engine that ignored `role` (an older one) says neither: the client fails closed
                             v["role"] = json!(ROLE_CONDUCTOR);
-                            v["tools"] =
-                                json!(stub_specs().into_iter().map(|s| s.name).collect::<Vec<_>>());
+                            v["tools"] = json!(
+                                conductor_specs()
+                                    .into_iter()
+                                    .map(|s| s.name)
+                                    .collect::<Vec<_>>()
+                            );
                         }
                         wire.result(id, Ok(v));
                     }
@@ -1373,7 +1378,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
-            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
+            host: Arc::new(Relay::new(conductor_specs, Box::new(|_, _, _| false))),
         });
         // a queue of one that nobody reads: the worker is stuck on a slow call
         let (q, rx) = mpsc::sync_channel(1);
@@ -1432,7 +1437,7 @@ mod tests {
             cancel: Mutex::new(None),
             sends_queued: AtomicU64::new(0),
             cancel_upto: AtomicU64::new(0),
-            host: Arc::new(Relay::new(stub_specs, Box::new(|_, _, _| false))),
+            host: Arc::new(Relay::new(conductor_specs, Box::new(|_, _, _| false))),
         });
         let (q, rx) = mpsc::sync_channel(8);
         let input = std::io::Cursor::new(

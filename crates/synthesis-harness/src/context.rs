@@ -24,7 +24,7 @@ const SUB_RULES: &str =
 /// any `<` or full-width `＜`, optionally followed by spaces and a `/` or `／`, then `tag` (any
 /// case) loses its bracket (`&lt;`). Shared by every framing delimiter (`user-bash`, `tool_output`,
 /// `agent_message`, ...).
-pub(crate) fn fence(tag: &str, text: &str) -> String {
+pub fn fence(tag: &str, text: &str) -> String {
     // The origin blocks of person-side messages are never forgeable from inside any other
     // fence (tool output, repository text, peer data): their tags are defanged everywhere.
     let tags = [

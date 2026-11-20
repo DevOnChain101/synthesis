@@ -1083,15 +1083,15 @@ fn a_headless_engine_without_a_cost_cap_refuses_to_start_a_session() {
     );
 }
 
-/// The conductor role over the wire (super-agent-s1.md 4.1): the model's `conductor_list` call becomes a
+/// The conductor role over the wire (super-agent-s1.md 4.1): the model's `conductor_list_sessions` call becomes a
 /// `host.call` line, the client's `host.result` goes back to the model, and a role with no cap or an unknown
 /// role is refused.
 #[test]
 fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
     let script = |_: &Path| {
         json!([
-            {"tools": [{"id": "c1", "name": "conductor_list", "input": {}}]},
-            {"dump": "tools", "tools": [{"id": "c2", "name": "conductor_list", "input": {}}]},
+            {"tools": [{"id": "c1", "name": "conductor_list_sessions", "input": {}}]},
+            {"dump": "tools", "tools": [{"id": "c2", "name": "conductor_list_sessions", "input": {}}]},
             {"dump": "messages"}
         ])
     };
@@ -1108,7 +1108,7 @@ fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
     assert!(r["error"].is_null(), "{r}");
     // the report names the role and its tools: a client of an engine that ignored `role` can tell
     assert_eq!(r["ok"]["role"], "conductor");
-    assert_eq!(r["ok"]["tools"], json!(["conductor_list"]));
+    assert_eq!(r["ok"]["tools"], json!(synthesis_app::conductor::TOOLS));
     // the mode never leaves default, plan and dontAsk, whatever the client sends
     for m in ["acceptEdits", "auto", "bypassPermissions"] {
         let id = e.call("set_mode", json!({"mode": m}));
@@ -1136,7 +1136,7 @@ fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
             break;
         }
         calls += 1;
-        assert_eq!(last["tool"], "conductor_list");
+        assert_eq!(last["tool"], "conductor_list_sessions");
         let (call, host_id) = (
             last["id"].clone(),
             e.call(
@@ -1148,7 +1148,9 @@ fn a_conductor_role_engine_asks_the_client_for_its_tools_over_host_call() {
     }
     assert_eq!(calls, 2, "{texts:?}");
     assert!(
-        texts.iter().any(|t| t.contains("\"conductor_list\"")),
+        texts
+            .iter()
+            .any(|t| t.contains("\"conductor_list_sessions\"")),
         "{texts:?}"
     );
     assert!(
