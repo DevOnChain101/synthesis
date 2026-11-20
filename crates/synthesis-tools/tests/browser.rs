@@ -1705,3 +1705,150 @@ async fn an_agent_only_session_reads_console_network_and_tabs_without_a_prompt()
     );
     reg.close_session("rw-agent");
 }
+
+const MOUSE_PAGE: &str = r#"<html><head><title>Mouse</title><style>body{margin:0}
+#m{position:absolute;left:100px;top:100px;width:100px;height:40px;background:#ccc}
+#h{position:absolute;left:300px;top:100px;width:20px;height:20px;background:red}
+#tall{position:absolute;top:0;left:0;width:1px;height:4000px}</style></head><body>
+<div id="m">menu</div><div id="h"></div><div id="tall"></div><pre id="log" style="position:fixed;left:0;top:300px"></pre>
+<script>const L=t=>document.getElementById('log').textContent+=' '+t;let drag=false;
+m.onmouseover=()=>L('over-menu');m.ondblclick=()=>L('dbl');m.oncontextmenu=e=>{e.preventDefault();L('ctx')};
+h.onmousedown=()=>{drag=true;L('drag-start')};
+addEventListener('mouseup',e=>{if(drag){drag=false;L('drag-end:'+e.clientX)}});
+addEventListener('scroll',()=>L('scrolled'));</script></body></html>"#;
+
+async fn serve_html(html: &'static str) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                    html.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_mouse_hovers_double_right_clicks_drags_and_wheels_in_a_real_page() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(MOUSE_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let (reg, c) = (registry(false, true), ctx(d.path(), "mouse1"));
+    let run = |i: Value| reg.execute("browser_mouse", i, &c);
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+            .await,
+        "navigate",
+    );
+    let seen = |t: &'static str| {
+        reg.execute(
+            "browser_wait_for",
+            json!({"text": t, "timeout_ms": 5000}),
+            &c,
+        )
+    };
+    let o = run(json!({"action": "move", "x": 150, "y": 120})).await;
+    ok(&o, "move");
+    assert_eq!(o.meta["action"]["action"], "hover");
+    assert_eq!(
+        (o.meta["action"]["x"].clone(), o.meta["action"]["y"].clone()),
+        (json!(150), json!(120))
+    );
+    ok(&seen("over-menu").await, "hover reached the page");
+    let o = run(json!({"action": "double_click", "x": 150, "y": 120})).await;
+    ok(&o, "double");
+    ok(&seen("dbl").await, "dblclick");
+    ok(
+        &run(json!({"action": "right_click", "x": 150, "y": 120})).await,
+        "right",
+    );
+    ok(&seen("ctx").await, "contextmenu");
+    ok(
+        &run(json!({"action": "drag", "x": 310, "y": 110, "to_x": 500, "to_y": 110})).await,
+        "drag",
+    );
+    ok(
+        &seen("drag-end:500").await,
+        "the drag ended where it was told to",
+    );
+    // an element target works as for browser_click
+    let tree = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    assert!(tree.contains("menu"), "{tree}");
+    // a huge wheel is clamped, not refused; the page scrolls
+    let o = run(json!({"action": "wheel", "x": 50, "y": 50, "dy": 1e12})).await;
+    ok(&o, "wheel");
+    assert!(text(&o).contains("5000"), "{}", text(&o));
+    ok(&seen("scrolled").await, "wheel scrolled the page");
+    // untrusted numbers and shapes are refused before anything is sent
+    for bad in [
+        json!({"action": "click", "x": -1, "y": 5}),
+        json!({"action": "click", "x": 5, "y": 100000}),
+        json!({"action": "click", "x": "5", "y": 5}),
+        json!({"action": "click", "x": 5}),
+        json!({"action": "click", "ref": "e1", "x": 5, "y": 5}),
+        json!({"action": "click"}),
+        json!({"action": "drag", "x": 5, "y": 5}),
+        json!({"action": "wheel", "x": 5, "y": 5}),
+        json!({"action": "wheel", "dy": "a"}),
+        json!({"action": "fly", "x": 5, "y": 5}),
+        json!({"x": 5, "y": 5}),
+    ] {
+        let o = run(bad.clone()).await;
+        assert!(o.is_error, "{bad}: {}", text(&o));
+    }
+    reg.close_session("mouse1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_mouse_is_gated_like_click_on_a_loopback_page_the_person_opened() {
+    if !have_browser() {
+        return;
+    }
+    let a = serve_html(MOUSE_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(LoopbackPerson::default());
+    let tap = Arc::new(synthesis_tools::BrowserTap::default());
+    let cfg = BrowserConfig {
+        no_sandbox: no_sandbox(),
+        host: Some(person.clone()),
+        view: Some(tap.clone()),
+        ..Default::default()
+    };
+    tap.enable_start(
+        cfg.clone(),
+        d.path().join("art"),
+        synthesis_config::Env::from_process(),
+    );
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(cfg);
+    tap.start().await.unwrap();
+    tap.view()
+        .unwrap()
+        .navigate(&format!("{a}/"), synthesis_browser::WaitUntil::Load)
+        .await
+        .unwrap();
+    let c = ctx(d.path(), "mouse2");
+    let o = reg
+        .execute(
+            "browser_mouse",
+            json!({"action": "move", "x": 150, "y": 120}),
+            &c,
+        )
+        .await;
+    assert!(o.is_error && text(&o).contains("approves"), "{o:?}");
+    assert_eq!(person.asked.lock().unwrap().len(), 1);
+    reg.close_session("mouse2");
+}

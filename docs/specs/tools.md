@@ -36,7 +36,7 @@ Rules:
 | Read | Read, Glob, Grep, BashOutput, TodoWrite, TaskCreate/Get/List/Update, Skill, Task¹, AskUserQuestion, ExitPlanMode, terminal_logs, terminal_status, git_status, git_diff, artifact_read, browser_snapshot, browser_screenshot, browser_console, browser_network |
 | Write | Write, Edit, NotebookEdit, git_apply_patch |
 | Execute | Bash, KillShell, terminal_spawn, terminal_signal, verify_run, git_revert |
-| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_fill, browser_login, browser_fill_secret, mcp__* |
+| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_mouse, browser_fill, browser_login, browser_fill_secret, mcp__* |
 
 ¹ Task runs a sub-agent whose own calls are gated one by one. The class drives defaults; permission rules still decide (Node's READ_ONLY_TOOLS/EDIT_TOOLS sets [from-node permissions.js:11-12] are ported verbatim for the `Permissions::check` port).
 
@@ -120,6 +120,7 @@ The model-facing text and schemas are unchanged. Where the whole file is known t
  "browser_navigate":{"properties":{"url":{"type":"string"},"profile":{"type":"string"},"wait_until":{"enum":["load","domcontentloaded","networkidle"]},"timeout_ms":{"type":"integer"}},"required":["url"]},
  "browser_snapshot":{"properties":{"ref":{"type":"string"},"max_nodes":{"type":"integer"}}},
  "browser_click":{"properties":{"ref":{"type":"string"},"role":{"type":"string"},"name":{"type":"string"},"selector":{"type":"string"}}},
+ "browser_mouse":{"properties":{"action":{"enum":["move","click","double_click","right_click","drag","wheel"]},"ref":{"type":"string"},"role":{"type":"string"},"name":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"to_ref":{"type":"string"},"to_x":{"type":"number"},"to_y":{"type":"number"},"dx":{"type":"number"},"dy":{"type":"number"}},"required":["action"]},
  "browser_login":{"properties":{"origin":{"type":"string"},"profile":{"type":"string"}},"required":["origin"]},
  "browser_fill_secret":{"properties":{"ref":{"type":"string"},"secret":{"type":"string"}},"required":["ref","secret"]},
  "browser_fill":{"properties":{"ref":{"type":"string"},"selector":{"type":"string"},"value":{"type":"string"},"sensitive":{"type":"boolean"}},"required":["value"]},

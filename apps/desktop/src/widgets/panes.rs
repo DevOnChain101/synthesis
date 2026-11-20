@@ -509,6 +509,22 @@ pub fn pointer_alpha(age_ms: i64) -> f32 {
     }
 }
 
+/// How long the cursor takes to glide from the previous point to the new one.
+pub const GLIDE_MS: i64 = 350;
+
+/// The cursor `age_ms` after an action that moved it from `from` to `to` (both fractions): an ease-out glide.
+/// At once (`to`) without a previous point, without motion, or for an age that is not in the glide.
+pub fn glide(from: Option<(f32, f32)>, to: (f32, f32), age_ms: i64, motion: bool) -> (f32, f32) {
+    match from {
+        Some((fx, fy)) if motion && (0..GLIDE_MS).contains(&age_ms) => {
+            let t = age_ms as f32 / GLIDE_MS as f32;
+            let e = 1.0 - (1.0 - t) * (1.0 - t);
+            (fx + (to.0 - fx) * e, fy + (to.1 - fy) * e)
+        }
+        _ => to,
+    }
+}
+
 /// Where the cursor goes on a screenshot of `shot_w` x `shot_h`, as fractions of the image: the action's point in
 /// its viewport scaled over. `None` without a point, and when the image is not the viewport (a full-page shot has
 /// another aspect ratio), since the point would land on the wrong place.
@@ -794,7 +810,23 @@ mod tests {
             h: Some(h),
             target: None,
             ts: Some(0),
+            from: None,
         }
+    }
+
+    #[test]
+    fn the_cursor_glides_from_the_previous_point_then_rests() {
+        let (a, b) = ((0.0, 0.0), (1.0, 0.5));
+        assert_eq!(glide(Some(a), b, 0, true), a);
+        let mid = glide(Some(a), b, GLIDE_MS / 2, true);
+        assert!(
+            mid.0 > 0.5 && mid.0 < 1.0,
+            "ease-out is past halfway: {mid:?}"
+        );
+        assert_eq!(glide(Some(a), b, GLIDE_MS, true), b);
+        assert_eq!(glide(Some(a), b, 10, false), b, "no motion");
+        assert_eq!(glide(None, b, 10, true), b);
+        assert_eq!(glide(Some(a), b, -5, true), b, "a stamp in the future");
     }
 
     #[test]

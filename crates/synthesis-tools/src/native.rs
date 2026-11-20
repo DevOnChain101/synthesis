@@ -115,6 +115,7 @@ pub(crate) fn lookup(name: &str) -> Option<Run> {
         "browser_navigate" => Run::Async(browser::navigate),
         "browser_snapshot" => Run::Async(browser::snapshot),
         "browser_click" => Run::Async(browser::click),
+        "browser_mouse" => Run::Async(browser::mouse),
         "browser_fill" => Run::Async(browser::fill),
         "browser_login" => Run::Async(browser::login),
         "browser_fill_secret" => Run::Async(browser::fill_secret),

@@ -45,6 +45,7 @@ fn side_effect(name: &str) -> SideEffectClass {
         | "WebSearch"
         | "browser_navigate"
         | "browser_click"
+        | "browser_mouse"
         | "browser_fill"
         | "browser_press_key"
         | "browser_login"

@@ -194,6 +194,8 @@ pub struct Pointer {
     pub h: Option<u32>,
     pub target: Option<String>,
     pub ts: Option<i64>,
+    /// Where the pointer was before this action (fractions of the viewport), for a viewer to glide from.
+    pub from: Option<(f32, f32)>,
 }
 
 impl Pointer {
@@ -692,6 +694,7 @@ impl AgentPanes {
                     h: *h,
                     target: target.clone(),
                     ts,
+                    from: self.pointer.as_ref().and_then(Pointer::frac),
                 });
             }
             Event::BrowserFrame {
@@ -783,6 +786,7 @@ fn browser_summary(name: &str, input: &Value) -> String {
             s("element").or_else(|| s("ref")).or_else(|| s("selector"))
         }
         "browser_press_key" => s("key"),
+        "browser_mouse" => s("action"),
         _ => None,
     };
     t.map_or_else(
