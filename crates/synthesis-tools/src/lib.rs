@@ -33,7 +33,8 @@ mod web;
 mod write;
 
 pub use browser::{
-    BrowserConfig, BrowserHost, BrowserTap, LoginRequest, is_control_chord, redact_input,
+    BrowserConfig, BrowserHost, BrowserTap, LoginRequest, PaymentRequest, is_control_chord,
+    redact_input,
 };
 pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
 pub use skill::{

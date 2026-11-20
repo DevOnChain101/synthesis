@@ -8,6 +8,7 @@ mod discover;
 mod error;
 mod input;
 mod mouse;
+pub mod payment;
 mod policy;
 pub mod profile;
 mod redact;

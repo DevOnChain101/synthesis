@@ -571,6 +571,20 @@ impl BrowserHost for CliHost {
         })
     }
 
+    fn confirm_payment<'a>(
+        &'a self,
+        req: &'a synthesis_tools::PaymentRequest,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            ask_yes(
+                &format!("{}. {}", payment_line(req), "Allow THIS ONE action?"),
+                cancel,
+            )
+            .await
+        })
+    }
+
     fn confirm_secret<'a>(
         &'a self,
         secret: &'a str,
@@ -589,6 +603,20 @@ impl BrowserHost for CliHost {
             .await
         })
     }
+}
+
+/// What the person reads: action, origin, the control's label and the amount near it (all page text, sanitized).
+fn payment_line(r: &synthesis_tools::PaymentRequest) -> String {
+    let amount = r.amount.as_deref().map_or(String::new(), |a| {
+        format!(", amount {}", sanitize_for_display(a))
+    });
+    format!(
+        "{} on {}: \"{}\"{amount} ({})",
+        sanitize_for_display(&r.action),
+        sanitize_for_display(&r.origin),
+        sanitize_for_display(&r.label),
+        r.reason
+    )
 }
 
 fn emit_login_required(sink: &EventSink, req: &LoginRequest) {
@@ -713,6 +741,27 @@ impl BrowserHost for DialogHost {
                     "The agent asks to browse or read {} on this machine (a local server); the open page is {}. Asked once per session and address; private network and metadata addresses are never allowed.",
                     sanitize_for_display(target),
                     sanitize_for_display(page)
+                ),
+                cancel,
+            )
+            .await
+        })
+    }
+
+    fn confirm_payment<'a>(
+        &'a self,
+        req: &'a synthesis_tools::PaymentRequest,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            // the tool name is the action's own; no allow rule, mode or "always allow" is offered or consulted
+            self.ask(
+                req.action.split(' ').next().unwrap_or("browser_click"),
+                "browser-host",
+                serde_json::json!({"payment_action": req.action, "origin": req.origin, "label": req.label, "amount": req.amount}),
+                format!(
+                    "PAYMENT / CONSENT: {}. Approves this one action only; it is asked again every time.",
+                    payment_line(req)
                 ),
                 cancel,
             )

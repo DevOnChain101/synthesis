@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use serde_json::{Value, json};
+use synthesis_browser::payment::{self, Kind, PayTarget, Probe};
 use synthesis_browser::profile::{self, DONE_FILE};
 use synthesis_browser::secret::{self, SecretSpec};
 use synthesis_browser::{
@@ -146,6 +147,19 @@ pub struct LoginRequest {
     pub done_file: PathBuf,
 }
 
+/// What a payment approval shows. All text came from the page or the model: the front-end sanitizes it for display.
+#[derive(Debug, Clone)]
+pub struct PaymentRequest {
+    /// The tool and what it does ("browser_click click").
+    pub action: String,
+    pub origin: String,
+    /// The target's label, clipped; empty when the page gave none.
+    pub label: String,
+    /// An amount found near the target, if any.
+    pub amount: Option<String>,
+    pub reason: &'static str,
+}
+
 /// The seam to the person (a CLI dialog, the headless terminal prompt). Both calls are in
 /// addition to, never instead of, the permission engine, and neither may be auto-answered.
 pub trait BrowserHost: Send + Sync + std::fmt::Debug {
@@ -174,6 +188,17 @@ pub trait BrowserHost: Send + Sync + std::fmt::Debug {
         &'a self,
         _target: &'a str,
         _page: &'a str,
+        _cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
+    /// The agent's browser action may pay or commit money or consent (checkout, place order, card fields ...). Asked
+    /// for EVERY such action, never remembered, never covered by an allow rule, "always allow" or a permission mode.
+    /// The default (no way to ask) refuses.
+    fn confirm_payment<'a>(
+        &'a self,
+        _req: &'a PaymentRequest,
         _cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
@@ -413,14 +438,163 @@ macro_rules! browser_tool {
                 {
                     return fail($wire, e.into());
                 }
+                let mut unchecked = false;
+                if matches!(
+                    $wire,
+                    "browser_click" | "browser_mouse" | "browser_fill" | "browser_press_key"
+                ) {
+                    match payment_gate(sh, ctx, &rt, $wire, input).await {
+                        Ok(u) => unchecked = u,
+                        Err(e) => return fail($wire, e.into()),
+                    }
+                }
                 let r = tokio::select! {
                     r = $body(&rt, input, sh) => r,
                     () = ctx.cancel.cancelled() => Err("aborted.".into()),
                 };
-                r.unwrap_or_else(|e| fail($wire, e))
+                note_unchecked(r.unwrap_or_else(|e| fail($wire, e)), unchecked)
             })
         }
     };
+}
+
+/// Records in the result that the payment check could not run (so a reviewer sees the action went unchecked).
+fn note_unchecked(mut o: ToolOutput, unchecked: bool) -> ToolOutput {
+    if unchecked {
+        if o.meta.is_null() {
+            o.meta = json!({});
+        }
+        o.meta["payment_check"] = json!("unavailable");
+    }
+    o
+}
+
+/// What the person is asked about, from the tool input: the target to read, the kind of action and its name. `None`
+/// for input the tool itself rejects, and for actions that pay nothing (hover, wheel, a printable key).
+async fn pay_plan(
+    rt: &BrowserRuntime,
+    wire: &str,
+    input: &Value,
+) -> Option<(PayTarget, Kind, String)> {
+    let by_ref = async |a: Aim<'_>| match a {
+        Aim::Ref(r) => Some(PayTarget::Ref(r.to_owned())),
+        Aim::Role(role, name) => ref_by_role(rt, role, name).await.ok().map(PayTarget::Ref),
+        Aim::Point(x, y) => Some(PayTarget::Point(x, y)),
+    };
+    match wire {
+        "browser_click" => {
+            let a = match (
+                str_field(input, "ref"),
+                str_field(input, "role"),
+                str_field(input, "name"),
+            ) {
+                (Some(r), ..) => Aim::Ref(r),
+                (None, Some(role), Some(name)) => Aim::Role(role, name),
+                _ => return None,
+            };
+            Some((by_ref(a).await?, Kind::Click, "click".into()))
+        }
+        "browser_mouse" => {
+            let act = str_field(input, "action")?;
+            if !matches!(act, "click" | "double_click" | "right_click" | "drag") {
+                return None;
+            }
+            let t = by_ref(aim(input, "").ok()??).await?;
+            // a point, a double click or a drag cannot be vetted by its label
+            let blind = matches!(t, PayTarget::Point(..)) || matches!(act, "double_click" | "drag");
+            Some((t, if blind { Kind::Blind } else { Kind::Click }, act.into()))
+        }
+        "browser_fill" | "browser_fill_secret" => Some((
+            PayTarget::Ref(str_field(input, "ref")?.to_owned()),
+            Kind::Fill,
+            "type into".into(),
+        )),
+        "browser_press_key" => {
+            let k = str_field(input, "key")?;
+            matches!(k.rsplit('+').next(), Some("Enter" | " "))
+                .then(|| (PayTarget::Focused, Kind::Key, format!("press {k}")))
+        }
+        _ => None,
+    }
+}
+
+/// The payment guard (owner decision 2026-11-20): an action that may pay or commit money or consent needs the
+/// person's OWN approval for this action, now. No allow rule, "always allow", permission mode, sub-agent or earlier
+/// answer covers it, and nothing is remembered. Nobody to ask: refused. Returns `true` when the check could not run
+/// (browsing goes on as before, the result says so).
+async fn payment_gate(
+    sh: &Shared,
+    ctx: &ToolContext,
+    rt: &BrowserRuntime,
+    wire: &str,
+    input: &Value,
+) -> Result<bool, BrowserError> {
+    let Some((target, kind, what)) = pay_plan(rt, wire, input).await else {
+        return Ok(false);
+    };
+    let page = current_page(rt).await;
+    let mut unread = false;
+    let (probe, reason) = match rt.payment_probe(&target).await {
+        Ok(p) => {
+            let r = payment::assess(&p, kind);
+            (p, r)
+        }
+        // detection failed on a page that already looks like a payment page: treat it as one
+        Err(_) if page.as_deref().is_some_and(payment::page_hit) => {
+            unread = true;
+            (
+                Probe {
+                    href: page.clone().unwrap_or_default(),
+                    ..Default::default()
+                },
+                Some("the target could not be read on a payment page"),
+            )
+        }
+        Err(_) => return Ok(true),
+    };
+    let Some(reason) = reason else {
+        return Ok(false);
+    };
+    let origin =
+        url::Url::parse(&probe.href).map_or(String::new(), |u| u.origin().ascii_serialization());
+    let how = format!(
+        "{wire} {what} on {origin}: {reason}. Payment and consent actions need the person's own approval every time (never covered by an allow rule, a mode or an earlier answer)"
+    );
+    let host = lock(&sh.browser_cfg).host.clone();
+    let Some(host) = host.filter(|_| !ctx.sub_agent) else {
+        return Err(BrowserError::Refused(format!(
+            "{how}; nobody can be asked in this run, so it is refused"
+        )));
+    };
+    let state = sh.session(ctx);
+    let key = format!("payment:{origin}");
+    if refused_too_often(&state, &key) {
+        return Err(BrowserError::Refused(format!(
+            "{how}; the person already refused it on this origin in this session, so it is not asked again"
+        )));
+    }
+    let req = PaymentRequest {
+        action: format!("{wire} {what}"),
+        origin,
+        label: payment::clean(&synthesis_browser::redact_text(&probe.label), 80),
+        amount: payment::amount(&probe.amount_text),
+        reason,
+    };
+    if !host.confirm_payment(&req, &ctx.cancel).await {
+        note_refusal(&state, &key);
+        return Err(BrowserError::Refused(format!(
+            "{how}; the person did not approve it"
+        )));
+    }
+    // one-shot and bound to what was shown: a page that changed its target meanwhile is not approved
+    match rt.payment_probe(&target).await {
+        // an unreadable target cannot be compared: the person's answer stands for this one action
+        Err(_) if unread => Ok(false),
+        Ok(now) if payment::same_target(&probe, &now) => Ok(false),
+        _ => Err(BrowserError::Refused(format!(
+            "{how}; the target changed after the person approved, so nothing was done. Look at the page again"
+        ))),
+    }
 }
 /// `browser_navigate`: like the other browser tools, plus the person's approval for a loopback address (a dev server).
 pub(crate) fn navigate<'a>(
@@ -663,11 +837,18 @@ pub(crate) fn fill_secret<'a>(
         if let Err(e) = approve_loopback(sh, ctx, &rt, current_page(&rt).await.as_deref()).await {
             return fail("browser_fill_secret", e.into());
         }
+        let unchecked = match payment_gate(sh, ctx, &rt, "browser_fill_secret", input).await {
+            Ok(u) => u,
+            Err(e) => return fail("browser_fill_secret", e.into()),
+        };
         let r = tokio::select! {
             r = fill_secret_body(&rt, input, sh, ctx) => r,
             () = ctx.cancel.cancelled() => Err("aborted.".into()),
         };
-        r.unwrap_or_else(|e| fail("browser_fill_secret", e))
+        note_unchecked(
+            r.unwrap_or_else(|e| fail("browser_fill_secret", e)),
+            unchecked,
+        )
     })
 }
 

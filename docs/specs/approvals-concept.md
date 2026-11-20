@@ -50,6 +50,7 @@ Agents that run unattended raise many questions. They are buried in transcripts,
 | Money beyond a cap; changing a cap | Money | cost cap, contract revise [E] |
 | Scope, contract, plan, verification bar | Design authority belongs to the person | `outcome.contract.approve`, `plan_approval`, `verification_review` [E]/[N in V1c] |
 | Project trust, MCP approval, enabling the orchestrator, permission-mode raise | Trust boundary | existing dialogs [E] |
+| Browser actions that pay or commit money or consent (checkout, place order, subscribe, donate, authorize, card fields) | Money, consent; owner decision 2026-11-20 | `BrowserHost::confirm_payment` [E] (terminal-browser.md, payment guard) |
 | Messages to a worker proposed by the orchestrator | S1 4.6: never on the auto list | conductor confirm policy [planned S1 P3b] |
 
 ---
@@ -130,6 +131,7 @@ ADR-019 mapping: T0/T1 exist only inside R0/R1 (inside the envelope and sandbox)
 | 18 | Style, naming, formatting, small local design choice | does not exist as an ask (agents ask in prose) | T0 when the class is listed; else T1 | T0 (default list: Q2) | default applied | A5 |
 | 19 | Project trust, MCP server approval, permission-mode raise to bypass | desktop dialogs [E] (`live.rs` `TrustGrant`, `DialogKind`) | T3 | no | not granted | unchanged (shown in queue only) |
 | 20 | Policy change proposal (`policy_change`, ADR-019 section 2) | [planned] | T3 (widens authority) | no | HOLD | later |
+| 21 | Browser payment or consent action (`browser_click`, `browser_mouse`, `browser_press_key` Enter/Space, `browser_fill`/`browser_fill_secret` into a card field on a payment-like page, label or origin) | `BrowserHost::confirm_payment` [E] (a dialog of the host, not a harness approval) | T3: one-shot per action, shows origin, label, action, amount; never covered by an allow rule, "always allow", mode (also bypass), sub-agent or conductor | no | refused (no host, sub-agent, headless `synt run`, a changed target, the person's no); never becomes yes | [E] |
 
 ### 4.3 The classifier (deterministic; last word)
 
