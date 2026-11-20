@@ -1723,16 +1723,8 @@ mod tests {
         // focused: consumed and sent
         assert!(key(vcx, "a"));
         settle(1);
-        // an app chord is not the page's
-        assert!(!key(
-            vcx,
-            if cfg!(target_os = "macos") {
-                "cmd-1"
-            } else {
-                "ctrl-1"
-            }
-        ));
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        // (app chords are not the page's: `page_key` is tested for both chord sets; on Windows and Linux Ctrl+1 is
+        // also an app chord of `on_key` itself that leaves the tab, so it cannot be pressed here)
         assert_eq!(inputs(), 1);
         // the agent is using the tab: the status shows, the key is dropped
         *fake.input_err.lock().unwrap() = Some("the agent is using this tab".into());
