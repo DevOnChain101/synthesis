@@ -2,7 +2,9 @@
 //! Without a browser they print SKIP and pass; run with `-- --nocapture` to see which ran.
 
 use std::time::Duration;
-use synthesis_browser::{BrowserOptions, BrowserRuntime, UrlPolicy, WaitFor, WaitUntil};
+use synthesis_browser::{
+    BrowserOptions, BrowserRuntime, FrameStream, UrlPolicy, ViewMetrics, WaitFor, WaitUntil,
+};
 use synthesis_config::Env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -55,6 +57,8 @@ const j=await r.json();document.getElementById('msg').textContent='Error: '+j.er
 const FLOOD: &str = r#"<html><body><script>
 setInterval(()=>{for(let i=0;i<5000;i++){console.log('flood'+i)}},1);</script></body></html>"#;
 /// Repaints forever, so the screencast always has a new frame to send (Chrome sends only on change).
+/// A page whose every pixel is this colour (rgb 30,144,255), with a text line to see sharpness in the shots.
+const SOLID: &str = "<html><body style=\"margin:0;background:rgb(30,144,255)\"><p style=\"font:16px sans-serif;margin:8px\">solid</p></body></html>";
 const ANIM: &str = r#"<html><body><script>let n=0;
 setInterval(()=>{document.body.style.background='rgb('+(n++*7%256)+',80,160)'},20);</script></body></html>"#;
 fn console_html(dead_port: u16) -> String {
@@ -163,6 +167,7 @@ async fn serve() -> String {
                         "<title>Read</title><p id=b></p><script>document.getElementById('b').textContent='cookies:'+document.cookie</script>".to_owned(),
                     ),
                     "/anim" => ("200 OK", "", "text/html", ANIM.to_owned()),
+                    "/solid" => ("200 OK", "", "text/html", SOLID.to_owned()),
                     "/flood" => ("200 OK", "", "text/html", FLOOD.to_owned()),
                     "/api/login" => (
                         "422 Unprocessable Entity",
@@ -1841,4 +1846,93 @@ async fn screencast_body() {
             .expect("next must not hang after close")
             .is_none()
     );
+}
+
+/// The next frame of exactly `(w, h)` pixels (within 2), decoded; earlier ones are frames of the previous size.
+async fn frame_of(frames: &FrameStream, (w, h): (u32, u32)) -> image::RgbImage {
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        let f = tokio::time::timeout(left, frames.next())
+            .await
+            .expect("no frame of the wanted size")
+            .expect("stream closed");
+        let img = image::load_from_memory(&f.jpeg).unwrap().to_rgb8();
+        if img.width().abs_diff(w) <= 2 && img.height().abs_diff(h) <= 2 {
+            return img;
+        }
+    }
+}
+
+/// B2 fit: the page viewport follows the pane. At 900x600 and scale 2 the frame is 1800x1200 (crisp, not a 1280x800
+/// frame stretched), the page covers all of it (no bars), a resize and the view off work, and the agent's own
+/// screenshot keeps the configured size throughout.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_view_follows_the_pane_and_the_agents_screenshot_does_not() {
+    traced("the_view_follows_the_pane", fit_body()).await;
+}
+
+async fn fit_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let mut o = local_opts(art.path());
+    o.viewport = (1280, 800);
+    let rt = launch(o, &env).await;
+    rt.navigate(&format!("{base}/solid"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let frames = rt.frames();
+    let png_size = |p: &[u8]| {
+        let i = image::load_from_memory(p).unwrap();
+        (i.width(), i.height())
+    };
+
+    rt.view_fit(true, ViewMetrics::fit(900., 600., 2.).unwrap())
+        .await
+        .unwrap();
+    let img = frame_of(&frames, (1800, 1200)).await;
+    let (w, h) = img.dimensions();
+    let page = |p: &image::Rgb<u8>| {
+        p.0.iter()
+            .zip([30u8, 144, 255])
+            .all(|(a, b)| a.abs_diff(b) <= 12)
+    };
+    // every edge of the frame is the page's colour: no black bars (the text line sits inside the margin)
+    for (x, y) in [
+        (0, h / 2),
+        (w - 1, h / 2),
+        (w / 2, h - 1),
+        (w - 1, h - 1),
+        (0, h - 1),
+    ] {
+        assert!(
+            page(img.get_pixel(x, y)),
+            "bar at {x},{y}: {:?}",
+            img.get_pixel(x, y)
+        );
+    }
+    for y in (0..h).step_by(7) {
+        assert!(
+            page(img.get_pixel(0, y)) && page(img.get_pixel(w - 1, y)),
+            "bar in row {y}"
+        );
+    }
+
+    // the agent's screenshot is the configured 1280x800 at scale 1, and the view is fitted again after it
+    let shot = rt.screenshot(false).await.unwrap();
+    assert_eq!(png_size(&shot.png), (1280, 800));
+    frame_of(&frames, (1800, 1200)).await;
+
+    // a resize to another size and scale
+    rt.view_fit(true, ViewMetrics::fit(700., 500., 1.).unwrap())
+        .await
+        .unwrap();
+    frame_of(&frames, (700, 500)).await;
+
+    // view off: the tab has the configured viewport again
+    rt.view(false, 0, 0).await.unwrap();
+    let shot = rt.screenshot(false).await.unwrap();
+    assert_eq!(png_size(&shot.png), (1280, 800));
+    rt.close().await.unwrap();
 }

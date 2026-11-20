@@ -42,6 +42,11 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The headless browser's display scale: the sharpest scale the live view can ask for.
+const HOST_SCALE: u32 = 2;
+/// JPEG quality of the live view (70 left visible ringing around text).
+const VIEW_QUALITY: u32 = 90;
+
 #[derive(Clone, Debug)]
 pub struct BrowserOptions {
     /// Where screenshots are written (kept after `close`, unlike the profile).
@@ -169,6 +174,45 @@ struct Tabs {
     order: Vec<String>,
 }
 
+/// The page viewport that follows the person's pane (spec 2.3): `width` x `height` CSS pixels at `scale` device
+/// pixels per CSS pixel, so the screencast frame is exactly `pixels()` big and is drawn 1:1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewMetrics {
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+}
+
+impl ViewMetrics {
+    /// The smallest viewport a pane asks for, and the largest side of a frame (the consumer's decode cap).
+    pub const MIN_SIDE: u32 = 100;
+    pub const MAX_PIXELS: u32 = 4096;
+
+    /// From the pane's logical size and the window's scale factor. The size is floored, then clamped to
+    /// `MIN_SIDE..=MAX_PIXELS`; the scale to `1..=4` and further down so the frame never exceeds `MAX_PIXELS`
+    /// (the layout keeps the pane's size, only the sharpness gives). `None` for a size that is not a positive
+    /// finite number.
+    pub fn fit(w: f64, h: f64, scale: f64) -> Option<Self> {
+        if ![w, h, scale].iter().all(|v| v.is_finite() && *v > 0.0) {
+            return None;
+        }
+        let side = |v: f64| (v.floor() as u32).clamp(Self::MIN_SIDE, Self::MAX_PIXELS);
+        let (width, height) = (side(w), side(h));
+        let cap = f64::from(Self::MAX_PIXELS) / f64::from(width.max(height));
+        Some(Self {
+            width,
+            height,
+            scale: scale.clamp(1.0, 4.0).min(cap),
+        })
+    }
+
+    /// The frame size Chrome is asked for (device pixels).
+    pub fn pixels(&self) -> (u32, u32) {
+        let px = |v: u32| ((f64::from(v) * self.scale).round() as u32).min(Self::MAX_PIXELS);
+        (px(self.width), px(self.height))
+    }
+}
+
 /// What a window that only SHOWS the browser (the desktop pane) may do with it: the live view, navigation under the
 /// policy, tabs. No snapshot, screenshot, click, fill, console or network access: those stay with the agent's tools.
 #[derive(Clone)]
@@ -180,6 +224,10 @@ impl PageView {
     }
     pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
         self.0.view(on, max_w, max_h).await
+    }
+    /// The live view with the page viewport following the pane (see [`BrowserRuntime::view_fit`]).
+    pub async fn view_fit(&self, on: bool, m: ViewMetrics) -> Result<()> {
+        self.0.view_fit(on, m).await
     }
     pub fn frames(&self) -> FrameStream {
         self.0.frames()
@@ -230,6 +278,9 @@ pub struct BrowserRuntime {
     filled: Mutex<HashMap<(String, String), bool>>,
     /// Serialises `view` so activate + startScreencast of two calls cannot interleave.
     view_lock: tokio::sync::Mutex<()>,
+    /// The tab (session) whose viewport follows the person's pane, and how: the agent's own capture puts the
+    /// configured viewport back around itself.
+    fitted: Mutex<Option<(String, ViewMetrics)>>,
 }
 
 impl Drop for BrowserRuntime {
@@ -762,6 +813,12 @@ impl BrowserRuntime {
         if opts.no_sandbox {
             chrome_args.push("--no-sandbox".into());
         }
+        if opts.headless {
+            // Chrome's screencast frames are never sharper than the browser's own display scale (verified: an
+            // emulated scale of 2 on a scale-1 headless browser still casts at 1x). So the display scale is the ceiling
+            // (a Retina pane); every tab pins its own emulated scale (1 for the agent, the window's for the view).
+            chrome_args.push(format!("--force-device-scale-factor={HOST_SCALE}"));
+        }
         chrome_args.extend(opts.chrome_args.iter().cloned());
         chrome_args.push("about:blank".into());
 
@@ -922,6 +979,7 @@ impl BrowserRuntime {
             profile_lock: Mutex::new(profile_lock),
             filled: Mutex::default(),
             view_lock: tokio::sync::Mutex::new(()),
+            fitted: Mutex::default(),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -957,6 +1015,15 @@ impl BrowserRuntime {
 
     async fn call(&self, tab: &Tab, method: &str, params: Value) -> Result<Value> {
         self.cdp.send(Some(&tab.session), method, params).await
+    }
+
+    async fn set_metrics(&self, session: &str, (w, h): (u32, u32), scale: f64) -> Result<()> {
+        let m = json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": false});
+        let r = self
+            .cdp
+            .send(Some(session), "Emulation.setDeviceMetricsOverride", m)
+            .await;
+        r.map(drop)
     }
 
     fn live(&self) -> Result<()> {
@@ -1653,13 +1720,44 @@ impl BrowserRuntime {
     /// or a popup: the view never follows a tab by itself). It deliberately skips `guard_capture`: the
     /// frames go to the person's own window, never to the model. `max_w`/`max_h` are in 1..=4096 (the decode cap of spec 2.3).
     pub async fn view(&self, on: bool, max_w: u32, max_h: u32) -> Result<()> {
+        self.view_with(on, max_w, max_h, None).await
+    }
+
+    /// Like [`Self::view`], but the current tab's viewport becomes `m` (the pane's size at the window's scale
+    /// factor, headless only) and the cast is as large as `m.pixels()`, at high quality: a frame the pane draws
+    /// 1:1. Calling it again with another `m` resizes. Turning the view off or re-targeting it puts the old tab's
+    /// configured viewport back. The agent's screenshots do not see it (`screenshot` restores the configured
+    /// viewport around the capture).
+    pub async fn view_fit(&self, on: bool, m: ViewMetrics) -> Result<()> {
+        let (w, h) = m.pixels();
+        self.view_with(on, w, h, Some(m)).await
+    }
+
+    async fn view_with(
+        &self,
+        on: bool,
+        max_w: u32,
+        max_h: u32,
+        fit: Option<ViewMetrics>,
+    ) -> Result<()> {
+        let _one_at_a_time = self.view_lock.lock().await;
+        self.view_locked(on, max_w, max_h, fit).await
+    }
+
+    /// `view_with` while the caller holds `view_lock`.
+    async fn view_locked(
+        &self,
+        on: bool,
+        max_w: u32,
+        max_h: u32,
+        fit: Option<ViewMetrics>,
+    ) -> Result<()> {
         let ok = (1..=4096).contains(&max_w) && (1..=4096).contains(&max_h);
         if on && !ok {
             return Err(BrowserError::Refused(
                 "view size must be 1..=4096 pixels".into(),
             ));
         }
-        let _one_at_a_time = self.view_lock.lock().await;
         let tab = if on { Some(self.current()?) } else { None };
         // If this future is cancelled (timeout, select) the view ends up off, never half-open.
         let mut off_on_drop = ViewOff(Some(&self.cdp.screencast));
@@ -1675,16 +1773,27 @@ impl BrowserRuntime {
                 .send(Some(s), "Page.stopScreencast", json!({}))
                 .await;
         }
+        // the tab that followed the pane goes back to the configured viewport, unless it is re-fitted below
+        let prev = lock(&self.fitted).take();
+        if let Some((s, _)) = prev
+            && !(fit.is_some() && tab.as_ref().is_some_and(|t| t.session == s))
+        {
+            let _ = self.set_metrics(&s, self.opts.viewport, 1.0).await;
+        }
         let Some(tab) = tab else {
             off_on_drop.0 = None;
             return Ok(());
         };
+        if let Some(m) = fit.filter(|_| self.opts.headless) {
+            self.set_metrics(&tab.session, (m.width, m.height), m.scale)
+                .await?;
+            *lock(&self.fitted) = Some((tab.session.clone(), m));
+        }
         // The pipe is ordered: every frame of the old cast was dispatched before the stop answer came
         // back, so from here on frames are the new cast's. Opening before `startScreencast` (not after
         // its answer) keeps a first frame that arrives right behind that answer.
         self.cdp.screencast.open(generation);
-        let params =
-            json!({"format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h});
+        let params = json!({"format": "jpeg", "quality": VIEW_QUALITY, "maxWidth": max_w, "maxHeight": max_h});
         let r = self.call(&tab, "Page.startScreencast", params).await;
         if r.is_ok() {
             off_on_drop.0 = None; // keep the view on
@@ -1703,6 +1812,16 @@ impl BrowserRuntime {
     pub async fn screenshot(&self, full_page: bool) -> Result<Screenshot> {
         let tab = self.current()?;
         self.guard_capture(&tab, false).await?;
+        // The person's pane resizes the viewport of the viewed tab; the agent's screenshots keep the configured
+        // size (and the page its layout), so the viewport goes back for the capture and is fitted again after.
+        let _no_resize = self.view_lock.lock().await;
+        let fitted = lock(&self.fitted)
+            .clone()
+            .filter(|(s, _)| *s == tab.session);
+        if fitted.is_some() {
+            self.set_metrics(&tab.session, self.opts.viewport, 1.0)
+                .await?;
+        }
         let mut params = json!({"format": "png"});
         if full_page {
             let m = self.call(&tab, "Page.getLayoutMetrics", json!({})).await?;
@@ -1719,21 +1838,31 @@ impl BrowserRuntime {
         // produced its first frame (seen on loaded macOS runners). It is not a refusal: retry briefly,
         // re-checking the secret guard before every attempt.
         let mut retries = 0;
-        let r = loop {
-            match self
-                .call(&tab, "Page.captureScreenshot", params.clone())
-                .await
-            {
-                Err(BrowserError::Cdp { message, .. })
-                    if retries < 10 && message.contains("Unable to capture screenshot") =>
+        let r = async {
+            loop {
+                match self
+                    .call(&tab, "Page.captureScreenshot", params.clone())
+                    .await
                 {
-                    retries += 1;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    self.guard_capture(&tab, false).await?;
+                    Err(BrowserError::Cdp { message, .. })
+                        if retries < 10 && message.contains("Unable to capture screenshot") =>
+                    {
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        self.guard_capture(&tab, false).await?;
+                    }
+                    r => break r,
                 }
-                r => break r?,
             }
-        };
+        }
+        .await;
+        if let Some((_, m)) = fitted {
+            // Fits again and restarts the cast: on a page that does not repaint, Chrome would otherwise keep
+            // the frame of the configured viewport as the last one.
+            let (w, h) = m.pixels();
+            let _ = self.view_locked(true, w, h, Some(m)).await;
+        }
+        let r = r?;
         let png = base64::engine::general_purpose::STANDARD
             .decode(r["data"].as_str().unwrap_or(""))
             .map_err(|e| BrowserError::Page(format!("bad screenshot data: {e}")))?;
@@ -1878,6 +2007,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_view_follows_the_pane_size_and_scale() {
+        let m =
+            |w, h, s| ViewMetrics::fit(w, h, s).map(|m| (m.width, m.height, m.scale, m.pixels()));
+        // pane x scale; the size is floored, the frame rounded
+        assert_eq!(m(900., 600., 2.), Some((900, 600, 2., (1800, 1200))));
+        assert_eq!(m(900.9, 600.5, 1.25), Some((900, 600, 1.25, (1125, 750))));
+        // too small: the minimum side; scale under 1 or over 4 is clamped
+        assert_eq!(m(10., 20., 0.5), Some((100, 100, 1., (100, 100))));
+        assert_eq!(m(400., 300., 9.), Some((400, 300, 4., (1600, 1200))));
+        // too big: the frame stays within the decode cap, so the sharpness gives, not the layout size
+        assert_eq!(
+            m(3000., 1000., 2.),
+            Some((3000, 1000, 4096. / 3000., (4096, 1365)))
+        );
+        assert_eq!(m(9000., 5000., 2.), Some((4096, 4096, 1., (4096, 4096))));
+        // not a size
+        for bad in [
+            (0., 600., 2.),
+            (900., -1., 2.),
+            (f64::NAN, 600., 2.),
+            (900., 600., 0.),
+            (900., 600., f64::INFINITY),
+        ] {
+            assert_eq!(ViewMetrics::fit(bad.0, bad.1, bad.2), None, "{bad:?}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]

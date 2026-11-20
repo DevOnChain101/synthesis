@@ -53,6 +53,8 @@ pub struct Args {
     /// `--browser-frame`: the Browser tab shows a fixed frame from a fake browser (the live page view), with a
     /// tab strip, and the agent cursor when the session is `--live`.
     browser_frame: bool,
+    /// `--browser-jpeg FILE`: the fixed frame is this JPEG (a real capture) instead of the generated gradient.
+    browser_jpeg: Option<PathBuf>,
     /// `--browser-go URL`: that address is typed into the URL bar and Enter pressed (a refused one shows its reason).
     browser_go: Option<String>,
     /// `--expand`: every tool card open (Ctrl+O).
@@ -353,6 +355,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         pty_script: val("--pty-script").map(PathBuf::from),
         bare: args.iter().any(|a| a == "--bare"),
         browser_frame: args.iter().any(|a| a == "--browser-frame"),
+        browser_jpeg: val("--browser-jpeg").map(PathBuf::from),
         browser_go: val("--browser-go").cloned(),
         expand: args.iter().any(|a| a == "--expand"),
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
@@ -782,7 +785,10 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     active: 0,
                     offset: 0,
                 };
-                let jpeg = super::browser_view::sample_jpeg(1280, 800);
+                let jpeg = match &a.browser_jpeg {
+                    Some(f) => std::fs::read(f).expect("--browser-jpeg: file not readable"),
+                    None => super::browser_view::sample_jpeg(1280, 800),
+                };
                 t.ts.bv
                     .attach(super::browser_view::FakeSource::new(jpeg, page), h.clone());
                 if let Some(u) = &a.browser_go {
