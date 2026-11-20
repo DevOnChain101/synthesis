@@ -2222,3 +2222,75 @@ async fn typed_card_data_never_reaches_the_approval_and_enter_reads_the_submit_b
     assert_eq!(a, 3, "Enter asked");
     reg.close_session("pay5");
 }
+
+const EDIT_PAGE: &str = r#"<html><body><div contenteditable="true">SECRETNOTE $5.00</div>
+<button>Place order</button></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn editable_text_never_becomes_the_amount_and_changing_paths_cannot_flood_the_person() {
+    if !have_browser() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let base = serve_html(EDIT_PAGE).await;
+    let yes = Arc::new(Payer {
+        yes: true,
+        ..Default::default()
+    });
+    let reg = pay_registry(Some(yes.clone()));
+    let c = ctx(d.path(), "pay6");
+    ok(
+        &reg.execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/checkout")}),
+            &c,
+        )
+        .await,
+        "navigate",
+    );
+    ok(
+        &reg.execute(
+            "browser_click",
+            json!({"role": "button", "name": "Place order"}),
+            &c,
+        )
+        .await,
+        "click",
+    );
+    {
+        let a = yes.asked.lock().unwrap();
+        assert_eq!(a.len(), 1);
+        assert!(
+            a[0].amount.is_none() && !format!("{:?}", a[0]).contains("SECRETNOTE"),
+            "{:?}",
+            a[0]
+        );
+    }
+    reg.close_session("pay6");
+
+    // the person keeps saying no while the page keeps changing its path: asked a bounded number of times
+    let no = Arc::new(Payer::default());
+    let reg = pay_registry(Some(no.clone()));
+    let c = ctx(d.path(), "pay7");
+    for i in 0..9 {
+        ok(
+            &reg.execute(
+                "browser_navigate",
+                json!({"url": format!("{base}/checkout/{i}")}),
+                &c,
+            )
+            .await,
+            "navigate",
+        );
+        let o = reg
+            .execute(
+                "browser_click",
+                json!({"role": "button", "name": "Place order"}),
+                &c,
+            )
+            .await;
+        assert!(o.is_error && o.meta["error"] == "refused", "{o:?}");
+    }
+    assert_eq!(no.asked.lock().unwrap().len(), 5);
+    reg.close_session("pay7");
+}

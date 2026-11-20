@@ -168,7 +168,7 @@ pub fn fold(s: &str) -> String {
     s.chars()
         .filter(|c| {
             !('\u{300}'..='\u{36f}').contains(c) // combining marks
-                && !matches!(*c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+                && !matches!(*c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}')
         })
         .flat_map(char::to_lowercase)
         .map(|c| {
@@ -290,7 +290,7 @@ const by=g('aria-labelledby').split(' ').map(i=>d.getElementById(i)).filter(Bool
 // never what the person or the agent typed: a field's value and a contenteditable's text stay out of the label
 const btn=tg==='INPUT'&&/^(button|submit|reset|image)$/i.test(n.type)?n.value:'';
 label=t(g('aria-label')||by||(field?'':n.innerText)||btn||(n.labels&&n.labels[0]&&n.labels[0].innerText)||g('title')||g('alt')||g('placeholder')||g('name'));
-for(let a=n,i=0;a&&i<5;a=a.parentElement,i++){const x=a.innerText||'';if(/\d/.test(x)&&/[$€£¥₫]|\d\s?(đ|vnd|usd|eur|gbp)/i.test(x)){amt=x.slice(0,800);break}}
+for(let a=field?n.parentElement:n,i=0;a&&i<5&&!a.isContentEditable;a=a.parentElement,i++){if(a.querySelector('[contenteditable=""],[contenteditable=true],textarea,select'))continue;const x=a.innerText||'';if(/\d/.test(x)&&/[$€£¥₫]|\d\s?(đ|vnd|usd|eur|gbp)/i.test(x)){amt=x.slice(0,800);break}}
 const f=n.form,sb=f&&f.querySelector('button[type=submit],input[type=submit],button:not([type])');
 if(sb)sub=t(sb.innerText||sb.value||sb.getAttribute('aria-label'))}
 const g=a=>n?n.getAttribute(a)||'':'';

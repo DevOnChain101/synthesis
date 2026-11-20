@@ -259,6 +259,9 @@ fn require_sandbox(cfg: &BrowserConfig) -> Result<(), BrowserError> {
 
 /// A person who said no twice to the same question is not asked a third time in the session.
 const MAX_REFUSALS: u8 = 2;
+/// Payment refusals of one origin (any path) after which nobody is asked again, and the most keys the table holds.
+const MAX_PAYMENT_REFUSALS_PER_ORIGIN: u8 = 5;
+const MAX_REFUSAL_KEYS: usize = 256;
 
 fn refused_too_often(state: &crate::native::SessionState, key: &str) -> bool {
     lock(&state.refusals).get(key).copied().unwrap_or(0) >= MAX_REFUSALS
@@ -639,7 +642,14 @@ async fn payment_gate(
     // per page, not per origin: a refusal on one page does not silence the question on the next
     let path = url::Url::parse(&probe.href).map_or(String::new(), |u| u.path().to_owned());
     let key = format!("payment:{origin}{path}");
-    if refused_too_often(&state, &key) {
+    let origin_key = format!("payment:{origin}");
+    let flooded = {
+        let r = lock(&state.refusals);
+        // an origin cannot keep asking by changing its path; the table itself stays small
+        r.get(&origin_key).copied().unwrap_or(0) >= MAX_PAYMENT_REFUSALS_PER_ORIGIN
+            || r.len() >= MAX_REFUSAL_KEYS
+    };
+    if flooded || refused_too_often(&state, &key) {
         return Err(BrowserError::Refused(format!(
             "{how}; the person already refused it on this origin in this session, so it is not asked again"
         )));
@@ -648,11 +658,12 @@ async fn payment_gate(
         action: format!("{wire} {what}"),
         origin,
         label: payment::clean(&synthesis_browser::redact_text(&probe.label), 80),
-        amount: payment::amount(&probe.amount_text),
+        amount: payment::amount(&synthesis_browser::redact_text(&probe.amount_text)),
         reason,
     };
     if !host.confirm_payment(&req, &ctx.cancel).await {
         note_refusal(&state, &key);
+        note_refusal(&state, &origin_key);
         return Err(BrowserError::Refused(format!(
             "{how}; the person did not approve it"
         )));
