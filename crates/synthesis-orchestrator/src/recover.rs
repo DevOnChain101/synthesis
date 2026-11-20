@@ -115,6 +115,7 @@ pub fn recover_item(
     report: &mut RecoveryReport,
 ) -> Result<(), RunError> {
     {
+        let in_place = crate::is_read_only(w)?;
         for a in w.list_attempts(&item.id)? {
             if !matches!(a.state, AttemptState::Starting | AttemptState::Running) {
                 continue;
@@ -164,11 +165,11 @@ pub fn recover_item(
                 .git_info
                 .as_deref()
                 .and_then(|j| serde_json::from_str(j).ok());
-            if let (Some(end), Some(git), true) =
-                (end, git.clone(), a.state == AttemptState::Running)
+            if let (Some(end), true) = (end, a.state == AttemptState::Running)
+                && (git.is_some() != in_place)
             {
                 let runner = never_spawns(store, worktrees, probe);
-                runner.settle(w, &a, &git, end)?;
+                runner.settle(w, &a, git.as_ref(), end)?;
                 report.settled.push(a.id.clone());
                 continue;
             }

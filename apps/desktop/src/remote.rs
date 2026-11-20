@@ -17,8 +17,9 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::Value;
 use synthesis_app::asks::{AskInput, Choice};
 use synthesis_app::host::lock;
+use synthesis_app::host_tools::{HostTools, MAX_INPUT as MAX_HOST_INPUT};
 use synthesis_app::proto::{
-    Call, Incoming, Out, Reply, Request, check_hello, parse_incoming, read_line,
+    Call, Incoming, Out, ROLE_CONDUCTOR, Reply, Request, check_hello, parse_incoming, read_line,
 };
 use synthesis_config::Env;
 use synthesis_harness::{UserReply, sanitize_for_display};
@@ -165,6 +166,12 @@ struct Shared {
     discard: AtomicBool,
     /// The last sanitized stderr lines.
     tail: Mutex<VecDeque<String>>,
+    /// P3a: the conductor role's host. `None`: the engine has no role, and any `host.call` kills it.
+    host: Option<Arc<dyn HostTools>>,
+    /// A `host.call` is being answered: a second one meanwhile is hostile.
+    host_busy: AtomicBool,
+    /// The writer, for `host.result` only; cleared with `Remote::lines` so stdin still reaches EOF.
+    host_out: Mutex<Option<mpsc::SyncSender<Vec<u8>>>>,
 }
 
 impl Shared {
@@ -230,6 +237,18 @@ impl Remote {
         tx: UnboundedSender<UiMsg>,
         spec: &StartSpec,
     ) -> Result<(Self, Value), String> {
+        Self::connect_with(l, project, tx, spec, None)
+    }
+
+    /// [`Remote::connect`]; with `host` the engine is started with the conductor role and its `host.call`s are
+    /// answered by `host` (the only engine allowed to make them).
+    pub fn connect_with(
+        l: &Launcher,
+        project: &Path,
+        tx: UnboundedSender<UiMsg>,
+        spec: &StartSpec,
+        host: Option<Arc<dyn HostTools>>,
+    ) -> Result<(Self, Value), String> {
         let cwd = match &l.start_cwd {
             Some(c) => c.clone(),
             None => project
@@ -270,8 +289,14 @@ impl Remote {
             tx: Mutex::new(tx),
             discard: AtomicBool::new(false),
             tail: Mutex::default(),
+            host_busy: AtomicBool::new(false),
+            host_out: Mutex::default(),
+            host,
         });
         let (line_tx, line_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        if shared.host.is_some() {
+            *lock(&shared.host_out) = Some(line_tx.clone());
+        }
         // from here a failure drops `remote`, which closes and then kills the child
         let remote = Self {
             shared: shared.clone(),
@@ -304,10 +329,30 @@ impl Remote {
                     cwd,
                     resume: spec.resume.clone(),
                     model: spec.model.clone(),
+                    role: remote.shared.host.as_ref().map(|_| ROLE_CONDUCTOR.into()),
                 },
                 START_TIMEOUT,
             )
             .map_err(why)?;
+        // fail closed: an engine that ignored `role` (an older one) would run a coding agent with its own tools
+        if let Some(h) = &remote.shared.host {
+            let mut want: Vec<String> = h.specs().into_iter().map(|s| s.name).collect();
+            want.sort();
+            let mut got: Vec<String> = v["tools"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            got.sort();
+            if v["role"] != ROLE_CONDUCTOR || got != want {
+                return Err(
+                    "the engine did not start the conductor role (an older engine?); it is not used".into(),
+                );
+            }
+        }
         // an engine that does not say its mode is not trusted to be in the default one
         let mode = v["mode"]
             .as_str()
@@ -632,6 +677,7 @@ impl Drop for Remote {
     fn drop(&mut self) {
         self.shared.closing.store(true, Ordering::SeqCst);
         lock(&self.lines).take(); // stdin EOF: the engine ends its session by itself
+        lock(&self.shared.host_out).take();
         let t0 = Instant::now();
         while t0.elapsed() < DROP_GRACE {
             if matches!(lock(&self.shared.child).try_wait(), Ok(Some(_))) {
@@ -692,8 +738,15 @@ fn drain_stderr(r: std::process::ChildStderr, s: &Shared) {
 fn watchdog(s: &Arc<Shared>, idle: Duration) {
     while !s.dead.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(250));
+        // a host call being answered (a card can wait for the person) is this side's wait, not the engine's silence
         let owes = s.running.load(Ordering::SeqCst) || !lock(&s.waiting).is_empty();
-        if owes && !s.closing.load(Ordering::SeqCst) && s.idle() > idle {
+        // the host call's own limit (plus slack) bounds the suspension: a host that never answers still ends it
+        let limit = if s.host_busy.load(Ordering::SeqCst) {
+            idle.max(synthesis_app::host_tools::RELAY_TIMEOUT + Duration::from_secs(60))
+        } else {
+            idle
+        };
+        if owes && !s.closing.load(Ordering::SeqCst) && s.idle() > limit {
             s.tell(UiMsg::BadEvent("the engine stopped answering".into()));
             s.kill();
             return;
@@ -786,7 +839,7 @@ fn open_ask(s: &Shared, id: &str) -> bool {
     }
 }
 
-fn dispatch(s: &Shared, m: Incoming) -> Verdict {
+fn dispatch(s: &Arc<Shared>, m: Incoming) -> Verdict {
     let discarding = s.discard.load(Ordering::SeqCst);
     let m = match m {
         Incoming::Event(e) => {
@@ -807,6 +860,7 @@ fn dispatch(s: &Shared, m: Incoming) -> Verdict {
             s.tell(UiMsg::BadEvent("unexpected hello".into()));
             return Verdict::Bad;
         }
+        Out::HostCall { id, tool, input } => return host_call(s, id, &tool, input),
         // only while a restart that this side asked for is under way: the next lines are the new session's
         Out::Restarted => {
             if !s.discard.swap(false, Ordering::SeqCst) {
@@ -872,6 +926,50 @@ fn dispatch(s: &Shared, m: Incoming) -> Verdict {
             ));
         }
     }
+    Verdict::Fine
+}
+
+/// P3a: the conductor engine calls one of the host's tools. Only an engine started with the role may, with a
+/// tool of the role's set, an input within the limit, and one call at a time: anything else kills it.
+fn host_call(s: &Arc<Shared>, id: u64, tool: &str, input: Value) -> Verdict {
+    let Some(host) = s.host.clone() else {
+        return Verdict::Hostile("the engine made a host call without the conductor role");
+    };
+    if input.to_string().len() > MAX_HOST_INPUT {
+        return Verdict::Hostile("a host call over the size limit");
+    }
+    if !host.specs().iter().any(|t| t.name == tool) {
+        return Verdict::Hostile("a host call to a tool the conductor role does not have");
+    }
+    if s.host_busy.swap(true, Ordering::SeqCst) {
+        return Verdict::Hostile("a second host call while one is outstanding");
+    }
+    let (s, tool) = (s.clone(), tool.to_string());
+    std::thread::spawn(move || {
+        let run = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| rt.block_on(host.call(&tool, input)));
+        let (ok, error) = match run {
+            Ok(v) => (Some(v), None),
+            Err(e) => (None, Some(clean(&e))),
+        };
+        // free before the answer is written: the engine's next call can follow it at once
+        s.host_busy.store(false, Ordering::SeqCst);
+        s.touch();
+        let writer = lock(&s.host_out).clone();
+        if let (Ok(line), Some(w)) = (
+            serde_json::to_vec(&Request {
+                id,
+                call: Call::HostResult { id, ok, error },
+            }),
+            writer,
+        ) {
+            // blocks while the write queue is full (the engine waits for this answer); gone writer = closing
+            let _ = w.send(line);
+        }
+    });
     Verdict::Fine
 }
 

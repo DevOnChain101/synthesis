@@ -29,7 +29,16 @@ tokio = { version = "1.54.1", default-features = false, features = ["rt", "macro
 tokio-util = { version = "0.7.20", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# Builds `PersonApproved::for_text`: only the approval-card code path (P3b) and tests may. A build without
+# `debug_assertions` refuses it (compile_error in lib.rs) unless `approval-card-in-release` is also on, which only
+# the product crate that owns the card code may set; `tests/person_approved_guard.rs` fails if any `src` file
+# outside this crate calls the constructor.
+approval-card = []
+approval-card-in-release = []
+
 [dev-dependencies]
+synthesis-harness = { path = ".", features = ["approval-card"] }
 synthesis-terminal = { path = "../synthesis-terminal" }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }

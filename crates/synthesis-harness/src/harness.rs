@@ -275,11 +275,16 @@ pub type ReportSink =
 pub enum ModeError {
     /// `bypassPermissions` was requested without the person's confirmation.
     BypassNotConfirmed,
+    /// A conductor-role harness runs in default, plan or dontAsk only.
+    ConductorMode,
 }
 
 impl std::fmt::Display for ModeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("bypassPermissions needs an explicit confirmation")
+        f.write_str(match self {
+            Self::BypassNotConfirmed => "bypassPermissions needs an explicit confirmation",
+            Self::ConductorMode => "a conductor session runs in default, plan or dontAsk mode only",
+        })
     }
 }
 
@@ -609,6 +614,8 @@ pub struct Harness {
     pub(crate) verified: Mutex<HashMap<String, Vec<VerifiedCommand>>>,
     /// The "context window unknown" notice was shown.
     pub(crate) window_noted: AtomicBool,
+    /// The conductor role: `set_mode` refuses every mode but default, plan and dontAsk.
+    conductor: bool,
 }
 
 impl Harness {
@@ -653,6 +660,7 @@ impl Harness {
             reasoning_effort: Mutex::default(),
             image_taint: AtomicBool::new(false),
             window_noted: AtomicBool::new(false),
+            conductor: false,
             verify_ok: Mutex::default(),
             procs_exited: Mutex::default(),
             rule_store: None,
@@ -716,7 +724,16 @@ impl Harness {
     /// `bypassPermissions` needs `confirmed_bypass`: the caller vouches that the person said yes
     /// to a dialog that named what it disables; it is checked here, not only in the UI.
     /// Emits `session.mode_changed` (and a warning notice for bypass).
+    /// Marks this harness as the conductor's: its mode can never leave default, plan or dontAsk.
+    pub fn with_conductor_role(mut self) -> Self {
+        self.conductor = true;
+        self
+    }
+
     pub fn set_mode(&self, mode: Mode, confirmed_bypass: bool) -> Result<(), ModeError> {
+        if self.conductor && !matches!(mode, Mode::Default | Mode::Plan | Mode::DontAsk) {
+            return Err(ModeError::ConductorMode);
+        }
         if mode == Mode::BypassPermissions && !confirmed_bypass {
             return Err(ModeError::BypassNotConfirmed);
         }

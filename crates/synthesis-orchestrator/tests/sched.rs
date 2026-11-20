@@ -464,7 +464,7 @@ fn a_restart_frees_orphaned_leases_and_continues_without_duplicate_attempts() {
         .allocator()
         .allocate(&mut w, &r.spec(&it("two"), 1), OffsetDateTime::now_utc())
         .unwrap();
-    r.wm.mark_started(&env.git).unwrap();
+    r.wm.mark_started(env.git.as_ref().unwrap()).unwrap();
     let rev = w.list_attempts(&it("two")).unwrap()[0].revision;
     w.transition_attempt(
         &env.attempt.id,
@@ -885,7 +885,7 @@ fn a_crash_keeps_the_reservations_of_attempts_that_never_recorded_a_usage() {
         .allocator()
         .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
         .unwrap();
-    r.wm.mark_started(&env.git).unwrap();
+    r.wm.mark_started(env.git.as_ref().unwrap()).unwrap();
     let rev = w.list_attempts(&one).unwrap()[0].revision;
     w.transition_attempt(
         &env.attempt.id,
@@ -1983,7 +1983,7 @@ fn adopted_live_of(
         .allocator()
         .allocate(w, &r.spec(&one, 1), OffsetDateTime::now_utc())
         .unwrap();
-    r.wm.mark_started(&env.git).unwrap();
+    r.wm.mark_started(env.git.as_ref().unwrap()).unwrap();
     let rev = w.list_attempts(&one).unwrap()[0].revision;
     w.transition_attempt(
         &env.attempt.id,

@@ -137,6 +137,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
+        kind: ContractKind::Write,
         version: 1,
         goal: "- write hello.txt".into(),
         criteria: vec![ContractCriterion {
@@ -315,7 +316,14 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
             log.contains("sandbox") || log.contains("unattended"),
             "{log}"
         );
-        assert!(!env.git.worktree.join("hello.txt").exists());
+        assert!(
+            !env.git
+                .as_ref()
+                .unwrap()
+                .worktree
+                .join("hello.txt")
+                .exists()
+        );
         return;
     }
     let s = settled.unwrap();
@@ -327,12 +335,12 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
     assert_eq!(s.item, WorkItemState::Verifying, "{log}");
     // the file is in the attempt's worktree and in its commit, not in the user's tree
     assert_eq!(
-        std::fs::read_to_string(env.git.worktree.join("hello.txt")).unwrap(),
+        std::fs::read_to_string(env.git.as_ref().unwrap().worktree.join("hello.txt")).unwrap(),
         "hi\n"
     );
     assert_eq!(
         g(
-            &env.git.worktree,
+            &env.git.as_ref().unwrap().worktree,
             &["show", "--name-only", "--format=", "HEAD"]
         ),
         "hello.txt"
@@ -503,7 +511,14 @@ fn the_worker_cannot_be_given_a_weaker_profile() {
             "{bad:?}: {}",
             String::from_utf8_lossy(&o.stderr)
         );
-        assert!(!env.git.worktree.join("hello.txt").exists());
+        assert!(
+            !env.git
+                .as_ref()
+                .unwrap()
+                .worktree
+                .join("hello.txt")
+                .exists()
+        );
     }
     // --attempt-session needs --unattended and --resume (clap), and a live attempt (the store)
     let o = Command::new(env!("CARGO_BIN_EXE_synt"))
@@ -629,10 +644,22 @@ fn a_write_outside_allowed_paths_blocks_the_attempt_and_becomes_a_decision() {
     assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
     assert_eq!(s.item, WorkItemState::WaitingDecision, "{log}");
     assert!(
-        env.git.worktree.join("src/ok.txt").exists(),
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("src/ok.txt")
+            .exists(),
         "control: {log}"
     );
-    assert!(!env.git.worktree.join("outside.txt").exists());
+    assert!(
+        !env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("outside.txt")
+            .exists()
+    );
     // not in the user's tree either
     assert!(!r.repo.join("outside.txt").exists());
     // a durable, pending decision names what was needed; no live prompt was involved
@@ -789,6 +816,8 @@ fn bypass_git_alias_and_repo_scripts_are_refused_and_nothing_widens() {
         !p.ran
             .2
             .git
+            .as_ref()
+            .unwrap()
             .worktree
             .join(".synt/settings.local.json")
             .exists()
@@ -1008,11 +1037,21 @@ fn user_settings_cannot_widen_the_compiled_envelope_of_an_attempt() {
     let s = settled.unwrap();
     assert_eq!(s.end, WorkerEnd::Blocked, "{log}");
     assert!(
-        env.git.worktree.join("src/ok.txt").exists(),
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("src/ok.txt")
+            .exists(),
         "control: {log}"
     );
     assert!(
-        !env.git.worktree.join("outside.txt").exists(),
+        !env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("outside.txt")
+            .exists(),
         "user allow widened the envelope"
     );
     assert!(
@@ -1204,4 +1243,418 @@ fn a_person_grants_one_refused_write_and_only_the_next_attempt_may_make_it() {
     }
     // a third attempt has no grant: the used one cannot be used again
     assert!(w.usable_grants(&it).unwrap().is_empty());
+}
+
+// ---- read-only goals (S1 section 2.1, 2.5): in place, four read tools, no write path ----
+
+/// A leased read-only `research` item of `root`, allocated in place and run with the real worker.
+fn run_read_only(r: &Rig, root: &Path, script: serde_json::Value) -> Ran {
+    let c = Contract::read_only(
+        "review the folder".into(),
+        &["names the risks".into()],
+        Budgets::new(5.0),
+    );
+    let ws = WorkspaceContext::open("w", root, root, &[], r.dir.path().join("cart"), "pg").unwrap();
+    let mut policy = OutcomePolicy::new(true, 16, 10, 24);
+    policy.max_cost_usd = None;
+    let mut w = r
+        .store
+        .create_outcome(NewOutcome {
+            workspace: &ws,
+            base_commit: String::new(),
+            contract: &c,
+            policy: &policy,
+        })
+        .unwrap();
+    let none = Effects::default();
+    let go = |w: &mut OutcomeWriter, to| {
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(rev, to, None, &none).unwrap();
+    };
+    go(&mut w, OutcomeState::ContractPending);
+    let h = w.get_contract(w.id(), 1).unwrap().1;
+    w.approve_contract(1, &h, "user").unwrap();
+    let (plan, _) = make_plan(&StubPlanner, &c, 1).unwrap();
+    let it = w.insert_plan(&plan).unwrap()[0].1.clone();
+    go(&mut w, OutcomeState::Ready);
+    go(&mut w, OutcomeState::Running);
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
+        let rev = w.get_work_item(&it).unwrap().revision;
+        w.transition_work_item(&it, rev, to, &none).unwrap();
+    }
+    let alloc = Allocator {
+        store: &r.store,
+        worktrees: &r.wm,
+        platform: Platform::current(),
+        artifact_root: r.dir.path().join("art"),
+    };
+    let env = alloc
+        .allocate_in_place(
+            &mut w,
+            &AllocSpec {
+                item: &it,
+                ordinal: 1,
+                source: root,
+                base_commit: "",
+                worker_kind: "local-engine",
+            },
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let script_path = r.dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).unwrap();
+    policy.attempt_max_wall_secs = Some(120);
+    let profile = Profile::build(
+        PathBuf::from(env!("CARGO_BIN_EXE_synt")),
+        &env,
+        &c,
+        &policy,
+        0.0,
+        "review the folder".into(),
+    )
+    .unwrap()
+    .with_extra(&["--provider", &format!("fake:{}", script_path.display())])
+    .unwrap();
+    let spawn = SyntSpawn {
+        log: r.dir.path().join("worker.log"),
+        env: Some(worker_env(r)),
+    };
+    let runner = Runner::new(
+        &r.store,
+        &r.wm,
+        &spawn,
+        &OsProbe,
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+    );
+    let settled = runner.run_attempt(&mut w, &env, &profile, &CancelFlag::default());
+    (w, it, env, settled)
+}
+
+fn tree_of(d: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&p).unwrap_or_default(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// `ro-write-tools-absent`, `ro-secret-not-readable` and the report: the model tries Write, Edit,
+/// Bash and a read of `.env` in a folder that is not a git repository; only the reads work, the
+/// folder's tree is byte for byte unchanged, no worktree exists, and the last message is the report.
+#[test]
+fn ro_worker_has_only_read_tools_cannot_read_secrets_and_its_last_message_is_the_report() {
+    let r = rig();
+    let confines = host_confines(&r.home);
+    let root = std::fs::canonicalize(r.dir.path()).unwrap().join("plain");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "the module\n").unwrap();
+    std::fs::write(root.join(".env"), "API_KEY=TOPSECRET-VALUE\n").unwrap();
+    let marker = root.join("bash-ran");
+    let before = tree_of(&root);
+    let tools = json!([
+        {"id": "t1", "name": "Write", "input": {"file_path": root.join("hello.txt"), "content": "x\n"}},
+        {"id": "t2", "name": "Edit", "input": {"file_path": root.join("a.txt"), "old_string": "the", "new_string": "evil"}},
+        {"id": "t3", "name": "Bash", "input": {"command": format!("touch {}", marker.display())}},
+        {"id": "t4", "name": "Read", "input": {"file_path": root.join("a.txt")}},
+        {"id": "t5", "name": "Read", "input": {"file_path": root.join(".env")}},
+    ]);
+    let script = json!([{"text": "looking", "tools": tools}, {"text": "REPORT"}, {"text": "REPORT"}, {"text": "REPORT"}, {"text": "REPORT"}]);
+    let (w, it, env, settled) = run_read_only(&r, &root, script);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    assert_eq!(tree_of(&root), before, "the folder is unchanged: {log}");
+    assert!(!root.join("hello.txt").exists() && !marker.exists());
+    assert!(
+        !root.join(".git").exists(),
+        "git was never run in the folder"
+    );
+    assert!(env.git.is_none());
+    if !confines {
+        no_sandbox_is_ok("the read-only attempt cannot run");
+        assert_eq!(settled.unwrap().end, WorkerEnd::Failed, "{log}");
+        return;
+    }
+    let s = settled.unwrap();
+    assert!(
+        matches!(s.end, WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{log}"
+    );
+    assert_eq!(s.item, WorkItemState::Verifying, "{log}");
+    let evs = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&env.session_id, 0, 5000)
+        .unwrap();
+    let outcome_of = |tool: &str, id: &str| {
+        evs.iter().find_map(|e| match e {
+            synthesis_events::Record::Known(e) => match &e.event {
+                synthesis_events::Event::ToolCompleted {
+                    tool_call_id,
+                    name,
+                    is_error,
+                    preview,
+                    output,
+                    ..
+                } if tool_call_id == id && name == tool => Some((
+                    *is_error,
+                    format!("{preview}{}", output.clone().unwrap_or_default()),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    // the write tools do not exist for this worker (an allow-list of four), and neither does a shell
+    for (tool, id) in [("Write", "t1"), ("Edit", "t2"), ("Bash", "t3")] {
+        let (err, _) = outcome_of(tool, id).unwrap_or_else(|| (true, "no result".into()));
+        assert!(err, "{tool} must not run: {log}");
+    }
+    let (err, shown) = outcome_of("Read", "t4").expect("the read ran");
+    assert!(!err && shown.contains("the module"), "{shown}");
+    let (_, shown) = outcome_of("Read", "t5").unwrap_or((true, String::new()));
+    assert!(
+        !shown.contains("TOPSECRET-VALUE"),
+        "a secret file was read: {shown}"
+    );
+    // no worktree was made; the subject is the report, named by its hash
+    assert!(std::fs::read_dir(r.home.join("worktrees")).map_or(true, |mut d| d.next().is_none()));
+    let report = attempt_report(&r.store, &env.session_id).expect("a report");
+    assert_eq!(report.text, "REPORT");
+    assert_eq!(s.subject_commit, Some(report.subject()));
+    let a = w.list_attempts(&it).unwrap().remove(0);
+    assert_eq!(a.subject_commit, s.subject_commit);
+}
+
+/// The read scope is the declared folder, not the repository around it: a goal on `mono/pkg` cannot
+/// read `mono/` (a file, `..`, or a symlink to it), and key files inside the folder stay unread.
+#[test]
+fn ro_read_scope_is_the_folder_not_the_enclosing_repository_and_key_files_are_denied() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the read-only attempt cannot run");
+        println!("SKIP: no enforcing sandbox on this host");
+        return;
+    }
+    let mono = std::fs::canonicalize(r.dir.path()).unwrap().join("mono");
+    let pkg = mono.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    g(&mono, &["init", "-q"]);
+    std::fs::write(mono.join("secret.txt"), "PARENTSECRET\n").unwrap();
+    std::fs::write(pkg.join("inside.txt"), "INSIDEOK\n").unwrap();
+    std::fs::write(pkg.join("id_rsa"), "RSASECRET\n").unwrap();
+    std::fs::write(pkg.join("x.pem"), "PEMSECRET\n").unwrap();
+    std::os::unix::fs::symlink("../secret.txt", pkg.join("link")).unwrap();
+    // secret-shaped files INSIDE the declared folder
+    std::fs::create_dir_all(pkg.join(".git")).unwrap();
+    std::fs::create_dir_all(pkg.join(".docker")).unwrap();
+    std::fs::write(
+        pkg.join(".git/config"),
+        "[remote \"o\"]\n url = https://TOKENSECRET@h/x\n",
+    )
+    .unwrap();
+    std::fs::write(pkg.join(".pypirc"), "password = TOKENSECRET\n").unwrap();
+    std::fs::write(
+        pkg.join(".docker/config.json"),
+        "{\"auth\":\"TOKENSECRET\"}",
+    )
+    .unwrap();
+    let rd = |id: &str, p: PathBuf| json!({"id": id, "name": "Read", "input": {"file_path": p}});
+    let tools = json!([
+        rd("t1", mono.join("secret.txt")),
+        rd("t2", pkg.join("../secret.txt")),
+        rd("t3", pkg.join("link")),
+        rd("t4", pkg.join("inside.txt")),
+        rd("t5", pkg.join("id_rsa")),
+        rd("t6", pkg.join("x.pem")),
+        rd("t7", mono.join(".git/config")),
+        rd("t8", pkg.join(".git/config")),
+        rd("t9", pkg.join(".pypirc")),
+        rd("t10", pkg.join(".docker/config.json")),
+    ]);
+    let script =
+        json!([{"text": "looking", "tools": tools}, {"text": "R"}, {"text": "R"}, {"text": "R"}]);
+    let (_, _, env, settled) = run_read_only(&r, &pkg, script);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert!(
+        matches!(s.end, WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{log}"
+    );
+    let evs = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&env.session_id, 0, 5000)
+        .unwrap();
+    let result = |id: &str| {
+        evs.iter().find_map(|e| match e {
+            synthesis_events::Record::Known(e) => match &e.event {
+                synthesis_events::Event::ToolCompleted {
+                    tool_call_id,
+                    is_error,
+                    preview,
+                    output,
+                    ..
+                } if tool_call_id == id => Some((
+                    *is_error,
+                    format!("{preview}{}", output.clone().unwrap_or_default()),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    for (id, secret) in [
+        ("t1", "PARENTSECRET"),
+        ("t2", "PARENTSECRET"),
+        ("t3", "PARENTSECRET"),
+        ("t5", "RSASECRET"),
+        ("t6", "PEMSECRET"),
+        ("t8", "TOKENSECRET"),
+        ("t9", "TOKENSECRET"),
+        ("t10", "TOKENSECRET"),
+    ] {
+        let (err, shown) = result(id).unwrap_or_else(|| panic!("{id} unanswered: {log}"));
+        assert!(err && !shown.contains(secret), "{id} was read: {shown}");
+    }
+    let (err, shown) = result("t7").expect("t7");
+    assert!(err, "the enclosing repository's .git was read: {shown}");
+    let (err, shown) = result("t4").expect("t4");
+    assert!(
+        !err && shown.contains("INSIDEOK"),
+        "a read inside the folder works: {shown}"
+    );
+}
+
+/// `ro-project-hook-not-run`: in place inside a git repository whose project settings carry a
+/// hook, and with a user MCP server configured, the worker starts neither, and the repository's
+/// tree, index and HEAD are as they were.
+#[test]
+fn ro_project_hook_not_run_and_the_repository_is_untouched() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the exclusion test needs a running worker");
+        println!("SKIP: no enforcing sandbox on this host");
+        return;
+    }
+    let base = std::fs::canonicalize(r.dir.path()).unwrap();
+    let (mcp, hook) = (base.join("mcp-started"), base.join("project-hook-ran"));
+    // a USER-level hook too: only `--bare` keeps it from running in the attempt
+    let user_hook = base.join("user-hook-ran");
+    std::fs::write(
+        r.home.join("settings.json"),
+        json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}},
+            "hooks": {"SessionStart": [{"hooks": [{"type": "command",
+                "command": format!("touch {}", user_hook.display())}]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    let head = g(&r.repo, &["rev-parse", "HEAD"]);
+    let status = g(&r.repo, &["status", "--porcelain", "--ignored"]);
+    let (_, _, _, settled) = run_read_only(
+        &r,
+        &r.repo.clone(),
+        json!([{"text": "REPORT"}, {"text": "REPORT"}, {"text": "REPORT"}]),
+    );
+    let log = std::fs::read_to_string(base.join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert!(
+        matches!(s.end, WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{log}"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !mcp.exists(),
+        "the read-only attempt started the user's MCP server"
+    );
+    assert!(
+        !hook.exists(),
+        "the read-only attempt ran the repository's own hook"
+    );
+    assert_eq!(g(&r.repo, &["rev-parse", "HEAD"]), head);
+    assert_eq!(g(&r.repo, &["status", "--porcelain", "--ignored"]), status);
+    assert_eq!(
+        g(&r.repo, &["worktree", "list"]).lines().count(),
+        1,
+        "no worktree"
+    );
+}
+
+/// The read-only flag is internal and narrow: it only rides on an attempt session (which needs
+/// `--resume` and `--unattended`), never alone and never with a planning run or a worktree.
+#[test]
+fn read_only_session_needs_an_attempt_session_and_takes_no_worktree() {
+    for bad in [
+        vec!["run", "--read-only-session", "--prompt", "x"],
+        vec![
+            "run",
+            "--read-only-session",
+            "--resume",
+            "x",
+            "--prompt",
+            "x",
+        ],
+        vec![
+            "run",
+            "--read-only-session",
+            "--resume",
+            "x",
+            "--plan-session",
+            "--prompt",
+            "x",
+        ],
+        vec![
+            "run",
+            "--read-only-session",
+            "--attempt-session",
+            "--resume",
+            "x",
+            "--unattended",
+            "--worktree",
+            "--prompt",
+            "x",
+        ],
+    ] {
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(&bad)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{bad:?}");
+    }
+}
+
+/// An attempt whose folder turns out to be the home folder (here through a symlink made after the
+/// goal was approved) does not start: the worker refuses it, and nothing is read.
+#[test]
+fn ro_attempt_refuses_a_folder_that_is_the_home_folder_through_a_symlink() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the read-only attempt cannot run");
+        println!("SKIP: no enforcing sandbox on this host");
+        return;
+    }
+    // the worker's HOME is `r.dir`
+    let home = std::fs::canonicalize(r.dir.path()).unwrap();
+    let link = home
+        .parent()
+        .unwrap()
+        .join(format!("homelink-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    let (_, _, _, settled) =
+        run_read_only(&r, &link, json!([{"text": "REPORT"}, {"text": "REPORT"}]));
+    let _ = std::fs::remove_file(&link);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    assert_eq!(settled.unwrap().end, WorkerEnd::Failed, "{log}");
+    assert!(log.contains("home folder"), "{log}");
 }

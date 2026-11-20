@@ -32,6 +32,7 @@ fn contract() -> Contract {
     caps.insert(Capability::RepoRead, CapabilityMode::Allow);
     caps.insert(Capability::RepoWrite, CapabilityMode::Allow);
     Contract {
+        kind: synthesis_core::outcome::ContractKind::Write,
         version: 1,
         goal: "goal".into(),
         criteria: vec![ContractCriterion {
@@ -224,6 +225,7 @@ fn off_by_default_every_method_but_status_is_refused_and_nothing_is_created() {
         (json!(false), json!(false))
     );
     assert_eq!(st["protocol"], PROTOCOL);
+    assert_eq!(st["features"], json!([]));
     assert!(matches!(c.outcomes(None), Err(ClientError::Refused(e)) if e.contains("off")));
     assert!(
         c.command("start", "11111111-1111-4111-8111-111111111111", None, "k")
@@ -792,7 +794,7 @@ fn a_reply_that_is_about_another_command_or_lies_about_order_is_not_believed() {
 // (`a_default_open_stays_at_v4_...`, `a_binary_that_supports_v4_refuses_v5_...`)
 #[test]
 fn an_engine_of_another_protocol_is_refused_at_connect() {
-    for p in [3, 5] {
+    for p in [3, 4, 6] {
         let hello = format!("{{\"msg\":\"hello\",\"version\":\"{VERSION}\",\"protocol\":{p}}}\n");
         let e = Stdio::connect(Cursor::new(hello.into_bytes()), Sink::default())
             .err()

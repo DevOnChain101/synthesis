@@ -33,6 +33,7 @@ mod planrun;
 mod proc;
 mod profile;
 mod recover;
+mod report;
 mod retention;
 mod runner;
 mod sched;
@@ -72,7 +73,8 @@ pub use planrun::{
 pub use proc::{ChildState, StateFn, child_state, kill_verified};
 pub use profile::{DEFAULT_WALL_SECS, Profile, ProfileError, wall_secs};
 pub use recover::{RecoveryReport, recover_attempts, recover_item};
-pub use retention::{Cleanup, cleanup_attempt, finish_attempt, retention_due};
+pub use report::{AttemptReport, attempt_report, is_read_only};
+pub use retention::{Cleanup, cleanup_attempt, finish_attempt, finish_in_place, retention_due};
 pub use runner::{
     CancelFlag, RunError, Runner, Running, Settled, Spawn, SyntSpawn, WorkerEnd, map_exit,
     settle_item,

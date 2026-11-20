@@ -36,6 +36,16 @@ mod live;
 mod mcp_guard;
 mod peer;
 mod sink;
+#[cfg(all(
+    feature = "approval-card",
+    not(debug_assertions),
+    not(feature = "approval-card-in-release")
+))]
+compile_error!(
+    "feature `approval-card` builds the constructor of the person's approval token: it is for tests and the \
+     approval-card code only; a release build needs `approval-card-in-release`, set by that code's crate"
+);
+
 pub mod testing;
 mod toolbox;
 mod toolsearch;
@@ -47,7 +57,7 @@ pub use agents::{
     AgentDef, AgentSource, AgentTable, GENERAL_PURPOSE, ModelResolver, from_mode, stricter, to_mode,
 };
 pub use classifier::AutoJudge;
-pub use comm::{AgentInfo, NO_TASK_RUNNING, TaskAgent};
+pub use comm::{AgentInfo, NO_TASK_RUNNING, PersonApproved, TaskAgent};
 pub use context::{RULES, StaticContext, wrap_tool_output};
 pub use harness::{
     AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ImageAttachment, LongTier,

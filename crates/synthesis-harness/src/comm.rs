@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::{AgentDef, stricter};
-use crate::context::agent_message_block;
+use crate::context::{agent_message_block, conductor_message_block, owner_message_block};
 use crate::exec::Res;
 use crate::harness::{AgentCtx, AgentEnd, AgentState, Harness, TaskRun};
 use crate::hub::{
@@ -26,6 +26,24 @@ use crate::sink::Scope;
 use crate::traits::BoxFut;
 use crate::util::{lock, uuid};
 use synthesis_events::ToolStatus;
+
+/// Proof that the person approved exactly this text (a card they clicked). It is bound to the text's sha256, so
+/// it cannot cover other bytes. Only the approval-card code path may build one: the constructor exists with the
+/// `approval-card` feature (tests, and P3b's card code); a grep test in P3b checks no other module calls it.
+pub struct PersonApproved([u8; 32]);
+
+impl PersonApproved {
+    #[cfg(any(test, feature = "approval-card"))]
+    pub fn for_text(text: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(text.as_bytes()).into())
+    }
+
+    fn covers(&self, text: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        self.0 == <[u8; 32]>::from(Sha256::digest(text.as_bytes()))
+    }
+}
 
 /// Why `send_user_message` refuses a line when the task ended before it arrived.
 pub const NO_TASK_RUNNING: &str = "no task is running";
@@ -364,9 +382,17 @@ impl Harness {
                     text: m.text.clone(),
                 });
             } else {
-                blocks.push(Block::Text {
-                    text: agent_message_block(m, &self.address(task, &m.from)),
-                });
+                // no `user.message` event for these: the view must not show them as the person's own words
+                let text = match m.origin {
+                    Origin::Owner { seq } => owner_message_block(seq, &m.text),
+                    Origin::Conductor { confirmed } => conductor_message_block(confirmed, &m.text),
+                    _ => agent_message_block(m, &self.address(task, &m.from)),
+                };
+                if m.origin.is_person_text() {
+                    // the auto judge reads it as the user's intent, before the task's own request (last)
+                    crate::classifier::add_user_text(&mut lock(&task.user_texts), &m.text);
+                }
+                blocks.push(Block::Text { text });
             }
         }
         blocks.extend(peer.into_iter().map(|text| Block::Text { text }));
@@ -713,6 +739,41 @@ impl Harness {
     /// agent at its next safe point; an idle sub-agent starts again. Never an approval. It is a
     /// user prompt like any other: the `UserPromptSubmit` hook runs first and can reject it.
     pub async fn send_user_message(&self, to: &str, text: String) -> Result<(), String> {
+        self.send_injected(to, text, "user", Origin::User).await
+    }
+
+    /// A line the person sent this worker through the outcome owner (super-agent-s1.md 4.6): the same
+    /// drain points, task check and `UserPromptSubmit` hook as `send_user_message`, but a fenced
+    /// `<owner_message>` block. The origin is set here and nowhere else.
+    pub async fn send_owner_message(&self, seq: u64, text: String) -> Result<(), String> {
+        self.send_injected(MAIN, text, "owner", Origin::Owner { seq })
+            .await
+    }
+
+    /// A request the person's conductor relays to the main agent (conductor.md 2.4). `approval`: the person
+    /// approved these exact bytes (a [`PersonApproved`] bound to the text's sha256). A fenced
+    /// `<conductor_message>` block, never an answer.
+    pub async fn send_conductor_message(
+        &self,
+        text: String,
+        approval: Option<PersonApproved>,
+    ) -> Result<(), String> {
+        let confirmed = match &approval {
+            Some(a) if a.covers(&text) => true,
+            Some(_) => return Err("the approval is for other text".into()),
+            None => false,
+        };
+        self.send_injected(MAIN, text, "conductor", Origin::Conductor { confirmed })
+            .await
+    }
+
+    async fn send_injected(
+        &self,
+        to: &str,
+        text: String,
+        from: &str,
+        origin: Origin,
+    ) -> Result<(), String> {
         let task_id = self
             .hub
             .task_id()
@@ -737,6 +798,18 @@ impl Harness {
                     .unwrap_or_else(|| "blocked by a UserPromptSubmit hook".into()));
             }
             let extra = out.additional_context.join("\n");
+            // text the person wrote or approved is delivered as it is: hook context is never put inside its block
+            // or into the judge's user texts
+            if !extra.is_empty()
+                && matches!(
+                    origin,
+                    Origin::Owner { .. } | Origin::Conductor { confirmed: true }
+                )
+            {
+                return Err(
+                    "a UserPromptSubmit hook added context to a message the person approved; not delivered".into(),
+                );
+            }
             if !extra.is_empty() {
                 text = format!("{text}\n\n{extra}");
             }
@@ -747,10 +820,10 @@ impl Harness {
         }
         let m = Msg {
             id: uuid(),
-            from: "user".into(),
-            from_kind: "user".into(),
+            from: from.into(),
+            from_kind: from.into(),
             to,
-            origin: Origin::User,
+            origin,
             kind: Kind::Message,
             text,
             summary: None,

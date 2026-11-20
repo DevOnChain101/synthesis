@@ -8,8 +8,8 @@
 //! a stored record (the store keeps plans and contracts immutable).
 
 use synthesis_core::outcome::{
-    Capability, CapabilityMode, Contract, Plan, PlanDiff, PlanError, PlanItem, ValidPlan,
-    WorkItemKind, diff_plans, validate_plan,
+    Capability, CapabilityMode, Contract, ContractKind, Plan, PlanDiff, PlanError, PlanItem,
+    ValidPlan, WorkItemKind, diff_plans, validate_plan,
 };
 
 /// A planner that could not produce a plan (a model that failed, a refusal). The text is shown
@@ -72,6 +72,20 @@ impl Planner for StubPlanner {
             title: String::new(),
             instructions: String::new(),
         };
+        if contract.kind == ContractKind::ReadOnly {
+            // one worker that reads and reports; the person's review of the report covers every criterion
+            return Ok(Plan {
+                version,
+                contract_version: contract.version,
+                items: vec![item(
+                    "research",
+                    WorkItemKind::Agent,
+                    &[],
+                    allowed(&[Capability::RepoRead]),
+                    contract.criteria.iter().map(|c| c.id.clone()).collect(),
+                )],
+            });
+        }
         Ok(Plan {
             version,
             contract_version: contract.version,
