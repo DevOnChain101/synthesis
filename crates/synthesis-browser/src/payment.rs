@@ -136,6 +136,8 @@ pub struct Probe {
     pub card_inputs: bool,
     pub amount_text: String,
     pub frame_src: String,
+    /// For a key press: the label of the submit control of the focused element's form.
+    pub submit_label: String,
 }
 
 /// `fold` with only letters, digits and single spaces: ` pay now ` matches the phrase `pay now` on word borders.
@@ -164,7 +166,10 @@ pub fn fold(s: &str) -> String {
         ('d', "đ"),
     ];
     s.chars()
-        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
+        .filter(|c| {
+            !('\u{300}'..='\u{36f}').contains(c) // combining marks
+                && !matches!(*c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+        })
         .flat_map(char::to_lowercase)
         .map(|c| {
             MAP.iter()
@@ -198,7 +203,10 @@ pub fn page_hit(href: &str) -> bool {
     PSP_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-        || has_phrase(u.path(), PAGE_PATHS)
+        || [Some(u.path()), u.query(), u.fragment()] // a hash-routed SPA keeps its route in the fragment
+            .into_iter()
+            .flatten()
+            .any(|part| has_phrase(part, PAGE_PATHS))
 }
 
 /// Why the action needs the person, or `None`. `page_ctx`: the page host/path matched or it has card inputs.
@@ -220,6 +228,9 @@ pub fn assess(p: &Probe, kind: Kind) -> Option<&'static str> {
             Some("a pointer action by position on a payment page")
         }
         Kind::Key if page_ctx => Some("a key press on a payment page"),
+        Kind::Key if label_hit(&p.submit_label, ACTIONS) => {
+            Some("the key submits a form whose button pays or commits")
+        }
         Kind::Click | Kind::Blind | Kind::Key if act || frame_psp => {
             Some("the target looks like a pay or confirm control")
         }
@@ -273,59 +284,102 @@ const d=document,t=s=>String(s||'').replace(/\s+/g,' ').trim().slice(0,200);
 if(el===d.body||el===d.documentElement)el=null;
 let it=el&&el.closest&&el.closest('button,a,input,select,summary,label,[role=button],[role=link],[role=menuitem],[onclick]');
 if(el&&!it&&getComputedStyle(el).cursor==='pointer')it=el;
-const n=it||el;let label='',amt='';
-if(n){const g=a=>n.getAttribute(a)||'';
+const n=it||el;let label='',amt='',sub='';
+if(n){const g=a=>n.getAttribute(a)||'',tg=n.tagName,field=/^(INPUT|TEXTAREA|SELECT)$/.test(tg)||n.isContentEditable;
 const by=g('aria-labelledby').split(' ').map(i=>d.getElementById(i)).filter(Boolean).map(e=>e.textContent).join(' ');
-label=t(g('aria-label')||by||n.innerText||n.value||(n.labels&&n.labels[0]&&n.labels[0].innerText)||g('title')||g('alt')||g('placeholder')||g('name'));
-for(let a=n,i=0;a&&i<5;a=a.parentElement,i++){const x=a.innerText||'';if(/\d/.test(x)&&/[$€£¥₫]|\d\s?(đ|vnd|usd|eur|gbp)/i.test(x)){amt=x.slice(0,800);break}}}
+// never what the person or the agent typed: a field's value and a contenteditable's text stay out of the label
+const btn=tg==='INPUT'&&/^(button|submit|reset|image)$/i.test(n.type)?n.value:'';
+label=t(g('aria-label')||by||(field?'':n.innerText)||btn||(n.labels&&n.labels[0]&&n.labels[0].innerText)||g('title')||g('alt')||g('placeholder')||g('name'));
+for(let a=n,i=0;a&&i<5;a=a.parentElement,i++){const x=a.innerText||'';if(/\d/.test(x)&&/[$€£¥₫]|\d\s?(đ|vnd|usd|eur|gbp)/i.test(x)){amt=x.slice(0,800);break}}
+const f=n.form,sb=f&&f.querySelector('button[type=submit],input[type=submit],button:not([type])');
+if(sb)sub=t(sb.innerText||sb.value||sb.getAttribute('aria-label'))}
 const g=a=>n?n.getAttribute(a)||'':'';
 return{href:location.href,label,tag:n?n.tagName.toLowerCase():'',role:g('role'),typ:g('type'),ac:g('autocomplete'),
-interactive:!!it,card:!!d.querySelector('[autocomplete^="cc-"]'),amt,src:n&&n.tagName==='IFRAME'?n.src:''}}"#;
+interactive:!!it,card:!!d.querySelector('[autocomplete^="cc-"]'),amt,sub,src:n&&n.tagName==='IFRAME'?n.src:''}}"#;
 
 impl BrowserRuntime {
-    /// Reads `target` for `assess` (one page call). An error means detection could not run here.
+    /// Reads `target` for `assess` (one page call, in an ISOLATED world: the page's own scripts cannot replace the DOM
+    /// methods it uses). Every field is clipped here before anything folds or shows it. An error means detection
+    /// could not run here.
     pub async fn payment_probe(&self, target: &PayTarget) -> Result<Probe> {
         let tab = self.current()?;
+        let frame = self.call(&tab, "Page.getFrameTree", json!({})).await?;
+        let frame = frame["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or(crate::BrowserError::Closed)?
+            .to_owned();
+        let world = self
+            .call(
+                &tab,
+                "Page.createIsolatedWorld",
+                json!({"frameId": frame, "worldName": "synthesis-payment"}),
+            )
+            .await?;
+        let ctx = world["executionContextId"]
+            .as_i64()
+            .ok_or_else(|| crate::BrowserError::Page("no isolated world".into()))?;
         let v = match target {
             PayTarget::Ref(r) => {
-                let oid = self.object_for(&tab, r).await?;
+                let oid = self.isolated_object(&tab, r).await?;
                 let f = format!("function(){{return ({PROBE_JS})(this)}}");
-                let v = self
+                let r = self
                     .call(
                         &tab,
                         "Runtime.callFunctionOn",
                         json!({"objectId": oid, "functionDeclaration": f, "returnByValue": true}),
                     )
                     .await?;
-                v["result"]["value"].clone()
+                r["result"]["value"].clone()
             }
             PayTarget::Point(x, y) => {
                 let at = format!("document.elementFromPoint({}, {})", x.round(), y.round());
-                self.eval(&tab, &format!("({PROBE_JS})({at})")).await?
+                self.eval_in(&tab, ctx, &format!("({PROBE_JS})({at})"))
+                    .await?
             }
             PayTarget::Focused => {
-                self.eval(&tab, &format!("({PROBE_JS})(document.activeElement)"))
+                self.eval_in(&tab, ctx, &format!("({PROBE_JS})(document.activeElement)"))
                     .await?
             }
         };
-        let s = |k: &str| v[k].as_str().unwrap_or("").to_owned();
-        if s("href").is_empty() {
+        let s = |k: &str, max: usize| {
+            v[k].as_str()
+                .unwrap_or("")
+                .chars()
+                .take(max)
+                .collect::<String>()
+        };
+        if s("href", 1).is_empty() {
             return Err(crate::BrowserError::Page(
                 "payment probe returned nothing".into(),
             ));
         }
         Ok(Probe {
-            href: s("href"),
-            label: s("label"),
-            tag: s("tag"),
-            role: s("role"),
-            typ: s("typ"),
-            autocomplete: s("ac"),
+            href: s("href", 2048),
+            label: s("label", 200),
+            tag: s("tag", 30),
+            role: s("role", 30),
+            typ: s("typ", 30),
+            autocomplete: s("ac", 60),
             interactive: v["interactive"] == true,
             card_inputs: v["card"] == true,
-            amount_text: s("amt"),
-            frame_src: s("src"),
+            amount_text: s("amt", 800),
+            frame_src: s("src", 2048),
+            submit_label: s("sub", 200),
         })
+    }
+
+    async fn eval_in(&self, tab: &crate::Tab, ctx: i64, expr: &str) -> Result<serde_json::Value> {
+        let r = self
+            .call(
+                tab,
+                "Runtime.evaluate",
+                json!({"expression": expr, "contextId": ctx, "returnByValue": true}),
+            )
+            .await?;
+        if r.get("exceptionDetails").is_some() {
+            return Err(crate::BrowserError::Page("payment probe failed".into()));
+        }
+        Ok(r["result"]["value"].clone())
     }
 }
 
@@ -477,5 +531,25 @@ mod tests {
         assert!(same_target(&a, &b));
         b.label = "Cancel".into();
         assert!(!same_target(&a, &b));
+    }
+
+    #[test]
+    fn invisible_characters_hash_routes_and_form_submit_do_not_hide_a_hit() {
+        let shop = "https://shop.example/x";
+        assert!(
+            assess(
+                &p(shop, "Pl\u{200b}ace\u{ad} or\u{feff}der", true),
+                Kind::Click
+            )
+            .is_some()
+        );
+        assert!(page_hit("https://shop.example/#/checkout/pay"));
+        assert!(page_hit("https://shop.example/app?step=payment"));
+        assert!(!page_hit("https://shop.example/app?step=browse#top"));
+        // Enter in a field of a form whose submit button pays
+        let mut f = p(shop, "Email", true);
+        assert!(assess(&f, Kind::Key).is_none());
+        f.submit_label = "Place order".into();
+        assert!(assess(&f, Kind::Key).is_some());
     }
 }

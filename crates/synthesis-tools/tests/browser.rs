@@ -1931,7 +1931,8 @@ const PAY_PAGE: &str = r#"<html><head><title>Cart</title></head><body>
 <div id="big" style="position:absolute;left:300px;top:20px;width:200px;height:60px" onclick="document.title='pointed'">x</div>
 </body></html>"#;
 const CARD_PAGE: &str = r#"<html><body><label>Card <input id="c" autocomplete="cc-number"></label>
-<label>Email <input id="e"></label></body></html>"#;
+<form onsubmit="document.title='submitted';return false"><label>Email <input id="e"></label>
+<button type="submit">Place order</button></form></body></html>"#;
 
 /// The person, scripted for payment approvals: answers and records every request.
 #[derive(Debug, Default)]
@@ -2167,4 +2168,57 @@ async fn a_card_field_asks_before_it_is_filled() {
     assert!(o.is_error && text(&o).contains("did not approve"), "{o:?}");
     assert_eq!(person.asked.lock().unwrap().len(), 1);
     reg.close_session("pay4");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_card_data_never_reaches_the_approval_and_enter_reads_the_submit_button() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_html(CARD_PAGE).await;
+    let d = tempfile::tempdir().unwrap();
+    let person = Arc::new(Payer {
+        yes: true,
+        ..Default::default()
+    });
+    let reg = pay_registry(Some(person.clone()));
+    let c = ctx(d.path(), "pay5");
+    ok(
+        &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+            .await,
+        "navigate",
+    );
+    let tree = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    let (card, mail) = (
+        ref_of(&tree, "textbox \"Card\""),
+        ref_of(&tree, "textbox \"Email\""),
+    );
+    for v in ["4111111111111111", "4000000000000002"] {
+        ok(
+            &reg.execute("browser_fill", json!({"ref": card, "value": v}), &c)
+                .await,
+            "card",
+        );
+    }
+    {
+        let a = person.asked.lock().unwrap();
+        assert_eq!(a.len(), 2);
+        // the second ask happened with the first number in the field: it must not be in anything shown
+        assert!(!format!("{:?}", a[1]).contains("4111"), "{:?}", a[1]);
+    }
+    // a printable key into the card field asks; into the email field it does not
+    ok(
+        &reg.execute("browser_fill", json!({"ref": mail, "value": "a@b.c"}), &c)
+            .await,
+        "email",
+    );
+    assert_eq!(person.asked.lock().unwrap().len(), 2);
+    // Enter in the email field submits a form whose button says "Place order": asks, on a page that is not payment
+    let o = reg
+        .execute("browser_press_key", json!({"key": "Enter"}), &c)
+        .await;
+    ok(&o, "enter");
+    let a = person.asked.lock().unwrap().len();
+    assert_eq!(a, 3, "Enter asked");
+    reg.close_session("pay5");
 }

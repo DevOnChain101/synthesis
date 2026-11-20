@@ -577,8 +577,13 @@ impl BrowserHost for CliHost {
         cancel: &'a CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, bool> {
         Box::pin(async move {
+            // A worker (orchestrator, a spawned run) can still open /dev/tty through its session; only a run whose
+            // stdin IS the terminal was started by the person at it. Anything else is refused, never prompted.
+            if !payment_prompt_allowed() {
+                return false;
+            }
             ask_yes(
-                &format!("{}. {}", payment_line(req), "Allow THIS ONE action?"),
+                &format!("{}. Allow THIS ONE action?", payment_line(req)),
                 cancel,
             )
             .await
@@ -603,6 +608,11 @@ impl BrowserHost for CliHost {
             .await
         })
     }
+}
+
+/// The headless host may prompt for a payment only when stdin is the terminal.
+fn payment_prompt_allowed() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
 /// What the person reads: action, origin, the control's label and the amount near it (all page text, sanitized).
@@ -828,6 +838,50 @@ pub fn doctor_lines(env: &Env, h: &Homes) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Re-runs itself with a null stdin (an orchestrator worker): the payment ask must be refused at once, not
+    /// prompt on an inherited controlling terminal.
+    #[test]
+    fn a_payment_is_refused_without_a_terminal_stdin() {
+        if std::env::var_os("SYNT_TEST_PAY_CHILD").is_some() {
+            let host = CliHost {
+                sink: EventSink::new(Vec::new(), "s", Vec::<String>::new()),
+            };
+            let req = synthesis_tools::PaymentRequest {
+                action: "browser_click click".into(),
+                origin: "https://x.example".into(),
+                label: "Pay".into(),
+                amount: None,
+                reason: "t",
+            };
+            let cancel = CancellationToken::new();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let yes = rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), host.confirm_payment(&req, &cancel))
+                    .await
+            });
+            assert_eq!(yes, Ok(false));
+            return;
+        }
+        let st = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "login::tests::a_payment_is_refused_without_a_terminal_stdin",
+            ])
+            .env("SYNT_TEST_PAY_CHILD", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            st.status.success(),
+            "{}",
+            String::from_utf8_lossy(&st.stdout)
+        );
+        assert!(String::from_utf8_lossy(&st.stdout).contains("1 passed"));
+    }
 
     #[test]
     fn settings_parse_clamp_and_approvals() {

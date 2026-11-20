@@ -439,15 +439,18 @@ macro_rules! browser_tool {
                     return fail($wire, e.into());
                 }
                 let mut unchecked = false;
+                let mut checked: Option<Value> = None;
                 if matches!(
                     $wire,
                     "browser_click" | "browser_mouse" | "browser_fill" | "browser_press_key"
                 ) {
                     match payment_gate(sh, ctx, &rt, $wire, input).await {
-                        Ok(u) => unchecked = u,
+                        Ok((u, r)) => (unchecked, checked) = (u, r),
                         Err(e) => return fail($wire, e.into()),
                     }
                 }
+                // the body acts on the element the guard checked
+                let input = checked.as_ref().unwrap_or(input);
                 let r = tokio::select! {
                     r = $body(&rt, input, sh) => r,
                     () = ctx.cancel.cancelled() => Err("aborted.".into()),
@@ -469,17 +472,49 @@ fn note_unchecked(mut o: ToolOutput, unchecked: bool) -> ToolOutput {
     o
 }
 
-/// What the person is asked about, from the tool input: the target to read, the kind of action and its name. `None`
-/// for input the tool itself rejects, and for actions that pay nothing (hover, wheel, a printable key).
+/// What the guard reads and asks about, from the tool input.
+struct PayPlan {
+    target: PayTarget,
+    kind: Kind,
+    what: String,
+    /// The input with a role+name target replaced by the ref the guard resolved, so the body acts on the very
+    /// element that was checked (a page that changes between the two resolutions cannot swap it).
+    resolved: Option<Value>,
+}
+
+/// `None` for actions that pay nothing (hover, wheel, a printable key outside a card field's reach) and for input the
+/// tool itself rejects. A role+name that does not resolve is an error here: the body would fail the same way.
 async fn pay_plan(
     rt: &BrowserRuntime,
     wire: &str,
     input: &Value,
-) -> Option<(PayTarget, Kind, String)> {
-    let by_ref = async |a: Aim<'_>| match a {
-        Aim::Ref(r) => Some(PayTarget::Ref(r.to_owned())),
-        Aim::Role(role, name) => ref_by_role(rt, role, name).await.ok().map(PayTarget::Ref),
-        Aim::Point(x, y) => Some(PayTarget::Point(x, y)),
+) -> Result<Option<PayPlan>, BrowserError> {
+    let plan = |target, kind, what: &str| {
+        Ok(Some(PayPlan {
+            target,
+            kind,
+            what: what.to_owned(),
+            resolved: None,
+        }))
+    };
+    // role+name becomes a ref in a copy of the input
+    let resolve = async |a: Aim<'_>| -> Result<(PayTarget, Option<Value>), BrowserError> {
+        Ok(match a {
+            Aim::Ref(r) => (PayTarget::Ref(r.to_owned()), None),
+            Aim::Role(role, name) => {
+                let r = ref_by_role(rt, role, name)
+                    .await
+                    .map_err(BrowserError::Page)?;
+                let mut v = input.clone();
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("role");
+                    o.remove("name");
+                    o.insert("ref".into(), json!(r));
+                }
+                (PayTarget::Ref(r), Some(v))
+            }
+            Aim::Point(x, y) => (PayTarget::Point(x, y), None),
+        })
     };
     match wire {
         "browser_click" => {
@@ -490,31 +525,55 @@ async fn pay_plan(
             ) {
                 (Some(r), ..) => Aim::Ref(r),
                 (None, Some(role), Some(name)) => Aim::Role(role, name),
-                _ => return None,
+                _ => return Ok(None),
             };
-            Some((by_ref(a).await?, Kind::Click, "click".into()))
+            let (target, resolved) = resolve(a).await?;
+            Ok(Some(PayPlan {
+                target,
+                kind: Kind::Click,
+                what: "click".into(),
+                resolved,
+            }))
         }
         "browser_mouse" => {
-            let act = str_field(input, "action")?;
+            let Some(act) = str_field(input, "action") else {
+                return Ok(None);
+            };
             if !matches!(act, "click" | "double_click" | "right_click" | "drag") {
-                return None;
+                return Ok(None);
             }
-            let t = by_ref(aim(input, "").ok()??).await?;
+            let Some(a) = aim(input, "").ok().flatten() else {
+                return Ok(None);
+            };
+            let (target, resolved) = resolve(a).await?;
             // a point, a double click or a drag cannot be vetted by its label
-            let blind = matches!(t, PayTarget::Point(..)) || matches!(act, "double_click" | "drag");
-            Some((t, if blind { Kind::Blind } else { Kind::Click }, act.into()))
+            let blind =
+                matches!(target, PayTarget::Point(..)) || matches!(act, "double_click" | "drag");
+            Ok(Some(PayPlan {
+                target,
+                kind: if blind { Kind::Blind } else { Kind::Click },
+                what: act.into(),
+                resolved,
+            }))
         }
-        "browser_fill" | "browser_fill_secret" => Some((
-            PayTarget::Ref(str_field(input, "ref")?.to_owned()),
-            Kind::Fill,
-            "type into".into(),
-        )),
+        "browser_fill" | "browser_fill_secret" => match str_field(input, "ref") {
+            Some(r) => plan(PayTarget::Ref(r.to_owned()), Kind::Fill, "type into"),
+            None => Ok(None),
+        },
         "browser_press_key" => {
-            let k = str_field(input, "key")?;
-            matches!(k.rsplit('+').next(), Some("Enter" | " "))
-                .then(|| (PayTarget::Focused, Kind::Key, format!("press {k}")))
+            let Some(k) = str_field(input, "key") else {
+                return Ok(None);
+            };
+            match k.rsplit('+').next() {
+                Some("Enter" | " ") => plan(PayTarget::Focused, Kind::Key, &format!("press {k}")),
+                // a printable key types into the focused element: a card field asks, as `browser_fill` does
+                Some(c) if c.chars().count() == 1 => {
+                    plan(PayTarget::Focused, Kind::Fill, "type a key into")
+                }
+                _ => Ok(None),
+            }
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -528,14 +587,24 @@ async fn payment_gate(
     rt: &BrowserRuntime,
     wire: &str,
     input: &Value,
-) -> Result<bool, BrowserError> {
-    let Some((target, kind, what)) = pay_plan(rt, wire, input).await else {
-        return Ok(false);
+) -> Result<(bool, Option<Value>), BrowserError> {
+    let Some(PayPlan {
+        target,
+        kind,
+        what,
+        resolved,
+    }) = pay_plan(rt, wire, input).await?
+    else {
+        return Ok((false, None));
     };
+    // origin and path come from the browser's own tab list, not from the page's answer
     let page = current_page(rt).await;
     let mut unread = false;
     let (probe, reason) = match rt.payment_probe(&target).await {
-        Ok(p) => {
+        Ok(mut p) => {
+            if let Some(u) = &page {
+                p.href.clone_from(u);
+            }
             let r = payment::assess(&p, kind);
             (p, r)
         }
@@ -550,10 +619,10 @@ async fn payment_gate(
                 Some("the target could not be read on a payment page"),
             )
         }
-        Err(_) => return Ok(true),
+        Err(_) => return Ok((true, None)),
     };
     let Some(reason) = reason else {
-        return Ok(false);
+        return Ok((false, resolved));
     };
     let origin =
         url::Url::parse(&probe.href).map_or(String::new(), |u| u.origin().ascii_serialization());
@@ -567,7 +636,9 @@ async fn payment_gate(
         )));
     };
     let state = sh.session(ctx);
-    let key = format!("payment:{origin}");
+    // per page, not per origin: a refusal on one page does not silence the question on the next
+    let path = url::Url::parse(&probe.href).map_or(String::new(), |u| u.path().to_owned());
+    let key = format!("payment:{origin}{path}");
     if refused_too_often(&state, &key) {
         return Err(BrowserError::Refused(format!(
             "{how}; the person already refused it on this origin in this session, so it is not asked again"
@@ -587,10 +658,14 @@ async fn payment_gate(
         )));
     }
     // one-shot and bound to what was shown: a page that changed its target meanwhile is not approved
-    match rt.payment_probe(&target).await {
+    let mut now = rt.payment_probe(&target).await;
+    if let (Ok(n), Some(u)) = (now.as_mut(), current_page(rt).await) {
+        n.href = u;
+    }
+    match now {
         // an unreadable target cannot be compared: the person's answer stands for this one action
-        Err(_) if unread => Ok(false),
-        Ok(now) if payment::same_target(&probe, &now) => Ok(false),
+        Err(_) if unread => Ok((false, resolved)),
+        Ok(now) if payment::same_target(&probe, &now) => Ok((false, resolved)),
         _ => Err(BrowserError::Refused(format!(
             "{how}; the target changed after the person approved, so nothing was done. Look at the page again"
         ))),
@@ -838,7 +913,7 @@ pub(crate) fn fill_secret<'a>(
             return fail("browser_fill_secret", e.into());
         }
         let unchecked = match payment_gate(sh, ctx, &rt, "browser_fill_secret", input).await {
-            Ok(u) => u,
+            Ok((u, _)) => u,
             Err(e) => return fail("browser_fill_secret", e.into()),
         };
         let r = tokio::select! {
