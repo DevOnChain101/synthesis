@@ -153,6 +153,10 @@ pub fn page_key(ks: &Keystroke, mac: bool) -> PageKey {
     if key == "escape" && !m.alt && !m.platform {
         return PageKey::Release;
     }
+    // Ctrl+C on macOS stays the app's: it interrupts the agent
+    if mac && m.control && key == "c" {
+        return PageKey::Pass;
+    }
     if if mac { m.platform } else { m.control } {
         return match key {
             "v" => PageKey::Paste,
@@ -810,6 +814,24 @@ impl BrowserPane {
         });
     }
 
+    /// The pane shows a note under the bar (a refusal of input or of an action).
+    pub fn has_note(&self) -> bool {
+        lock(&self.shared).note.is_some()
+    }
+
+    /// The person's paste: text over the browser's limit is not sent, and the pane says so.
+    pub fn paste(&mut self, t: String) {
+        if t.chars().count() > synthesis_browser::MAX_TEXT {
+            lock(&self.shared).note = Some(format!(
+                "the clipboard text is longer than {} characters: not pasted",
+                synthesis_browser::MAX_TEXT
+            ));
+            let _ = self.wake.try_send(());
+        } else {
+            self.input(PageInput::Text(t));
+        }
+    }
+
     /// The pointer at `pos` (window pixels) as page input; `None` when it is not over the page.
     pub fn pointer(&self, pos: (f32, f32), clamp: bool) -> Option<(f64, f64)> {
         to_page(pos, (*self.stage.lock().ok()?)?, clamp)
@@ -1139,9 +1161,12 @@ impl TuiView {
                 Some(true)
             }
             PageKey::Paste => {
-                // the clipboard is read here, on the person's own paste chord, and nowhere else
-                if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    self.ts.bv.input(PageInput::Text(t));
+                // the clipboard is read here, on the person's own paste chord, and nowhere else; not while the
+                // pane shows a refusal (the agent is using the tab, a password field): nothing would arrive
+                if !self.ts.bv.has_note()
+                    && let Some(t) = cx.read_from_clipboard().and_then(|c| c.text())
+                {
+                    self.ts.bv.paste(t);
                 }
                 Some(true)
             }
@@ -1968,8 +1993,9 @@ mod tests {
         ] {
             assert_eq!(page_key(&ks(k, None, m), mac), PageKey::Pass, "{k} {m}");
         }
-        // a Ctrl chord on macOS (not the shortcut key) is the page's, without text
-        assert_eq!(page_key(&ks("c", None, "c"), true), key("c", CTRL));
+        // a Ctrl chord on macOS (not the shortcut key) is the page's, without text, except Ctrl+C (interrupts the agent)
+        assert_eq!(page_key(&ks("d", None, "c"), true), key("d", CTRL));
+        assert_eq!(page_key(&ks("c", None, "c"), true), PageKey::Pass);
         // Ctrl+Cmd or Cmd+Option typing never turns into text
         assert_eq!(
             page_key(&ks("x", Some("\u{2248}"), "m"), false),
@@ -2044,6 +2070,14 @@ mod tests {
         bp.input(mv(3.));
         wait("the status to clear", || bp.snapshot().3.is_none());
         assert_eq!(fake.calls().len(), 2);
+        // a paste over the limit is not sent and says why; one within it goes
+        bp.paste("x".repeat(synthesis_browser::MAX_TEXT + 1));
+        assert!(bp.has_note());
+        assert_eq!(fake.calls().len(), 2);
+        bp.paste("ok".into());
+        wait("the paste", || {
+            fake.calls().iter().any(|c| c.contains("Text(<2 chars>)"))
+        });
     }
 
     #[test]

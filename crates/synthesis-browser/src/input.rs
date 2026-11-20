@@ -42,7 +42,7 @@ impl PageButton {
 }
 
 /// One thing the person did in the pane. Positions are CSS pixels of the page viewport.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum PageInput {
     /// `buttons`: bit 1 left, 2 right, 4 middle, as held down.
     Move { x: f64, y: f64, buttons: u8 },
@@ -65,6 +65,31 @@ pub enum PageInput {
     Key { key: String, mods: u8 },
     /// Text for `Input.insertText` (paste, IME commit, a character the key table has no code for).
     Text(String),
+}
+
+/// What the person types never reaches a log: text and single characters print as their length only.
+impl std::fmt::Debug for PageInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key { key, mods } if key.chars().count() > 1 => {
+                write!(f, "Key({key}, mods {mods})")
+            }
+            Self::Key { mods, .. } => write!(f, "Key(<char>, mods {mods})"),
+            Self::Text(t) => write!(f, "Text(<{} chars>)", t.chars().count()),
+            Self::Move { x, y, buttons } => write!(f, "Move({x}, {y}, {buttons})"),
+            Self::Button {
+                down,
+                x,
+                y,
+                button,
+                clicks,
+                mods,
+            } => {
+                write!(f, "Button({down}, {x}, {y}, {button:?}, {clicks}, {mods})")
+            }
+            Self::Wheel { x, y, dx, dy, mods } => write!(f, "Wheel({x}, {y}, {dx}, {dy}, {mods})"),
+        }
+    }
 }
 
 impl PageInput {
@@ -199,6 +224,27 @@ mod tests {
         );
         assert_eq!(key_events("Enter", 0).unwrap()[0]["text"], "\r");
         assert!(key_events("F13", 0).is_none() && key_events("ab", 0).is_none());
+    }
+
+    #[test]
+    fn what_is_typed_is_never_printed() {
+        let all = format!(
+            "{:?} {:?} {:?}",
+            PageInput::Text("hunter2-secret".into()),
+            PageInput::Key {
+                key: "q".into(),
+                mods: 0
+            },
+            PageInput::Key {
+                key: "Enter".into(),
+                mods: 0
+            }
+        );
+        assert!(
+            !all.contains("hunter2") && !all.contains("\"q\"") && !all.contains("(q"),
+            "{all}"
+        );
+        assert!(all.contains("14 chars") && all.contains("Enter"));
     }
 
     #[test]

@@ -165,6 +165,8 @@ pub struct Spot {
 struct Tab {
     session: String,
     refs: Mutex<RefTable>,
+    /// The isolated world of `typing_blocked` (execution context id), made once and renewed when it is gone.
+    input_world: Mutex<Option<i64>>,
 }
 
 #[derive(Default)]
@@ -301,9 +303,10 @@ impl Drop for AgentBusy<'_> {
     }
 }
 
-/// The focused element (through open shadow roots) is a password, one-time-code or card field, or a frame/embed the
+/// The focused element (through open shadow roots) is a password, one-time-code, card or PIN-like field (by type,
+/// `autocomplete`, name, id, label), a custom element (its shadow root may be closed) or a frame/embed the
 /// script cannot look into: `true`. Only a plain `false` lets a key through.
-const TYPING_BLOCKED_JS: &str = "(()=>{let e=document.activeElement;while(e&&e.shadowRoot&&e.shadowRoot.activeElement)e=e.shadowRoot.activeElement;if(!e)return false;if(/^(IFRAME|FRAME|EMBED|OBJECT)$/.test(e.tagName))return true;const a=((e.getAttribute&&e.getAttribute('autocomplete'))||'').toLowerCase();return e.tagName==='INPUT'&&(e.type==='password'||/(^|\\s)(cc-[a-z-]+|one-time-code|current-password|new-password)(\\s|$)/.test(a))})()";
+const TYPING_BLOCKED_JS: &str = r#"(()=>{let e=document.activeElement;while(e&&e.shadowRoot&&e.shadowRoot.activeElement)e=e.shadowRoot.activeElement;if(!e)return false;const t=e.tagName||'';if(/^(IFRAME|FRAME|EMBED|OBJECT)$/.test(t)||t.includes('-'))return true;const g=n=>((e.getAttribute&&e.getAttribute(n))||'').toLowerCase();if(t!=='INPUT'&&t!=='TEXTAREA')return false;if(e.type==='password'||/(^|\s)(cc-[a-z-]+|one-time-code|current-password|new-password)(\s|$)/.test(g('autocomplete')))return true;return /pass|pwd|otp|cvv|cvc|card|secret|(^|[^a-z])pin([^a-z]|$)/.test(g('name')+' '+(e.id||'').toLowerCase()+' '+g('inputmode')+' '+g('aria-label'))})()"#;
 
 impl Drop for BrowserRuntime {
     fn drop(&mut self) {
@@ -1085,6 +1088,7 @@ impl BrowserRuntime {
         let tab = Arc::new(Tab {
             session,
             refs: Mutex::default(),
+            input_world: Mutex::default(),
         });
         for m in [
             "Page.enable",
@@ -1716,9 +1720,13 @@ impl BrowserRuntime {
     /// The person's input (`PageView::input` only). Refused while the agent acts; keys and text never reach a
     /// password, one-time-code or card field (B4 masks person-typed values; until it lands they are dropped).
     pub(crate) async fn input(&self, ev: PageInput) -> Result<()> {
-        if self.agent_busy.load(Ordering::SeqCst) > 0 {
-            return Err(BrowserError::Busy);
-        }
+        let busy = || {
+            if self.agent_busy.load(Ordering::SeqCst) > 0 {
+                return Err(BrowserError::Busy);
+            }
+            Ok(())
+        };
+        busy()?;
         let tab = self.current()?;
         if let PageInput::Text(t) = &ev {
             PageInput::check_text(t)?;
@@ -1728,6 +1736,7 @@ impl BrowserRuntime {
                 "the view does not type into a password, one-time-code or card field, or into an embedded frame".into(),
             ));
         }
+        busy()?; // again right before the dispatch: the gate above awaited the page
         match &ev {
             PageInput::Key { key, mods } => {
                 let events = input::key_events(key, *mods)
@@ -1752,28 +1761,45 @@ impl BrowserRuntime {
     /// True unless the focused element is clearly harmless to type into. Asked in an isolated world (the page's own
     /// scripts cannot answer for it); any failure to ask counts as blocked.
     async fn typing_blocked(&self, tab: &Tab) -> Result<bool> {
-        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
-        let frame = tree["frameTree"]["frame"]["id"]
-            .as_str()
-            .ok_or(BrowserError::Closed)?;
-        let world = self
-            .call(
-                tab,
-                "Page.createIsolatedWorld",
-                json!({"frameId": frame, "worldName": "synthesis-input"}),
-            )
-            .await?;
-        let Some(ctx) = world["executionContextId"].as_i64() else {
-            return Ok(true);
-        };
-        let r = self
-            .call(
-                tab,
-                "Runtime.evaluate",
-                json!({"expression": TYPING_BLOCKED_JS, "contextId": ctx, "returnByValue": true}),
-            )
-            .await?;
-        Ok(r["result"]["value"] != json!(false))
+        // a cached world is gone after a navigation: the evaluate then fails and one fresh world is made
+        for fresh in [false, true] {
+            let cached = if fresh { None } else { *lock(&tab.input_world) };
+            let ctx = match cached {
+                Some(c) => c,
+                None => {
+                    let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+                    let frame = tree["frameTree"]["frame"]["id"]
+                        .as_str()
+                        .ok_or(BrowserError::Closed)?;
+                    let world = self
+                        .call(
+                            tab,
+                            "Page.createIsolatedWorld",
+                            json!({"frameId": frame, "worldName": "synthesis-input"}),
+                        )
+                        .await?;
+                    let Some(c) = world["executionContextId"].as_i64() else {
+                        return Ok(true);
+                    };
+                    *lock(&tab.input_world) = Some(c);
+                    c
+                }
+            };
+            let r = self
+                .call(
+                    tab,
+                    "Runtime.evaluate",
+                    json!({"expression": TYPING_BLOCKED_JS, "contextId": ctx, "returnByValue": true}),
+                )
+                .await;
+            match r {
+                Ok(v) if v.get("exceptionDetails").is_none() => {
+                    return Ok(v["result"]["value"] != json!(false));
+                }
+                _ => *lock(&tab.input_world) = None,
+            }
+        }
+        Ok(true)
     }
 
     pub async fn wait_for(&self, what: WaitFor, timeout: Duration) -> Result<()> {

@@ -67,6 +67,7 @@ const INPUT: &str = r#"<html><body style="margin:0;height:3000px"><style>*{posit
 <input id="p" type="password" style="left:100px;top:300px;width:200px;height:30px" oninput="out.textContent+=' pw:'+this.value">
 <a href="http://denied.invalid/x" style="left:100px;top:400px;width:200px;height:40px">denied</a>
 <a href="/form" style="left:100px;top:500px;width:200px;height:40px">form</a>
+<input name="cardnumber" style="left:100px;top:600px;width:200px;height:30px">
 <p id="out" style="left:400px;top:100px">ready</p>
 <script>window.onscroll=()=>out.textContent+=' scrolled'</script></body></html>"#;
 const SOLID: &str = "<html><body style=\"margin:0;background:rgb(30,144,255)\"><p style=\"font:16px sans-serif;margin:8px\">solid</p></body></html>";
@@ -2085,6 +2086,13 @@ async fn input_body() {
     rt.navigate(&format!("{base}/input"), WaitUntil::Load)
         .await
         .unwrap();
+    // a new document: the cached isolated world is renewed, typing works, a card-like name is still refused
+    click(150., 215.).await;
+    pv.input(key("k")).await.unwrap();
+    has("typed:k").await.unwrap();
+    click(150., 615.).await;
+    let r = pv.input(key("4")).await;
+    assert!(matches!(r, Err(BrowserError::Refused(_))), "{r:?}");
     click(150., 520.).await;
     has("Contact").await.unwrap();
     rt.close().await.unwrap();
