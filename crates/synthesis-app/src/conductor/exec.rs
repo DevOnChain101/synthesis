@@ -82,27 +82,34 @@ impl ProposalExecutor {
 
     /// Runs the stored proposal after the person's click. The proposal is re-validated first; if it no longer
     /// holds it becomes `stale` and nothing is sent. The returned state is `Accepted` or `Failed`.
-    pub async fn execute(&self, id: &str, click: PersonClick) -> Result<State, String> {
-        self.run(id, None, click).await
+    pub async fn execute(
+        &self,
+        id: &str,
+        shown_sha256: &str,
+        click: PersonClick,
+    ) -> Result<State, String> {
+        self.run(id, shown_sha256, None, click).await
     }
 
-    /// As `execute`, with the text the person edited on the card (state `Edited`). Invalid text leaves the card open.
+    /// `shown_sha256` is the hash of the payload the card displayed. As `execute`, with the text the person edited on the card (state `Edited`). Invalid text leaves the card open.
     pub async fn execute_edited(
         &self,
         id: &str,
+        shown_sha256: &str,
         text: String,
         click: PersonClick,
     ) -> Result<State, String> {
-        self.run(id, Some(text), click).await
+        self.run(id, shown_sha256, Some(text), click).await
     }
 
     async fn run(
         &self,
         id: &str,
+        shown_sha256: &str,
         edit: Option<String>,
         _click: PersonClick,
     ) -> Result<State, String> {
-        let p = self.host.claim(id, edit)?;
+        let p = self.host.claim(id, shown_sha256, edit)?;
         let via = Via {
             proposal_id: p.id.clone(),
             proposal_sha256: p.payload_sha256.clone(),

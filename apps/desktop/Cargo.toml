@@ -51,7 +51,8 @@ gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "wayland", "x11"] }
 gpui-kit-assets = "=0.8.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
-synthesis-app = { path = "../../crates/synthesis-app" }
+# `card-click`: the card's click handler is the one place that builds a PersonClick
+synthesis-app = { path = "../../crates/synthesis-app", features = ["card-click"] }
 synthesis-mcp = { path = "../../crates/synthesis-mcp" }
 synthesis-tools = { path = "../../crates/synthesis-tools" }
 synthesis-browser = { path = "../../crates/synthesis-browser" }

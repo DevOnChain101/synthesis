@@ -38,7 +38,10 @@ pub struct HostConfig {
 #[derive(Default)]
 pub(super) struct St {
     turn: Turn,
+    /// Sticky: once the conductor read session content, its context holds it until the session ends (4.2).
     tainted: bool,
+    /// The person's latest line: what `basis: explicit` is checked against.
+    line: String,
     sources: Vec<String>,
     proposals: Vec<Proposal>,
     next: u64,
@@ -91,6 +94,13 @@ fn resolve(rows: &[SessionRow], token: &str) -> Resolved {
     }
 }
 
+/// Does the person's line name this session by handle (`s3`, `@s3`) or by a session id prefix of 8+ hex digits?
+fn names(line: &str, row: &SessionRow) -> bool {
+    line.to_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .any(|t| t == row.handle || (t.len() >= 8 && row.sid.starts_with(t)))
+}
+
 fn parse<T: DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid input: {e}"))
 }
@@ -135,18 +145,19 @@ impl ConductorHost {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The person typed a line: a new conductor turn. Resets the turn's limits and taint, and returns the text
+    /// The person typed a line: a new conductor turn. Resets the turn's limits (not the taint: the model's context keeps what it read), and returns the text
     /// the model reads: the pending host notes, fenced, then the person's line. This is the only way a turn starts.
     pub fn person_turn(&self, line: &str) -> String {
         let mut st = self.lock();
         self.sweep(&mut st);
         st.turn = Turn::default();
-        st.tainted = std::mem::take(&mut st.notes_tainted);
-        st.sources = if st.tainted {
-            vec!["host_note".into()]
-        } else {
-            vec![]
-        };
+        st.line = line.to_string();
+        if std::mem::take(&mut st.notes_tainted) {
+            st.tainted = true;
+            if !st.sources.iter().any(|s| s == "host_note") && st.sources.len() < 32 {
+                st.sources.push("host_note".into());
+            }
+        }
         let mut out = String::new();
         for n in st.notes.drain(..) {
             out += &format!("<host_note>\n{}\n</host_note>\n", fence("host_note", &n));
@@ -348,7 +359,12 @@ impl ConductorHost {
     /// Claims a shown proposal for execution (so a second click finds it taken), re-validates it, and
     /// charges the rate limit. `edit`: the person changed the card's text; the new bytes are validated and
     /// become the proposal's payload. Returns the payload to run.
-    pub(super) fn claim(&self, id: &str, edit: Option<String>) -> Result<Proposal, String> {
+    pub(super) fn claim(
+        &self,
+        id: &str,
+        shown_sha256: &str,
+        edit: Option<String>,
+    ) -> Result<Proposal, String> {
         let mut st = self.lock();
         self.sweep(&mut st);
         let i = st
@@ -360,7 +376,10 @@ impl ConductorHost {
             return Err("that proposal is no longer open".into());
         }
         let mut payload = st.proposals[i].payload.clone();
-        if st.proposals[i].payload_sha256 != payload.sha256() {
+        // the click is bound to the bytes the card displayed, not to whatever is stored now
+        if st.proposals[i].payload_sha256 != shown_sha256
+            || st.proposals[i].payload_sha256 != payload.sha256()
+        {
             self.set_state(&mut st, i, State::Stale, Some("the card changed".into()));
             return Err("stale: the proposal changed".into());
         }
@@ -536,7 +555,7 @@ impl ConductorHost {
         }
         let mut forced = vec![];
         if st.tainted {
-            forced.push("the conductor read session content since your last line".to_string());
+            forced.push("the conductor read session content in this session".to_string());
         }
         forced.extend(extra_forced.map(str::to_string));
         let auto_eligible = forced.is_empty()
@@ -613,7 +632,7 @@ impl ConductorHost {
             AssignTarget::Item(_) if !MESSAGE_WORKER_ENABLED => {
                 return Err("message_worker is not available yet: it needs the live worker inbox (P2c). Ask the person to message the worker in its session.".into());
             }
-            AssignTarget::Item(_) => unreachable!("message_worker has no card until P2c"),
+            AssignTarget::Item(_) => return Err("message_worker has no card until P2c".into()),
             AssignTarget::Session(SessionT { session }) => session,
         };
         if a.brief_change {
@@ -657,6 +676,8 @@ impl ConductorHost {
                 title: self.digests.clean(&r.title, TITLE_MAX),
             })
             .collect();
+        // `explicit` is the model's claim: it holds only if the person's latest line names the target
+        let described = described || !names(&self.lock().line, &row);
         let payload = Payload::SendMessage {
             session: row.handle,
             sid: row.sid,

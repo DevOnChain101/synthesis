@@ -206,6 +206,10 @@ impl Rig {
     fn effects(&self) -> Vec<String> {
         self.fx.0.lock().unwrap().clone()
     }
+    /// The hash the card displays for a proposal.
+    fn sha(&self, id: &str) -> String {
+        self.h.proposal(id).unwrap().payload_sha256
+    }
     fn click() -> PersonClick {
         PersonClick::from_card_click()
     }
@@ -241,6 +245,59 @@ fn the_tools_are_exactly_seven_closed_read_only_ones_and_none_can_approve_or_ena
     }
 }
 
+// ---------------------------------------------------------------- hardening
+
+#[tokio::test]
+async fn explicit_basis_holds_only_if_the_persons_line_names_the_target() {
+    let r = rig(auto_send());
+    // the model claims `explicit`, the person named nobody: a card is forced
+    r.h.person_turn("please rerun the tests");
+    let p = id_of(&r.send_proposal("s2", "rerun", "explicit").await.unwrap());
+    let p = r.h.proposal(&p).unwrap();
+    assert!(!p.auto_eligible && !p.card_forced.is_empty(), "{p:?}");
+    // another session's handle (s20 is not s2) and a handle inside a word do not count
+    r.h.person_turn("tell s20 or xs2 to rerun");
+    let p = id_of(&r.send_proposal("s2", "rerun", "explicit").await.unwrap());
+    assert!(!r.h.proposal(&p).unwrap().auto_eligible);
+    // the handle, with or without `@`, or a session id prefix, does
+    for line in [
+        "tell s2 to rerun",
+        "tell @S2 to rerun",
+        "tell 2222aaaa to rerun",
+    ] {
+        r.h.person_turn(line);
+        let p = id_of(&r.send_proposal("s2", "rerun", "explicit").await.unwrap());
+        assert!(r.h.proposal(&p).unwrap().auto_eligible, "{line}");
+    }
+}
+
+#[tokio::test]
+async fn taint_survives_later_person_lines_until_the_session_ends() {
+    let r = rig(auto_send());
+    r.h.person_turn("look at s1");
+    r.call("conductor_list_sessions", json!({})).await.unwrap();
+    for _ in 0..2 {
+        r.h.person_turn("tell s2 to rerun");
+        let p = id_of(&r.send_proposal("s2", "rerun", "explicit").await.unwrap());
+        let p = r.h.proposal(&p).unwrap();
+        assert!(p.tainted && !p.auto_eligible, "{p:?}");
+        r.h.cancel(&p.id).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_click_is_bound_to_the_displayed_hash() {
+    let r = rig(Confirm::All);
+    r.h.person_turn("tell s2 to rerun");
+    let id = id_of(&r.send_proposal("s2", "rerun", "explicit").await.unwrap());
+    let e =
+        r.ex.execute(&id, &"0".repeat(64), Rig::click())
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("stale"), "{e}");
+    assert!(r.effects().is_empty());
+}
+
 // ---------------------------------------------------------------- RT1, T1, T2, T7: injected text
 
 #[tokio::test]
@@ -272,7 +329,19 @@ async fn rt1_a_tainted_turn_forces_a_card_even_on_the_auto_list_and_cancel_sends
     r.h.cancel(&p.id).unwrap();
     assert_eq!(r.h.proposal(&p.id).unwrap().state, State::Cancelled);
     assert!(r.effects().is_empty());
+    // taint is sticky: the model's context still holds the digest on the next line
+    r.h.person_turn("tell s2 to rerun the tests");
+    let p = r
+        .send_proposal("s2", "rerun the tests", "explicit")
+        .await
+        .unwrap();
+    let p = r.h.proposal(&id_of(&p)).unwrap();
+    assert!(
+        p.tainted && !p.auto_eligible && !p.card_forced.is_empty(),
+        "{p:?}"
+    );
     // an untainted, explicit turn on the auto list is eligible, and still needs the click
+    let r = rig(auto_send());
     r.h.person_turn("tell s2 to rerun the tests");
     let p = r
         .send_proposal("s2", "rerun the tests", "explicit")
@@ -281,7 +350,10 @@ async fn rt1_a_tainted_turn_forces_a_card_even_on_the_auto_list_and_cancel_sends
     let p = r.h.proposal(&id_of(&p)).unwrap();
     assert!(p.auto_eligible && !p.tainted);
     assert!(r.effects().is_empty());
-    assert_eq!(r.ex.execute(&p.id, Rig::click()).await, Ok(State::Accepted));
+    assert_eq!(
+        r.ex.execute(&p.id, &r.sha(&p.id), Rig::click()).await,
+        Ok(State::Accepted)
+    );
     assert!(
         r.effects()[0].starts_with("send:2222aaaa") && r.effects()[0].ends_with("\"proposal\"")
     );
@@ -602,7 +674,7 @@ async fn rt5_an_eleventh_send_to_one_target_in_ten_minutes_is_refused_at_the_cli
             ));
         }
         for id in ids.drain(..) {
-            let _ = r.ex.execute(&id, Rig::click()).await;
+            let _ = r.ex.execute(&id, &r.sha(&id), Rig::click()).await;
         }
     }
     assert_eq!(r.effects().len(), 10, "10 sends, the rest refused");
@@ -746,19 +818,25 @@ async fn rt8_t8_the_click_runs_the_stored_bytes_and_a_changed_target_makes_it_st
     assert_eq!(r.h.proposal(&id).unwrap().payload_sha256, sha);
     // the model's later text cannot change it either: only a new proposal exists
     r.send_proposal("s2", "other", "explicit").await.unwrap();
-    assert_eq!(r.ex.execute(&id, Rig::click()).await, Ok(State::Accepted));
+    assert_eq!(
+        r.ex.execute(&id, &r.sha(&id), Rig::click()).await,
+        Ok(State::Accepted)
+    );
     assert!(
         r.effects()[0].contains("original text"),
         "{:?}",
         r.effects()
     );
     // one click, one effect
-    assert!(r.ex.execute(&id, Rig::click()).await.is_err());
+    assert!(r.ex.execute(&id, &r.sha(&id), Rig::click()).await.is_err());
     assert_eq!(r.effects().len(), 1);
     // target ended before the click: stale, nothing sent
     let id2 = id_of(&r.send_proposal("s2", "late", "explicit").await.unwrap());
     r.reads.sessions.lock().unwrap()[1].live = false;
-    let e = r.ex.execute(&id2, Rig::click()).await.unwrap_err();
+    let e =
+        r.ex.execute(&id2, &r.sha(&id2), Rig::click())
+            .await
+            .unwrap_err();
     assert!(e.starts_with("stale"), "{e}");
     assert_eq!(r.h.proposal(&id2).unwrap().state, State::Stale);
     assert_eq!(r.effects().len(), 1);
@@ -771,7 +849,7 @@ async fn an_edit_is_validated_rebinds_the_hash_and_a_failed_effect_is_recorded()
     let id = id_of(&r.send_proposal("s2", "first", "explicit").await.unwrap());
     let before = r.h.proposal(&id).unwrap().payload_sha256;
     assert!(
-        r.ex.execute_edited(&id, "bad\u{202e}".into(), Rig::click())
+        r.ex.execute_edited(&id, &r.sha(&id), "bad\u{202e}".into(), Rig::click())
             .await
             .is_err()
     );
@@ -781,7 +859,7 @@ async fn an_edit_is_validated_rebinds_the_hash_and_a_failed_effect_is_recorded()
         "a bad edit leaves the card open"
     );
     assert_eq!(
-        r.ex.execute_edited(&id, "second".into(), Rig::click())
+        r.ex.execute_edited(&id, &r.sha(&id), "second".into(), Rig::click())
             .await,
         Ok(State::Edited)
     );
@@ -797,7 +875,10 @@ async fn an_edit_is_validated_rebinds_the_hash_and_a_failed_effect_is_recorded()
         .await
         .unwrap(),
     );
-    assert_eq!(r.ex.execute(&c, Rig::click()).await, Ok(State::Failed));
+    assert_eq!(
+        r.ex.execute(&c, &r.sha(&c), Rig::click()).await,
+        Ok(State::Failed)
+    );
     assert_eq!(r.h.proposal(&c).unwrap().state, State::Failed);
     // a stop card has no text to edit
     let i = id_of(
@@ -809,7 +890,7 @@ async fn an_edit_is_validated_rebinds_the_hash_and_a_failed_effect_is_recorded()
         .unwrap(),
     );
     assert!(
-        r.ex.execute_edited(&i, "x".into(), Rig::click())
+        r.ex.execute_edited(&i, &r.sha(&i), "x".into(), Rig::click())
             .await
             .is_err()
     );
@@ -821,7 +902,10 @@ async fn proposals_expire_after_30_minutes_and_when_the_conductor_session_ends_a
     r.h.person_turn("x");
     let a = id_of(&r.send_proposal("s2", "a", "explicit").await.unwrap());
     r.clock.fetch_add(30 * 60, Ordering::SeqCst);
-    let e = r.ex.execute(&a, Rig::click()).await.unwrap_err();
+    let e =
+        r.ex.execute(&a, &r.sha(&a), Rig::click())
+            .await
+            .unwrap_err();
     assert!(e.contains("no longer open"), "{e}");
     assert_eq!(r.h.proposal(&a).unwrap().state, State::Expired);
     assert!(r.h.person_turn("y").contains("proposal p1 is expired"));
@@ -878,7 +962,10 @@ async fn stop_and_pause_proposals_validate_their_target() {
         .await
         .unwrap(),
     );
-    assert_eq!(r.ex.execute(&id, Rig::click()).await, Ok(State::Accepted));
+    assert_eq!(
+        r.ex.execute(&id, &r.sha(&id), Rig::click()).await,
+        Ok(State::Accepted)
+    );
     assert_eq!(r.effects(), ["pause:o1"]);
 }
 
