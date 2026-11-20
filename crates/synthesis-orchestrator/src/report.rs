@@ -71,7 +71,7 @@ pub struct Citation {
 /// The deliverable: `{report, citations}` as JSON (a code fence around it is tolerated). Anything
 /// else, including JSON with any other key (it would be hashed but never shown), is the whole
 /// message as the report with no citations, so what the person reads is all that was hashed. The
-/// flag is set when more than [`CITES_MAX`] citations were given (the rest are not checked).
+/// flag is set when more than `CITES_MAX` citations were given (the rest are not checked).
 pub fn parse_report(text: &str) -> (String, Vec<Citation>, bool) {
     let whole = || (text.to_owned(), vec![], false);
     let t = text.trim();
@@ -177,12 +177,9 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
         return no("the path is not a plain path inside the folder");
     }
     let state = |x: Component| {
-        x.as_os_str().to_str().is_none_or(|n| {
-            matches!(
-                n.to_ascii_lowercase().as_str(),
-                ".git" | ".synt" | ".synthesis"
-            )
-        })
+        x.as_os_str()
+            .to_str()
+            .is_none_or(|n| matches!(n.to_ascii_lowercase().as_str(), ".git" | ".synt"))
     };
     if rel.components().any(state) || is_secret_shaped(rel) {
         return no("a secret or state path is never cited");
