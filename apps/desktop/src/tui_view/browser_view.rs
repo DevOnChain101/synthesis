@@ -53,9 +53,9 @@ const MAX_TABS: usize = 32;
 /// An address offered to the person's own browser is shown whole next to the button, so it must be short.
 const MAX_OPEN: usize = 200;
 /// A pane size or scale change must hold still this long before the page is resized (a window drag is one resize).
-const RESIZE_DEBOUNCE: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 250 });
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(if cfg!(test) { 400 } else { 250 });
 /// A failed `view(true)` is tried again after this long, this many times in all.
-const START_RETRY: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 5000 });
+const START_RETRY: Duration = Duration::from_millis(if cfg!(test) { 400 } else { 5000 });
 const MAX_STARTS: u32 = 5;
 /// Polls without any frame (the view is on) after which the pane asks the browser to start casting again.
 const REASSERT_POLLS: u32 = 5;
@@ -1336,10 +1336,10 @@ mod tests {
         // a drag: many sizes in a row are one resize, to the last
         for w in [800., 810., 820., 830.] {
             bp.fit.send_replace(m(w));
-            std::thread::sleep(RESIZE_DEBOUNCE / 5);
+            std::thread::sleep(Duration::from_millis(10)); // far inside the debounce, even on a loaded runner
         }
-        wait("the resize", || fake.fits.lock().unwrap().len() == 2);
-        std::thread::sleep(RESIZE_DEBOUNCE * 3);
+        wait("the resize", || fake.fits.lock().unwrap().len() >= 2);
+        std::thread::sleep(RESIZE_DEBOUNCE * 2);
         assert_eq!(*fake.fits.lock().unwrap(), [None, m(830.)]);
         // the same size again is no resize; a hide and show starts with the size the pane has
         // as the drawing code reports it: an equal size does not notify
