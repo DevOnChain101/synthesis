@@ -2023,7 +2023,11 @@ async fn person_tabs_body() {
         loop {
             let t = pv.tabs().await.unwrap();
             if t.len() > 2 {
-                pv.close_tab(t.len() - 1, &t[t.len() - 1].id).await.unwrap();
+                // a tab that vanished meanwhile is a clean refusal; the list is read again
+                match pv.close_tab(t.len() - 1, &t[t.len() - 1].id).await {
+                    Ok(()) | Err(BrowserError::Refused(_)) => {}
+                    Err(e) => panic!("{e}"),
+                }
             } else if t.len() < 2 {
                 pv.new_tab(None).await.unwrap();
             } else {

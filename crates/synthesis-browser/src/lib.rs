@@ -1459,6 +1459,17 @@ impl BrowserRuntime {
                     .cdp
                     .send(None, "Target.closeTarget", json!({"targetId": id}))
                     .await;
+                // closeTarget returns before the target leaves getTargets: wait, so the tab list is settled
+                for _ in 0..40 {
+                    let gone = self
+                        .page_targets()
+                        .await
+                        .is_ok_and(|p| p.iter().all(|t| t["targetId"] != id.as_str()));
+                    if gone {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
                 return Err(BrowserError::Busy);
             }
             if !t.order.contains(&id) {
@@ -1519,9 +1530,17 @@ impl BrowserRuntime {
             return Err(BrowserError::Refused("the last tab stays open".into()));
         }
         self.not_busy(person)?;
-        self.cdp
+        match self
+            .cdp
             .send(None, "Target.closeTarget", json!({"targetId": id}))
-            .await?;
+            .await
+        {
+            // closed meanwhile (a popup, the page itself, an earlier close still settling): not a failure of the person
+            Err(BrowserError::Cdp { message, .. }) if person && message.contains("No target") => {
+                return Err(BrowserError::Refused("the tab is already closed".into()));
+            }
+            r => r.map(drop)?,
+        }
         // closeTarget returns before the target is gone from getTargets.
         for _ in 0..40 {
             if self.target_at(index).await.ok().as_deref() != Some(id.as_str()) {
