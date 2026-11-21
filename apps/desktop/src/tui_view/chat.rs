@@ -7,7 +7,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, list, prelude::*, px,
 };
 use gpui_component::input::Textarea;
-use gpui_component::text::TextView;
+use gpui_component::text::{TextView, TextViewStyle};
 use synthesis_cli_ui_render::theme as t;
 use synthesis_view::convo::{ApprovalState, CheckRow, CheckState, Item, StepState};
 use synthesis_view::toolview::{self, Glyph, Tone};
@@ -643,10 +643,11 @@ impl TuiView {
                 "SYNTHESIS",
                 hsla(t::ACCENT),
                 &time,
-                div()
-                    .min_w(px(0.))
-                    .text_color(strong())
-                    .child(TextView::markdown(("assistant", idx), s.clone()).selectable(true)),
+                div().min_w(px(0.)).text_color(strong()).child(
+                    TextView::markdown(("assistant", idx), s.clone())
+                        .style(table_head_style())
+                        .selectable(true),
+                ),
             )
             .into_any_element(),
             Item::Thinking(s) => div()
@@ -1683,6 +1684,17 @@ pub fn input_box(
                 .when_some(send, |d, f| d.on_click(f))
                 .child(icon("send", 14., hsla(t::ACCENT))),
         )
+}
+
+/// A table's header row stands out in the chat: bold, in the strong text colour on the elevated ground (the theme default
+/// is the muted grey of a body cell).
+fn table_head_style() -> TextViewStyle {
+    TextViewStyle::default().table_head(
+        gpui::StyleRefinement::default()
+            .font_weight(FontWeight::BOLD)
+            .text_color(strong())
+            .bg(hsla(t::ELEVATED)),
+    )
 }
 
 #[cfg(test)]
