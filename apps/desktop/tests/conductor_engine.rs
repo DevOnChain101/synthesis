@@ -41,6 +41,7 @@ struct Rig {
     engine: Engine,
     rx: UnboundedReceiver<UiMsg>,
     convo: Convo,
+    started: bool,
     done: Option<Result<(), String>>,
 }
 
@@ -50,7 +51,10 @@ impl Rig {
         while !stop(self) {
             assert!(t0.elapsed() < Duration::from_secs(30), "timed out: {what}");
             match self.rx.try_recv() {
-                Ok(UiMsg::Event(e)) => self.convo.apply(&e),
+                Ok(UiMsg::Event(e)) => {
+                    self.started |= matches!(e.event, synthesis_events::Event::TaskStarted { .. });
+                    self.convo.apply(&e)
+                }
                 Ok(UiMsg::TaskDone(r)) => self.done = Some(r),
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -130,6 +134,7 @@ fn rig(d: &Dirs) -> Rig {
         engine,
         rx,
         convo: Convo::default(),
+        started: false,
         done: None,
     }
 }
@@ -144,6 +149,7 @@ fn conductor(d: &Dirs, host: Arc<Host>, cap: f64) -> Result<Rig, String> {
         engine,
         rx,
         convo: Convo::default(),
+        started: false,
         done: None,
     })
 }
@@ -285,7 +291,9 @@ fn a_conductor_line_reaches_a_running_session_fenced_and_a_repo_file_cannot_forg
     std::fs::write(&d.script, script.to_string()).unwrap();
     let mut r = rig(&d);
     r.engine.send("read the notes".into()).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // a relay is refused until the task is active (`TaskStarted` follows that), and the scripted step then waits
+    // 800 ms before the tool batch (the drain point): send on that signal, not after a guessed sleep
+    r.pump("task started", |r| r.started);
     r.engine
         .send_via_conductor("run the tests".into(), None)
         .unwrap();
@@ -345,6 +353,7 @@ fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
         engine,
         rx,
         convo: Convo::default(),
+        started: false,
         done: None,
     };
     r.engine.send("go".into()).unwrap();
@@ -365,6 +374,7 @@ fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
         engine,
         rx,
         convo: Convo::default(),
+        started: false,
         done: None,
     };
     n.engine.send("go".into()).unwrap();
