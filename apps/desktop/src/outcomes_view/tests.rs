@@ -20,6 +20,7 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> (Entity<Shell>, &mut VisualT
         Shell::new(window, cx, None, Default::default(), Err("test".into()))
     });
     v.simulate_resize(size(px(w), px(h)));
+    shell.update(v, |s, _| s.mount_legacy_ui());
     shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
     v.run_until_parked();
     (shell, v)

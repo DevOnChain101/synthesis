@@ -102,6 +102,8 @@ pub struct Shell {
     outcomes: Entity<OutcomesView>,
     /// What `View::SuperAgent` shows; `outcomes` stays its data and link owner.
     sa: Entity<SuperAgentView>,
+    /// Tests of the old outcomes UI (deleted in phase E) mount it in place of `sa`.
+    legacy_ui: bool,
     /// A restart was asked from Settings and the new session is not live yet.
     restarting: bool,
     /// The Super Agent button counts what waits for the person: only a live app (never the sample), and the count is
@@ -139,7 +141,9 @@ impl Shell {
                 o.state.remote = remote;
                 o.shown(window, cx)
             });
-            self.sa.update(cx, |v, cx| v.shown(window, cx));
+            if !self.legacy_ui {
+                self.sa.update(cx, |v, cx| v.shown(window, cx));
+            }
         }
         if cfg!(target_os = "macos") {
             // the lights sit in the first row of the Super Agent rail, else in the 30 px bar
@@ -162,6 +166,12 @@ impl Shell {
     #[cfg(any(test, feature = "shot"))]
     pub(crate) fn outcomes(&self) -> &Entity<OutcomesView> {
         &self.outcomes
+    }
+
+    /// Shows the old outcomes UI instead of the Super Agent view (its tests, until phase E).
+    #[cfg(any(test, feature = "shot"))]
+    pub(crate) fn mount_legacy_ui(&mut self) {
+        self.legacy_ui = true;
     }
 
     /// The badge counts the sample's waiting things too (shots and tests of the badge).
@@ -337,6 +347,14 @@ impl Shell {
             .child(icon(glyph, 12., theme::hsla(t::TEXT)))
     }
 
+    fn sa_or_legacy(&self) -> gpui::AnyView {
+        if self.legacy_ui {
+            self.outcomes.clone().into()
+        } else {
+            self.sa.clone().into()
+        }
+    }
+
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         div()
@@ -436,11 +454,11 @@ impl Render for Shell {
         }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
-            View::SuperAgent => div().size_full().child(self.sa.clone()),
+            View::SuperAgent => div().size_full().child(self.sa_or_legacy()),
             // the panel slides over the view it was opened from
             View::Settings => {
                 let under = match self.back {
-                    View::SuperAgent => div().size_full().child(self.sa.clone()),
+                    View::SuperAgent => div().size_full().child(self.sa_or_legacy()),
                     _ => div().size_full().child(self.tui.clone()),
                 };
                 div()
@@ -481,7 +499,7 @@ impl Render for Shell {
                 cx.stop_propagation();
             }))
             // the Super Agent view draws its own title row over the whole window
-            .children((self.view != View::SuperAgent).then(|| self.title_bar(cx)))
+            .children((self.view != View::SuperAgent || self.legacy_ui).then(|| self.title_bar(cx)))
             .child(div().flex_1().min_h(px(0.)).child(content))
     }
 }
@@ -727,6 +745,7 @@ impl Shell {
             settings,
             outcomes,
             sa,
+            legacy_ui: false,
             restarting: false,
             count_waiting: live_outcomes,
             anim_tick: None,
