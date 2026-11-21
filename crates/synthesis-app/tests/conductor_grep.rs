@@ -27,49 +27,124 @@ fn conductor_files() -> Vec<(String, String)> {
     out
 }
 
-/// The text outside `//` comments and `#[cfg(test)]` modules.
+/// The text outside `//` comments. A `#[cfg(test)]` module is NOT cut off: a constructor call there is still a call.
 fn code(s: &str) -> String {
-    let s = s.split("#[cfg(test)]").next().unwrap_or(s);
     s.lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+fn walk(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if !p
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "node_modules" || n == ".git")
+            {
+                walk(&p, ext, out);
+            }
+        } else if p.extension().is_some_and(|x| x == ext) {
+            out.push(p);
+        }
+    }
+}
+
+fn rel(p: &Path) -> String {
+    p.canonicalize()
+        .unwrap()
+        .strip_prefix(root().canonicalize().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// `word` as a whole identifier, wherever it is (aliases, a line break after `::`, a `use`).
+fn has_ident(text: &str, word: &str) -> bool {
+    let id = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(id)
+            && !text[i + word.len()..].chars().next().is_some_and(id)
+    })
+}
+
+/// Only the card handler of the desktop app builds the person's click (and this crate's conductor tests, through
+/// the dev feature `click-test`). No conductor module does, and no other file of `crates/`, `apps/`, `tests/`.
 #[test]
-fn no_conductor_module_constructs_the_persons_click() {
-    let needle = ["PersonClick", "::from_card_click"].concat();
-    let mut seen = 0;
+fn only_the_card_handler_and_the_conductor_tests_construct_the_persons_click() {
+    const ALLOWED: &[&str] = &[
+        "crates/synthesis-app/src/conductor/click.rs",
+        "crates/synthesis-app/tests/conductor.rs",
+        "crates/synthesis-app/tests/conductor_grep.rs",
+    ];
+    let mut all = vec![];
+    for top in ["crates", "apps", "tests"] {
+        walk(&root().join(top), "rs", &mut all);
+    }
+    let mut bad = vec![];
+    for f in all {
+        let r = rel(&f);
+        if ALLOWED.contains(&r.as_str()) || r.starts_with("apps/desktop/src/") {
+            continue;
+        }
+        if has_ident(
+            &code(&std::fs::read_to_string(&f).unwrap()),
+            "from_card_click",
+        ) {
+            bad.push(r);
+        }
+    }
+    assert!(bad.is_empty(), "builds a PersonClick: {bad:?}");
     for (name, text) in conductor_files() {
         let c = code(&text);
         if name == "click.rs" {
             assert!(c.contains("pub fn from_card_click"), "the one constructor");
-            seen += 1;
-            continue;
+        } else {
+            assert!(!c.contains("PersonClick(("), "{name} builds a PersonClick");
         }
-        assert!(
-            !c.contains(&needle) && !c.contains("PersonClick(("),
-            "{name} builds a PersonClick"
-        );
     }
-    assert_eq!(seen, 1);
-    // nor does any other file of the crate's sources (the card handler lives in the desktop app)
-    let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(d).unwrap().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("conductor/click.rs")
-            {
-                assert!(
-                    !code(&std::fs::read_to_string(&p).unwrap()).contains(&needle),
-                    "{}",
-                    p.display()
-                );
+}
+
+/// The constructor is behind features that only `apps/desktop` (`card-click`) and this crate's own dev-dependency
+/// (`click-test`) enable, in any Cargo.toml of the workspace.
+#[test]
+fn only_the_desktop_app_enables_the_click_feature() {
+    let mut tomls = vec![];
+    for top in ["crates", "apps", "tests", "tools"] {
+        walk(&root().join(top), "toml", &mut tomls);
+    }
+    let mut bad = vec![];
+    for f in tomls {
+        let r = rel(&f);
+        if f.file_name().is_some_and(|n| n == "Cargo.toml")
+            && !["apps/desktop/Cargo.toml", "crates/synthesis-app/Cargo.toml"].contains(&r.as_str())
+        {
+            let t = std::fs::read_to_string(&f).unwrap();
+            if t.contains("card-click") || t.contains("click-test") {
+                bad.push(r);
             }
         }
     }
+    assert!(bad.is_empty(), "click features named in: {bad:?}");
+    let app = std::fs::read_to_string(root().join("crates/synthesis-app/Cargo.toml")).unwrap();
+    // in the app crate they appear only as the definitions and the self dev-dependency (never in [dependencies])
+    let deps = app
+        .split("[dependencies]")
+        .nth(1)
+        .unwrap()
+        .split("[dev-dependencies]")
+        .next()
+        .unwrap();
+    assert!(
+        !deps.contains("click"),
+        "a production dependency enables a click feature"
+    );
+    let desk = std::fs::read_to_string(root().join("apps/desktop/Cargo.toml")).unwrap();
+    assert!(desk.contains("card-click"));
 }
 
 /// Everything that can change something outside the conductor's own memory is reached from `exec.rs` alone,

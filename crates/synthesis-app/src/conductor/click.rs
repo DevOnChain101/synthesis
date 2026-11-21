@@ -6,7 +6,9 @@
 pub struct PersonClick(());
 
 impl PersonClick {
-    /// Call only from the card's click handler.
+    /// Call only from the card's click handler. Exists only with feature `card-click` (enabled by `apps/desktop`
+    /// alone) or `click-test` (this crate's own dev-dependency): `tests/conductor_grep.rs` checks every Cargo.toml.
+    #[cfg(any(feature = "card-click", feature = "click-test"))]
     pub fn from_card_click() -> Self {
         Self(())
     }
