@@ -220,6 +220,29 @@ pub struct LiveUi {
     _subs: Vec<Subscription>,
 }
 
+/// A folder a new session may start in: not a network path, and canonical (symlinks and `..` resolved).
+fn checked_folder(p: &Path) -> Result<PathBuf, String> {
+    // the system picker can return a network path too: not probed here either
+    if crate::folder::is_unc(&p.to_string_lossy()) {
+        return Err(crate::folder::UNC_REFUSED.to_string());
+    }
+    match synthesis_core::canonicalize(p) {
+        Ok(c) if c.is_dir() => Ok(c),
+        _ => Err(format!("no such folder: {}", p.display())),
+    }
+}
+
+/// Hands the built engine to the window; when the window is gone (the view was closed mid-start) nobody else
+/// owns it, so it is closed here (MCP servers, browser, session lock).
+fn deliver(
+    tx: futures::channel::oneshot::Sender<Result<Launched, String>>,
+    r: Result<Launched, String>,
+) {
+    if let Err(Ok(l)) = tx.send(r) {
+        engine::close_shared(Arc::new(l.engine));
+    }
+}
+
 fn text_of(s: &Entity<TextareaState>, cx: &gpui::App) -> String {
     s.read(cx).value().to_string()
 }
@@ -353,6 +376,18 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         self.embed = Some(Embed::default());
+        // the same folder checks as `open_folder`: no network path, symlinks and `..` resolved
+        let folder = match checked_folder(&folder) {
+            Ok(c) => c,
+            Err(why) => {
+                if let Some(lu) = &mut self.live {
+                    lu.live.note(why, true);
+                    lu.dirty = true;
+                }
+                cx.notify();
+                return;
+            }
+        };
         let rel = cx.on_release(|this, cx| this.close_embedded(cx));
         if let Some(lu) = &mut self.live {
             lu.add_sub(rel);
@@ -436,6 +471,10 @@ impl TuiView {
     /// The Terminal or Browser pane of this embedded view, for the owner's right sidebar.
     #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
     pub(crate) fn embed_pane(&mut self, kind: ChatTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        debug_assert!(matches!(kind, ChatTab::Terminal | ChatTab::Browser));
+        if !matches!(kind, ChatTab::Terminal | ChatTab::Browser) {
+            return gpui::IntoElement::into_any_element(gpui::Empty);
+        }
         if self.pane_tab() != kind {
             self.embed_side(Some(kind), cx);
         }
@@ -498,7 +537,7 @@ impl TuiView {
         let (trust, model) = (lu.session_trust.clone(), lu.model_override.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(build(&cfg, project, prior, target, model, trust, notes));
+            deliver(tx, build(&cfg, project, prior, target, model, trust, notes));
         });
         let task = cx.spawn(async move |this, cx| {
             let r = rx
@@ -2403,21 +2442,13 @@ impl TuiView {
         // the slide-over column the picker was opened from closes: the new session (or the note) shows
         self.drawer = None;
         let Some(lu) = &mut self.live else { return };
-        // the system picker can return a network path too: not probed here either
-        if crate::folder::is_unc(&p.to_string_lossy()) {
-            lu.live.note(crate::folder::UNC_REFUSED, true);
-            lu.dirty = true;
-            cx.notify();
-            return;
-        }
-        match synthesis_core::canonicalize(p) {
-            Ok(c) if c.is_dir() => {
+        match checked_folder(p) {
+            Ok(c) => {
                 let key = format!("folder:{}", c.display());
                 self.switch(Target::New(c), key, cx)
             }
-            _ => {
-                lu.live
-                    .note(format!("no such folder: {}", p.display()), true);
+            Err(why) => {
+                lu.live.note(why, true);
                 lu.dirty = true;
                 cx.notify();
             }
@@ -4027,17 +4058,8 @@ mod switch_tests {
             t.engine_ready(Ok(first), cx)
         });
         w.1.run_until_parked();
-        if let Some((tap, _)) = w.0.read_with(w.1, |t, _| {
-            t.live
-                .as_ref()
-                .unwrap()
-                .live
-                .engine
-                .as_ref()
-                .unwrap()
-                .browser_access()
-        }) {
-            let again = w.0.read_with(w.1, |t, _| {
+        let access = |w: &mut Win<'_>| {
+            w.0.read_with(w.1, |t, _| {
                 t.live
                     .as_ref()
                     .unwrap()
@@ -4046,9 +4068,10 @@ mod switch_tests {
                     .as_ref()
                     .unwrap()
                     .browser_access()
-            });
-            assert!(Arc::ptr_eq(&tap, &again.unwrap().0));
-        }
+            })
+        };
+        let (tap, _) = access(&mut w).expect("a local engine has a browser tap");
+        assert!(Arc::ptr_eq(&tap, &access(&mut w).unwrap().0));
         w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Terminal), cx));
         assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Terminal);
         assert!(w.0.read_with(w.1, |t, _| t.term.is_some()));
@@ -4061,5 +4084,44 @@ mod switch_tests {
         w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Diff), cx));
         assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Chat);
         forget_engine(&mut w);
+    }
+
+    #[test]
+    fn a_new_embedded_session_gets_the_checks_of_open_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        // `..` is resolved
+        assert_eq!(
+            checked_folder(&base.join("a/b/..")).unwrap(),
+            base.join("a")
+        );
+        assert!(
+            checked_folder(&base.join("missing"))
+                .unwrap_err()
+                .starts_with("no such folder")
+        );
+        assert!(checked_folder(Path::new(r"\\host\share\x")).is_err());
+    }
+
+    /// The window is gone when the engine is built (the view closed mid-start): the engine is closed, its
+    /// session lock released, not leaked.
+    #[test]
+    fn an_engine_built_for_a_closed_view_is_closed() {
+        let (_t, cfg, _l) = setup();
+        let c = Arc::new(cfg);
+        let l = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        let sid = l.engine.sid.clone();
+        assert!(!synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        let (tx, rx) = futures::channel::oneshot::channel();
+        drop(rx);
+        deliver(tx, Ok(l));
+        assert!(synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
     }
 }
