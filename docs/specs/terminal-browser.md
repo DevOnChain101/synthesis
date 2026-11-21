@@ -382,6 +382,10 @@ to the window only; they are untrusted text, sanitized for display). Stored even
 
 ---
 
+### 2.11 Hosting in the Super Agent tab (owner decision 2026-11-21; spec: super-agent-s1.md 5.3)
+
+The Super Agent tab hosts the same terminal and browser panes in **one right sidebar** (segmented header Details | Terminal | Browser), not as centre tabs. Own sessions only: outcome, worker and home frames get Details only, and WSL has no browser. One `TermPane` and one `BrowserPane` per own session (the browser attached to that session's `BrowserTap`, no second runtime); the panes keep their own inner tabs. Resizable 280-640, default 340. No change to any rule of sections 1 and 2 (T2 environment scrub, OSC 52, replies, links, `UrlPolicy`, T15).
+
 ## 3. Settings keys
 
 None new. Every switch needed already exists: permission rules deny or ask `pty_open`, `pty_send`, `PtyInput(...)` and the
