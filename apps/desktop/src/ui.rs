@@ -2,8 +2,8 @@
 //!
 //! The title bar follows the design's chrome (`index.html` `#chrome`): a 30px row above the content,
 //! the icon group (`.cb` 26x22, radius 6, hover and pressed backgrounds) at the right, the gear after it. In the
-//! Super Agent view three more buttons sit at the left (hide or show the list, back, forward) with a breadcrumb
-//! (`super-agent-v7-1.svg`); the right side does not move. macOS
+//! Super Agent view this bar is not drawn: `superagent::SuperAgentView` owns the whole window (its rail's first row
+//! and its title row carry the lights, tabs, mode buttons and gear, spec 5.1). macOS
 //! keeps the native traffic lights over a transparent title bar (the bar reserves 78px for them); Windows and
 //! Linux draw their own minimise / maximise / close buttons (`WindowControlArea`) and the bar is the drag
 //! region (client-side decorations). The content below is exactly the TUI view of `cli.html`: its 46px top bar,
@@ -20,6 +20,7 @@ use gpui::{
 use crate::outcomes_view::OutcomesView;
 use crate::outcomes_view::popup::OpenSession;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
+use crate::superagent::{SuperAgentView, SwitchView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{self, icon, tracked, with_alpha};
@@ -99,6 +100,8 @@ pub struct Shell {
     tui: Entity<TuiView>,
     settings: Entity<SettingsView>,
     outcomes: Entity<OutcomesView>,
+    /// What `View::SuperAgent` shows; `outcomes` stays its data and link owner.
+    sa: Entity<SuperAgentView>,
     /// A restart was asked from Settings and the new session is not live yet.
     restarting: bool,
     /// The Super Agent button counts what waits for the person: only a live app (never the sample), and the count is
@@ -136,6 +139,12 @@ impl Shell {
                 o.state.remote = remote;
                 o.shown(window, cx)
             });
+            self.sa.update(cx, |v, cx| v.shown(window, cx));
+        }
+        if cfg!(target_os = "macos") {
+            // the lights sit in the first row of the Super Agent rail, else in the 30 px bar
+            let y = crate::superagent::traffic_light_y(v == View::SuperAgent);
+            window.set_traffic_light_position(gpui::point(px(14.), px(y)));
         }
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
         self.tui.update(cx, |t, cx| {
@@ -159,6 +168,7 @@ impl Shell {
     #[cfg(any(test, feature = "shot"))]
     pub(crate) fn count_waiting_in_sample(&mut self, cx: &mut Context<Self>) {
         self.count_waiting = true;
+        self.sa.update(cx, |v, _| v.count_waiting = true);
         cx.notify();
     }
 
@@ -301,141 +311,8 @@ impl Shell {
             })
     }
 
-    /// A button of the Super Agent title bar's left group: same size and look as the icon group's. Disabled (dim,
-    /// no hover, no action) when there is nowhere to go.
-    fn nav_button(
-        &self,
-        name: &'static str,
-        glyph: &'static str,
-        tip: String,
-        (on, enabled): (bool, bool),
-        act: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let fg = if !enabled {
-            with_alpha(theme::hsla(t::MUTED), 0.45)
-        } else if on {
-            theme::hsla(t::TEXT_STRONG)
-        } else {
-            theme::hsla(t::MUTED)
-        };
-        div()
-            .id(name)
-            .debug_selector(move || name.to_string())
-            .w(px(26.))
-            .h(px(22.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .text_color(fg)
-            .when(on, |d| d.bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.16)))
-            .when(enabled, |d| {
-                d.cursor_pointer().hover(|d| {
-                    d.bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.10))
-                        .text_color(theme::hsla(t::TEXT_STRONG))
-                })
-            })
-            .tooltip(move |_, cx| -> AnyView { cx.new(|_| Tip(tip.clone())).into() })
-            .on_click(cx.listener(move |s, _, window, cx| {
-                if enabled {
-                    act(s, window, cx);
-                }
-            }))
-            .child(icon(glyph, 14., fg))
-    }
-
-    /// The Super Agent title bar's left group (hide or show the list, back, forward) and the breadcrumb.
-    fn nav_group(&self, cx: &mut Context<Self>) -> (impl IntoElement, impl IntoElement) {
-        let (rail, back, fwd, goal) = {
-            let o = self.outcomes.read(cx);
-            (
-                o.rail_open,
-                o.can_back(),
-                o.can_forward(),
-                // capped before sanitising: the whole goal is never walked every frame
-                o.breadcrumb_goal().map(|g| {
-                    synthesis_harness::sanitize_for_display(
-                        &g.chars().take(200).collect::<String>(),
-                    )
-                }),
-            )
-        };
-        let group = div()
-            .flex()
-            .flex_none()
-            .gap(px(1.))
-            .p(px(2.))
-            .rounded(px(8.))
-            .bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.07))
-            .child(self.nav_button(
-                "nav-rail",
-                "rail",
-                format!("{} the list", if rail { "Hide" } else { "Show" }),
-                (!rail, true),
-                |s, _, cx| s.outcomes.update(cx, |o, cx| o.toggle_rail(cx)),
-                cx,
-            ))
-            .child(self.nav_button(
-                "nav-back",
-                "nav-back",
-                "Back  (Alt+Left)".into(),
-                (false, back),
-                |s, _, cx| s.outcomes.update(cx, |o, cx| o.nav(true, cx)),
-                cx,
-            ))
-            .child(self.nav_button(
-                "nav-forward",
-                "nav-forward",
-                "Forward  (Alt+Right)".into(),
-                (false, fwd),
-                |s, _, cx| s.outcomes.update(cx, |o, cx| o.nav(false, cx)),
-                cx,
-            ));
-        let crumb = div()
-            .debug_selector(|| "breadcrumb".to_string())
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .min_w(px(0.))
-            .overflow_hidden()
-            .text_size(px(12.))
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(theme::hsla(if goal.is_some() {
-                        t::MUTED
-                    } else {
-                        t::TEXT_STRONG
-                    }))
-                    .child("Super Agent"),
-            )
-            .children(goal.map(|g| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme::hsla(t::MUTED))
-                            .child("\u{203a}"),
-                    )
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_color(theme::hsla(t::TEXT_STRONG))
-                            .child(g),
-                    )
-            }));
-        (group, crumb)
-    }
-
     /// Minimise / maximise / close of the Windows and Linux title bar.
-    fn window_button(area: WindowControlArea) -> impl IntoElement {
+    pub(crate) fn window_button(area: WindowControlArea) -> impl IntoElement {
         let (name, glyph, danger) = match area {
             WindowControlArea::Min => ("win-min", "win-min", false),
             WindowControlArea::Max => ("win-max", "win-max", false),
@@ -462,15 +339,6 @@ impl Shell {
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
-        // the left group and the breadcrumb belong to the Super Agent view (also while Settings is over it)
-        let (group, crumb) = if self.view == View::SuperAgent
-            || (self.view == View::Settings && self.back == View::SuperAgent)
-        {
-            let (g, c) = self.nav_group(cx);
-            (Some(g), Some(c))
-        } else {
-            (None, None)
-        };
         div()
             .debug_selector(|| "titlebar".to_string())
             .h(px(TITLEBAR_H))
@@ -485,7 +353,6 @@ impl Shell {
             .border_color(with_alpha(theme::hsla(t::TEXT), 0.12))
             // translucent like the surface under it (the window opacity), so no opaque strip
             .bg(theme::fill(t::BG))
-            .children(group)
             .child(
                 // the drag region: the whole bar except the buttons
                 div()
@@ -511,7 +378,6 @@ impl Shell {
                         d.child(brand::mark_img(16.).size(px(16.)).flex_none())
                             .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
                     })
-                    .children(crumb)
                     // a dialog waits for the person: a red dot and word, blinking unless motion is off
                     .when_some(self.tui.read(cx).attention_colour(), |d, red| {
                         // a click leads back to the TUI view, where the dialog is
@@ -570,11 +436,11 @@ impl Render for Shell {
         }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
-            View::SuperAgent => div().size_full().child(self.outcomes.clone()),
+            View::SuperAgent => div().size_full().child(self.sa.clone()),
             // the panel slides over the view it was opened from
             View::Settings => {
                 let under = match self.back {
-                    View::SuperAgent => div().size_full().child(self.outcomes.clone()),
+                    View::SuperAgent => div().size_full().child(self.sa.clone()),
                     _ => div().size_full().child(self.tui.clone()),
                 };
                 div()
@@ -614,7 +480,8 @@ impl Render for Shell {
                 }
                 cx.stop_propagation();
             }))
-            .child(self.title_bar(cx))
+            // the Super Agent view draws its own title row over the whole window
+            .children((self.view != View::SuperAgent).then(|| self.title_bar(cx)))
             .child(div().flex_1().min_h(px(0.)).child(content))
     }
 }
@@ -749,6 +616,21 @@ impl Shell {
         {
             outcomes.update(cx, |o, cx| o.connect(cx));
         }
+        let sa = cx.new(|cx| SuperAgentView::new(outcomes.clone(), live_outcomes, cx));
+        cx.subscribe_in(
+            &sa,
+            window,
+            |s: &mut Shell, _, e: &SwitchView, window, cx| {
+                // the gear closes Settings when it is already open (like the title bar's button)
+                let to = if e.0 == View::Settings && s.view == View::Settings {
+                    s.back
+                } else {
+                    e.0
+                };
+                s.go(to, window, cx);
+            },
+        )
+        .detach();
         // the title bar's badge follows the list and what the sessions wait for
         cx.observe(&outcomes, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(
@@ -766,9 +648,9 @@ impl Shell {
         cx.subscribe_in(
             &outcomes,
             window,
-            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, window, cx| {
-                s.go(View::Tui, window, cx);
-                s.tui.update(cx, |t, cx| t.open_folder(&e.0, cx));
+            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, _, cx| {
+                // a plain New session opens as a tab of Super Agent, never in the TUI view
+                s.sa.update(cx, |v, cx| v.open_session_folder(&e.0, cx));
             },
         )
         .detach();
@@ -844,6 +726,7 @@ impl Shell {
             tui,
             settings,
             outcomes,
+            sa,
             restarting: false,
             count_waiting: live_outcomes,
             anim_tick: None,
@@ -908,10 +791,13 @@ mod tests {
             "the TUI view is not drawn on the Super Agent page"
         );
         assert!(
-            v.debug_bounds("outcomes").is_some(),
+            v.debug_bounds("superagent").is_some(),
             "the Super Agent view is"
         );
-        assert!(v.debug_bounds("titlebar").is_some(), "the title bar stays");
+        assert!(
+            v.debug_bounds("sa-title-row").is_some() && v.debug_bounds("titlebar").is_none(),
+            "the Super Agent view draws its own title row"
+        );
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
         v.run_until_parked();
         assert!(v.debug_bounds("header").is_some());
@@ -1041,65 +927,51 @@ mod tests {
     const SIZES: [(f32, f32); 2] = [(1400., 900.), (1100., 700.)];
 
     #[gpui::test]
-    fn super_agent_has_three_buttons_at_the_left_and_the_mode_buttons_do_not_move(
+    fn super_agent_draws_its_own_chrome_and_the_tui_title_bar_does_not_change(
         cx: &mut TestAppContext,
     ) {
         let _g = theme::opacity_guard();
         for (w, h) in SIZES {
             let (shell, v) = open(cx, w, h);
-            // the TUI view: no left group, the mode buttons and the gear where they always were
-            assert!(v.debug_bounds("nav-rail").is_none() && v.debug_bounds("breadcrumb").is_none());
-            let tui_mode: Vec<_> = MODES.iter().map(|m| b(v, m)).collect();
+            // the TUI view: the 30 px bar with the mode buttons and the gear, none of the Super Agent chrome
+            assert!(v.debug_bounds("sa-rail").is_none() && v.debug_bounds("breadcrumb").is_none());
+            assert!(MODES.iter().all(|m| v.debug_bounds(m).is_some()));
             shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
             v.run_until_parked();
-            // Super Agent: the same right side, pixel for pixel
-            let sa_mode: Vec<_> = MODES.iter().map(|m| b(v, m)).collect();
-            assert_eq!(tui_mode, sa_mode, "{w}x{h}: the mode buttons stay put");
-            // three 26x22 buttons in a row after the traffic lights (macOS) or the edge, 1px apart, centred in the bar
-            let left = if cfg!(target_os = "macos") { 78. } else { 10. } + 2.;
-            let (rail, back, fwd) = (b(v, "nav-rail"), b(v, "nav-back"), b(v, "nav-forward"));
-            // (the bar is 30px with a 1px rule under it)
-            let y = (TITLEBAR_H - 1. - 22.) / 2.;
-            assert_eq!(rail, (left, y, 26., 22.), "{w}x{h}");
-            assert_eq!(back, (left + 27., y, 26., 22.), "{w}x{h}");
-            assert_eq!(fwd, (left + 54., y, 26., 22.), "{w}x{h}");
-            // the breadcrumb follows them, and everything left of the mode buttons
-            let crumb = b(v, "breadcrumb");
-            assert!(crumb.0 >= fwd.0 + fwd.2, "{w}x{h}: {crumb:?}");
+            // Super Agent: no shell title bar; the rail's first row holds back, forward and the toggle, the tabs start
+            // where the rail ends, and the mode buttons and the gear are at the right of the 48 px title row
+            assert!(v.debug_bounds("titlebar").is_none() && v.debug_bounds("breadcrumb").is_none());
+            let rail = b(v, "sa-rail");
+            let rw = if w < 900. { 72. } else { 248. };
+            assert_eq!(
+                (rail.0, rail.1, rail.2, rail.3),
+                (0., 0., rw, h),
+                "{w}x{h}: a full-height rail"
+            );
+            let (back, fwd, tog) = (b(v, "sa-back"), b(v, "sa-forward"), b(v, "sa-rail-toggle"));
             assert!(
-                crumb.0 + crumb.2 <= sa_mode[0].0,
-                "{w}x{h}: {crumb:?} runs into the mode buttons"
+                back.1 < crate::superagent::TITLE_ROW_H && fwd.1 < crate::superagent::TITLE_ROW_H
             );
             assert!(
-                sa_mode[0].0 < sa_mode[1].0 && sa_mode[1].0 < sa_mode[2].0,
-                "TUI | Super Agent | gear"
+                back.0 < fwd.0 && fwd.0 < tog.0,
+                "{w}x{h}: back, forward, toggle"
             );
-            assert!(
-                sa_mode[2].0 - (sa_mode[1].0 + sa_mode[1].2) < 20.,
-                "the gear is next to them"
+            let tab = b(v, "sa-tab-0");
+            assert_eq!(
+                tab.0, rail.2,
+                "{w}x{h}: tabs start at the rail's right edge"
             );
-            // back to the TUI view: the left group is gone again
+            let (tui, sa, gear) = (
+                b(v, "sa-mode-tui"),
+                b(v, "sa-mode-super-agent"),
+                b(v, "sa-gear"),
+            );
+            assert!(tui.0 < sa.0 && sa.0 < gear.0, "TUI | Super Agent | gear");
+            // back to the TUI view: its title bar is the same as before
             shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
             v.run_until_parked();
-            assert!(v.debug_bounds("nav-rail").is_none());
+            assert!(v.debug_bounds("sa-rail").is_none() && v.debug_bounds("titlebar").is_some());
         }
-    }
-
-    #[gpui::test]
-    fn the_breadcrumb_names_the_selected_outcome(cx: &mut TestAppContext) {
-        let _g = theme::opacity_guard();
-        let (shell, v) = open(cx, 1400., 900.);
-        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
-        v.run_until_parked();
-        let goal = shell.read_with(v, |s, cx| {
-            s.outcomes.read(cx).breadcrumb_goal().map(String::from)
-        });
-        assert!(
-            goal.is_some_and(|g| !g.is_empty()),
-            "the sample selects an outcome"
-        );
-        // wider than the bare "Super Agent" label
-        assert!(b(v, "breadcrumb").2 > 100.);
     }
 
     #[gpui::test]
@@ -1140,7 +1012,7 @@ mod tests {
         v.simulate_click(c, Default::default());
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
         // the TUI button goes back; with a badge up, a click on the badge opens Super Agent with its card in front
-        let c = v.debug_bounds("mode-tui").unwrap().center();
+        let c = v.debug_bounds("sa-mode-tui").unwrap().center();
         v.simulate_click(c, Default::default());
         assert_eq!(shell.read_with(v, |s, _| s.view), View::Tui);
         shell.update(v, |s, cx| s.count_waiting_in_sample(cx));
@@ -1152,62 +1024,114 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_left_buttons_walk_the_history_and_hide_the_list(cx: &mut TestAppContext) {
+    fn the_rail_buttons_walk_the_frame_history_and_collapse_the_rail(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 900.);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        v.run_until_parked();
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        let active =
+            |v: &mut gpui::VisualTestContext| sa.read_with(v, |s, _| s.frames.active().clone());
+        let click = |v: &mut gpui::VisualTestContext, sel: &'static str| {
+            let c = v.debug_bounds(sel).unwrap().center();
+            v.simulate_click(c, Default::default());
+            v.run_until_parked();
+        };
+        assert!(
+            !sa.read_with(v, |s, cx| s.can_nav(true, cx)),
+            "nowhere to go yet"
+        );
+        click(v, "sa-back");
+        assert_eq!(
+            active(v),
+            crate::superagent::frames::Frame::Home,
+            "a disabled button does nothing"
+        );
+        // two outcomes from the rail
+        let ids = shell.read_with(v, |s, cx| {
+            s.outcomes
+                .read(cx)
+                .state
+                .items
+                .iter()
+                .map(|i| i.row.id.clone())
+                .collect::<Vec<_>>()
+        });
+        for (i, id) in ids.iter().take(2).enumerate() {
+            let _ = id;
+            click(v, ["sa-rail-2", "sa-rail-3"][i]);
+        }
+        let last = active(v);
+        assert_eq!(
+            last,
+            crate::superagent::frames::Frame::Outcome(ids[1].clone())
+        );
+        click(v, "sa-back");
+        assert_eq!(
+            active(v),
+            crate::superagent::frames::Frame::Outcome(ids[0].clone())
+        );
+        click(v, "sa-forward");
+        assert_eq!(active(v), last, "forward");
+        // the toggle collapses the rail to icons and expands it again
+        assert_eq!(b(v, "sa-rail").2, 248.);
+        click(v, "sa-rail-toggle");
+        assert_eq!(b(v, "sa-rail").2, 72.);
+        click(v, "sa-rail-toggle");
+        assert_eq!(b(v, "sa-rail").2, 248.);
+    }
+
+    #[gpui::test]
+    fn settings_over_super_agent_shows_the_shell_bar_and_the_gear_toggles_it(
+        cx: &mut TestAppContext,
+    ) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1100., 700.);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        v.run_until_parked();
+        // the gear of the Super Agent title row opens Settings over it
+        let c = v.debug_bounds("sa-gear").unwrap().center();
+        v.simulate_click(c, Default::default());
+        v.run_until_parked();
+        assert_eq!(
+            shell.read_with(v, |s, _| (s.view, s.back)),
+            (View::Settings, View::SuperAgent)
+        );
+        assert!(
+            v.debug_bounds("titlebar").is_some(),
+            "the shell bar is back while Settings is open"
+        );
+        let c = v.debug_bounds("mode-settings").unwrap().center();
+        v.simulate_click(c, Default::default());
+        v.run_until_parked();
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+        assert!(v.debug_bounds("titlebar").is_none());
+    }
+
+    #[gpui::test]
+    fn a_new_session_opens_a_tab_inside_super_agent_and_never_switches_to_the_tui_view(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::superagent::frames::Frame;
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 900.);
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         v.run_until_parked();
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
-        let sel = |o: &Entity<OutcomesView>, v: &mut gpui::VisualTestContext| {
-            o.read_with(v, |o, _| o.state.selected.clone())
-        };
-        let first = sel(&o, v);
-        assert!(!o.read_with(v, |o, _| o.can_back()), "nowhere to go yet");
-        // a click on a disabled button does nothing
-        let c = v.debug_bounds("nav-back").unwrap().center();
-        v.simulate_click(c, Default::default());
-        assert_eq!(sel(&o, v), first);
-        let second = o.read_with(v, |o, _| {
-            o.state
-                .items
-                .iter()
-                .map(|i| i.row.id.clone())
-                .find(|i| Some(i) != first.as_ref())
+        let dir = tempfile::tempdir().unwrap();
+        // what `OutcomesView::new_session` emits once the scratch folder exists
+        o.update(v, |_, cx| {
+            cx.emit(crate::outcomes_view::OpenFolder(dir.path().to_path_buf()))
         });
-        o.update(v, |o, cx| o.select_id(&second.clone().unwrap(), cx));
         v.run_until_parked();
-        assert_eq!(sel(&o, v), second);
-        let c = v.debug_bounds("nav-back").unwrap().center();
-        v.simulate_click(c, Default::default());
-        v.run_until_parked();
-        assert_eq!(sel(&o, v), first, "back");
-        let c = v.debug_bounds("nav-forward").unwrap().center();
-        v.simulate_click(c, Default::default());
-        v.run_until_parked();
-        assert_eq!(sel(&o, v), second, "forward");
-        // the rail button hides the list column and shows it again; the state is the window's own
-        assert!(v.debug_bounds("out-left").is_some());
-        let c = v.debug_bounds("nav-rail").unwrap().center();
-        v.simulate_click(c, Default::default());
-        v.run_until_parked();
-        assert!(v.debug_bounds("out-left").is_none() && !o.read_with(v, |o, _| o.rail_open));
-        let c = v.debug_bounds("nav-rail").unwrap().center();
-        v.simulate_click(c, Default::default());
-        v.run_until_parked();
-        assert!(v.debug_bounds("out-left").is_some());
-    }
-
-    #[gpui::test]
-    fn the_left_group_stays_while_settings_is_over_super_agent(cx: &mut TestAppContext) {
-        let _g = theme::opacity_guard();
-        let (shell, v) = open(cx, 1100., 700.);
-        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
-        shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
-        v.run_until_parked();
-        assert!(v.debug_bounds("nav-rail").is_some());
-        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
-        v.run_until_parked();
-        assert!(v.debug_bounds("nav-rail").is_none());
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+        let id = dir.path().to_string_lossy().into_owned();
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        assert_eq!(
+            sa.read_with(v, |s, _| s.frames.active().clone()),
+            Frame::Session(id)
+        );
+        assert!(v.debug_bounds("sa-tab-1").is_some() && v.debug_bounds("header").is_none());
     }
 
     #[gpui::test]
