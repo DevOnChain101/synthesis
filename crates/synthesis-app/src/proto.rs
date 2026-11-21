@@ -23,13 +23,13 @@ pub const PROTOCOL: u32 = 5;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// ---- S1 P2a (read-only goals): kept apart from the rest of the file ------------------------------
+// ---- S1 P2a/P2b (read-only goals): kept apart from the rest of the file ------------------------
 /// What this build's `orchestrator.status` says it can do beyond the base protocol, so a surface
 /// shows only the controls that work (PROTOCOL stays 4: an old surface ignores the extra field).
-/// Empty in P2a: `read_only_goal` joins with P2b, together with `report_review` (a goal that
-/// cannot be reviewed must not be offered); `attempt_message` joins with P2c.
-pub const FEATURES: [&str; 0] = [];
-// ---- end S1 P2a -----------------------------------------------------------------------------------
+/// `read_only_goal` and `report_review` go together: a goal whose report cannot be reviewed must
+/// not be offered. `attempt_message` joins with P2c.
+pub const FEATURES: [&str; 2] = ["read_only_goal", "report_review"];
+// ---- end S1 P2a/P2b --------------------------------------------------------------------------------
 /// Longest accepted line (a tool result can carry a big file).
 pub const MAX_LINE: usize = 8 << 20;
 

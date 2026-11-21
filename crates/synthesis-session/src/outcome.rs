@@ -1617,6 +1617,11 @@ impl OutcomeWriter {
     }
 
     /// The settings' limit on how long a decision may stay open.
+    /// The writer's clock (the one expiry and binding checks use).
+    pub fn now(&self) -> OffsetDateTime {
+        (self.clock)()
+    }
+
     pub fn decision_expiry_hours(&self) -> u32 {
         self.policy.decision_expiry_hours
     }
@@ -4191,6 +4196,16 @@ impl OutcomeTx<'_, '_> {
     /// hash. Idempotent on `(attempt, work item, check, commit)`: the same row again returns the
     /// stored id and `false`; the same key with different content is an error.
     pub fn record_evidence(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
+        self.record_evidence_kind(e, "check")
+    }
+
+    /// [`Self::record_evidence`] with the row's `kind` (part of its MAC): a read-only goal's
+    /// `citation_check` and `report_review` rows (S1 section 2.3).
+    pub(crate) fn record_evidence_kind(
+        &mut self,
+        e: &NewEvidence,
+        kind: &str,
+    ) -> Result<(EvidenceId, bool)> {
         let producer_ok = match e.trust_class {
             TrustClass::IndependentCheck => e.producer == "independent_runner",
             TrustClass::HumanReview => e.producer == "human",
@@ -4304,15 +4319,15 @@ impl OutcomeTx<'_, '_> {
                 fence: &fence,
                 captured_at: &captured,
                 flags: &flags_json,
-                kind: "check",
+                kind,
                 tree: "",
             };
             mac(self.et.key(), "evidence", &m.parts())
         };
         let inserted = self.et.tx.execute(
             "INSERT INTO evidence(id,outcome_id,work_item_id,attempt_id,trust_class,producer,subject_commit,check_id,command_hash,\
-               criteria_ids,result,exit_code,env_fingerprint,artifact_session_id,artifact_id,sha256,fence,captured_at,flags,mac) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) \
+               criteria_ids,result,exit_code,env_fingerprint,artifact_session_id,artifact_id,sha256,fence,captured_at,flags,mac,kind) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21) \
              ON CONFLICT DO NOTHING",
             params![
                 id.as_str(),
@@ -4334,7 +4349,8 @@ impl OutcomeTx<'_, '_> {
                 e.fence,
                 captured,
                 flags_json,
-                mac_text
+                mac_text,
+                kind
             ],
         )? == 1;
         if !inserted {
@@ -4380,6 +4396,129 @@ impl OutcomeTx<'_, '_> {
                    "flags": flags}),
         )?;
         Ok((id, true))
+    }
+
+    /// The owner's citation check of a read-only goal's report (S1 section 2.3): an
+    /// `independent_check` row of kind `citation_check` that covers NO criterion, so it can never
+    /// verify the goal by itself. Anything else is refused.
+    pub fn record_citation_check(&mut self, e: &NewEvidence) -> Result<(EvidenceId, bool)> {
+        if e.trust_class != TrustClass::IndependentCheck
+            || !(e.check_id == "citation_check" || e.check_id.starts_with("citation_check:"))
+            || !e.criteria_ids.is_empty()
+            || !e.subject_commit.starts_with("report:sha256:")
+        {
+            return Err(Error::Invalid(
+                "a citation check is an independent_check of a report that covers no criterion"
+                    .into(),
+            ));
+        }
+        self.record_evidence_kind(e, "citation_check")
+    }
+
+    /// The person's `accept_report` of a read-only goal (S1 section 2.3): one MAC'd `human_review`
+    /// row per criterion, written in the transaction that resolves the decision, so the answer and
+    /// its evidence exist together or not at all. The ONLY writer of those rows. Everything is
+    /// re-derived from the stored decision, never from the caller: it is a `report_review`,
+    /// approved with `accept_report` in this very revision, its action still hashes to the
+    /// binding's `action_hash`, and the action names the finished attempt, the report hash that
+    /// attempt's subject carries and exactly the contract's criteria.
+    pub fn accept_report(&mut self, decision: &DecisionId) -> Result<usize> {
+        let d = self.load_decision(decision)?;
+        let tamper = |why: &str| Error::Tampered(format!("decision {decision}: {why}"));
+        let asked: bool = self.et.tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM decision_approvals WHERE decision_id=?1 AND decision_revision=?2 \
+               AND choice='accept_report')",
+            params![decision.as_str(), d.revision - 1],
+            |r| r.get(0),
+        )?;
+        if d.kind != "report_review" || d.row_state != DecisionState::Approved || !asked {
+            return Err(Error::Invalid(
+                "only an accept_report answer to a report_review decision accepts a report".into(),
+            ));
+        }
+        let action_text: Option<String> = self.et.tx.query_row(
+            "SELECT action FROM decisions WHERE id=?1",
+            [decision.as_str()],
+            |r| r.get(0),
+        )?;
+        let action: Value = action_text
+            .as_deref()
+            .filter(|t| {
+                d.binding.get("action_hash").and_then(Value::as_str) == Some(&sha_hex(t.as_bytes()))
+            })
+            .and_then(|t| serde_json::from_str(t).ok())
+            .ok_or_else(|| tamper("the action is missing or does not match its hash"))?;
+        let field = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+        let (item, subject) = (
+            field(&d.binding, "work_item_id"),
+            field(&d.binding, "subject_commit"),
+        );
+        let ordinal = d.binding.get("attempt_ordinal").and_then(Value::as_u64);
+        let (Some(item), Some(subject), Some(ordinal)) = (item, subject, ordinal) else {
+            return Err(Error::Invalid("the binding names no attempt report".into()));
+        };
+        let item = WorkItemId::parse(&item).map_err(refuse)?;
+        let (attempt, fence): (String, i64) = self
+            .et
+            .tx
+            .query_row(
+                "SELECT id,fence FROM attempts WHERE work_item_id=?1 AND ordinal=?2 AND state='finished' \
+                 AND subject_commit=?3",
+                params![item.as_str(), ordinal as i64, subject],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| Error::Invalid("the attempt of this report is not finished".into()))?;
+        let o = self.outcome()?;
+        let contract = self.stored_contract(o.contract_version)?;
+        let mut ids: Vec<&str> = contract.criteria.iter().map(|c| c.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut named: Vec<&str> = action
+            .get("criteria")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        named.sort_unstable();
+        // a cut report or unchecked citations are never accepted, whatever the card offered
+        if action.get("cut") != Some(&Value::Bool(false))
+            || action.get("too_many") != Some(&Value::Bool(false))
+        {
+            return Err(Error::Invalid(
+                "this report cannot be accepted: it was cut or had too many citations".into(),
+            ));
+        }
+        if contract.kind != synthesis_core::outcome::ContractKind::ReadOnly
+            || field(&action, "attempt").as_deref() != Some(&attempt)
+            || field(&action, "report_sha256").map(|h| format!("report:sha256:{h}"))
+                != Some(subject.clone())
+            || named != ids
+        {
+            return Err(tamper(
+                "the action is not for this attempt, report and contract",
+            ));
+        }
+        for c in &contract.criteria {
+            self.record_evidence_kind(
+                &NewEvidence {
+                    work_item_id: item.clone(),
+                    attempt_id: None,
+                    trust_class: TrustClass::HumanReview,
+                    producer: "human".into(),
+                    subject_commit: subject.clone(),
+                    check_id: format!("report_review:{}", c.id),
+                    command_hash: None,
+                    criteria_ids: vec![c.id.clone()],
+                    result: "passed".into(),
+                    exit_code: None,
+                    env_fingerprint: "report-review/1".into(),
+                    artifact: None,
+                    fence,
+                    flags: vec![],
+                },
+                "report_review",
+            )?;
+        }
+        Ok(contract.criteria.len())
     }
 
     // ---- commands

@@ -11,6 +11,10 @@ use gpui::{Image, ImageFormat};
 pub const MARK_PNG: &[u8] =
     include_bytes!("../../../design/01-brand/logo/png/synthesis-symbol-transparent-256.png");
 
+/// The Dock icon body (charcoal squircle with the logo, `scripts/make-macos-icns.swift`) cropped of its
+/// transparent margin, 128 px, for the chat avatar.
+pub const AVATAR_PNG: &[u8] = include_bytes!("../assets/icons/synthesis-avatar-128.png");
+
 /// Family name of the bundled UI sans.
 pub const UI_FONT: &str = "Inter";
 
@@ -39,14 +43,15 @@ pub fn mark() -> Arc<Image> {
 /// The mark as a texture of exactly `logical * scale` device pixels. gpui samples a texture bilinearly without
 /// mipmaps, so drawing the 256 px PNG at 16-96 px skips most source pixels and the edge turns into stairs; this
 /// resamples once (Lanczos in premultiplied alpha, no fringe) and caches per size.
-fn mark_at(device: u32) -> Arc<gpui::RenderImage> {
+fn mark_at(src: &'static [u8], device: u32) -> Arc<gpui::RenderImage> {
     use image::{RgbaImage, imageops};
-    static CACHE: OnceLock<Mutex<HashMap<u32, Arc<gpui::RenderImage>>>> = OnceLock::new();
+    type Cache = Mutex<HashMap<(usize, u32), Arc<gpui::RenderImage>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     cache
-        .entry(device)
+        .entry((src.as_ptr() as usize, device))
         .or_insert_with(|| {
-            let mut img = image::load_from_memory(MARK_PNG).unwrap().into_rgba8();
+            let mut img = image::load_from_memory(src).unwrap().into_rgba8();
             let premul = |img: &mut RgbaImage, up: bool| {
                 for p in img.pixels_mut() {
                     let a = p[3] as f32 / 255.;
@@ -76,9 +81,18 @@ fn mark_at(device: u32) -> Arc<gpui::RenderImage> {
 
 /// The mark drawn at `size` logical px, sharp at the window's scale factor.
 pub fn mark_img(size: f32) -> gpui::Img {
+    png_img(MARK_PNG, size)
+}
+
+/// The Dock-icon avatar drawn at `size` logical px.
+pub fn avatar_img(size: f32) -> gpui::Img {
+    png_img(AVATAR_PNG, size)
+}
+
+fn png_img(src: &'static [u8], size: f32) -> gpui::Img {
     gpui::img(gpui::ImageSource::Custom(Arc::new(move |window, _| {
         let device = (size * window.scale_factor()).round().max(1.) as u32;
-        Some(Ok(mark_at(device)))
+        Some(Ok(mark_at(src, device)))
     })))
 }
 
@@ -148,6 +162,14 @@ mod tests {
     fn mark_is_a_png_and_embedded() {
         assert!(MARK_PNG.starts_with(b"\x89PNG"));
         assert!(MARK_PNG.len() > 1000);
+    }
+
+    #[test]
+    fn avatar_icon_decodes_square_with_transparent_corners() {
+        let img = image::load_from_memory(AVATAR_PNG).unwrap().into_rgba8();
+        assert_eq!(img.dimensions(), (128, 128));
+        assert_eq!(img.get_pixel(0, 0)[3], 0);
+        assert_eq!(img.get_pixel(64, 64)[3], 255);
     }
 
     #[test]

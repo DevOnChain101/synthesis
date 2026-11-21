@@ -29,7 +29,7 @@ pub(crate) fn clean(s: &str) -> String {
     }
 }
 
-fn ts(t: OffsetDateTime) -> String {
+pub(crate) fn ts(t: OffsetDateTime) -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
     );

@@ -194,6 +194,10 @@ fn heading(key: &str) -> String {
         "alternatives" => "Alternatives",
         "evidence" | "evidence_refs" => "Evidence",
         "unknowns" => "Unknowns",
+        // a read-only goal's `report_review` (S1 section 2.3)
+        "report" => "Report (the worker's own words, untrusted)",
+        "rubric" => "Rubric",
+        "citations" => "Citations",
         "defer_consequence" => "If you defer",
         "safe_default" | "default_action" => "If you do nothing",
         other => return clean(other),
@@ -409,6 +413,31 @@ mod tests {
                "evidence": {"work_item": "one", "attempt_ordinal": 3, "refused_calls": ["Bash: rm x"]},
                "unknowns": ["is the client typed?"], "defer_consequence": "the item stays on hold",
                "safe_default": "HOLD", "future_field": "shown even though this build does not know it"})
+    }
+
+    #[test]
+    fn a_report_review_brief_is_shown_whole_with_the_report_made_printable() {
+        let brief = json!({"why": "a worker finished", "alternatives": [{"id": "accept_report", "label": "accept"}],
+            "report": "all good\u{1b}[31m", "rubric": ["r1: names the risks"],
+            "citations": [{"path": "a.txt", "lines": "1-2", "result": "verified"}]});
+        let card = DecisionCard::from_json(&decision(brief.clone())).unwrap();
+        let shown = card.render_text();
+        assert!(uncovered(&brief, &shown).is_empty());
+        assert!(
+            shown.contains("Report (the worker's own words, untrusted)")
+                && shown.contains("Citations")
+        );
+        assert!(!shown.contains('\u{1b}'));
+        let ids: Vec<_> = Picker::new(&card)
+            .unwrap()
+            .options
+            .iter()
+            .map(|o| o.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            ["accept_report", "reject", "request_evidence", "edit_scope"]
+        );
     }
 
     // surface-brief-all-fields-shown (the shared renderer; each surface runs `uncovered` on its own layout)

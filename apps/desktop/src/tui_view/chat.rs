@@ -98,23 +98,14 @@ fn toggle_label(cut: bool, more: usize) -> String {
     }
 }
 
-/// `.msg`: a 32px avatar (radius 7) and, beside it, the tracked who label over the body (`cli.html`).
+/// `.msg`: a 32px avatar (the user's: radius 7; the assistant's is the Dock icon, which carries its own squircle) and, beside it, the tracked who label over the body (`cli.html`).
 fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) -> Div {
     div()
         .flex()
         .gap(px(10.))
         .px(px(10.))
         .py(px(8.))
-        .child(
-            div()
-                .size(px(32.))
-                .flex_none()
-                .rounded(px(7.))
-                .border_1()
-                .border_color(hsla(t::BORDER))
-                .overflow_hidden()
-                .child(avatar.rounded(px(6.))),
-        )
+        .child(div().size(px(32.)).flex_none().child(avatar))
         .child(
             div()
                 .flex_1()
@@ -619,11 +610,20 @@ impl TuiView {
                 msg(
                     div()
                         .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(hsla(t::INFO))
-                        .child(icon("user", 14., hsla(t::BG))),
+                        .rounded(px(7.))
+                        .border_1()
+                        .border_color(hsla(t::BORDER))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .size_full()
+                                .rounded(px(6.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(hsla(t::INFO))
+                                .child(icon("user", 14., hsla(t::BG))),
+                        ),
                     "YOU",
                     hsla(t::INFO),
                     &time,
@@ -635,11 +635,10 @@ impl TuiView {
                 .into_any_element()
             }
             Item::Assistant { text: s, .. } => msg(
-                div().size_full().bg(crate::theme::ground()).child(
-                    crate::brand::mark_img(32.)
+                div().size_full().child(
+                    crate::brand::avatar_img(32.)
                         .size_full()
-                        .rounded(px(6.))
-                        .object_fit(gpui::ObjectFit::Cover),
+                        .object_fit(gpui::ObjectFit::Contain),
                 ),
                 "SYNTHESIS",
                 hsla(t::ACCENT),

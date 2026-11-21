@@ -629,14 +629,32 @@ fn the_kind_picker_preselects_nothing_and_enter_is_a_no_op_until_a_row_is_chosen
 }
 
 #[test]
+fn the_read_only_row_works_once_the_engine_advertises_it() {
+    use super::super::kind_picker::{Kind, ROWS, refusal};
+    let mut s = sample::state();
+    s.read_only_goal = true;
+    assert_eq!(
+        refusal(Kind::ReadOnlyGoal, &s.screen, s.read_only_goal),
+        None
+    );
+    press(&mut s, "n", 0);
+    press(&mut s, &ROWS.len().to_string(), 0);
+    assert!(!press(&mut s, "enter", 0).is_empty() || s.form.is_some());
+    assert!(s.picker.is_none());
+}
+
+#[test]
 fn native_windows_refuses_both_goals_but_not_a_session() {
     use super::super::kind_picker::{Kind, refusal};
     let w = Screen::Windows;
     assert_eq!(
-        refusal(Kind::Goal, &w),
+        refusal(Kind::Goal, &w, true),
         Some(synthesis_view::outcomes::WSL2_REFUSAL)
     );
-    assert!(refusal(Kind::ReadOnlyGoal, &w).is_some() && refusal(Kind::Session, &w).is_none());
+    assert!(
+        refusal(Kind::ReadOnlyGoal, &w, true).is_some()
+            && refusal(Kind::Session, &w, true).is_none()
+    );
     let mut s = State::new(w);
     press(&mut s, "n", 0);
     assert!(s.picker.is_some());
