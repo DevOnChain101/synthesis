@@ -145,11 +145,12 @@ impl Shell {
                 self.sa.update(cx, |v, cx| v.shown(window, cx));
             }
         }
-        if cfg!(target_os = "macos") {
-            // the lights sit in the first row of the Super Agent rail, else in the 30 px bar
-            let y = crate::superagent::traffic_light_y(v == View::SuperAgent);
-            window.set_traffic_light_position(gpui::point(px(14.), px(y)));
-        }
+        // the lights (macOS only) sit in the first row of the Super Agent rail, else in the 30 px bar
+        #[cfg(target_os = "macos")]
+        window.set_traffic_light_position(gpui::point(
+            px(14.),
+            px(crate::superagent::traffic_light_y(v == View::SuperAgent)),
+        ));
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
         self.tui.update(cx, |t, cx| {
             let was = t.active;
@@ -169,7 +170,7 @@ impl Shell {
     }
 
     /// Shows the old outcomes UI instead of the Super Agent view (its tests, until phase E).
-    #[cfg(any(test, feature = "shot"))]
+    #[cfg(test)]
     pub(crate) fn mount_legacy_ui(&mut self) {
         self.legacy_ui = true;
     }
