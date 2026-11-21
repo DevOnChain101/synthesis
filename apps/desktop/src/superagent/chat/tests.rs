@@ -298,7 +298,11 @@ fn the_edited_text_is_what_is_sent(cx: &mut TestAppContext) {
     refresh(&r, v);
     click(v, "sa-card-edit");
     let ed = r.chat.read_with(v, |c, _| {
-        c.editors.values().next().cloned().expect("an edit box")
+        c.editors
+            .values()
+            .next()
+            .map(|e| e.ent.clone())
+            .expect("an edit box")
     });
     assert_eq!(
         ed.read_with(v, |s, _| s.value().to_string()),
@@ -450,4 +454,47 @@ fn the_buttons_are_tab_stops_and_a_held_enter_never_confirms(cx: &mut TestAppCon
         *r.port.log.lock().unwrap(),
         ["send:0123456789abcdef:run the tests"]
     );
+}
+
+#[test]
+fn model_markdown_is_inert_and_hidden_characters_are_visible() {
+    let src = include_str!("mod.rs");
+    let body = &src[src.find("fn md(").unwrap()..];
+    let body = &body[..body.find("fn clean_md").unwrap()];
+    assert!(
+        body.contains(".on_link_click(|_, _, _, _| {})"),
+        "links must be inert"
+    );
+    assert!(body.contains(".image_source("), "no image may load");
+    assert_eq!(
+        src.matches("TextView::markdown(").count(),
+        1,
+        "one markdown site"
+    );
+    let c = clean_md("a\u{202e}b\u{200b}c\u{7}d\n**e**");
+    assert_eq!(c, "a\\u{202e}b\\u{200b}c\\u{0007}d\n**e**");
+}
+
+#[test]
+fn an_untouched_edit_box_is_no_edit_and_cards_are_keyed_by_proposal() {
+    assert_eq!(edit_text("orig", "shown", "shown"), None);
+    assert_eq!(edit_text("orig", "shown", "orig"), None);
+    assert_eq!(edit_text("orig", "shown", "new"), Some("new".into()));
+    let cards = include_str!("cards.rs");
+    assert!(!cards.contains("\"sa-card-wrap\", i"));
+    assert!(cards.contains("sa-card-{id}"));
+}
+
+#[test]
+fn start_checks_the_gate_again_and_refuses_when_super_agent_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = std::fs::canonicalize(dir.path()).unwrap();
+    let env = Env::from_pairs([
+        ("HOME", h.to_str().unwrap()),
+        ("SYNT_HOME", h.to_str().unwrap()),
+    ]);
+    let e = glue::start(&env, &h, Arc::new(glue::NoPort))
+        .err()
+        .expect("refused");
+    assert!(e.contains("off"), "{e}");
 }

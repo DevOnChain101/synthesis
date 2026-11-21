@@ -27,7 +27,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::text::TextView;
-use synthesis_app::conductor::PersonClick;
+use synthesis_app::conductor::{Payload, PersonClick};
 use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
 use synthesis_view::conductor::CardButton;
@@ -45,11 +45,25 @@ use crate::outcomes_view::model::OFF_LINES;
 const TICK: Duration = Duration::from_secs(5);
 /// A tool row is cut here (model-written text never takes the width of the chat).
 const ROW_MAX: usize = 160;
+const COMMANDS_REFUSED: &str = "Commands are not available in this chat.";
 
 /// The person asked to turn Super Agent on (the Off explanation's button): the shell opens its enable guide.
 pub struct OpenEnableGuide;
 
 impl EventEmitter<OpenEnableGuide> for ConductorChat {}
+
+/// An open edit box. `original` is the proposal's own text (the box shows `shown`, which is cleaned for display):
+/// a box left untouched is no edit, so the original bytes go on, never the cleaned ones.
+struct Edit {
+    ent: Entity<TextareaState>,
+    original: String,
+    shown: String,
+}
+
+/// What an edit sends: `None` when the box still holds the text as shown (run the proposal as it is).
+fn edit_text(original: &str, shown: &str, value: &str) -> Option<String> {
+    (value != shown && value != original).then(|| value.to_string())
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -72,7 +86,7 @@ pub struct ConductorChat {
     lines: Vec<String>,
     cards: Vec<Shown>,
     /// Open edit boxes ("Edit in form"), by proposal id.
-    editors: HashMap<String, Entity<TextareaState>>,
+    editors: HashMap<String, Edit>,
     /// Proposals whose click is being run: a second click is ignored.
     busy: HashSet<String>,
     /// Tab stops of each card's Confirm, Edit and Cancel (nothing is focused until the person tabs to one).
@@ -164,7 +178,7 @@ impl ConductorChat {
         }
         self.notice = None;
         if line.starts_with('/') {
-            self.notice = Some("Commands are not available in this chat.".into());
+            self.notice = Some(COMMANDS_REFUSED.into());
         } else if self.live.is_none() {
             self.start(window, cx);
         } else {
@@ -233,7 +247,9 @@ impl ConductorChat {
                 })
                 .detach();
                 let line = self.composer.read(cx).value().trim().to_string();
-                if !line.is_empty() {
+                if line.starts_with('/') {
+                    self.notice = Some(COMMANDS_REFUSED.into());
+                } else if !line.is_empty() {
                     self.send(&line, window, cx);
                 }
             }
@@ -309,7 +325,10 @@ impl ConductorChat {
         let Some(exec) = self.live.as_ref().map(|l| l.exec.clone()) else {
             return;
         };
-        let edited = self.editors.get(id).map(|e| e.read(cx).value().to_string());
+        let edited = self
+            .editors
+            .get(id)
+            .and_then(|e| edit_text(&e.original, &e.shown, &e.ent.read(cx).value()));
         let busy = self.busy.contains(id);
         let Some(s) = self.card(id) else { return };
         if busy || !s.card.buttons.contains(&CardButton::Confirm) || !s.armed(Instant::now()) {
@@ -380,12 +399,33 @@ impl ConductorChat {
         }) else {
             return;
         };
-        let ed = cx.new(|cx| {
+        let original = self
+            .live
+            .as_ref()
+            .and_then(|l| l.host.proposal(id))
+            .and_then(|p| match p.payload {
+                Payload::CreateSession {
+                    first_message: t, ..
+                }
+                | Payload::SendMessage { text: t, .. }
+                | Payload::CreateGoal { contract: t, .. } => Some(t),
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone());
+        let shown = value.clone();
+        let ent = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 12)
                 .default_value(value)
         });
-        self.editors.insert(id.to_string(), ed);
+        self.editors.insert(
+            id.to_string(),
+            Edit {
+                ent,
+                original,
+                shown,
+            },
+        );
         cx.notify();
     }
 
@@ -396,9 +436,9 @@ impl ConductorChat {
         let mut people = self.lines.iter();
         let n = self.convo.items.len();
         for idx in 0..=n {
-            for (i, s) in self.cards.iter().enumerate() {
+            for s in &self.cards {
                 if s.anchor.min(n) == idx {
-                    out.push(self.card_el(i, s, cx));
+                    out.push(self.card_el(s, cx));
                 }
             }
             let Some(it) = self.convo.items.get(idx) else {
@@ -416,7 +456,7 @@ impl ConductorChat {
                         .text_size(px(t::T3.0))
                         .line_height(px(t::T3.1))
                         .text_color(hsla(t::TEXT_STRONG))
-                        .child(TextView::markdown(("sa-chat-md", idx), s.clone()).selectable(true)),
+                        .child(md(idx, s)),
                 )),
                 Item::Tool { name, summary, .. } => out.push(tool_row(name, summary)),
                 Item::TaskEnd {
@@ -428,7 +468,7 @@ impl ConductorChat {
         out
     }
 
-    fn card_el(&self, i: usize, s: &Shown, cx: &mut Context<Self>) -> AnyElement {
+    fn card_el(&self, s: &Shown, cx: &mut Context<Self>) -> AnyElement {
         let id = s.card.id.clone();
         let (a, b, c) = (id.clone(), id.clone(), id);
         let acts = Acts {
@@ -443,9 +483,8 @@ impl ConductorChat {
             ),
         };
         cards::render(
-            i,
             s,
-            self.editors.get(&s.card.id),
+            self.editors.get(&s.card.id).map(|e| &e.ent),
             &acts,
             &self.focus[&s.card.id],
         )
@@ -591,6 +630,30 @@ pub fn conversation(chat: &Entity<ConductorChat>) -> AnyElement {
 }
 
 // ------------------------------------------------------------------------------------------ small pieces
+
+/// Model text as markdown, inert: a link is shown but never opened (the model's text is untrusted, and a link
+/// could pose as a card button), and no image is loaded from a path or a URL. Hidden characters are made visible.
+fn md(idx: usize, text: &str) -> TextView {
+    TextView::markdown(("sa-chat-md", idx), clean_md(text))
+        .selectable(true)
+        .on_link_click(|_, _, _, _| {})
+        .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
+}
+
+/// Bidi, zero-width and control characters (but not newline or tab) become visible `\u{..}` escapes.
+fn clean_md(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\t' => c.to_string(),
+            c if c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}') =>
+            {
+                format!("\\u{{{:04x}}}", c as u32)
+            }
+            c => c.to_string(),
+        })
+        .collect()
+}
 
 fn clip(s: &str) -> String {
     if s.chars().count() <= ROW_MAX {

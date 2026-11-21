@@ -58,7 +58,6 @@ fn line(label: String, value: String) -> Div {
 }
 
 pub fn render(
-    i: usize,
     s: &Shown,
     editor: Option<&Entity<TextareaState>>,
     acts: &Acts,
@@ -109,7 +108,7 @@ pub fn render(
         card.child(text(t::T1, t::W_REGULAR, t::TEXT).child(format!("#{} ({})", c.sha8, c.state)));
     if !open {
         return wrap(
-            i,
+            &s.card.id,
             card.child(text(t::T2, t::W_MEDIUM, t::TEXT).child(state_word(&c.state))),
         );
     }
@@ -161,12 +160,16 @@ pub fn render(
             .on_key_down(key_act(&acts.cancel)),
         });
     }
-    wrap(i, card.child(row))
+    wrap(&s.card.id, card.child(row))
 }
 
 /// Each card has its own id, so the buttons of two cards never share state.
-fn wrap(i: usize, card: Div) -> AnyElement {
-    div().id(("sa-card-wrap", i)).child(card).into_any_element()
+fn wrap(id: &str, card: Div) -> AnyElement {
+    // keyed by the proposal: a re-order between mouse-down and mouse-up cannot land on another card's button
+    div()
+        .id(gpui::SharedString::from(format!("sa-card-{id}")))
+        .child(card)
+        .into_any_element()
 }
 
 /// A mouse or touch click. A keyboard "click" is ignored here: keys go through [`key_act`], which can tell a

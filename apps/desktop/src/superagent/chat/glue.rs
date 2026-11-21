@@ -321,6 +321,12 @@ pub struct Started {
 /// Builds and starts the conductor. Blocking (config, model list, engine start): a worker thread only.
 /// User and managed settings only (`ConductorConfig::load`), the folder is only the engine's workspace.
 pub fn start(env: &Env, workspace: &Path, port: Arc<dyn WindowPort>) -> Result<Started, String> {
+    // the gate again, now: the setting may have been turned off, or WSL mode on, since the window drew
+    match super::model::gate(env) {
+        super::model::Gate::Ready => {}
+        super::model::Gate::Off => return Err("Super Agent is off".into()),
+        super::model::Gate::Unavailable(why) => return Err(why),
+    }
     let cfg = ConductorConfig::load(env, &synthesis_settings::managed_settings_path())?;
     let h = synthesis_app::homes(env)?;
     let models = crate::models::rows(env, workspace)
