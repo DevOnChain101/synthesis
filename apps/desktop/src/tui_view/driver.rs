@@ -243,6 +243,26 @@ fn deliver(
     }
 }
 
+/// The receiving end of a build: whatever engine it holds when it is dropped (the view was released, the task
+/// replaced by a newer launch, or the update found no entity) is closed, never leaked.
+struct EngineRx {
+    rx: futures::channel::oneshot::Receiver<Result<Launched, String>>,
+    got: Option<Result<Launched, String>>,
+}
+
+impl Drop for EngineRx {
+    fn drop(&mut self) {
+        // closing first makes a late `send` fail, which `deliver` closes on the worker thread
+        self.rx.close();
+        let late = self.rx.try_recv().ok().flatten();
+        for r in [self.got.take(), late] {
+            if let Some(Ok(l)) = r {
+                engine::close_shared(Arc::new(l.engine));
+            }
+        }
+    }
+}
+
 fn text_of(s: &Entity<TextareaState>, cx: &gpui::App) -> String {
     s.read(cx).value().to_string()
 }
@@ -368,7 +388,6 @@ impl TuiView {
 
     /// Launches the view as one embedded chat frame: a new session in `folder`. It is not "the last session" of
     /// the standalone view, and the engine and the shells end with the view (`on_release`).
-    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
     pub(crate) fn start_in(
         &mut self,
         folder: PathBuf,
@@ -396,12 +415,33 @@ impl TuiView {
     }
 
     /// The embedded frame closes (or is dropped): its session ends and its shells hang up.
-    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
     pub(crate) fn close_embedded(&mut self, cx: &mut gpui::App) {
         self.shutdown_engine();
         if let Some(p) = self.term.take() {
             p.update(cx, |p, _| p.shutdown());
         }
+    }
+
+    /// The settings an embedded frame of the Super Agent starts its own session with.
+    pub fn live_cfg(&self) -> Option<LiveCfg> {
+        self.live.as_ref().map(|l| (*l.cfg).clone())
+    }
+
+    /// What the owner of an embedded frame shows of it: the first thing the person asked, whether a turn runs,
+    /// and how many questions (permission asks) wait for an answer.
+    pub(crate) fn embed_info(&self) -> (Option<String>, bool, usize) {
+        let Some(lu) = &self.live else {
+            return (None, false, 0);
+        };
+        let first = lu.live.convo().items.iter().find_map(|i| match i {
+            Item::User(u) => Some(u.clone()),
+            _ => None,
+        });
+        (
+            first,
+            lu.live.busy || lu.live.starting,
+            lu.live.dialogs.len(),
+        )
     }
 
     fn start_at(&mut self, folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
@@ -450,7 +490,6 @@ impl TuiView {
 
     /// Which pane the owner shows in its sidebar for this embedded view (`None`: none of the shells or the
     /// browser): a pane left stops holding the keys, one shown gets them.
-    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
     pub(crate) fn embed_side(&mut self, side: Option<ChatTab>, cx: &mut Context<Self>) {
         let Some(e) = &mut self.embed else { return };
         e.side = side.filter(|t| matches!(t, ChatTab::Terminal | ChatTab::Browser));
@@ -469,7 +508,6 @@ impl TuiView {
     }
 
     /// The Terminal or Browser pane of this embedded view, for the owner's right sidebar.
-    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
     pub(crate) fn embed_pane(&mut self, kind: ChatTab, cx: &mut Context<Self>) -> gpui::AnyElement {
         debug_assert!(matches!(kind, ChatTab::Terminal | ChatTab::Browser));
         if !matches!(kind, ChatTab::Terminal | ChatTab::Browser) {
@@ -539,11 +577,20 @@ impl TuiView {
         std::thread::spawn(move || {
             deliver(tx, build(&cfg, project, prior, target, model, trust, notes));
         });
+        // built here, not in the task: a task dropped before its first poll still closes what the thread sent
+        let mut slot = EngineRx { rx, got: None };
         let task = cx.spawn(async move |this, cx| {
-            let r = rx
+            let r = (&mut slot.rx)
                 .await
                 .unwrap_or_else(|_| Err("the engine thread ended unexpectedly".into()));
-            this.update(cx, |t, cx| t.engine_ready(r, cx)).ok();
+            slot.got = Some(r);
+            // when the entity is gone the closure never runs and `slot` closes the engine
+            this.update(cx, |t, cx| {
+                if let Some(r) = slot.got.take() {
+                    t.engine_ready(r, cx)
+                }
+            })
+            .ok();
         });
         if let Some(lu) = &mut self.live {
             lu.engine_task = Some(task);
@@ -828,6 +875,14 @@ impl TuiView {
     }
 
     pub fn quit(&mut self, cx: &mut Context<Self>) {
+        // an embedded chat ends with its tab, never with the whole app (Ctrl+C twice, Ctrl+D, /quit)
+        if self.embed.is_some() {
+            if let Some(lu) = &mut self.live {
+                lu.live.note("close the tab to end this session", false);
+                lu.dirty = true;
+            }
+            return cx.notify();
+        }
         self.shutdown_engine();
         cx.quit();
     }
@@ -4075,6 +4130,9 @@ mod switch_tests {
         w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Terminal), cx));
         assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Terminal);
         assert!(w.0.read_with(w.1, |t, _| t.term.is_some()));
+        // Ctrl+C twice, Ctrl+D and /quit end the tab's session at most, never the app
+        w.0.update(w.1, |t, cx| t.quit(cx));
+        assert!(w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.engine.is_some()));
         w.0.update(w.1, |t, cx| t.close_embedded(cx));
         w.0.read_with(w.1, |t, _| {
             assert!(t.live.as_ref().unwrap().live.engine.is_none());
@@ -4102,6 +4160,34 @@ mod switch_tests {
                 .starts_with("no such folder")
         );
         assert!(checked_folder(Path::new(r"\\host\share\x")).is_err());
+    }
+
+    /// The view is released (or its task replaced) after the build thread's send succeeded and before the task
+    /// polled: the engine waiting in the channel, and one in a result no update took, are closed.
+    #[test]
+    fn an_engine_nobody_polled_is_closed_when_the_receiver_drops() {
+        let (_t, cfg, _l) = setup();
+        let c = Arc::new(cfg);
+        for taken in [false, true] {
+            let l = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+            let sid = l.engine.sid.clone();
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let mut slot = EngineRx { rx, got: None };
+            deliver(tx, Ok(l));
+            assert!(!synthesis_app::peers::session_lock_free(
+                &c.synthesis_home,
+                &sid
+            ));
+            if taken {
+                // polled, but the update that would hand it on failed
+                slot.got = slot.rx.try_recv().ok().flatten();
+            }
+            drop(slot);
+            assert!(synthesis_app::peers::session_lock_free(
+                &c.synthesis_home,
+                &sid
+            ));
+        }
     }
 
     /// The window is gone when the engine is built (the view closed mid-start): the engine is closed, its
