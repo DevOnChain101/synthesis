@@ -19,7 +19,7 @@ use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList};
 
-use super::{TuiView, panels};
+use super::{ChatTab, Embed, TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
 use crate::live::{Action, Focus, Live, NoticeKind, Preview, SWITCH_ARM_MS, Submitted, now_ms};
 
@@ -220,6 +220,29 @@ pub struct LiveUi {
     _subs: Vec<Subscription>,
 }
 
+/// A folder a new session may start in: not a network path, and canonical (symlinks and `..` resolved).
+fn checked_folder(p: &Path) -> Result<PathBuf, String> {
+    // the system picker can return a network path too: not probed here either
+    if crate::folder::is_unc(&p.to_string_lossy()) {
+        return Err(crate::folder::UNC_REFUSED.to_string());
+    }
+    match synthesis_core::canonicalize(p) {
+        Ok(c) if c.is_dir() => Ok(c),
+        _ => Err(format!("no such folder: {}", p.display())),
+    }
+}
+
+/// Hands the built engine to the window; when the window is gone (the view was closed mid-start) nobody else
+/// owns it, so it is closed here (MCP servers, browser, session lock).
+fn deliver(
+    tx: futures::channel::oneshot::Sender<Result<Launched, String>>,
+    r: Result<Launched, String>,
+) {
+    if let Err(Ok(l)) = tx.send(r) {
+        engine::close_shared(Arc::new(l.engine));
+    }
+}
+
 fn text_of(s: &Entity<TextareaState>, cx: &gpui::App) -> String {
     s.read(cx).value().to_string()
 }
@@ -340,6 +363,48 @@ impl TuiView {
 
     /// Launches the engine, the clock and the keyboard.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_at(None, window, cx)
+    }
+
+    /// Launches the view as one embedded chat frame: a new session in `folder`. It is not "the last session" of
+    /// the standalone view, and the engine and the shells end with the view (`on_release`).
+    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
+    pub(crate) fn start_in(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.embed = Some(Embed::default());
+        // the same folder checks as `open_folder`: no network path, symlinks and `..` resolved
+        let folder = match checked_folder(&folder) {
+            Ok(c) => c,
+            Err(why) => {
+                if let Some(lu) = &mut self.live {
+                    lu.live.note(why, true);
+                    lu.dirty = true;
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let rel = cx.on_release(|this, cx| this.close_embedded(cx));
+        if let Some(lu) = &mut self.live {
+            lu.add_sub(rel);
+        }
+        self.start_at(Some(folder), window, cx)
+    }
+
+    /// The embedded frame closes (or is dropped): its session ends and its shells hang up.
+    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
+    pub(crate) fn close_embedded(&mut self, cx: &mut gpui::App) {
+        self.shutdown_engine();
+        if let Some(p) = self.term.take() {
+            p.update(cx, |p, _| p.shutdown());
+        }
+    }
+
+    fn start_at(&mut self, folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| s.focus(window, cx));
         let weak = cx.weak_entity();
@@ -377,7 +442,43 @@ impl TuiView {
             (c.project.clone(), resume_args)
         };
         lu.tick_task = Some(tick);
-        self.launch(first.0, None, vec![], cx);
+        match folder {
+            Some(f) => self.launch_with(f.clone(), None, Some(Target::New(f)), vec![], cx),
+            None => self.launch(first.0, None, vec![], cx),
+        }
+    }
+
+    /// Which pane the owner shows in its sidebar for this embedded view (`None`: none of the shells or the
+    /// browser): a pane left stops holding the keys, one shown gets them.
+    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
+    pub(crate) fn embed_side(&mut self, side: Option<ChatTab>, cx: &mut Context<Self>) {
+        let Some(e) = &mut self.embed else { return };
+        e.side = side.filter(|t| matches!(t, ChatTab::Terminal | ChatTab::Browser));
+        match e.side {
+            Some(ChatTab::Terminal) => {
+                let p = self.ensure_term(cx);
+                p.update(cx, |p, _| p.shown = true);
+            }
+            _ => {
+                if let Some(p) = &self.term {
+                    p.update(cx, |p, _| p.shown = false);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Terminal or Browser pane of this embedded view, for the owner's right sidebar.
+    #[allow(dead_code)] // the Super Agent's session frames (phase C1) call it
+    pub(crate) fn embed_pane(&mut self, kind: ChatTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        debug_assert!(matches!(kind, ChatTab::Terminal | ChatTab::Browser));
+        if !matches!(kind, ChatTab::Terminal | ChatTab::Browser) {
+            return gpui::IntoElement::into_any_element(gpui::Empty);
+        }
+        if self.pane_tab() != kind {
+            self.embed_side(Some(kind), cx);
+        }
+        self.pane(cx)
     }
 
     /// Builds the engine on a worker thread (closing `prior` first), then installs it.
@@ -436,7 +537,7 @@ impl TuiView {
         let (trust, model) = (lu.session_trust.clone(), lu.model_override.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(build(&cfg, project, prior, target, model, trust, notes));
+            deliver(tx, build(&cfg, project, prior, target, model, trust, notes));
         });
         let task = cx.spawn(async move |this, cx| {
             let r = rx
@@ -498,7 +599,7 @@ impl TuiView {
                 lu.pending_remember.clear();
                 lu.model_override = l.model;
                 // the next launch starts here (best effort: a state file that cannot be written loses only that)
-                if !l.engine.is_remote() && !lu.fixture {
+                if !l.engine.is_remote() && !lu.fixture && self.embed.is_none() {
                     let _ = crate::last_session::save(
                         &lu.cfg.synthesis_home,
                         crate::last_session::LOCAL,
@@ -631,6 +732,10 @@ impl TuiView {
 
     /// Reads the workspace list, the usage history and the peers off the UI thread.
     pub fn refresh_store(&mut self, cx: &mut Context<Self>) {
+        // the workspace list and usage are the standalone view's panels
+        if self.embed.is_some() {
+            return;
+        }
         let Some(lu) = &mut self.live else { return };
         let cfg = lu.cfg.clone();
         let root = lu.live.engine.as_ref().map(|e| e.root.clone());
@@ -688,7 +793,7 @@ impl TuiView {
         lu.dirty = true;
         if let Some(e) = lu.live.engine.clone() {
             lu.live.mcp = e.mcp_status();
-            if n.is_multiple_of(5) {
+            if n.is_multiple_of(5) && self.embed.is_none() {
                 let job = cx.background_spawn(async move { e.peer_rows() });
                 let t = cx.spawn(async move |this, cx| {
                     let rows = job.await;
@@ -946,6 +1051,10 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.active || self.bar_focused(window, cx) {
+            return false;
+        }
+        // an embedded frame that is not on screen takes no keys
+        if self.embed.is_some() && !self.shown {
             return false;
         }
         // the Browser tab's page takes the keys while it holds the focus (a dialog still owns the keyboard first)
@@ -2333,21 +2442,13 @@ impl TuiView {
         // the slide-over column the picker was opened from closes: the new session (or the note) shows
         self.drawer = None;
         let Some(lu) = &mut self.live else { return };
-        // the system picker can return a network path too: not probed here either
-        if crate::folder::is_unc(&p.to_string_lossy()) {
-            lu.live.note(crate::folder::UNC_REFUSED, true);
-            lu.dirty = true;
-            cx.notify();
-            return;
-        }
-        match synthesis_core::canonicalize(p) {
-            Ok(c) if c.is_dir() => {
+        match checked_folder(p) {
+            Ok(c) => {
                 let key = format!("folder:{}", c.display());
                 self.switch(Target::New(c), key, cx)
             }
-            _ => {
-                lu.live
-                    .note(format!("no such folder: {}", p.display()), true);
+            Err(why) => {
+                lu.live.note(why, true);
                 lu.dirty = true;
                 cx.notify();
             }
@@ -3905,5 +4006,122 @@ mod switch_tests {
         });
         press(&mut w, "up");
         assert!(!w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.ws_new));
+    }
+
+    /// Two embedded frames in one window: a key is taken only by the one its owner marks active and shown.
+    #[gpui::test]
+    fn two_embedded_views_never_both_take_the_same_key(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let (_t2, cfg2, l2) = setup();
+        let a = open(cx, cfg, l, false);
+        a.0.update(a.1, |t, _| t.embed = Some(Embed::default()));
+        let b_view = a.0.update_in(a.1, |_, window, cx| {
+            cx.new(|cx| TuiView::live(window, cx, cfg2, Default::default(), 0.))
+        });
+        b_view.update(a.1, |t, _| {
+            t.set_live(l2);
+            t.embed = Some(Embed::default());
+        });
+        // Esc leaves the "whole chat selected" state and is consumed only then
+        let armed = |v: &Entity<TuiView>, c: &mut gpui::VisualTestContext| {
+            v.update(c, |t, _| t.ts.chat_all = true)
+        };
+        let esc = Keystroke::parse("escape").unwrap();
+        let press = |v: &Entity<TuiView>, c: &mut gpui::VisualTestContext| {
+            v.update_in(c, |t, window, cx| t.on_key(&esc, window, cx))
+        };
+        armed(&a.0, a.1);
+        armed(&b_view, a.1);
+        a.0.update(a.1, |t, _| (t.active, t.shown) = (true, true));
+        b_view.update(a.1, |t, _| (t.active, t.shown) = (true, false));
+        assert!(press(&a.0, a.1), "the shown frame takes the key");
+        assert!(!press(&b_view, a.1), "the hidden frame does not");
+        assert!(b_view.read_with(a.1, |t, _| t.ts.chat_all));
+        // the owner moves the focus: the other way round
+        armed(&a.0, a.1);
+        a.0.update(a.1, |t, _| t.active = false);
+        b_view.update(a.1, |t, _| t.shown = true);
+        assert!(!press(&a.0, a.1) && press(&b_view, a.1));
+        assert!(a.0.read_with(a.1, |t, _| t.ts.chat_all));
+    }
+
+    /// An embedded frame's engine ends with it, its shells are dropped, and the browser tap it follows is the
+    /// engine's own (the same `Arc` on every look, never a copy).
+    #[gpui::test]
+    fn closing_an_embedded_view_ends_its_engine_and_shells(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let c = Arc::new(cfg.clone());
+        let mut w = open(cx, cfg, l, true);
+        let first = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        w.0.update(w.1, |t, cx| {
+            t.embed = Some(Embed::default());
+            t.engine_ready(Ok(first), cx)
+        });
+        w.1.run_until_parked();
+        let access = |w: &mut Win<'_>| {
+            w.0.read_with(w.1, |t, _| {
+                t.live
+                    .as_ref()
+                    .unwrap()
+                    .live
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .browser_access()
+            })
+        };
+        let (tap, _) = access(&mut w).expect("a local engine has a browser tap");
+        assert!(Arc::ptr_eq(&tap, &access(&mut w).unwrap().0));
+        w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Terminal), cx));
+        assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Terminal);
+        assert!(w.0.read_with(w.1, |t, _| t.term.is_some()));
+        w.0.update(w.1, |t, cx| t.close_embedded(cx));
+        w.0.read_with(w.1, |t, _| {
+            assert!(t.live.as_ref().unwrap().live.engine.is_none());
+            assert!(t.term.is_none());
+        });
+        // a pane that is no sidebar pane leaves the centre on the chat
+        w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Diff), cx));
+        assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Chat);
+        forget_engine(&mut w);
+    }
+
+    #[test]
+    fn a_new_embedded_session_gets_the_checks_of_open_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        // `..` is resolved
+        assert_eq!(
+            checked_folder(&base.join("a/b/..")).unwrap(),
+            base.join("a")
+        );
+        assert!(
+            checked_folder(&base.join("missing"))
+                .unwrap_err()
+                .starts_with("no such folder")
+        );
+        assert!(checked_folder(Path::new(r"\\host\share\x")).is_err());
+    }
+
+    /// The window is gone when the engine is built (the view closed mid-start): the engine is closed, its
+    /// session lock released, not leaked.
+    #[test]
+    fn an_engine_built_for_a_closed_view_is_closed() {
+        let (_t, cfg, _l) = setup();
+        let c = Arc::new(cfg);
+        let l = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        let sid = l.engine.sid.clone();
+        assert!(!synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        let (tx, rx) = futures::channel::oneshot::channel();
+        drop(rx);
+        deliver(tx, Ok(l));
+        assert!(synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
     }
 }
