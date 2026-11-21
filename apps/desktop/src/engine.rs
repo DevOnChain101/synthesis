@@ -489,9 +489,8 @@ impl Engine {
 
     /// The conductor engine: the chat's model session, with no file, shell, web or MCP tool, no project
     /// instructions or memory, no peers, no worktree and no stored transcript until P3b adds the store kind.
-    /// Blocking, like `start_with`. Tests only until P3b: the product start goes through `driver.rs` behind the WSL
-    /// gate like every local start.
-    #[cfg(any(feature = "shot", feature = "local-engine-for-tests"))]
+    /// Blocking, like `start_with`. Started only by `superagent::chat::glue::start`, which refuses under WSL mode
+    /// (the conductor has no file or shell tool, but a local engine stays behind the same gate as every other).
     pub(crate) fn start_conductor(
         mut o: StartOpts,
         c: ConductorOpts,
