@@ -35,7 +35,7 @@ impl Kind {
             Self::ReadOnlyGoal => "New goal (read-only)",
         }
     }
-    fn blurb(self) -> &'static str {
+    pub fn blurb(self) -> &'static str {
         match self {
             Self::Session => "A plain chat with an agent. A folder is optional.",
             Self::Goal => {
@@ -102,7 +102,7 @@ impl State {
         }
     }
 
-    pub(super) fn picker_key(&mut self, name: &str) -> Vec<Effect> {
+    pub(crate) fn picker_key(&mut self, name: &str) -> Vec<Effect> {
         let at = self.picker.as_ref().and_then(|p| p.cursor);
         match name {
             "escape" => self.picker = None,

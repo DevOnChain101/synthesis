@@ -70,8 +70,7 @@ pub struct OutcomesView {
     hist: history::History,
 }
 
-/// The picker made a folder for a new session: the shell opens it in the TUI view (`TuiView::open_folder`) until the
-/// Super Agent centre hosts sessions (P5).
+/// The picker made a folder for a new session: the shell opens it as a session tab of the Super Agent view.
 pub struct OpenFolder(pub std::path::PathBuf);
 
 impl gpui::EventEmitter<OpenFolder> for OutcomesView {}
@@ -406,7 +405,7 @@ impl OutcomesView {
 
     /// "New session": with no folder named, a scratch folder under the synt home. For a remote engine (WSL) a local
     /// scratch folder is no use: the person is asked for a folder.
-    fn new_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn new_session(&mut self, cx: &mut Context<Self>) {
         if self.state.remote {
             return self.session_in_folder(cx);
         }
@@ -428,7 +427,7 @@ impl OutcomesView {
     }
 
     /// The system folder dialog; the chosen folder gets the new session.
-    fn session_in_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn session_in_folder(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,

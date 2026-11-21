@@ -14,7 +14,7 @@ use super::tokens::{self as t, hsla};
 use crate::widgets::chrome::OnClick;
 
 /// A text run in one of the type steps (`t::T1..T5`), weight and colour.
-fn text(step: (f32, f32), weight: gpui::FontWeight, c: u32) -> Div {
+pub(super) fn text(step: (f32, f32), weight: gpui::FontWeight, c: u32) -> Div {
     div()
         .text_size(px(step.0))
         .line_height(px(step.1))
@@ -24,7 +24,7 @@ fn text(step: (f32, f32), weight: gpui::FontWeight, c: u32) -> Div {
 }
 
 /// `inset 0 1px 0 warm-top` plus the contact shadow: the raised look of buttons and plates.
-fn raised() -> Vec<BoxShadow> {
+pub(super) fn raised() -> Vec<BoxShadow> {
     vec![
         BoxShadow {
             color: t::warm_top(),
@@ -44,7 +44,7 @@ fn raised() -> Vec<BoxShadow> {
 }
 
 /// The 2 px accent focus ring.
-fn ring() -> Vec<BoxShadow> {
+pub(super) fn ring() -> Vec<BoxShadow> {
     vec![BoxShadow {
         color: hsla(t::ACCENT),
         offset: point(px(0.), px(0.)),
@@ -244,7 +244,7 @@ impl Status {
             Self::Stopped => ("▪", "Stopped"),
         }
     }
-    fn colour(self) -> u32 {
+    pub(super) fn colour(self) -> u32 {
         match self {
             Self::Running => t::ACCENT_LIGHT,
             Self::Needs | Self::Blocked => t::SOFT_BEIGE,
