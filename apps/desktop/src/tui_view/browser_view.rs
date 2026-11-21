@@ -1082,7 +1082,7 @@ impl TuiView {
     /// Per frame: follows the agent's browser, starts or stops the view with the tab, keeps the URL bar.
     pub(super) fn browser_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let want =
-            self.shown && self.active && self.ts.tab == ChatTab::Browser && !self.previewing();
+            self.shown && self.active && self.pane_tab() == ChatTab::Browser && !self.previewing();
         if let Some((tap, h)) = self
             .live
             .as_ref()
@@ -1210,7 +1210,7 @@ impl TuiView {
         {
             return None;
         }
-        if !self.shown || self.ts.tab != ChatTab::Browser || !self.ts.bv.is_attached() {
+        if !self.shown || self.pane_tab() != ChatTab::Browser || !self.ts.bv.is_attached() {
             // the tab or view was left with the page still holding the keys: the prompt takes them back
             self.focus_prompt(window, cx);
             return None;
@@ -1262,7 +1262,7 @@ impl TuiView {
 
     /// The URL bar holds the keys: the window-wide key hook leaves them alone.
     pub(super) fn bar_focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        self.ts.tab == ChatTab::Browser
+        self.pane_tab() == ChatTab::Browser
             && self
                 .ts
                 .bv

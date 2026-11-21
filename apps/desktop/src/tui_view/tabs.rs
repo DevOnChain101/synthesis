@@ -320,11 +320,11 @@ impl TuiView {
             self.ts.diff_open.insert(p);
             self.ts.diff_init = true;
         }
-        if self.ts.tab == ChatTab::Terminal {
+        if self.pane_tab() == ChatTab::Terminal {
             self.term_tick(cx);
         }
         let Some(lu) = &self.live else { return };
-        if self.ts.tab == ChatTab::Terminal {
+        if self.pane_tab() == ChatTab::Terminal {
             let c = &lu.live.view.panes.commands;
             let sig = (
                 c.len(),
@@ -353,7 +353,7 @@ impl TuiView {
     /// window repaints every frame meanwhile.
     pub(super) fn pointer_animating(&self) -> bool {
         let Some(lu) = &self.live else { return false };
-        self.ts.tab == ChatTab::Browser
+        self.pane_tab() == ChatTab::Browser
             && lu.cfg.tui.motion
             && lu.live.view.panes.pointer.as_ref().is_some_and(|p| {
                 p.ts.is_some_and(|ts| {
@@ -672,22 +672,23 @@ impl TuiView {
                 &empty
             }
         };
+        let tab = self.pane_tab();
         let tz = self.live.as_ref().map_or(0, |l| l.cfg.tz_min);
-        if self.previewing() && self.ts.tab != ChatTab::Chat {
+        if self.previewing() && tab != ChatTab::Chat {
             return div()
                 .debug_selector(|| "tab-pane".to_string())
                 .flex_1()
                 .min_h(px(0.))
                 .p(px(14.))
-                .child(note(preview_note(self.ts.tab)))
+                .child(note(preview_note(tab)))
                 .into_any_element();
         }
-        if self.ts.tab == ChatTab::Browser
+        if tab == ChatTab::Browser
             && let Some(live) = self.browser_live(cx)
         {
             return live;
         }
-        let inner = match self.ts.tab {
+        let inner = match tab {
             ChatTab::Chat => div(),
             ChatTab::Diff => {
                 let toggle = |path: String| -> OnClick {
@@ -735,7 +736,7 @@ impl TuiView {
             ChatTab::Files => return self.files_tab(cx),
         };
         div()
-            .id(("pane", self.ts.tab as usize))
+            .id(("pane", tab as usize))
             .debug_selector(|| "tab-pane".to_string())
             .flex_1()
             .min_h(px(0.))

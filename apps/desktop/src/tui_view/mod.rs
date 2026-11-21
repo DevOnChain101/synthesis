@@ -200,6 +200,15 @@ pub struct TuiView {
     pub(crate) window_active: Option<bool>,
     /// The Terminal tab's personal shells (created on the first look; they outlive session switches).
     pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
+    /// `Some` when the view is one chat frame of the Super Agent surface (see [`Embed`]); `None` is the TUI view.
+    pub(crate) embed: Option<Embed>,
+}
+
+/// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
+/// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Embed {
+    pub side: Option<ChatTab>,
 }
 
 /// A side column of the view.
@@ -268,6 +277,16 @@ impl TuiView {
             input_strip: None,
             window_active: None,
             term: None,
+            embed: None,
+        }
+    }
+
+    /// The tab whose pane is on screen and gets the keys: the tab of the view, or the sidebar pane of an embedded
+    /// one (its centre always shows the chat).
+    pub(crate) fn pane_tab(&self) -> ChatTab {
+        match &self.embed {
+            Some(e) => e.side.unwrap_or(ChatTab::Chat),
+            None => self.ts.tab,
         }
     }
 
@@ -777,7 +796,8 @@ impl TuiView {
             self.centre_w - 2.,
             &tab_click,
         );
-        let body = if self.ts.tab != ChatTab::Chat {
+        let embedded = self.embed.is_some();
+        let body = if !embedded && self.ts.tab != ChatTab::Chat {
             self.pane(cx)
         } else if self.live.is_some() {
             self.chat_stage(cx)
@@ -827,7 +847,7 @@ impl TuiView {
             }))
             .rounded(px(layout::PANEL_RADIUS))
             .child(self.chat_head())
-            .child(strip)
+            .when(!embedded, |d| d.child(strip))
             .child(body)
             .children(dock)
             .child(prompt)
@@ -1092,6 +1112,28 @@ impl Render for TuiView {
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
         self.browser_tick(window, cx);
+        if self.embed.is_some() {
+            // one chat frame: no columns, header or footer (the owner draws the rest)
+            self.centre_w = f32::from(window.viewport_size().width) - self.inset - 2. * PAD;
+            return div()
+                .debug_selector(|| "view".to_string())
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .bg(crate::theme::ground())
+                .font_family(MONO)
+                .font_weight(FontWeight::NORMAL)
+                .text_size(px(12.5))
+                .line_height(gpui::relative(1.55))
+                .text_color(text())
+                .child(gpui_base::TextSelectionLayer)
+                .child(self.chat(cx))
+                .children(self.quote_menu(cx))
+                .children(self.chat_menu_view(cx))
+                .into_any_element();
+        }
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height) - self.top;
@@ -1186,6 +1228,7 @@ impl Render for TuiView {
             .children(drawer)
             .children(self.quote_menu(cx))
             .children(self.chat_menu_view(cx))
+            .into_any_element()
     }
 }
 
