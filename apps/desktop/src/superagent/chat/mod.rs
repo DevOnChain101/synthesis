@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::text::TextView;
@@ -75,6 +75,8 @@ pub struct ConductorChat {
     editors: HashMap<String, Entity<TextareaState>>,
     /// Proposals whose click is being run: a second click is ignored.
     busy: HashSet<String>,
+    /// Tab stops of each card's Confirm, Edit and Cancel (nothing is focused until the person tabs to one).
+    focus: HashMap<String, [FocusHandle; 3]>,
     composer: Entity<TextareaState>,
     /// Why the last send did not go (a turn is running, a command, the engine failed).
     notice: Option<String>,
@@ -129,6 +131,7 @@ impl ConductorChat {
             cards: vec![],
             editors: HashMap::new(),
             busy: HashSet::new(),
+            focus: HashMap::new(),
             composer,
             notice: None,
             notes: vec![],
@@ -439,7 +442,13 @@ impl ConductorChat {
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.cancel_clicked(&c, cx)),
             ),
         };
-        cards::render(i, s, self.editors.get(&s.card.id), &acts)
+        cards::render(
+            i,
+            s,
+            self.editors.get(&s.card.id),
+            &acts,
+            &self.focus[&s.card.id],
+        )
     }
 
     fn composer_el(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -545,6 +554,11 @@ impl ConductorChat {
 
 impl Render for ConductorChat {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for s in &self.cards {
+            self.focus
+                .entry(s.card.id.clone())
+                .or_insert_with(|| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
+        }
         let body = if self.gate == Gate::Ready {
             let rows = self.transcript(cx);
             div()

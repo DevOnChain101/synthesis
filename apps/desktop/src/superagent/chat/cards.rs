@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, Entity, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Styled as _, Window, div, px,
+    AnyElement, App, ClickEvent, Div, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::input::{Textarea, TextareaState};
 use synthesis_view::conductor::CardButton;
@@ -62,6 +62,7 @@ pub fn render(
     s: &Shown,
     editor: Option<&Entity<TextareaState>>,
     acts: &Acts,
+    focus: &[FocusHandle; 3],
 ) -> AnyElement {
     let c = &s.card;
     let open = !c.buttons.is_empty();
@@ -133,7 +134,9 @@ pub fn render(
                 ButtonKind::Primary,
                 false,
                 Some(forward(&acts.confirm)),
-            ),
+            )
+            .track_focus(&focus[0])
+            .on_key_down(key_act(&acts.confirm)),
             CardButton::Edit => kit::button(
                 "sa-card-edit",
                 if editor.is_some() {
@@ -144,14 +147,18 @@ pub fn render(
                 ButtonKind::Secondary,
                 false,
                 Some(forward(&acts.edit)),
-            ),
+            )
+            .track_focus(&focus[1])
+            .on_key_down(key_act(&acts.edit)),
             CardButton::Cancel => kit::button(
                 "sa-card-cancel",
                 "Cancel",
                 ButtonKind::Ghost,
                 false,
                 Some(forward(&acts.cancel)),
-            ),
+            )
+            .track_focus(&focus[2])
+            .on_key_down(key_act(&acts.cancel)),
         });
     }
     wrap(i, card.child(row))
@@ -162,9 +169,28 @@ fn wrap(i: usize, card: Div) -> AnyElement {
     div().id(("sa-card-wrap", i)).child(card).into_any_element()
 }
 
+/// A mouse or touch click. A keyboard "click" is ignored here: keys go through [`key_act`], which can tell a
+/// held key from a press.
 fn forward(a: &Act) -> crate::widgets::chrome::OnClick {
     let a = a.clone();
-    Box::new(move |e, w, cx| a(e, w, cx))
+    Box::new(move |e, w, cx| {
+        if !e.is_keyboard() {
+            a(e, w, cx)
+        }
+    })
+}
+
+/// Enter or Space on the focused button: one fresh press acts, a held (auto-repeating) key never does.
+fn key_act(a: &Act) -> impl Fn(&gpui::KeyDownEvent, &mut Window, &mut App) + 'static {
+    let a = a.clone();
+    move |e, w, cx| {
+        if matches!(e.keystroke.key.as_str(), "enter" | "space") {
+            cx.stop_propagation();
+            if !e.is_held {
+                a(&ClickEvent::default(), w, cx);
+            }
+        }
+    }
 }
 
 /// The free-text payload fields the edit box replaces.

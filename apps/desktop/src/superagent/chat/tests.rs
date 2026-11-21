@@ -420,3 +420,34 @@ fn the_click_is_built_only_in_confirm_clicked() {
     let callers: Vec<_> = src.match_indices("confirm_clicked(").collect();
     assert_eq!(callers.len(), 2, "the definition and the Confirm listener");
 }
+
+#[gpui::test]
+fn the_buttons_are_tab_stops_and_a_held_enter_never_confirms(cx: &mut TestAppContext) {
+    let (r, v) = mount(cx, Confirm::All);
+    propose(&r, "run the tests");
+    refresh(&r, v);
+    let id = r.chat.read_with(v, |c, _| c.cards[0].card.id.clone());
+    let h = r.chat.read_with(v, |c, _| c.focus[&id][0].clone());
+    // Tab reaches the Confirm button (the first tab stop of the card)
+    v.update(|w, cx| h.focus(w, cx));
+    v.run_until_parked();
+    // a fresh Enter inside the guard time does nothing
+    v.simulate_keystrokes("enter");
+    assert!(r.port.log.lock().unwrap().is_empty());
+    arm(&r, v);
+    // a held (repeating) Enter does nothing, even armed
+    let ev = gpui::KeyDownEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        is_held: true,
+        prefer_character_input: false,
+    };
+    v.simulate_event(ev);
+    assert!(r.port.log.lock().unwrap().is_empty());
+    // one fresh press, armed: sends once
+    v.simulate_keystrokes("enter");
+    v.run_until_parked();
+    assert_eq!(
+        *r.port.log.lock().unwrap(),
+        ["send:0123456789abcdef:run the tests"]
+    );
+}
