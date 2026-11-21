@@ -1325,7 +1325,7 @@ impl TuiView {
         if !pane.read(cx).is_focused(window) {
             return None;
         }
-        if self.ts.tab != super::ChatTab::Terminal {
+        if self.pane_tab() != super::ChatTab::Terminal {
             // the tab was left with the terminal still holding the keys: the prompt takes them back
             if let Some(lu) = &self.live {
                 lu.prompt.update(cx, |s, cx| s.focus(window, cx));

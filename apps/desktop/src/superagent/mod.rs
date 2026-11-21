@@ -223,6 +223,12 @@ impl SuperAgentView {
             return self.picker_key(ev, window, cx);
         }
         let bare = !(m.control || m.alt || m.platform || m.shift);
+        // before the Cmd/Ctrl chords: on Windows and Linux Ctrl is the secondary key, and Ctrl+Tab is not one of them
+        if m.control && !m.alt && !m.platform && key == "tab" {
+            self.frames.cycle(if m.shift { -1 } else { 1 });
+            self.changed(cx);
+            return true;
+        }
         if m.secondary(cx) && !m.alt {
             match key {
                 "t" => self.new_picker(window, cx),
@@ -230,11 +236,6 @@ impl SuperAgentView {
                 "b" => self.toggle_rail(window, cx),
                 _ => return false,
             }
-            return true;
-        }
-        if m.control && !m.alt && !m.platform && key == "tab" {
-            self.frames.cycle(if m.shift { -1 } else { 1 });
-            self.changed(cx);
             return true;
         }
         if m.alt && !m.control && !m.platform && !m.shift && matches!(key, "left" | "right") {
