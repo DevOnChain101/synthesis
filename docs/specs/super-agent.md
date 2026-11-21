@@ -23,10 +23,12 @@ Settings stays a popup over the TUI view (gear, Cmd/Ctrl+,), not a mode.
 
 **Current choice (owner, 2026-11-17, temporary, to be revisited): layout A = rail left | centre | right context column.** Variant B (section 2.2) stays documented as the alternative.
 
-### 2.0 Title bar (v7)
+### 2.0 Title bar (v7; amended by the v3 mock, owner decision 2026-11-21)
+
+- **Owner decision 2026-11-21 (amends everything below in this section; details in [super-agent-s1.md](super-agent-s1.md) section 5):** the owner's v3 mock `~/Vibe/synthesis-cli-ui/super-agent-v3/` (`index.html`, `DESIGN-NOTES.md`) is the visual source of truth for the Super Agent tab and ships into it. **Back and forward sit in the rail's top row beside the traffic lights; the open frames are TABS in the title row, starting at the rail's right edge; there is no breadcrumb; Settings is the title-bar gear** (the app's Settings view is kept). The layout diagram in 2.1 shows the earlier v7 placement and is superseded for the title bar. **Needs you is part of the home** (command centre: Needs you, Running, Finished, then the conversation), not a separate tab. Terminal and Browser are a right sidebar (section 6). The TUI view keeps its own palette and title bar; the Super Agent tokens come from `design/02-design-tokens`.
 
 - **Owner decision 2026-11-18 (supersedes the left-side placement):** in the Super Agent tab only (the TUI view gets none of these), the **collapse/expand-rail button sits right after the traffic lights**, and **back and forward chevrons sit at the far right edge**, greyed when there is no history; **no "Super Agent" text** in the bar. Back and forward walk through Super Agent frames only (the orchestrator chat and the session chats opened from the rail), like a browser. Details: [super-agent-s1.md](super-agent-s1.md) section 5.
-- **Breadcrumb** in the title bar: `Super Agent` in the chat; `Super Agent > Migrate auth > w3 token refresh` in a session.
+- (Superseded 2026-11-21: no breadcrumb.) **Breadcrumb** in the title bar: `Super Agent` in the chat; `Super Agent > Migrate auth > w3 token refresh` in a session.
 - **Right, next to the Settings gear: the `TUI | Super Agent` mode buttons**, exactly where they are in the TUI view today (so the two modes look the same from both). The **badge** (things waiting for the person, section 8) is on the Super Agent button.
 - The right column is collapsible with the rail button.
 
@@ -115,6 +117,7 @@ Clicking a session in the rail **replaces the orchestrator chat in the centre wi
 - A session that waits for the person shows a banner "waiting for you since 4 min" (own sessions: the dock is right there).
 - Back/forward return to the orchestrator chat; the composer draft of each frame is kept per frame.
 - **Owner decision 2026-11-18:** the session view also has **Terminal** and **Browser** tabs (the merged T2 and B2/B6 panes, hosted per session without a second engine or browser; their security rules carry over unchanged; outcome worker sessions get no Terminal tab) and later a read-only **Files** tab; the open tabs of a session show as stacked icon tiles. Plan and phases P0-P8: [super-agent-s1.md](super-agent-s1.md).
+- **Owner decision 2026-11-21 (amends the previous bullet):** Terminal and Browser are a **right sidebar** (segmented header `Details | Terminal | Browser`, one at a time, resizable 280-640, default 340, panes keep their own inner tabs, own sessions only; worker, outcome and home frames get Details only; WSL has no browser), not centre tabs; the stacked tiles (D7) are dropped from the mounted design. New session opens its chat inside Super Agent (an embedded `TuiView` chat in v1), cap 6 open session frames. Phases A1 to E: [super-agent-s1.md](super-agent-s1.md) section 6.
 
 ### 6.1 What is reused from the fork (layout only)
 

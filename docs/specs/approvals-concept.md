@@ -297,7 +297,7 @@ Anti-habituation:
 
 | Surface | What |
 |---|---|
-| Super Agent rail | badge with the count of T2+T3 open + T1 digest due; click opens the queue in the centre (a frame of the S1 frame stack) |
+| Super Agent rail | badge with the count of T2+T3 open + T1 digest due on the Super Agent item; **owner decision 2026-11-21: the queue is the Needs you section of the Super Agent home (command centre), not a separate frame, tab or rail item** |
 | Orchestrator chat | each T2/T3 is a decision card at its place in time (super-agent.md 5); a digest card for T1; chat text cannot answer (existing) |
 | TUI view | the existing title-bar badge only (super-agent.md 8); same count |
 | Notifications | existing notifier, ids and codes only |
@@ -438,12 +438,12 @@ Each phase is one PR, CI on 3 OSes. SR = security-reviewer. Sup = supervisor.
 | Phase | Scope | Files owned | Depends on | Fits | SR | Owner decision |
 |---|---|---|---|---|---|---|
 | **A0** | This spec; ADR-019 amendment (tiers = attention; T1 `assumption_review`; deferred asks); ADR-021 amendment (queue read; Q1 if yes) | `docs/**` | none | S1 wave 1, V0 | no | Q1-Q5 |
-| **A1** (first slice) | Queue view model + "blocked by" from existing data: decisions, `work_item_deps`, item states, session asks; sections, ordering, age, expiry shown; CLI `--queue`, `--export md` | `synthesis-view/src/outcomes.rs` (queue part), `apps/desktop/src/approvals.rs`, `synthesis-app/src/outcome_cmd.rs` | none | S1 wave 1 (render later mounted by P4) | no (read-only) | none |
+| **A1** (first slice) | Queue view model + "blocked by" from existing data: decisions, `work_item_deps`, item states, session asks; sections, ordering, age, expiry shown; CLI `--queue`, `--export md` | `synthesis-view/src/outcomes.rs` (queue part), `apps/desktop/src/approvals.rs`, `synthesis-app/src/outcome_cmd.rs` | none | S1 wave 1 (render later mounted by B2, the Needs you section of the home) | no (read-only) | none |
 | **A2** (first slice) | Classifier `synthesis-core/src/ask.rs` + corpus eval; store writes `tier`, `blocks`, `remind_at`, safe default into new briefs; reminders in `DecisionDriver`; `asks.list` read | `synthesis-core/src/ask.rs`, `synthesis-session/src/outcome.rs` (brief build), `synthesis-orchestrator/src/decision.rs`, `gateway.rs`, `proto.rs` (read variant) | A1 | S1 wave 2 (with P2b: both touch `outcome.rs`, P2b first) | yes | none |
 | **A3** (first slice) | Non-blocking T2 in attempts: refused call → "queued, continue"; batch at settle; per-attempt budget; lease order 6.2 | `synthesis-app/src/run.rs` (attempt profile), `synthesis-harness/src/exec.rs` (deferred result), `synthesis-orchestrator/src/{decision,sched}.rs` | A2 | S1 wave 2-3 | yes + Sup (changes PR-08 bypass behaviour) | none |
 | **A4** | T1: `assumption_review`, provisional checkpoint and flag, Keep/Change, `resolve_many`, `assumption_changed` → B9 replan, caveat in verdict | `synthesis-session/src/outcome.rs`, `synthesis-orchestrator/src/{decision,sched,planrun}.rs`, `verdict.rs` (one caveat line) | A3, **V1a** (caveats) | S1 wave 3, V wave 2 | yes + Sup | Q3 |
 | **A5** | T0: policy `synt.approvals`, confirmation MAC, `ask.auto_decided`, spot audit, weekly review, auto-tightening; conductor auto list folded in | `synthesis-core/src/ask.rs`, `synthesis-settings`, `synthesis-app/src/doctor.rs`, conductor policy module | A4, **S1 P3b** | S1 wave 4 | yes | Q2 |
-| **A6** | Super Agent UI: queue frame, digest card, one-tap Keep, Keep all, undo toast, snooze, highlight rules, accessibility; T2/T3 cards keep the #167 rules | `apps/desktop/src/superagent/queue/**` [N], `outcomes_view/{ask,render}.rs` | A1, A4, **S1 P4** | S1 wave 4 (after P4) | yes | Q1, Q4 |
+| **A6** | Super Agent UI (owner decision 2026-11-21: the queue is the Needs you section of the home, not a frame; the home ships without recommended one-tap, batch apply and Undo, which arrive here with A1/A4): queue section, digest card, one-tap Keep, Keep all, undo toast, snooze, highlight rules, accessibility; T2/T3 cards keep the #167 rules | `apps/desktop/src/superagent/queue/**` [N], `outcomes_view/{ask,render}.rs` | A1, A4, **S1 B2/B3** | S1 wave 4 (after B2) | yes | Q1, Q4 |
 | **A7** | Deferred asks in Super Agent own sessions (not TUI): `ApprovalDecision::Deferred`, input-hash one-shot allow on re-issue, host note at drain point | `synthesis-harness/src/{traits,exec,comm}.rs`, `synthesis-app/src/asks.rs` | A2, **S1 P5** | S1 wave 5 | yes + Sup | Q5 |
 | **ART** | `ap-*` red-team cases, `docs/SECURITY.md` residuals | `tests/redteam/cases.mjs`, `docs/SECURITY.md` | each phase | S1 P6, VRT | yes + Sup | none |
 
