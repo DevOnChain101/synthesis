@@ -206,9 +206,11 @@ pub struct TuiView {
 
 /// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
 /// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Embed {
     pub side: Option<ChatTab>,
+    /// The frame's folder (canonical): every start of this view, a recheck included, is a new session here.
+    pub folder: Option<std::path::PathBuf>,
 }
 
 /// A side column of the view.
