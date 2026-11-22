@@ -265,7 +265,11 @@ impl GoalForm {
                         ButtonKind::Primary
                     },
                     self.stops.send.is_focused(window),
-                    Some(Box::new(cx.listener(|v, _, _, cx| v.send(cx)))),
+                    Some(Box::new(cx.listener(|v, e: &gpui::ClickEvent, _, cx| {
+                        if !e.is_keyboard() {
+                            v.send(cx)
+                        }
+                    }))),
                 )
                 .track_focus(&self.stops.send),
             )

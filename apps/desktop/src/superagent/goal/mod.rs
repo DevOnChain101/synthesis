@@ -38,7 +38,8 @@ use crate::outcomes_view::model::Screen;
 
 /// What the shell does with the frame.
 pub enum GoalEvent {
-    /// Cancel, Esc, "Not now": close the frame. A draft the server already stored stays a draft on the home.
+    /// Cancel, Esc, "Not now": close the frame. Never sent while an approval is in flight (the frame waits for
+    /// the answer), but a stored draft stays and the shell must not assume it is unapproved: show the outcome.
     Close,
     /// The server applied the approval of `outcome`: open it and close the frame.
     Approved { outcome: String, note: String },
@@ -93,6 +94,7 @@ pub struct GoalForm {
     pub(crate) read_only_goal: bool,
     /// The engine runs on another machine: a local folder dialog would not name its folders.
     pub(crate) remote: bool,
+    env: Option<Env>,
     link: Option<Link>,
     _pump: Option<Task<()>>,
     /// Requests made while no link exists (the sample, the tests).
@@ -209,6 +211,7 @@ impl GoalForm {
             screen: Screen::Ready,
             read_only_goal: true,
             remote: false,
+            env: env.clone(),
             link: None,
             _pump: None,
             outbox: vec![],
@@ -346,6 +349,9 @@ impl GoalForm {
         if let Some(l) = &self.link {
             self.screen = Screen::Loading;
             l.send(Req::Retry);
+        } else if let Some(env) = self.env.clone() {
+            // the gate refused at the start (no link was made): check again
+            self.connect(env, cx);
         }
         cx.notify();
     }
@@ -530,6 +536,10 @@ impl GoalForm {
     }
 
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        // an approval in flight may still be applied: the frame stays until the server answers
+        if matches!(self.form.stage, Stage::Approving(_)) {
+            return;
+        }
         cx.emit(GoalEvent::Close);
     }
 
@@ -559,10 +569,10 @@ impl GoalForm {
             "escape" => self.close(cx),
             // inside the dialog Tab cycles its two buttons: the page behind is not reachable
             "tab" if self.dialog.is_some() => {
-                let to = if s.dlg_approve.is_focused(window) == m.shift {
-                    &s.dlg_approve
-                } else {
+                let to = if s.dlg_approve.is_focused(window) {
                     &s.dlg_cancel
+                } else {
+                    &s.dlg_approve
                 };
                 window.focus(to, cx);
             }

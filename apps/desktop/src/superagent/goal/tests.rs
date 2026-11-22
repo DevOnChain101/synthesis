@@ -458,3 +458,58 @@ fn send_is_off_until_a_goal_is_typed_and_while_sending() {
         Some("Connecting to the orchestrator...")
     );
 }
+
+#[gpui::test]
+fn space_on_the_focused_approve_button_never_approves_and_shift_tab_moves(cx: &mut TestAppContext) {
+    let (f, v, _) = open(cx, GoalKind::Writes);
+    review(&f, v);
+    f.update_in(v, |f, w, cx| f.open_dialog(w, cx));
+    f.update(v, |f, _| {
+        f.dialog.as_mut().unwrap().since -= Duration::from_millis(500)
+    });
+    key(v, &f, "tab", none(), false);
+    assert!(f.update_in(v, |f, w, _| f.stops.dlg_approve.is_focused(w)));
+    // a keyboard click (Space, Enter key-up) is not a path to approval
+    v.simulate_keystrokes("space");
+    v.simulate_event(gpui::KeyUpEvent {
+        keystroke: Keystroke {
+            modifiers: none(),
+            key: "space".into(),
+            key_char: None,
+        },
+    });
+    v.run_until_parked();
+    assert!(creates(&f, v).is_empty(), "{:?}", creates(&f, v));
+    // Shift+Tab leaves the button for the other one
+    let shift = Modifiers {
+        shift: true,
+        ..none()
+    };
+    key(v, &f, "tab", shift, false);
+    assert!(f.update_in(v, |f, w, _| f.stops.dlg_cancel.is_focused(w)));
+}
+
+#[gpui::test]
+fn esc_and_close_wait_while_an_approval_is_in_flight(cx: &mut TestAppContext) {
+    let (f, v, seen) = open(cx, GoalKind::Writes);
+    review(&f, v);
+    f.update_in(v, |f, w, cx| f.open_dialog(w, cx));
+    f.update(v, |f, _| {
+        f.dialog.as_mut().unwrap().since -= Duration::from_millis(500)
+    });
+    key(v, &f, "tab", none(), false);
+    key(v, &f, "enter", none(), false);
+    assert_eq!(creates(&f, v).len(), 1);
+    key(v, &f, "escape", none(), false);
+    key(v, &f, "escape", none(), false);
+    assert!(seen.borrow().is_empty(), "the frame waits for the answer");
+}
+
+#[gpui::test]
+fn the_dialog_of_a_read_only_goal_carries_the_folder_warning(cx: &mut TestAppContext) {
+    let (f, v, _) = open(cx, GoalKind::ReadOnly);
+    review(&f, v);
+    f.update_in(v, |f, w, cx| f.open_dialog(w, cx));
+    v.run_until_parked();
+    assert!(v.debug_bounds("sa-goal-dialog-note").is_some());
+}

@@ -8,6 +8,7 @@ use gpui::{
     AnyElement, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
     Styled as _, Window, div, px,
 };
+use synthesis_harness::sanitize_for_display;
 use synthesis_view::outcomes::CriteriaView;
 
 use super::model::approve_ok;
@@ -238,7 +239,11 @@ pub(super) fn page(f: &GoalForm, window: &Window, cx: &mut Context<GoalForm>) ->
                         if approving { "Approving..." } else { "Approve contract..." },
                         if r.approvable() && !approving { ButtonKind::Primary } else { ButtonKind::Disabled },
                         f.stops.review_approve.is_focused(window),
-                        Some(Box::new(cx.listener(|v, _, window, cx| v.open_dialog(window, cx)))),
+                        Some(Box::new(cx.listener(|v, e: &gpui::ClickEvent, window, cx| {
+                            if !e.is_keyboard() {
+                                v.open_dialog(window, cx)
+                            }
+                        }))),
                     )
                     .track_focus(&f.stops.review_approve),
                 )
@@ -287,14 +292,20 @@ pub(super) fn dialog(
             ),
         ),
         ("Kind", plain(kind_line(f.kind))),
-        ("Budget", plain(format!("${}", typed.budget.trim()))),
+        (
+            "Budget",
+            plain(sanitize_for_display(&format!("${}", typed.budget.trim()))),
+        ),
         (
             "Folder",
-            mono(typed.workspace.trim().to_string(), t::TEXT_STRONG),
+            mono(sanitize_for_display(typed.workspace.trim()), t::TEXT_STRONG),
         ),
     ];
     if f.kind == GoalKind::Writes {
-        rows.push(("Base commit", mono(f.head_text().0, t::TEXT_STRONG)));
+        rows.push((
+            "Base commit",
+            mono(sanitize_for_display(&f.head_text().0), t::TEXT_STRONG),
+        ));
     }
     rows.push(("Version", plain(r.version.to_string())));
     rows.push((
@@ -327,6 +338,12 @@ pub(super) fn dialog(
                     }),
                 )
                 .child(kv(rows))
+                .children((f.kind == GoalKind::ReadOnly).then(|| {
+                    text(t::T2, t::W_REGULAR, t::TEXT)
+                        .debug_selector(|| "sa-goal-dialog-note".to_string())
+                        .whitespace_normal()
+                        .child(super::view::READ_ONLY_FOLDER_NOTE)
+                }))
                 .child(
                     text(t::T2, t::W_REGULAR, t::TEXT)
                         .debug_selector(|| "sa-goal-dialog-why".to_string())
@@ -361,7 +378,13 @@ pub(super) fn dialog(
                                 "Approve contract",
                                 if armed && !approving { ButtonKind::Primary } else { ButtonKind::Disabled },
                                 f.stops.dlg_approve.is_focused(window),
-                                Some(Box::new(cx.listener(|v, _, window, cx| v.approve(false, false, window, cx)))),
+                                Some(Box::new(cx.listener(|v, e: &gpui::ClickEvent, window, cx| {
+                                    // Space or Enter key-up on the focused button is a keyboard click: `on_key`
+                                    // is the only keyboard path (it knows held keys and the Enter-only rule)
+                                    if !e.is_keyboard() {
+                                        v.approve(false, false, window, cx)
+                                    }
+                                }))),
                             )
                             .track_focus(&f.stops.dlg_approve),
                         ),
