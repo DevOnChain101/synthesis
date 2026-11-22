@@ -243,6 +243,10 @@ fn deliver(
     }
 }
 
+/// Background closes of closed embedded frames' engines, joined on quit.
+static CLOSING: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// The receiving end of a build: whatever engine it holds when it is dropped (the view was released, the task
 /// replaced by a newer launch, or the update found no entity) is closed, never leaked.
 struct EngineRx {
@@ -414,11 +418,16 @@ impl TuiView {
         if let Some(lu) = &mut self.live
             && let Some(e) = lu.live.engine.take()
         {
-            std::thread::spawn(move || {
+            let h = std::thread::spawn(move || {
                 if let Some(m) = engine::close_shared(e) {
                     eprintln!("synthesis-desktop: {m}");
                 }
             });
+            // quitting waits for it (`shutdown_engine`), so the engine's orderly stop is never skipped
+            if let Ok(mut v) = CLOSING.lock() {
+                v.retain(|h| !h.is_finished());
+                v.push(h);
+            }
         }
         if let Some(p) = self.term.take() {
             p.update(cx, |p, _| p.shutdown());
@@ -876,6 +885,13 @@ impl TuiView {
 
     /// Ends the session on quit (blocking: the process is going away).
     fn shutdown_engine(&mut self) {
+        let pending: Vec<_> = CLOSING
+            .lock()
+            .map(|mut v| v.drain(..).collect())
+            .unwrap_or_default();
+        for h in pending {
+            let _ = h.join();
+        }
         if let Some(lu) = &mut self.live
             && let Some(e) = lu.live.engine.take()
         {
@@ -1847,7 +1863,28 @@ impl TuiView {
     /// Every relaunch (resume, `/new`, `/close`, `/model`, Ctrl+N, the Running panel) goes through
     /// here: the engine restarts without the window going blank. `key` names the request, so the
     /// repeat within [`SWITCH_ARM_MS`] that cancels a running task is for the same one.
+    /// The folder a relaunch to `target` starts in. An embedded frame always uses its own (a view without an
+    /// engine has no cwd to fall back on, and the app's project is not its folder).
+    fn switch_project(&self, target: &Target) -> PathBuf {
+        let Some(lu) = &self.live else {
+            return PathBuf::new();
+        };
+        if let Some(f) = self.embed.as_ref().and_then(|e| e.folder.clone()) {
+            return f;
+        }
+        match target {
+            Target::New(p) => p.clone(),
+            Target::Close | Target::CloseWorkspace(_) => lu
+                .live
+                .engine
+                .as_ref()
+                .map_or_else(|| lu.cfg.project.clone(), |e| PathBuf::from(&e.cwd)),
+            _ => lu.cfg.project.clone(),
+        }
+    }
+
     fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
+        let project = self.switch_project(&target);
         let Some(lu) = &mut self.live else { return };
         // an embedded frame is one session in one folder (its tab is named by it): no other one is opened here
         if self.embed.is_some()
@@ -1901,15 +1938,6 @@ impl TuiView {
             return;
         }
         lu.live.switch_armed = None;
-        let project = match &target {
-            Target::New(p) => p.clone(),
-            Target::Close | Target::CloseWorkspace(_) => lu
-                .live
-                .engine
-                .as_ref()
-                .map_or_else(|| lu.cfg.project.clone(), |e| PathBuf::from(&e.cwd)),
-            _ => lu.cfg.project.clone(),
-        };
         let prior = lu.live.engine.take();
         lu.live.queue.clear();
         lu.live.dialogs.clear();
@@ -4208,6 +4236,26 @@ mod switch_tests {
             assert!(!starting && !task, "no relaunch");
             assert!(note);
         }
+        // the same session may restart (model, trust, close) but only in the frame folder, engine or not; the
+        // launch itself is the engine thread's, so the folder is read off the thread-bound state: `starting` set
+        w.0.update(w.1, |t, _| t.live.as_mut().unwrap().live.engine = None);
+        let frame =
+            w.0.read_with(w.1, |t, _| t.embed.as_ref().unwrap().folder.clone());
+        assert_eq!(frame.as_deref(), Some(Path::new("/frame/folder")));
+        for target in [
+            Target::Model("fake/fake-model".into()),
+            Target::Trust(None),
+            Target::Close,
+        ] {
+            let p = w.0.update(w.1, |t, _| t.switch_project(&target));
+            assert_eq!(p, PathBuf::from("/frame/folder"));
+        }
+        // a frame whose start never got a folder relaunches nowhere
+        w.0.update(w.1, |t, _| t.embed.as_mut().unwrap().folder = None);
+        w.0.update(w.1, |t, cx| {
+            t.switch(Target::Model("x/y".into()), "m".into(), cx)
+        });
+        assert!(!w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.starting));
     }
 
     #[test]
