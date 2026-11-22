@@ -252,6 +252,18 @@ fn open_live(
     (sa, v)
 }
 
+/// The conductor's START effect (it carries no approval): the command the port sends, run on the UI thread.
+fn start(
+    sa: &Entity<SuperAgentView>,
+    v: &mut VisualTestContext,
+    req: &synthesis_app::conductor::SessionStart,
+) -> Result<String, String> {
+    let (tx, mut rx) = futures::channel::oneshot::channel();
+    sa.update_in(v, |s, w, cx| s.run_cmd(Cmd::Start(req.clone(), tx), w, cx));
+    v.run_until_parked();
+    rx.try_recv().unwrap().unwrap()
+}
+
 fn ready<T>(f: impl std::future::Future<Output = T>) -> T {
     let mut f = std::pin::pin!(f);
     let mut c = std::task::Context::from_waker(futures::task::noop_waker_ref());
@@ -267,7 +279,6 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
 ) {
     use super::chat::glue::WindowPort as _;
     use synthesis_app::conductor::SessionStart;
-    use synthesis_harness::PersonApproved;
     let (f, cfg) = super::session::host::tests::fx(2);
     let (sa, v) = open_live(cx, cfg);
     let port = sa.read_with(v, |s, _| s.port.clone());
@@ -279,9 +290,8 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
         model: None,
         title: None,
     };
-    let fut = port.start(&req, PersonApproved::for_text("hello"));
-    v.run_until_parked();
-    assert_eq!(ready(fut).unwrap(), "s1");
+    let r = start(&sa, v, &req);
+    assert_eq!(r.unwrap(), "s1");
     assert_eq!(
         active(v, &sa),
         Frame::Session("s1".into()),
@@ -293,17 +303,13 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
         (1, "s1", true)
     );
     assert!(port.report("s1").is_some() && port.report("s9").is_none());
-    // a line to an unknown handle is refused; Stop reaches the open one
-    let fut = port.send("s9", "hi", PersonApproved::for_text("hi"));
+    // an unknown handle is refused; Stop reaches the open one
+    let fut = port.interrupt("s9");
     v.run_until_parked();
     assert_eq!(ready(fut).unwrap_err(), "no such session");
     let fut = port.interrupt("s1");
     v.run_until_parked();
     assert!(ready(fut).is_ok());
-    // a line to a session with no running task is refused by the engine, never typed as the person's own
-    let fut = port.send("s1", "hi", PersonApproved::for_text("hi"));
-    v.run_until_parked();
-    assert!(ready(fut).is_err());
     // close: the tab goes, the row stays as ended
     let fut = port.close("s1");
     v.run_until_parked();
@@ -312,10 +318,9 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     let rows = port.sessions();
     assert_eq!((rows[0].live, rows[0].state.as_str()), (false, "ended"));
     // the same folder again is a NEW session with a NEW handle; the old handle stays dead
-    let fut = port.start(&req, PersonApproved::for_text("hello"));
-    v.run_until_parked();
-    assert_eq!(ready(fut).unwrap(), "s2");
-    let fut = port.send("s1", "stale", PersonApproved::for_text("stale"));
+    let r = start(&sa, v, &req);
+    assert_eq!(r.unwrap(), "s2");
+    let fut = port.interrupt("s1");
     v.run_until_parked();
     assert!(
         ready(fut).is_err(),
@@ -325,9 +330,8 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     v.run_until_parked();
     assert!(ready(fut).is_err());
     // a start whose folder already has an open session is refused: its line is never typed into that session
-    let fut = port.start(&req, PersonApproved::for_text("hello"));
-    v.run_until_parked();
-    assert!(ready(fut).unwrap_err().contains("already open"));
+    let r = start(&sa, v, &req);
+    assert!(r.unwrap_err().contains("already open"));
     assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 1);
     let fut = port.close("s2");
     v.run_until_parked();
@@ -337,17 +341,15 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
         model: Some("x/y".into()),
         ..req.clone()
     };
-    let fut = port.start(&with_model, PersonApproved::for_text("hello"));
-    v.run_until_parked();
-    assert!(ready(fut).unwrap_err().contains("model"));
+    let r = start(&sa, v, &with_model);
+    assert!(r.unwrap_err().contains("model"));
     // a bad folder says why
     let bad = SessionStart {
         folder: Some(f.base.join("missing").to_string_lossy().into_owned()),
         ..req
     };
-    let fut = port.start(&bad, PersonApproved::for_text("hello"));
-    v.run_until_parked();
-    assert!(ready(fut).unwrap_err().starts_with("no such folder"));
+    let r = start(&sa, v, &bad);
+    assert!(r.unwrap_err().starts_with("no such folder"));
     assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 0);
     v.update(|_, _| ());
     v.run_until_parked();
