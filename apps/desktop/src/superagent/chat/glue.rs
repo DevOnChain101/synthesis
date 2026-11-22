@@ -52,7 +52,7 @@ pub trait WindowPort: Send + Sync {
     fn close<'a>(&'a self, sid: &'a str) -> BoxFuture<'a, Result<(), String>>;
     /// Opens the New goal form with the draft filled in. Nothing is created: the person finishes the contract
     /// there and approves it, as for any goal. Returns a label for the card.
-    fn open_goal_form(&self, goal: &GoalDraft) -> Result<String, String>;
+    fn open_goal_form<'a>(&'a self, goal: &'a GoalDraft) -> BoxFuture<'a, Result<String, String>>;
 }
 
 /// No sessions and no form: every effect on them is refused, so a card says so instead of pretending.
@@ -88,8 +88,8 @@ impl WindowPort for NoPort {
     fn close<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Err(NOT_WIRED.into()) })
     }
-    fn open_goal_form(&self, _: &GoalDraft) -> Result<String, String> {
-        Err("the goal form is not wired here yet".into())
+    fn open_goal_form<'a>(&'a self, _: &'a GoalDraft) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Err("the goal form is not wired here yet".into()) })
     }
 }
 
@@ -251,8 +251,7 @@ impl Effects for DesktopEffects {
         goal: &'a GoalDraft,
         _: &'a Via,
     ) -> BoxFuture<'a, Result<String, String>> {
-        let r = self.port.open_goal_form(goal);
-        Box::pin(async move { r })
+        self.port.open_goal_form(goal)
     }
     fn pause_outcome<'a>(&'a self, id: &'a str, via: &'a Via) -> BoxFuture<'a, Result<(), String>> {
         let (id, key) = (id.to_string(), format!("pause-{}", via.proposal_id));

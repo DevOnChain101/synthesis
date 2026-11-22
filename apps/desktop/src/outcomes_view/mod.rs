@@ -13,7 +13,8 @@
 
 use futures::StreamExt as _;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, ScrollHandle, Task, Window, point, px,
+    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, ScrollHandle, Styled as _, Task, Window, div, point, px,
 };
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use synthesis_config::Env;
@@ -401,6 +402,53 @@ impl OutcomesView {
             }
             Err(e) => self.state.guide_failed(e),
         }
+    }
+
+    /// The Super Agent's New goal frame: opens the contract form (the old one, drawn as a modal by `modals`, until
+    /// the frame's own form lands), with the goal and folder a conductor card proposed filled in. Nothing is created:
+    /// the person finishes the contract and approves it.
+    pub(crate) fn open_goal_form(
+        &mut self,
+        draft: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let eff = self.state.open_new();
+        if let (Some((goal, ws)), Some(f)) = (draft, self.state.form.as_mut()) {
+            f.initial.goal = goal;
+            if !ws.trim().is_empty() {
+                f.initial.workspace = ws;
+            }
+        }
+        self.run(eff, cx);
+        cx.notify();
+    }
+
+    /// The open form and the enable dialog as modals over the Super Agent view; their keys come back here.
+    pub(crate) fn modals(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        self.sync_form_ui(window, cx);
+        let (form, guide) = (self.form_overlay(window, cx), self.guide_overlay(cx));
+        (form.is_some() || guide.is_some())
+            .then(|| {
+                div()
+                    .id("out-modals")
+                    .absolute()
+                    .inset_0()
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
+                        if this.on_key(ev, w, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .children(form)
+                    .children(guide)
+                    .into_any_element()
+            })
+            .into_iter()
+            .collect()
     }
 
     /// "New session": with no folder named, a scratch folder under the synt home. For a remote engine (WSL) a local

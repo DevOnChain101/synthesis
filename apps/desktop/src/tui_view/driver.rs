@@ -465,6 +465,93 @@ impl TuiView {
         )
     }
 
+    /// A question waits for the person (tests of the owner's counts).
+    #[cfg(test)]
+    pub(crate) fn push_test_question(&mut self, cx: &mut Context<Self>) {
+        if let Some(lu) = &mut self.live {
+            lu.live.dialogs.push(crate::live::Dialog {
+                kind: crate::live::DialogKind::Plan {
+                    id: "p".into(),
+                    plan: String::new(),
+                },
+                options: vec![],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            });
+        }
+        cx.notify();
+    }
+
+    /// What the conductor may read of this embedded session (conductor.md 3.6): its id, the last reply, the last
+    /// tool names, and the kind and tool of a pending ask (never its input).
+    pub(crate) fn embed_read(&self) -> (String, synthesis_app::conductor::SessionReport) {
+        let Some(lu) = &self.live else {
+            return Default::default();
+        };
+        let items = &lu.live.convo().items;
+        let last_reply = items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                Item::Assistant { text, .. } => Some(text.chars().take(2000).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let last_tools = items
+            .iter()
+            .rev()
+            .filter_map(|i| match i {
+                Item::Tool { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .take(5)
+            .collect();
+        let pending_ask = lu.live.dialogs.iter().find_map(|d| match &d.kind {
+            crate::live::DialogKind::Approval(a) => Some((a.dialog.to_string(), a.tool.clone())),
+            crate::live::DialogKind::Question { .. } => {
+                Some(("question".to_string(), String::new()))
+            }
+            crate::live::DialogKind::Plan { .. } => Some(("plan".to_string(), String::new())),
+            _ => None,
+        });
+        let report = synthesis_app::conductor::SessionReport {
+            last_reply,
+            last_tools,
+            pending_ask,
+        };
+        (lu.live.sid.clone(), report)
+    }
+
+    /// The conductor's approved line goes to this session's running task (fenced, never the person's own line).
+    pub(crate) fn embed_send_via_conductor(
+        &self,
+        text: String,
+        approval: synthesis_harness::PersonApproved,
+    ) -> Result<(), String> {
+        let e = self.live.as_ref().and_then(|l| l.live.engine.clone());
+        let e = e.ok_or("the session has no engine yet")?;
+        e.send_via_conductor(text, Some(approval))
+            .map_err(str::to_string)
+    }
+
+    /// Stops the running task of this embedded session.
+    pub(crate) fn embed_interrupt(&self) {
+        if let Some(e) = self.live.as_ref().and_then(|l| l.live.engine.clone()) {
+            e.cancel();
+        }
+    }
+
+    /// The first message of a session the person approved the conductor to start: it waits for the engine.
+    pub(crate) fn embed_first_message(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hold_for_engine(text, window, cx);
+    }
+
     fn start_at(&mut self, folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| s.focus(window, cx));
