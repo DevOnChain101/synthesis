@@ -35,6 +35,13 @@ pub struct SessionHost {
     _activation: Subscription,
 }
 
+/// First line of `s`, sanitized first and then cut to 60 characters (never the reverse: a cut escape sequence
+/// would no longer be recognised).
+fn tab_title(s: &str) -> String {
+    let clean = synthesis_harness::sanitize_for_display(s.lines().next().unwrap_or(""));
+    clean.chars().take(60).collect()
+}
+
 impl SessionHost {
     /// `cfg` `None` is the sample: no session is ever hosted.
     pub fn new(cfg: Option<LiveCfg>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -64,32 +71,37 @@ impl SessionHost {
         self.views.is_empty()
     }
 
-    /// Starts the session of frame `id` in `folder` (once: an open frame is kept). False: nothing is hosted
-    /// (the sample, or the cap of open sessions), the owner keeps its placeholder.
+    /// Starts the session of frame `id` in `folder` (once: an open frame is kept). `Err(why)`: nothing is hosted
+    /// (the sample, the cap of open sessions, a refused folder), the owner keeps its placeholder and says why.
     pub fn open(
         &mut self,
         id: &str,
         folder: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Result<(), String> {
         if self.view(id).is_some() {
-            return true;
+            return Ok(());
         }
         let Some(cfg) = self.cfg.clone() else {
-            return false;
+            return Err("sessions need a live app".into());
         };
         if self.views.len() >= MAX_SESSIONS {
-            return false;
+            return Err(crate::superagent::CAP_NOTE.into());
         }
         let view = cx.new(|cx| TuiView::live(window, cx, cfg, Default::default(), 0.));
-        view.update(cx, |t, cx| {
+        let r = view.update(cx, |t, cx| {
             // keys only after `sync` says this frame is on screen
             (t.active, t.shown) = (false, false);
             t.start_in(folder.to_path_buf(), window, cx)
         });
+        if r.is_err() {
+            // a refused folder is no tab: it counts nowhere and nothing was started
+            view.update(cx, |t, cx| t.close_embedded(cx));
+            return r;
+        }
         self.views.push((id.to_string(), view));
-        true
+        Ok(())
     }
 
     /// The frames or the visible view changed: sessions whose tab is gone end (engine, shells, browser), the
@@ -133,7 +145,11 @@ impl SessionHost {
     pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.views.iter().position(|(v, _)| v == id) {
             let (_, view) = self.views.remove(i);
-            view.update(cx, |t, cx| t.close_embedded(cx));
+            // the closed view takes no key while it waits to be released
+            view.update(cx, |t, cx| {
+                (t.shown, t.active) = (false, false);
+                t.close_embedded(cx)
+            });
             if self.front.as_deref() == Some(id) {
                 self.front = None;
             }
@@ -162,10 +178,7 @@ impl SessionHost {
     /// Title and state of the tab: the first thing the person asked, else the folder's name.
     pub fn info(&self, id: &str, cx: &App) -> Option<Info> {
         let (first, busy, needs) = self.view(id)?.read(cx).embed_info();
-        let clean = |s: &str| {
-            let line = s.lines().next().unwrap_or("");
-            synthesis_harness::sanitize_for_display(&line.chars().take(60).collect::<String>())
-        };
+        let clean = tab_title;
         let title = first.map(|f| clean(&f)).filter(|t| !t.trim().is_empty());
         let folder = || {
             std::path::Path::new(id)
@@ -277,6 +290,14 @@ mod tests {
     }
 
     fn open(h: &Entity<SessionHost>, v: &mut VisualTestContext, p: &Path) -> bool {
+        try_open(h, v, p).is_ok()
+    }
+
+    fn try_open(
+        h: &Entity<SessionHost>,
+        v: &mut VisualTestContext,
+        p: &Path,
+    ) -> Result<(), String> {
         let id = p.to_string_lossy().into_owned();
         h.update_in(v, |h, w, cx| h.open(&id, p, w, cx))
     }
@@ -425,13 +446,48 @@ mod tests {
     ) {
         let (h, v) = host(cx, None);
         assert!(!open(&h, v, Path::new("/")));
-        let (f, cfg) = fx(1);
+        let (f, cfg) = fx(7);
         let (h, v) = host(cx, Some(cfg));
-        assert!(open(&h, v, &f.base.join("missing")));
-        let id = f.base.join("missing").to_string_lossy().into_owned();
-        assert_eq!(h.read_with(v, |h, cx| h.info(&id, cx)).unwrap().needs, 0);
-        h.update(v, |h, cx| h.close(&id, cx));
+        // a refused folder is no tab: it is not hosted and does not count against the cap
+        let why = try_open(&h, v, &f.base.join("missing")).unwrap_err();
+        assert!(why.starts_with("no such folder"), "{why}");
         assert_eq!(h.read_with(v, |h, _| h.len()), 0);
+        for i in 0..MAX_SESSIONS {
+            assert!(open(&h, v, &f.base.join(format!("f{i}"))));
+        }
+        h.update(v, |h, cx| h.sync(&Frames::default(), true, cx));
+        v.run_until_parked();
+        wait_free(&f.home);
+    }
+
+    /// A closed view keeps no key intercept alive while it waits to be released.
+    #[gpui::test]
+    fn a_closed_session_takes_no_key_even_while_the_entity_lives(cx: &mut TestAppContext) {
+        let (f, cfg) = fx(1);
+        let a = f.base.join("f0");
+        let (h, v) = host(cx, Some(cfg));
+        assert!(open(&h, v, &a));
+        h.update(v, |h, _| h.window_active = true);
+        h.update(v, |h, cx| h.sync(&frames(&[], Some(&a)), true, cx));
+        let kept = h.read_with(v, |h, _| h.views[0].1.clone());
+        assert_eq!(kept.read_with(v, |t, _| (t.shown, t.active)), (true, true));
+        let id = a.to_string_lossy().into_owned();
+        h.update(v, |h, cx| h.close(&id, cx));
+        assert_eq!(
+            kept.read_with(v, |t, _| (t.shown, t.active)),
+            (false, false)
+        );
+        drop(kept);
+        v.update(|_, _| ()); // the release is processed with the effects
+        v.run_until_parked();
+        wait_free(&f.home);
+    }
+
+    #[test]
+    fn a_title_is_sanitized_before_it_is_cut() {
+        assert_eq!(tab_title("fix the bug\nsecond line"), "fix the bug");
+        let t = tab_title(&format!("{}\u{1b}[31mred", "a".repeat(58)));
+        assert!(t.chars().count() <= 60 && !t.contains('\u{1b}'), "{t:?}");
     }
 
     /// Closing a tab ends the chat but never deletes the folder it ran in (a scratch folder is the person's).
