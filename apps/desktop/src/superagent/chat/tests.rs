@@ -496,5 +496,11 @@ fn start_checks_the_gate_again_and_refuses_when_super_agent_is_off() {
     let e = glue::start(&env, &h, Arc::new(glue::NoPort))
         .err()
         .expect("refused");
-    assert!(e.contains("off"), "{e}");
+    // the refusal is whichever the gate gives on this OS (native Windows: unavailable, elsewhere: off)
+    let want = match model::gate(&env) {
+        Gate::Off => "Super Agent is off".to_string(),
+        Gate::Unavailable(w) => w,
+        Gate::Ready => panic!("the gate must refuse in an empty home"),
+    };
+    assert_eq!(e, want);
 }
