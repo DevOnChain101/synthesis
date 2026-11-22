@@ -609,6 +609,7 @@ impl OutcomesView {
             budget: line(&ui.budget),
             scope: area(&ui.scope),
             workspace: line(&ui.workspace),
+            attempts: String::new(),
         }
     }
 

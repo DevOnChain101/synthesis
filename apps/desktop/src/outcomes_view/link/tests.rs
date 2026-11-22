@@ -975,3 +975,35 @@ fn a_worker_that_ended_makes_send_report_it() {
     drop(rx);
     assert!(!l.try_send(Req::Enable(1)));
 }
+
+#[test]
+fn a_read_only_create_reads_no_head_and_sends_an_empty_base_commit() {
+    let f = fake();
+    let ro = synthesis_core::outcome::Contract::read_only(
+        "Review the auth module".into(),
+        &[],
+        synthesis_core::outcome::Budgets::new(2.0),
+    );
+    let (tx, rx) = channel();
+    tx.send(Req::Submit(Submit::Create {
+        workspace: "/work/notes".into(),
+        base_commit: String::new(),
+        contract: Box::new(ro),
+        key: "create-ro".into(),
+    }))
+    .unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    // the folder is not a git repository: reading HEAD would fail, and must not be asked
+    let no_git = |_: &str| -> Result<String, String> { Err("not a git repository".into()) };
+    assert_eq!(
+        serve(&mut client(&f), &rx, &out, Duration::ZERO, &no_git),
+        Ok(())
+    );
+    drop(out);
+    let msgs: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
+    let drafts = f.drafts.borrow();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].1["base_commit"].as_str(), Some(""));
+    assert!(matches!(forms(&msgs)[..], [FormMsg::Review(_)]));
+}

@@ -19,6 +19,7 @@ fn text() -> FormText {
         budget: "5".into(),
         scope: "auth/**\ntests/**".into(),
         workspace: ws("app"),
+        attempts: String::new(),
     }
 }
 
@@ -299,4 +300,95 @@ fn the_servers_diff_is_shown_as_sent_and_a_reply_for_another_version_is_refused(
     // the server's own flag must agree with its list
     let v = json!({"version": 2, "hash": "h", "diff": {"changes": [], "widens": ["x"], "weakens": []}, "widens_scope": false});
     assert!(DiffView::from_json(&v, 2, "h").is_err());
+}
+
+fn ro_text() -> FormText {
+    FormText {
+        goal: "Which modules still use the old logger?".into(),
+        criteria: "Names every module\n\nGives a file and line for each\n".into(),
+        budget: "2".into(),
+        workspace: ws("notes"),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_read_only_text_becomes_a_read_only_contract_the_core_accepts() {
+    let c = build_read_only(&ro_text()).unwrap();
+    assert_eq!(c.kind, synthesis_core::outcome::ContractKind::ReadOnly);
+    // the implicit `report` criterion, then one manual criterion per rubric line; nothing writes or runs
+    let ids: Vec<_> = c.criteria.iter().map(|k| k.id.as_str()).collect();
+    assert_eq!(ids, ["report", "r1", "r2"]);
+    assert!(c.criteria.iter().all(|k| k.manual && k.mandatory));
+    assert!(c.checks.is_empty() && c.envelope.allowed_paths.is_empty());
+    assert_eq!(c.envelope.budgets.max_cost_usd, 2.0);
+    assert_eq!(c.envelope.budgets.max_attempts_per_work_item, 3);
+    // the rubric is optional
+    let mut t = ro_text();
+    t.criteria.clear();
+    t.attempts = "5".into();
+    let c = build_read_only(&t).unwrap();
+    assert_eq!(c.criteria.len(), 1);
+    assert_eq!(c.envelope.budgets.max_attempts_per_work_item, 5);
+}
+
+#[test]
+fn a_read_only_goal_needs_a_goal_a_budget_and_attempts_in_range_with_a_line_each() {
+    let errs = build_read_only(&FormText::default()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.starts_with("Goal")) && errs.iter().any(|e| e.starts_with("Budget"))
+    );
+    for bad in ["0", "11", "two", "-1"] {
+        let mut t = ro_text();
+        t.attempts = bad.into();
+        let errs = build_read_only(&t).unwrap_err();
+        assert!(errs[0].starts_with("Attempts"), "{bad}: {errs:?}");
+    }
+    let mut t = ro_text();
+    t.budget = "0".into();
+    assert!(
+        build_read_only(&t).is_err(),
+        "the core refuses a zero budget"
+    );
+}
+
+#[test]
+fn a_read_only_form_needs_no_commit_and_sends_an_empty_base() {
+    let mut f = Form::new_read_only(&ws("notes"));
+    // no HEAD is ever asked for
+    assert_eq!(f.needs_head(&ro_text()), None);
+    // an absolute folder is the only folder rule
+    let mut t = ro_text();
+    t.workspace = "notes".into();
+    assert_eq!(f.submit(&t), None);
+    assert!(
+        f.errors.iter().any(|e| e.starts_with("Folder")),
+        "{:?}",
+        f.errors
+    );
+    let Some(Submit::Create {
+        workspace,
+        base_commit,
+        contract,
+        key,
+    }) = f.submit(&ro_text())
+    else {
+        panic!("{:?}", f.errors)
+    };
+    assert_eq!((workspace, base_commit), (ws("notes"), String::new()));
+    assert_eq!(
+        contract.kind,
+        synthesis_core::outcome::ContractKind::ReadOnly
+    );
+    assert!(key.starts_with("create-"));
+    // sent again unchanged after a lost reply: the same key
+    f.failed("lost".into(), false);
+    let Some(Submit::Create { key: again, .. }) = f.submit(&ro_text()) else {
+        panic!()
+    };
+    assert_eq!(again, key);
+    // approval is the same separate act, on the server's version and hash
+    assert_eq!(f.approve(), None);
+    f.reviewing(sample::review(false));
+    assert!(f.approve().is_some());
 }
