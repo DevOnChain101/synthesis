@@ -10,6 +10,9 @@ use gpui::{
     Styled as _, Subscription, Window, div,
 };
 
+use synthesis_app::conductor::SessionReport;
+use synthesis_harness::PersonApproved;
+
 use crate::superagent::frames::{Frame, Frames, MAX_SESSIONS};
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{ChatTab, TuiView};
@@ -100,6 +103,8 @@ impl SessionHost {
             view.update(cx, |t, cx| t.close_embedded(cx));
             return r;
         }
+        // the owner's tab, rail and conductor snapshot follow the chat
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
         self.views.push((id.to_string(), view));
         Ok(())
     }
@@ -200,6 +205,55 @@ impl SessionHost {
             .sum()
     }
 
+    /// The hosted views (tests of the owner).
+    #[cfg(test)]
+    pub(crate) fn views(&self) -> Vec<Entity<TuiView>> {
+        self.views.iter().map(|(_, v)| v.clone()).collect()
+    }
+
+    /// The ids of the hosted sessions, oldest first.
+    pub fn ids(&self) -> Vec<String> {
+        self.views.iter().map(|(i, _)| i.clone()).collect()
+    }
+
+    /// What the conductor may read of session `id`: its engine's session id and the report.
+    pub fn read(&self, id: &str, cx: &App) -> Option<(String, SessionReport)> {
+        Some(self.view(id)?.read(cx).embed_read())
+    }
+
+    /// The conductor's approved line to the running task of session `id`.
+    pub fn send(
+        &self,
+        id: &str,
+        text: String,
+        approval: PersonApproved,
+        cx: &App,
+    ) -> Result<(), String> {
+        let v = self.view(id).ok_or("that session is closed")?;
+        v.read(cx).embed_send_via_conductor(text, approval)
+    }
+
+    pub fn interrupt(&self, id: &str, cx: &App) -> Result<(), String> {
+        self.view(id)
+            .ok_or("that session is closed")?
+            .read(cx)
+            .embed_interrupt();
+        Ok(())
+    }
+
+    /// The first message of a session the conductor started (the person approved it): sent once the engine is up.
+    pub fn first_message(
+        &mut self,
+        id: &str,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(v) = self.view(id).cloned() {
+            v.update(cx, |t, cx| t.embed_first_message(text, window, cx));
+        }
+    }
+
     /// Which pane of session `id` the sidebar shows (`None`: none).
     pub fn set_side(&mut self, id: &str, side: Option<ChatTab>, cx: &mut Context<Self>) {
         if let Some(v) = self.view(id) {
@@ -215,7 +269,7 @@ impl SessionHost {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::engine::Args;
     use clap::Parser as _;
@@ -233,14 +287,14 @@ mod tests {
         }
     }
 
-    struct Fx {
+    pub(crate) struct Fx {
         _t: tempfile::TempDir,
-        home: PathBuf,
-        base: PathBuf,
+        pub(crate) home: PathBuf,
+        pub(crate) base: PathBuf,
     }
 
     /// A scripted-model config on a temp home; `n` folders `f0..` to start sessions in.
-    fn fx(n: usize) -> (Fx, LiveCfg) {
+    pub(crate) fn fx(n: usize) -> (Fx, LiveCfg) {
         let t = tempfile::tempdir().unwrap();
         let base = synthesis_core::canonicalize(t.path()).unwrap();
         let home = base.join("home");
@@ -388,7 +442,7 @@ mod tests {
         wait_free(&f.home);
     }
 
-    fn wait_free(home: &Path) {
+    pub(crate) fn wait_free(home: &Path) {
         for _ in 0..600 {
             if locks_all_free(home) {
                 return;
