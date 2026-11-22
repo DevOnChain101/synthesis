@@ -36,6 +36,7 @@ use crate::ui::{TITLEBAR_H, Tip, View};
 use crate::widgets::chrome::icon;
 use chat::{ConductorChat, OpenEnableGuide};
 use frames::{Frame, Frames, GoalKind};
+use goal::{GoalEvent, GoalForm};
 use home::{HomeEvent, HomeView};
 use port::{Cmd, HostPort};
 use session::host::SessionHost;
@@ -92,9 +93,10 @@ pub struct SuperAgentView {
     synt_home: Option<PathBuf>,
     /// The enable dialog was open at the last look: its closing is when the setting may have changed.
     had_guide: bool,
-    /// The New goal frame opened the contract form (its closing closes the frame).
-    goal_form_opened: bool,
-    goal_prefill: Option<(String, String)>,
+    /// The live app's environment and folder (`None`: the sample): what a new goal form starts with.
+    conductor: Option<(synthesis_config::Env, PathBuf)>,
+    /// One form per open `Frame::NewGoal`; dropping it (with its frame) ends its link.
+    goals: Vec<(GoalKind, Entity<GoalForm>, Subscription)>,
     _subs: Vec<Subscription>,
 }
 
@@ -126,7 +128,7 @@ impl SuperAgentView {
             .as_ref()
             .and_then(|(env, _)| synthesis_app::homes(env).ok())
             .map(|h| h.synthesis);
-        let chat = conductor.map(|(env, ws)| {
+        let chat = conductor.clone().map(|(env, ws)| {
             let chat = cx.new(|cx| ConductorChat::new(env, ws, Some(port.clone()), window, cx));
             home.update(cx, |h, cx| {
                 h.set_conversation(Some(chat.clone().into()), cx)
@@ -161,8 +163,8 @@ impl SuperAgentView {
             next_session: 1,
             synt_home,
             had_guide: false,
-            goal_form_opened: false,
-            goal_prefill: None,
+            conductor,
+            goals: Vec::new(),
             _subs: subs,
             outcomes,
             frames: Frames::default(),
@@ -219,17 +221,6 @@ impl SuperAgentView {
         {
             c.update(cx, |c, cx| c.recheck(cx));
         }
-        // the New goal frame lives while its form is open; the form's end ends it
-        let o = self.outcomes.read(cx);
-        if matches!(self.frames.active(), Frame::NewGoal(GoalKind::Writes))
-            && o.state.form.is_none()
-            && self.goal_form_opened
-        {
-            self.goal_form_opened = false;
-            let i = self.frames.active_index();
-            self.close_tab(i, cx);
-            self.refocus = true;
-        }
         cx.notify();
     }
 
@@ -257,7 +248,9 @@ impl SuperAgentView {
         self.tab_scroll.scroll_to_item(self.frames.active_index());
         self.sync_host(cx);
         self.refresh_port(cx);
-        self.start_goal_form(cx);
+        let open = self.frames.tabs().to_vec();
+        self.goals
+            .retain(|(k, ..)| open.contains(&Frame::NewGoal(*k)));
         cx.notify();
     }
 
@@ -274,7 +267,22 @@ impl SuperAgentView {
         self.changed(cx);
     }
 
+    /// A goal form with an approval in flight stays: the server may still apply it (then the outcome opens).
     pub(crate) fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(Frame::NewGoal(k)) = self.frames.tabs().get(i)
+            && self
+                .goals
+                .iter()
+                .any(|(g, f, _)| g == k && f.read(cx).approving())
+        {
+            self.notice =
+                Some("An approval is being sent. The form stays until the server answers.".into());
+            return cx.notify();
+        }
+        self.drop_tab(i, cx);
+    }
+
+    fn drop_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         self.frames.close(i);
         self.changed(cx);
     }
@@ -461,7 +469,7 @@ impl SuperAgentView {
                 let _ = reply.send(r);
             }
             Cmd::Goal(draft, reply) => {
-                let _ = reply.send(self.open_goal_form(Some(&draft), cx));
+                let _ = reply.send(self.open_goal_form(&draft, window, cx));
             }
         }
     }
@@ -493,38 +501,70 @@ impl SuperAgentView {
         Ok(id)
     }
 
-    /// The New goal frame: the contract form (the old one, as a modal) opens. `draft`: what a conductor card
-    /// proposed, filled in; the person still finishes the contract and approves it. A read-only goal has no form yet.
+    /// The form of `kind` (made on first use, with the live environment or as the sample); `start` is the folder
+    /// of a writes form made for a conductor card.
+    fn goal_form(
+        &mut self,
+        kind: GoalKind,
+        start: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<GoalForm> {
+        if let Some((_, f, _)) = self.goals.iter().find(|(k, ..)| *k == kind) {
+            return f.clone();
+        }
+        let (env, ws) = match &self.conductor {
+            Some((e, w)) => (Some(e.clone()), w.to_string_lossy().into_owned()),
+            None => (None, String::new()),
+        };
+        let ws = start.map_or(ws, str::to_string);
+        let form = cx.new(|cx| GoalForm::new(kind, env, &ws, window, cx));
+        let sub = cx.subscribe(&form, move |v, _, e: &GoalEvent, cx| {
+            let at = v
+                .frames
+                .tabs()
+                .iter()
+                .position(|f| *f == Frame::NewGoal(kind));
+            match (e, at) {
+                (GoalEvent::Close, Some(i)) => v.close_tab(i, cx),
+                (GoalEvent::Approved { outcome, .. }, at) => {
+                    if let Some(i) = at {
+                        v.drop_tab(i, cx);
+                    }
+                    v.open(Frame::Outcome(outcome.clone()), cx);
+                }
+                _ => {}
+            }
+        });
+        self.goals.push((kind, form.clone(), sub));
+        form
+    }
+
+    /// A conductor goal card: the New goal frame opens (or comes forward) and its text is filled in. The person
+    /// still finishes the contract, sends it and approves the stored version; nothing is approved here.
     fn open_goal_form(
         &mut self,
-        draft: Option<&synthesis_app::conductor::GoalDraft>,
+        draft: &synthesis_app::conductor::GoalDraft,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        let kind = match draft.map(|d| d.kind.as_str()) {
-            Some("read_only" | "read-only" | "readonly") => GoalKind::ReadOnly,
+        let kind = match draft.kind.as_str() {
+            "read_only" | "read-only" | "readonly" => GoalKind::ReadOnly,
             _ => GoalKind::Writes,
         };
-        self.goal_prefill = draft.map(|d| (d.contract.clone(), d.folder.clone()));
         self.open(Frame::NewGoal(kind), cx);
-        self.goal_prefill = None;
         if self.frames.active() != &Frame::NewGoal(kind) {
             return Err(CAP_NOTE.into());
         }
-        Ok(match kind {
-            GoalKind::Writes => "New goal form".into(),
-            GoalKind::ReadOnly => "New read-only goal (its form is not built yet)".into(),
+        let folder = synthesis_harness::sanitize_for_display(draft.folder.trim());
+        let start = (kind == GoalKind::Writes && !folder.is_empty()).then_some(folder.as_str());
+        let form = self.goal_form(kind, start, window, cx);
+        let filled = form.update(cx, |f, cx| f.prefill(&draft.contract, &folder, window, cx));
+        Ok(match (filled, kind) {
+            (false, _) => "the form already has text, nothing was overwritten".into(),
+            (true, GoalKind::Writes) => "New goal form".into(),
+            (true, GoalKind::ReadOnly) => "New read-only goal form".into(),
         })
-    }
-
-    /// Opens the form of the active New goal frame once (the read-only form comes with its own phase).
-    fn start_goal_form(&mut self, cx: &mut Context<Self>) {
-        if self.frames.active() != &Frame::NewGoal(GoalKind::Writes) || self.goal_form_opened {
-            return;
-        }
-        let prefill = self.goal_prefill.take();
-        self.goal_form_opened = true;
-        self.outcomes
-            .update(cx, |o, cx| o.open_goal_form(prefill, cx));
     }
 
     fn toggle_rail(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -701,6 +741,14 @@ impl SuperAgentView {
                     .child(kit::text(t::T3, t::W_REGULAR, t::TEXT).child("This session has ended."))
                     .into_any_element()
             }
+            Frame::NewGoal(k) => {
+                let form = self.goal_form(*k, None, window, cx);
+                div()
+                    .debug_selector(|| "sa-new-goal".to_string())
+                    .size_full()
+                    .child(form)
+                    .into_any_element()
+            }
             f => col()
                 .debug_selector(|| "sa-frame".to_string())
                 .child(
@@ -709,12 +757,10 @@ impl SuperAgentView {
                             kit::text(t::T4, t::W_SEMIBOLD, t::TEXT_STRONG)
                                 .child(self.title(f, cx)),
                         )
-                        .child(kit::text(t::T2, t::W_REGULAR, t::TEXT).child(match f {
-                            Frame::NewGoal(GoalKind::ReadOnly) => {
-                                "The read-only goal form is coming. Nothing was created."
-                            }
-                            _ => "This frame is filled in a later phase.",
-                        })),
+                        .child(
+                            kit::text(t::T2, t::W_REGULAR, t::TEXT)
+                                .child("This frame is filled in a later phase."),
+                        ),
                 )
                 .into_any_element(),
         }
@@ -755,6 +801,17 @@ impl Render for SuperAgentView {
                 Frame::Home => self.home.update(cx, |h, cx| h.shown(window, cx)),
                 // a hosted chat takes its own focus; the others keep the keys on this view
                 Frame::Session(_) => {}
+                // a form already used keeps its own focus; a new one takes its first field when it first draws
+                Frame::NewGoal(k) if self.goals.iter().any(|(g, ..)| g == k) => {
+                    let f = self
+                        .goals
+                        .iter()
+                        .find(|(g, ..)| g == k)
+                        .map(|g| g.1.clone());
+                    if let Some(f) = f {
+                        window.focus(&f.read(cx).focus.clone(), cx);
+                    }
+                }
                 _ => window.focus(&self.focus, cx),
             }
         }

@@ -356,20 +356,20 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     super::session::host::tests::wait_free(&f.home);
 }
 
-#[gpui::test]
-fn the_conductors_goal_card_opens_the_prefilled_form_and_its_end_ends_the_frame(
-    cx: &mut TestAppContext,
-) {
+/// The conductor's goal-card effect, as the executor runs it (a foreground task of the UI thread).
+fn card(
+    sa: &Entity<SuperAgentView>,
+    v: &mut VisualTestContext,
+    kind: &str,
+    text: &str,
+) -> Result<String, String> {
     use synthesis_app::conductor::GoalDraft;
-    let (sa, v) = open(cx);
     let draft = GoalDraft {
-        kind: "writes".into(),
-        contract: "Make the build pass".into(),
+        kind: kind.into(),
+        contract: text.into(),
         folder: "/w/api".into(),
         base_commit: None,
     };
-    // the real path: the executor awaits the effect in a foreground task of the UI thread, which is also the
-    // thread that serves the command (a blocking wait there would hang)
     let port = sa.read_with(v, |s, _| s.port.clone());
     let fx = super::chat::glue::DesktopEffects {
         port,
@@ -383,59 +383,167 @@ fn the_conductors_goal_card_opens_the_prefilled_form_and_its_end_ends_the_frame(
     };
     let task = v.update(|_, cx| {
         use synthesis_app::conductor::Effects as _;
-        let draft = draft.clone();
         cx.spawn(async move |_| fx.create_goal(&draft, &via).await)
     });
     v.run_until_parked();
-    assert_eq!(ready(task).unwrap(), "New goal form");
-    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
-    let o = sa.read_with(v, |s, _| s.outcomes.clone());
-    let init = o.read_with(v, |o, _| o.state.form.as_ref().map(|f| f.initial.clone()));
-    let init = init.expect("the form is open");
-    assert_eq!(
-        (init.goal.as_str(), init.workspace.as_str()),
-        ("Make the build pass", "/w/api")
-    );
-    assert!(
-        v.debug_bounds("sa-frame").is_some(),
-        "the frame is under the modal"
-    );
-    // the form closed: its frame goes with it
-    o.update(v, |o, cx| {
-        o.state.close_form();
-        cx.notify();
-    });
-    v.run_until_parked();
-    assert_eq!(active(v, &sa), Frame::Home);
-    // a read-only goal has no form yet: the frame says so and nothing is created
-    let ro = GoalDraft {
-        kind: "read_only".into(),
-        contract: "x".into(),
-        folder: "/w".into(),
-        base_commit: None,
-    };
-    let port = sa.read_with(v, |s, _| s.port.clone());
-    let fut = super::chat::glue::WindowPort::open_goal_form(&*port, &ro);
-    v.run_until_parked();
-    assert!(ready(fut).unwrap().contains("not built yet"));
-    assert!(o.read_with(v, |o, _| o.state.form.is_none()));
+    ready(task)
+}
+
+fn goal_form(
+    sa: &Entity<SuperAgentView>,
+    v: &mut VisualTestContext,
+    k: GoalKind,
+) -> Option<Entity<goal::GoalForm>> {
+    sa.read_with(v, |s, _| {
+        s.goals.iter().find(|(g, ..)| *g == k).map(|g| g.1.clone())
+    })
+}
+
+fn goal_text(f: &Entity<goal::GoalForm>, v: &mut VisualTestContext) -> String {
+    f.read_with(v, |f, cx| f.ui.goal.read(cx).value().to_string())
 }
 
 #[gpui::test]
-fn the_kind_pickers_goal_row_opens_the_form_and_the_enable_dialog_closes_with_a_recheck(
+fn the_conductors_goal_card_fills_the_form_and_approves_nothing(cx: &mut TestAppContext) {
+    let (sa, v) = open(cx);
+    assert_eq!(
+        card(&sa, v, "writes", "Make the build pass").unwrap(),
+        "New goal form"
+    );
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
+    assert!(
+        v.debug_bounds("sa-goal").is_some(),
+        "the new form is the body"
+    );
+    let f = goal_form(&sa, v, GoalKind::Writes).expect("one form");
+    assert_eq!(goal_text(&f, v), "Make the build pass");
+    f.read_with(v, |f, _| {
+        assert!(
+            f.outbox
+                .iter()
+                .all(|o| !matches!(o, goal::Out::Approve { .. }))
+        );
+        assert!(!f.approving());
+    });
+    // a second card never overwrites what is there
+    f.update_in(v, |f, w, cx| {
+        f.set_text(goal::model::Field::Goal, "mine", w, cx)
+    });
+    let r = card(&sa, v, "writes", "other").unwrap();
+    assert!(r.contains("nothing was overwritten"), "{r}");
+    assert_eq!(goal_text(&f, v), "mine");
+    assert_eq!(
+        sa.read_with(v, |s, _| s.goals.len()),
+        1,
+        "the same form, not a second"
+    );
+    // a read-only card opens the read-only form
+    assert_eq!(
+        card(&sa, v, "read_only", "x").unwrap(),
+        "New read-only goal form"
+    );
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::ReadOnly));
+}
+
+#[gpui::test]
+fn the_pickers_goal_rows_open_the_new_form_not_the_modal_and_read_only_needs_the_capability(
     cx: &mut TestAppContext,
 ) {
     let (sa, v) = open(cx);
+    let o = sa.read_with(v, |s, _| s.outcomes.clone());
+    o.update(v, |o, _| o.state.read_only_goal = false);
     press(v, &sa, "n", none());
+    press(v, &sa, "3", none());
+    press(v, &sa, "enter", none());
+    assert_eq!(
+        active(v, &sa),
+        Frame::Home,
+        "disabled without the capability"
+    );
+    assert!(v.debug_bounds("sa-kind-notice").is_some());
+    o.update(v, |o, _| o.state.read_only_goal = true);
+    press(v, &sa, "enter", none());
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::ReadOnly));
+    assert!(v.debug_bounds("sa-new-goal").is_some());
+    let m = cmd(v);
+    press(v, &sa, "t", m);
     press(v, &sa, "2", none());
     press(v, &sa, "enter", none());
     assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
-    let o = sa.read_with(v, |s, _| s.outcomes.clone());
+    assert!(v.debug_bounds("sa-goal").is_some());
     assert!(
-        o.read_with(v, |o, _| o.state.form.is_some()),
-        "the picker's row opens the form too"
+        o.read_with(v, |o, _| o.state.form.is_none()),
+        "not the old modal"
     );
-    // the chat's "Turn on" asks for the enable dialog; the sample is Ready, so only the note comes
-    sa.update(v, |s, cx| s.enable_guide(cx));
+    assert_eq!(sa.read_with(v, |s, _| s.goals.len()), 2);
+}
+
+#[gpui::test]
+fn approved_opens_the_outcome_and_closing_the_frame_drops_the_form(cx: &mut TestAppContext) {
+    let (sa, v) = open(cx);
+    sa.update(v, |s, cx| s.open(Frame::NewGoal(GoalKind::Writes), cx));
+    v.run_until_parked();
+    let f = goal_form(&sa, v, GoalKind::Writes).expect("made when shown");
+    f.update(v, |_, cx| {
+        cx.emit(goal::GoalEvent::Approved {
+            outcome: "o1".into(),
+            note: String::new(),
+        })
+    });
+    v.run_until_parked();
+    assert_eq!(active(v, &sa), Frame::Outcome("o1".into()));
+    assert!(!sa.read_with(v, |s, _| {
+        s.frames.tabs().contains(&Frame::NewGoal(GoalKind::Writes))
+    }));
+    assert!(
+        goal_form(&sa, v, GoalKind::Writes).is_none(),
+        "dropped with its frame"
+    );
+    // Close (Esc, Cancel) closes the frame and drops the form too
+    sa.update(v, |s, cx| s.open(Frame::NewGoal(GoalKind::ReadOnly), cx));
+    v.run_until_parked();
+    let f = goal_form(&sa, v, GoalKind::ReadOnly).unwrap();
+    f.update(v, |_, cx| cx.emit(goal::GoalEvent::Close));
+    v.run_until_parked();
+    assert!(goal_form(&sa, v, GoalKind::ReadOnly).is_none());
+    assert_eq!(sa.read_with(v, |s, _| s.frames.tabs().len()), 2);
+}
+
+#[gpui::test]
+fn a_form_with_an_approval_in_flight_keeps_its_frame_and_says_so(cx: &mut TestAppContext) {
+    let (sa, v) = open(cx);
+    sa.update(v, |s, cx| s.open(Frame::NewGoal(GoalKind::Writes), cx));
+    v.run_until_parked();
+    let f = goal_form(&sa, v, GoalKind::Writes).unwrap();
+    f.update(v, |f, cx| {
+        f.apply_form(
+            crate::outcomes_view::link::FormMsg::Review(Box::new(
+                crate::outcomes_view::sample::review(false),
+            )),
+            cx,
+        );
+        f.form.stage = crate::outcomes_view::form::Stage::Approving(
+            match std::mem::replace(&mut f.form.stage, crate::outcomes_view::form::Stage::Edit) {
+                crate::outcomes_view::form::Stage::Review(r) => r,
+                _ => unreachable!(),
+            },
+        );
+    });
+    assert!(f.read_with(v, |f, _| f.approving()));
+    // Cmd+W, a Close event and the tab's x all leave it open
+    let m = cmd(v);
+    press(v, &sa, "w", m);
+    f.update(v, |_, cx| cx.emit(goal::GoalEvent::Close));
+    v.run_until_parked();
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
     assert!(sa.read_with(v, |s, _| s.notice.is_some()));
+    // the server's answer then opens the outcome
+    f.update(v, |_, cx| {
+        cx.emit(goal::GoalEvent::Approved {
+            outcome: "o2".into(),
+            note: String::new(),
+        })
+    });
+    v.run_until_parked();
+    assert_eq!(active(v, &sa), Frame::Outcome("o2".into()));
 }

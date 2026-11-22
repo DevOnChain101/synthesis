@@ -29,6 +29,8 @@ pub struct Args {
     card: usize,
     choose: Option<usize>,
     form: Option<String>,
+    /// `--frame new-goal|new-ro-goal`: that New goal frame is open (the form of the Super Agent tab).
+    frame: Option<String>,
     /// The disclosure of the Off / not-migrated screen is open.
     guide: bool,
     focus: Option<String>,
@@ -79,6 +81,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         card: val("--card").and_then(|n| n.parse().ok()).unwrap_or(0),
         choose: val("--choose").and_then(|n| n.parse().ok()),
         form: val("--form").cloned(),
+        frame: val("--frame").cloned(),
         guide: args.iter().any(|a| a == "--guide"),
         focus: val("--focus").cloned(),
         tui_mode: val("--mode").map(String::as_str) == Some("tui"),
@@ -164,6 +167,17 @@ pub fn render(a: Args) -> Result<(), Err> {
                 cx.notify();
             });
         });
+        if let Some(f) = a.frame.as_deref() {
+            let kind = if f == "new-ro-goal" {
+                crate::superagent::frames::GoalKind::ReadOnly
+            } else {
+                crate::superagent::frames::GoalKind::Writes
+            };
+            shell.update(cx, |s, cx| {
+                s.superagent()
+                    .update(cx, |v, cx| v.open(crate::superagent::frames::Frame::NewGoal(kind), cx))
+            });
+        }
         shell
     })?;
     cx.run_until_parked();

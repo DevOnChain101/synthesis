@@ -535,6 +535,11 @@ impl GoalForm {
         cx.notify();
     }
 
+    /// An approval is in flight: the frame must not close.
+    pub(crate) fn approving(&self) -> bool {
+        matches!(self.form.stage, Stage::Approving(_))
+    }
+
     pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
         // an approval in flight may still be applied: the frame stays until the server answers
         if matches!(self.form.stage, Stage::Approving(_)) {
