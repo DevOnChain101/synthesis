@@ -69,8 +69,8 @@ impl WindowPort for Port {
     fn close<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
-    fn open_goal_form(&self, _: &GoalDraft) -> Result<String, String> {
-        Ok("form".into())
+    fn open_goal_form<'a>(&'a self, _: &'a GoalDraft) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Ok("form".into()) })
     }
 }
 

@@ -22,8 +22,9 @@ fn open(cx: &mut TestAppContext) -> (Entity<SuperAgentView>, &mut VisualTestCont
 
 /// A session tab without a hosted chat (the sample hosts none): the cap, the titles and the close need only frames.
 fn session_tab(s: &mut SuperAgentView, folder: &str, cx: &mut Context<SuperAgentView>) {
-    s.register_session(folder, std::path::Path::new(folder));
-    s.open(Frame::Session(folder.into()), cx);
+    let id = format!("s{}", s.next_session);
+    s.register_session(&id, std::path::Path::new(folder));
+    s.open(Frame::Session(id), cx);
 }
 
 fn press(v: &mut VisualTestContext, sa: &Entity<SuperAgentView>, key: &str, m: Modifiers) -> bool {
@@ -216,8 +217,7 @@ fn a_session_tab_shows_the_folder_name_and_closes_from_its_x(cx: &mut TestAppCon
     sa.update(v, |s, cx| session_tab(s, "/w/api-gateway", cx));
     v.run_until_parked();
     assert_eq!(
-        sa.read_with(v, |s, cx| s
-            .title(&Frame::Session("/w/api-gateway".into()), cx)),
+        sa.read_with(v, |s, cx| s.title(&Frame::Session("s1".into()), cx)),
         "api-gateway"
     );
     let x = v.debug_bounds("sa-tab-1-x").unwrap().center();
@@ -284,7 +284,7 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     assert_eq!(ready(fut).unwrap(), "s1");
     assert_eq!(
         active(v, &sa),
-        Frame::Session(folder.to_string_lossy().into_owned()),
+        Frame::Session("s1".into()),
         "it opens as a tab, never in the TUI view"
     );
     let rows = port.sessions();
@@ -311,7 +311,36 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 0);
     let rows = port.sessions();
     assert_eq!((rows[0].live, rows[0].state.as_str()), (false, "ended"));
-    // a second start in the same folder is a new session with a new handle; a cap and a bad folder say why
+    // the same folder again is a NEW session with a NEW handle; the old handle stays dead
+    let fut = port.start(&req, PersonApproved::for_text("hello"));
+    v.run_until_parked();
+    assert_eq!(ready(fut).unwrap(), "s2");
+    let fut = port.send("s1", "stale", PersonApproved::for_text("stale"));
+    v.run_until_parked();
+    assert!(
+        ready(fut).is_err(),
+        "a stale card never reaches the new session"
+    );
+    let fut = port.close("s1");
+    v.run_until_parked();
+    assert!(ready(fut).is_err());
+    // a start whose folder already has an open session is refused: its line is never typed into that session
+    let fut = port.start(&req, PersonApproved::for_text("hello"));
+    v.run_until_parked();
+    assert!(ready(fut).unwrap_err().contains("already open"));
+    assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 1);
+    let fut = port.close("s2");
+    v.run_until_parked();
+    assert!(ready(fut).is_ok());
+    // a model the card names cannot be applied: refused, not ignored
+    let with_model = SessionStart {
+        model: Some("x/y".into()),
+        ..req.clone()
+    };
+    let fut = port.start(&with_model, PersonApproved::for_text("hello"));
+    v.run_until_parked();
+    assert!(ready(fut).unwrap_err().contains("model"));
+    // a bad folder says why
     let bad = SessionStart {
         folder: Some(f.base.join("missing").to_string_lossy().into_owned()),
         ..req
@@ -337,10 +366,26 @@ fn the_conductors_goal_card_opens_the_prefilled_form_and_its_end_ends_the_frame(
         folder: "/w/api".into(),
         base_commit: None,
     };
-    let (tx, rx) = std::sync::mpsc::channel();
-    sa.update_in(v, |s, w, cx| s.run_cmd(Cmd::Goal(draft, tx), w, cx));
+    // the real path: the executor awaits the effect in a foreground task of the UI thread, which is also the
+    // thread that serves the command (a blocking wait there would hang)
+    let port = sa.read_with(v, |s, _| s.port.clone());
+    let fx = super::chat::glue::DesktopEffects {
+        port,
+        outcomes: std::sync::Arc::new(
+            super::chat::glue::OutcomeWorker::start(std::env::temp_dir()),
+        ),
+    };
+    let via = synthesis_app::conductor::Via {
+        proposal_id: "p1".into(),
+        proposal_sha256: String::new(),
+    };
+    let task = v.update(|_, cx| {
+        use synthesis_app::conductor::Effects as _;
+        let draft = draft.clone();
+        cx.spawn(async move |_| fx.create_goal(&draft, &via).await)
+    });
     v.run_until_parked();
-    assert_eq!(rx.try_recv().unwrap().unwrap(), "New goal form");
+    assert_eq!(ready(task).unwrap(), "New goal form");
     assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
     let o = sa.read_with(v, |s, _| s.outcomes.clone());
     let init = o.read_with(v, |o, _| o.state.form.as_ref().map(|f| f.initial.clone()));
@@ -361,16 +406,16 @@ fn the_conductors_goal_card_opens_the_prefilled_form_and_its_end_ends_the_frame(
     v.run_until_parked();
     assert_eq!(active(v, &sa), Frame::Home);
     // a read-only goal has no form yet: the frame says so and nothing is created
-    let (tx, rx) = std::sync::mpsc::channel();
     let ro = GoalDraft {
         kind: "read_only".into(),
         contract: "x".into(),
         folder: "/w".into(),
         base_commit: None,
     };
-    sa.update_in(v, |s, w, cx| s.run_cmd(Cmd::Goal(ro, tx), w, cx));
+    let port = sa.read_with(v, |s, _| s.port.clone());
+    let fut = super::chat::glue::WindowPort::open_goal_form(&*port, &ro);
     v.run_until_parked();
-    assert!(rx.try_recv().unwrap().unwrap().contains("not built yet"));
+    assert!(ready(fut).unwrap().contains("not built yet"));
     assert!(o.read_with(v, |o, _| o.state.form.is_none()));
 }
 

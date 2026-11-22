@@ -1231,7 +1231,7 @@ mod tests {
         });
         v.run_until_parked();
         // the person stays in Super Agent, in a session frame with a real embedded chat
-        let id = folder.to_string_lossy().into_owned();
+        let id = "s1".to_string();
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
         assert_eq!(
             sa.read_with(v, |s, _| s.frames.active().clone()),

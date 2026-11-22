@@ -186,7 +186,11 @@ impl SessionHost {
         let clean = tab_title;
         let title = first.map(|f| clean(&f)).filter(|t| !t.trim().is_empty());
         let folder = || {
-            std::path::Path::new(id)
+            let f = self
+                .view(id)
+                .and_then(|v| v.read(cx).embed.as_ref().and_then(|e| e.folder.clone()));
+            f.as_deref()
+                .unwrap_or(std::path::Path::new(id))
                 .file_name()
                 .map_or_else(|| id.to_string(), |n| clean(&n.to_string_lossy()))
         };

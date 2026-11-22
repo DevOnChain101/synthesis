@@ -4,9 +4,7 @@
 //! effect arrives with the harness's proof from the card the person confirmed.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
@@ -16,8 +14,6 @@ use synthesis_tools::BoxFuture;
 
 use super::chat::glue::WindowPort;
 
-/// How long the conductor's thread waits for the UI thread to open the goal form.
-const FORM_WAIT: Duration = Duration::from_secs(5);
 const GONE: &str = "the window is closed";
 
 #[derive(Default)]
@@ -34,7 +30,7 @@ pub enum Cmd {
     Send(String, String, PersonApproved, Reply<()>),
     Interrupt(String, Reply<()>),
     Close(String, Reply<()>),
-    Goal(GoalDraft, Sender<Result<String, String>>),
+    Goal(GoalDraft, Reply<String>),
 }
 
 pub struct HostPort {
@@ -96,12 +92,7 @@ impl WindowPort for HostPort {
     fn close<'a>(&'a self, sid: &'a str) -> BoxFuture<'a, Result<(), String>> {
         self.ask(|r| Cmd::Close(sid.into(), r))
     }
-    fn open_goal_form(&self, goal: &GoalDraft) -> Result<String, String> {
-        let (tx, rx) = channel();
-        self.tx
-            .unbounded_send(Cmd::Goal(goal.clone(), tx))
-            .map_err(|_| GONE.to_string())?;
-        rx.recv_timeout(FORM_WAIT)
-            .unwrap_or_else(|_| Err(GONE.into()))
+    fn open_goal_form<'a>(&'a self, goal: &'a GoalDraft) -> BoxFuture<'a, Result<String, String>> {
+        self.ask(|r| Cmd::Goal(goal.clone(), r))
     }
 }

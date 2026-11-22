@@ -81,9 +81,12 @@ pub struct SuperAgentView {
     visible: bool,
     /// The next draw gives the keys to the front frame (a frame came forward).
     refocus: bool,
-    /// What the conductor reads of the sessions, and the `s<N>` handles it names them by (never reused).
+    /// The folder of each session (by frame id); a folder already hosted is not started twice.
     port: Arc<HostPort>,
-    handles: Vec<(String, String)>,
+    folders: Vec<(String, PathBuf)>,
+    /// The next session frame id is `s<N>`: the id is the conductor's handle too, minted per open and never reused,
+    /// so a stale card can never reach another session.
+    next_session: usize,
     /// A new session without a folder starts in a scratch folder under this home (`None`: the sample).
     synt_home: Option<PathBuf>,
     /// The enable dialog was open at the last look: its closing is when the setting may have changed.
@@ -153,7 +156,8 @@ impl SuperAgentView {
             visible: false,
             refocus: false,
             port: port.clone(),
-            handles: Vec::new(),
+            folders: Vec::new(),
+            next_session: 1,
             synt_home,
             had_guide: false,
             goal_form_opened: false,
@@ -317,45 +321,53 @@ impl SuperAgentView {
     }
 
     /// A new session started in folder `p` (a folder the person chose, a scratch folder, or the conductor's): its
-    /// chat is hosted in a session frame of this view, never in the TUI view. `Err(why)`: nothing opened, `why` is
-    /// shown (the sample, the cap of open sessions, a refused folder). The frame id is the folder.
+    /// chat is hosted in a session frame of this view, never in the TUI view. The frame id is a fresh `s<N>`, never
+    /// derived from the folder. A folder that already has an open session shows that tab (`Ok((id, false))`).
+    /// `Err(why)`: nothing opened, `why` is shown (the sample, the cap of open sessions, a refused folder).
     pub fn open_session_folder(
         &mut self,
         p: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<String, String> {
-        let id = p.to_string_lossy().into_owned();
+    ) -> Result<(String, bool), String> {
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let hosted = self.host.read(cx).ids();
+        if let Some((id, _)) = self
+            .folders
+            .iter()
+            .find(|(i, f)| *f == canon && hosted.contains(i))
+        {
+            let id = id.clone();
+            self.open(Frame::Session(id.clone()), cx);
+            return Ok((id, false));
+        }
+        let id = format!("s{}", self.next_session);
         let opened = self.host.update(cx, |h, cx| h.open(&id, p, window, cx));
         if let Err(why) = opened {
             self.notice = Some(why.clone());
             cx.notify();
             return Err(why);
         }
-        self.register_session(&id, p);
+        self.register_session(&id, &canon);
         self.open(Frame::Session(id.clone()), cx);
-        Ok(id)
+        Ok((id, true))
     }
 
-    /// The rail row and the conductor's `s<N>` handle of a hosted session.
-    fn register_session(&mut self, id: &str, p: &std::path::Path) {
-        if !self.sessions.iter().any(|(i, _)| i == id) {
-            let title = p
-                .file_name()
-                .map_or_else(|| id.to_string(), |n| n.to_string_lossy().into_owned());
-            self.sessions.push((id.to_string(), title));
-        }
-        if !self.handles.iter().any(|(_, i)| i == id) {
-            let n = self.handles.len() + 1;
-            self.handles.push((format!("s{n}"), id.to_string()));
-        }
+    /// The rail row of a hosted session; its id is the conductor's handle.
+    fn register_session(&mut self, id: &str, folder: &std::path::Path) {
+        self.next_session += 1;
+        let title = folder
+            .file_name()
+            .map_or_else(|| id.to_string(), |n| n.to_string_lossy().into_owned());
+        self.sessions.push((id.to_string(), title));
+        self.folders.push((id.to_string(), folder.to_path_buf()));
     }
 
     /// What the conductor reads of the sessions of this window (live or ended), and the rail's titles.
     fn refresh_port(&mut self, cx: &mut Context<Self>) {
         let host = self.host.read(cx);
         let mut snap = port::Snapshot::default();
-        for (handle, id) in &self.handles {
+        for (id, _) in &self.sessions {
             let info = host.info(id, cx);
             let (sid, report) = host.read(id, cx).unzip();
             let title = info.as_ref().map(|i| i.title.clone()).or_else(|| {
@@ -371,21 +383,25 @@ impl SuperAgentView {
                 Some(_) => "idle",
             };
             snap.rows.push(SessionRow {
-                handle: handle.clone(),
+                handle: id.clone(),
                 sid: sid.unwrap_or_default(),
                 title: title.unwrap_or_default(),
                 state: state.into(),
-                model: String::new(),
-                mode: String::new(),
-                cwd_label: std::path::Path::new(id)
-                    .file_name()
+                model: "unknown".into(),
+                mode: "unknown".into(),
+                cwd_label: self
+                    .folders
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .and_then(|(_, f)| f.file_name())
                     .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                // not reported for window sessions: say so instead of a misleading zero
                 spent_usd: 0.0,
-                task_summary: String::new(),
+                task_summary: "cost, model and mode are not reported for this session".into(),
                 live: info.is_some(),
             });
             if let Some(r) = report {
-                snap.reports.insert(handle.clone(), r);
+                snap.reports.insert(id.clone(), r);
             }
         }
         if let Ok(mut s) = self.port.shared.lock() {
@@ -399,11 +415,12 @@ impl SuperAgentView {
         }
     }
 
+    /// The frame id behind a handle: only a session of this window (never reused, so a stale handle finds none).
     fn id_of(&self, handle: &str) -> Option<String> {
-        self.handles
+        self.sessions
             .iter()
-            .find(|(h, _)| h == handle)
-            .map(|(_, i)| i.clone())
+            .any(|(i, _)| i == handle)
+            .then(|| handle.to_string())
     }
 
     /// An effect the conductor's card asked for (the person confirmed it; the proof came with it).
@@ -454,6 +471,9 @@ impl SuperAgentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
+        if req.model.is_some() {
+            return Err("choosing a model for a started session is not supported here".into());
+        }
         let folder = match &req.folder {
             Some(f) => PathBuf::from(f),
             None => {
@@ -461,15 +481,15 @@ impl SuperAgentView {
                 crate::outcomes_view::kind_picker::make_scratch(home)?
             }
         };
-        let id = self.open_session_folder(&folder, window, cx)?;
+        let (id, fresh) = self.open_session_folder(&folder, window, cx)?;
+        if !fresh {
+            // never type the card's line into a session the person is already using
+            return Err("a session is already open in that folder".into());
+        }
         let text = req.first_message.clone();
         self.host
             .update(cx, |h, cx| h.first_message(&id, text, window, cx));
-        self.handles
-            .iter()
-            .find(|(_, i)| *i == id)
-            .map(|(h, _)| h.clone())
-            .ok_or_else(|| "the session has no handle".into())
+        Ok(id)
     }
 
     /// The New goal frame: the contract form (the old one, as a modal) opens. `draft`: what a conductor card
