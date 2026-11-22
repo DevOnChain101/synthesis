@@ -20,6 +20,7 @@ use gpui::{
 use crate::outcomes_view::OutcomesView;
 use crate::outcomes_view::popup::OpenSession;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
+use crate::superagent::session::host::SessionHost;
 use crate::superagent::{SuperAgentView, SwitchView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
@@ -145,6 +146,9 @@ impl Shell {
                 self.sa.update(cx, |v, cx| v.shown(window, cx));
             }
         }
+        // the hosted chats take keys only while the Super Agent view itself is on screen (Settings over it: none)
+        let on_screen = v == View::SuperAgent && !self.legacy_ui;
+        self.sa.update(cx, |s, cx| s.set_visible(on_screen, cx));
         // the lights (macOS only) sit in the first row of the Super Agent rail, else in the 30 px bar
         #[cfg(target_os = "macos")]
         window.set_traffic_light_position(gpui::point(
@@ -161,6 +165,14 @@ impl Shell {
             }
         });
         cx.notify();
+    }
+
+    /// A session that waits for a tool permission is answered in the TUI view, in that session.
+    fn open_waiting_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.go(View::Tui, window, cx);
+        if !id.starts_with('#') {
+            self.tui.update(cx, |t, cx| t.open_session(id, cx));
+        }
     }
 
     /// The Super Agent view (the offscreen shots seed it).
@@ -224,11 +236,7 @@ impl Shell {
 
     /// What waits for the person (the number on the Super Agent button): 0 unless the app counts it.
     fn waiting(&self, cx: &App) -> usize {
-        if self.count_waiting {
-            self.outcomes.read(cx).waiting_count()
-        } else {
-            0
-        }
+        self.sa.read(cx).waiting(cx)
     }
 
     /// A button of the icon group: 26x22, radius 6; hover lightens, the open view is pressed. The Super Agent
@@ -599,7 +607,8 @@ impl Shell {
             Some(cfg) => TuiView::live(window, cx, cfg, hidden, 0.),
             None => TuiView::new(0., hidden),
         });
-        Self::with_outcomes(window, cx, tui, settings_cfg, env)
+        let host_cfg = tui.read(cx).live_cfg();
+        Self::with_outcomes(window, cx, tui, settings_cfg, env, host_cfg)
     }
 
     /// The shell over a TUI view the caller built (the offscreen shots fill it before it is drawn); the
@@ -610,7 +619,15 @@ impl Shell {
         tui: Entity<TuiView>,
         settings_cfg: Result<settings_view::model::Cfg, String>,
     ) -> Self {
-        Self::with_outcomes(window, cx, tui, settings_cfg, None)
+        Self::with_outcomes(window, cx, tui, settings_cfg, None, None)
+    }
+
+    /// A sample TUI view whose Super Agent hosts live sessions on `cfg` (tests: the standalone engine of a live TUI
+    /// view would wake the test scheduler from its thread).
+    #[cfg(test)]
+    pub(crate) fn around_live(window: &mut Window, cx: &mut Context<Self>, cfg: LiveCfg) -> Self {
+        let tui = cx.new(|_| TuiView::new(0., Default::default()));
+        Self::with_outcomes(window, cx, tui, Err("test".into()), None, Some(cfg))
     }
 
     /// `outcomes_env`: the environment the live Super Agent view reads its setting and home from, and the workspace a new outcome works in by default; `None` is the sample.
@@ -620,6 +637,7 @@ impl Shell {
         tui: Entity<TuiView>,
         settings_cfg: Result<settings_view::model::Cfg, String>,
         outcomes_env: Option<(synthesis_config::Env, String)>,
+        host_cfg: Option<LiveCfg>,
     ) -> Self {
         let outcomes = cx.new(|cx| match outcomes_env.clone() {
             Some((env, ws)) => OutcomesView::live(env, ws, cx),
@@ -635,7 +653,13 @@ impl Shell {
         {
             outcomes.update(cx, |o, cx| o.connect(cx));
         }
-        let sa = cx.new(|cx| SuperAgentView::new(outcomes.clone(), live_outcomes, cx));
+        let host = cx.new(|cx| SessionHost::new(host_cfg, window, cx));
+        let conductor = outcomes_env
+            .as_ref()
+            .map(|(env, ws)| (env.clone(), std::path::PathBuf::from(ws)));
+        let sa = cx.new(|cx| {
+            SuperAgentView::new(outcomes.clone(), host, conductor, live_outcomes, window, cx)
+        });
         cx.subscribe_in(
             &sa,
             window,
@@ -656,20 +680,26 @@ impl Shell {
             &outcomes,
             window,
             |s: &mut Shell, _, e: &OpenSession, window, cx| {
-                // a session that waits for a tool permission is answered in the TUI view, in that session
-                s.go(View::Tui, window, cx);
-                if !e.0.starts_with('#') {
-                    s.tui.update(cx, |t, cx| t.open_session(&e.0, cx));
-                }
+                s.open_waiting_session(&e.0, window, cx)
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &sa,
+            window,
+            |s: &mut Shell, _, e: &OpenSession, window, cx| {
+                s.open_waiting_session(&e.0, window, cx)
             },
         )
         .detach();
         cx.subscribe_in(
             &outcomes,
             window,
-            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, _, cx| {
-                // a plain New session opens as a tab of Super Agent, never in the TUI view
-                s.sa.update(cx, |v, cx| v.open_session_folder(&e.0, cx));
+            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, window, cx| {
+                // a plain New session opens as a tab of Super Agent, never in the TUI view; a refusal is the view's notice
+                s.sa.update(cx, |v, cx| {
+                    let _ = v.open_session_folder(&e.0, window, cx);
+                });
             },
         )
         .detach();
@@ -1129,29 +1159,157 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_new_session_opens_a_tab_inside_super_agent_and_never_switches_to_the_tui_view(
-        cx: &mut TestAppContext,
-    ) {
-        use crate::superagent::frames::Frame;
+    fn the_sample_hosts_no_session_and_says_why(cx: &mut TestAppContext) {
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 900.);
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         v.run_until_parked();
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         let dir = tempfile::tempdir().unwrap();
-        // what `OutcomesView::new_session` emits once the scratch folder exists
         o.update(v, |_, cx| {
             cx.emit(crate::outcomes_view::OpenFolder(dir.path().to_path_buf()))
         });
         v.run_until_parked();
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
-        let id = dir.path().to_string_lossy().into_owned();
         let sa = shell.read_with(v, |s, _| s.sa.clone());
+        assert_eq!(sa.read_with(v, |s, _| s.frames.tabs().len()), 1, "no tab");
+        assert!(v.debug_bounds("sa-notice").is_some(), "the reason is shown");
+    }
+
+    /// A live app over a scripted model: `(tui, hosted)` flags of who takes keys.
+    fn live(
+        cx: &mut TestAppContext,
+        cfg: LiveCfg,
+    ) -> (Entity<Shell>, &mut gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        let (shell, v) = cx.add_window_view(|window, cx| Shell::around_live(window, cx, cfg));
+        v.simulate_resize(size(px(1400.), px(900.)));
+        v.run_until_parked();
+        (shell, v)
+    }
+
+    fn keys(
+        shell: &Entity<Shell>,
+        v: &mut gpui::VisualTestContext,
+    ) -> ((bool, bool), Vec<(bool, bool)>) {
+        shell.read_with(v, |s, cx| {
+            let t = s.tui.read(cx);
+            let host = s.sa.read(cx).host.read(cx);
+            (
+                (t.shown, t.active),
+                host.views()
+                    .iter()
+                    .map(|h| (h.read(cx).shown, h.read(cx).active))
+                    .collect(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn a_new_session_is_a_real_chat_inside_super_agent_and_two_views_never_both_take_keys(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::superagent::frames::Frame;
+        use crate::superagent::session::host::tests::fx;
+        let _g = theme::opacity_guard();
+        let (f, cfg) = fx(2);
+        let (shell, v) = live(cx, cfg);
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        assert_eq!(keys(&shell, v).0, (true, true), "the TUI view has the keys");
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        v.run_until_parked();
+        assert_eq!(
+            keys(&shell, v).0,
+            (false, false),
+            "not while Super Agent shows"
+        );
+        let folder = f.base.join("f1");
+        let o = shell.read_with(v, |s, _| s.outcomes().clone());
+        o.update(v, |_, cx| {
+            cx.emit(crate::outcomes_view::OpenFolder(folder.clone()))
+        });
+        v.run_until_parked();
+        // the person stays in Super Agent, in a session frame with a real embedded chat
+        let id = folder.to_string_lossy().into_owned();
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
         assert_eq!(
             sa.read_with(v, |s, _| s.frames.active().clone()),
             Frame::Session(id)
         );
-        assert!(v.debug_bounds("sa-tab-1").is_some() && v.debug_bounds("header").is_none());
+        assert_eq!(sa.read_with(v, |s, cx| s.host.read(cx).len()), 1);
+        assert!(v.debug_bounds("sa-session").is_some() && v.debug_bounds("view").is_some());
+        assert_eq!(
+            keys(&shell, v),
+            ((false, false), vec![(true, false)]),
+            "only the front frame (window inactive in tests)"
+        );
+        // Settings over Super Agent releases the keys of the hosted chat, and the TUI view does not take them
+        shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+        assert_eq!(keys(&shell, v), ((false, false), vec![(false, false)]));
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        assert_eq!(keys(&shell, v).1, vec![(true, false)]);
+        // the TUI view: it takes the keys and the hosted chat gives them up
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        assert_eq!(keys(&shell, v), ((true, true), vec![(false, false)]));
+        // another frame in front of the session: no hosted chat takes a key
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        sa.update(v, |s, cx| s.focus_tab(0, cx));
+        assert_eq!(keys(&shell, v), ((false, false), vec![(false, false)]));
+        sa.update(v, |s, cx| s.focus_tab(1, cx));
+        // an embedded question counts for the rail and the mode button
+        sa.update(v, |s, _| s.count_waiting = true);
+        let before = sa.read_with(v, |s, cx| s.waiting(cx));
+        let view = sa.read_with(v, |s, cx| s.host.read(cx).views().remove(0));
+        view.update(v, |t, cx| t.push_test_question(cx));
+        assert_eq!(sa.read_with(v, |s, cx| s.waiting(cx)), before + 1);
+        // closing the tab ends the chat (its engine and panes: the host's own tests wait for the engine lock)
+        sa.update(v, |s, cx| s.close_tab(1, cx));
+        assert_eq!(sa.read_with(v, |s, cx| s.host.read(cx).len()), 0);
+        assert_eq!(
+            view.read_with(v, |t, _| (t.shown, t.active)),
+            (false, false)
+        );
+        assert_eq!(sa.read_with(v, |s, cx| s.waiting(cx)), before);
+        drop(view);
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        let _ = f;
+    }
+
+    #[gpui::test]
+    fn the_home_frame_is_the_home_view_and_alt_a_reaches_it(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 900.);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        shell.update(v, |s, cx| s.count_waiting_in_sample(cx));
+        v.run_until_parked();
+        assert!(v.debug_bounds("sa-home").is_some());
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        sa.update(v, |s, cx| {
+            s.open(
+                crate::superagent::frames::Frame::NewGoal(
+                    crate::superagent::frames::GoalKind::ReadOnly,
+                ),
+                cx,
+            )
+        });
+        let ev = gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                key: "a".into(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(sa.update_in(v, |s, w, cx| s.on_key(&ev, w, cx)));
+        assert_eq!(
+            sa.read_with(v, |s, _| s.frames.active().clone()),
+            crate::superagent::frames::Frame::Home
+        );
     }
 
     #[gpui::test]

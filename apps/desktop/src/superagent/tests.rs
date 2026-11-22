@@ -3,19 +3,27 @@ use gpui::{
 };
 
 use super::frames::{Frame, GoalKind, MAX_SESSIONS};
+use super::session::host::SessionHost;
 use super::*;
 
 fn open(cx: &mut TestAppContext) -> (Entity<SuperAgentView>, &mut VisualTestContext) {
     cx.update(gpui_component::init);
     let (sa, v) = cx.add_window_view(|window, cx| {
         let o = cx.new(OutcomesView::sample);
-        let mut sa = SuperAgentView::new(o, false, cx);
+        let host = cx.new(|cx| SessionHost::new(None, window, cx));
+        let mut sa = SuperAgentView::new(o, host, None, false, window, cx);
         sa.shown(window, cx);
         sa
     });
     v.simulate_resize(size(px(1400.), px(900.)));
     v.run_until_parked();
     (sa, v)
+}
+
+/// A session tab without a hosted chat (the sample hosts none): the cap, the titles and the close need only frames.
+fn session_tab(s: &mut SuperAgentView, folder: &str, cx: &mut Context<SuperAgentView>) {
+    s.register_session(folder, std::path::Path::new(folder));
+    s.open(Frame::Session(folder.into()), cx);
 }
 
 fn press(v: &mut VisualTestContext, sa: &Entity<SuperAgentView>, key: &str, m: Modifiers) -> bool {
@@ -59,7 +67,7 @@ fn the_picker_starts_with_nothing_chosen_and_enter_does_nothing_until_a_row_is(
     cx: &mut TestAppContext,
 ) {
     let (sa, v) = open(cx);
-    assert!(v.debug_bounds("sa-home").is_some(), "the home placeholder");
+    assert!(v.debug_bounds("sa-home").is_some(), "the home view");
     assert!(press(v, &sa, "n", none()));
     assert_eq!(cursor(v, &sa), Some(None), "open, nothing preselected");
     assert!(v.debug_bounds("sa-kind-picker").is_some());
@@ -174,9 +182,7 @@ fn the_rail_has_a_roving_cursor_and_enter_opens_the_row(cx: &mut TestAppContext)
 fn at_most_six_session_tabs_and_the_plus_says_why(cx: &mut TestAppContext) {
     let (sa, v) = open(cx);
     for i in 0..MAX_SESSIONS {
-        sa.update(v, |s, cx| {
-            s.open_session_folder(std::path::Path::new(&format!("/w/p{i}")), cx)
-        });
+        sa.update(v, |s, cx| session_tab(s, &format!("/w/p{i}"), cx));
     }
     v.run_until_parked();
     assert_eq!(
@@ -184,9 +190,7 @@ fn at_most_six_session_tabs_and_the_plus_says_why(cx: &mut TestAppContext) {
         MAX_SESSIONS
     );
     // a seventh is refused with the reason, the rail still lists only what exists
-    sa.update(v, |s, cx| {
-        s.open_session_folder(std::path::Path::new("/w/extra"), cx)
-    });
+    sa.update(v, |s, cx| session_tab(s, "/w/extra", cx));
     assert_eq!(
         sa.read_with(v, |s, _| s.frames.session_count()),
         MAX_SESSIONS
@@ -209,9 +213,7 @@ fn at_most_six_session_tabs_and_the_plus_says_why(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_session_tab_shows_the_folder_name_and_closes_from_its_x(cx: &mut TestAppContext) {
     let (sa, v) = open(cx);
-    sa.update(v, |s, cx| {
-        s.open_session_folder(std::path::Path::new("/w/api-gateway"), cx)
-    });
+    sa.update(v, |s, cx| session_tab(s, "/w/api-gateway", cx));
     v.run_until_parked();
     assert_eq!(
         sa.read_with(v, |s, cx| s
@@ -231,4 +233,162 @@ fn a_session_tab_shows_the_folder_name_and_closes_from_its_x(cx: &mut TestAppCon
         1,
         "the rail row stays"
     );
+}
+
+fn open_live(
+    cx: &mut TestAppContext,
+    cfg: crate::tui_view::driver::LiveCfg,
+) -> (Entity<SuperAgentView>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    let (sa, v) = cx.add_window_view(|window, cx| {
+        let o = cx.new(OutcomesView::sample);
+        let host = cx.new(|cx| SessionHost::new(Some(cfg), window, cx));
+        let mut sa = SuperAgentView::new(o, host, None, false, window, cx);
+        sa.shown(window, cx);
+        sa
+    });
+    v.simulate_resize(size(px(1400.), px(900.)));
+    v.run_until_parked();
+    (sa, v)
+}
+
+fn ready<T>(f: impl std::future::Future<Output = T>) -> T {
+    let mut f = std::pin::pin!(f);
+    let mut c = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    match f.as_mut().poll(&mut c) {
+        std::task::Poll::Ready(v) => v,
+        std::task::Poll::Pending => panic!("not ready"),
+    }
+}
+
+#[gpui::test]
+fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window(
+    cx: &mut TestAppContext,
+) {
+    use super::chat::glue::WindowPort as _;
+    use synthesis_app::conductor::SessionStart;
+    use synthesis_harness::PersonApproved;
+    let (f, cfg) = super::session::host::tests::fx(2);
+    let (sa, v) = open_live(cx, cfg);
+    let port = sa.read_with(v, |s, _| s.port.clone());
+    assert!(port.sessions().is_empty());
+    let folder = f.base.join("f1");
+    let req = SessionStart {
+        first_message: "hello".into(),
+        folder: Some(folder.to_string_lossy().into_owned()),
+        model: None,
+        title: None,
+    };
+    let fut = port.start(&req, PersonApproved::for_text("hello"));
+    v.run_until_parked();
+    assert_eq!(ready(fut).unwrap(), "s1");
+    assert_eq!(
+        active(v, &sa),
+        Frame::Session(folder.to_string_lossy().into_owned()),
+        "it opens as a tab, never in the TUI view"
+    );
+    let rows = port.sessions();
+    assert_eq!(
+        (rows.len(), rows[0].handle.as_str(), rows[0].live),
+        (1, "s1", true)
+    );
+    assert!(port.report("s1").is_some() && port.report("s9").is_none());
+    // a line to an unknown handle is refused; Stop reaches the open one
+    let fut = port.send("s9", "hi", PersonApproved::for_text("hi"));
+    v.run_until_parked();
+    assert_eq!(ready(fut).unwrap_err(), "no such session");
+    let fut = port.interrupt("s1");
+    v.run_until_parked();
+    assert!(ready(fut).is_ok());
+    // a line to a session with no running task is refused by the engine, never typed as the person's own
+    let fut = port.send("s1", "hi", PersonApproved::for_text("hi"));
+    v.run_until_parked();
+    assert!(ready(fut).is_err());
+    // close: the tab goes, the row stays as ended
+    let fut = port.close("s1");
+    v.run_until_parked();
+    assert!(ready(fut).is_ok());
+    assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 0);
+    let rows = port.sessions();
+    assert_eq!((rows[0].live, rows[0].state.as_str()), (false, "ended"));
+    // a second start in the same folder is a new session with a new handle; a cap and a bad folder say why
+    let bad = SessionStart {
+        folder: Some(f.base.join("missing").to_string_lossy().into_owned()),
+        ..req
+    };
+    let fut = port.start(&bad, PersonApproved::for_text("hello"));
+    v.run_until_parked();
+    assert!(ready(fut).unwrap_err().starts_with("no such folder"));
+    assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 0);
+    v.update(|_, _| ());
+    v.run_until_parked();
+    super::session::host::tests::wait_free(&f.home);
+}
+
+#[gpui::test]
+fn the_conductors_goal_card_opens_the_prefilled_form_and_its_end_ends_the_frame(
+    cx: &mut TestAppContext,
+) {
+    use synthesis_app::conductor::GoalDraft;
+    let (sa, v) = open(cx);
+    let draft = GoalDraft {
+        kind: "writes".into(),
+        contract: "Make the build pass".into(),
+        folder: "/w/api".into(),
+        base_commit: None,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    sa.update_in(v, |s, w, cx| s.run_cmd(Cmd::Goal(draft, tx), w, cx));
+    v.run_until_parked();
+    assert_eq!(rx.try_recv().unwrap().unwrap(), "New goal form");
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
+    let o = sa.read_with(v, |s, _| s.outcomes.clone());
+    let init = o.read_with(v, |o, _| o.state.form.as_ref().map(|f| f.initial.clone()));
+    let init = init.expect("the form is open");
+    assert_eq!(
+        (init.goal.as_str(), init.workspace.as_str()),
+        ("Make the build pass", "/w/api")
+    );
+    assert!(
+        v.debug_bounds("sa-frame").is_some(),
+        "the frame is under the modal"
+    );
+    // the form closed: its frame goes with it
+    o.update(v, |o, cx| {
+        o.state.close_form();
+        cx.notify();
+    });
+    v.run_until_parked();
+    assert_eq!(active(v, &sa), Frame::Home);
+    // a read-only goal has no form yet: the frame says so and nothing is created
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ro = GoalDraft {
+        kind: "read_only".into(),
+        contract: "x".into(),
+        folder: "/w".into(),
+        base_commit: None,
+    };
+    sa.update_in(v, |s, w, cx| s.run_cmd(Cmd::Goal(ro, tx), w, cx));
+    v.run_until_parked();
+    assert!(rx.try_recv().unwrap().unwrap().contains("not built yet"));
+    assert!(o.read_with(v, |o, _| o.state.form.is_none()));
+}
+
+#[gpui::test]
+fn the_kind_pickers_goal_row_opens_the_form_and_the_enable_dialog_closes_with_a_recheck(
+    cx: &mut TestAppContext,
+) {
+    let (sa, v) = open(cx);
+    press(v, &sa, "n", none());
+    press(v, &sa, "2", none());
+    press(v, &sa, "enter", none());
+    assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
+    let o = sa.read_with(v, |s, _| s.outcomes.clone());
+    assert!(
+        o.read_with(v, |o, _| o.state.form.is_some()),
+        "the picker's row opens the form too"
+    );
+    // the chat's "Turn on" asks for the enable dialog; the sample is Ready, so only the note comes
+    sa.update(v, |s, cx| s.enable_guide(cx));
+    assert!(sa.read_with(v, |s, _| s.notice.is_some()));
 }

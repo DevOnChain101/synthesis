@@ -9,6 +9,7 @@ pub mod home;
 pub mod kit;
 pub mod material;
 mod picker;
+pub mod port;
 pub mod rail;
 pub mod session;
 pub mod sidebar;
@@ -22,11 +23,22 @@ use gpui::{
     px,
 };
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use futures::StreamExt as _;
+use gpui::Subscription;
+
 use crate::outcomes_view::OutcomesView;
+use crate::outcomes_view::popup::OpenSession;
 use crate::ui::{TITLEBAR_H, Tip, View};
 use crate::widgets::chrome::icon;
+use chat::{ConductorChat, OpenEnableGuide};
 use frames::{Frame, Frames, GoalKind};
-use kit::ButtonKind;
+use home::{HomeEvent, HomeView};
+use port::{Cmd, HostPort};
+use session::host::SessionHost;
+use synthesis_app::conductor::SessionRow;
 use tokens::{self as t, hsla};
 
 /// The rail and the title row start at the window's top: the traffic lights sit in this 48 px row (the mock's grid).
@@ -39,6 +51,9 @@ pub const CAP_NOTE: &str = "At most 6 session tabs can be open. Close one first.
 pub struct SwitchView(pub View);
 
 impl EventEmitter<SwitchView> for SuperAgentView {}
+
+/// A session that waits for a tool permission is answered in the TUI view, in that session (the shell opens it).
+impl EventEmitter<OpenSession> for SuperAgentView {}
 
 pub struct SuperAgentView {
     outcomes: Entity<OutcomesView>,
@@ -56,16 +71,94 @@ pub struct SuperAgentView {
     /// The mode button counts what waits for the person only in a live app (never the sample).
     pub(crate) count_waiting: bool,
     tab_scroll: ScrollHandle,
+    /// The home frame's body (B2); the conversation of the orchestrator chat (B3) sits in its slot.
+    home: Entity<HomeView>,
+    /// Hosts the embedded chats of the session frames (C1).
+    pub(crate) host: Entity<SessionHost>,
+    /// `None` for the sample: no conductor runs.
+    chat: Option<Entity<ConductorChat>>,
+    /// The Super Agent view is the one on screen (not the TUI view, not Settings over it).
+    visible: bool,
+    /// The next draw gives the keys to the front frame (a frame came forward).
+    refocus: bool,
+    /// What the conductor reads of the sessions, and the `s<N>` handles it names them by (never reused).
+    port: Arc<HostPort>,
+    handles: Vec<(String, String)>,
+    /// A new session without a folder starts in a scratch folder under this home (`None`: the sample).
+    synt_home: Option<PathBuf>,
+    /// The enable dialog was open at the last look: its closing is when the setting may have changed.
+    had_guide: bool,
+    /// The New goal frame opened the contract form (its closing closes the frame).
+    goal_form_opened: bool,
+    goal_prefill: Option<(String, String)>,
+    _subs: Vec<Subscription>,
 }
 
 impl SuperAgentView {
+    /// `conductor`: the environment and workspace of the live app (`None`: the sample, which runs no conductor).
     pub fn new(
         outcomes: Entity<OutcomesView>,
+        host: Entity<SessionHost>,
+        conductor: Option<(synthesis_config::Env, PathBuf)>,
         count_waiting: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&outcomes, |_, _, cx| cx.notify()).detach();
+        let mut subs = vec![cx.observe_in(&outcomes, window, |v, _, window, cx| {
+            v.outcomes_changed(window, cx)
+        })];
+        subs.push(cx.observe(&host, |v, _, cx| {
+            v.refresh_port(cx);
+            cx.notify();
+        }));
+        let home = cx.new(|cx| HomeView::new(outcomes.clone(), cx));
+        subs.push(cx.subscribe(&home, |v, _, e: &HomeEvent, cx| match e {
+            HomeEvent::OpenOutcome(id) => v.open(Frame::Outcome(id.clone()), cx),
+            HomeEvent::OpenSession(id) => cx.emit(OpenSession(id.clone())),
+        }));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let port = Arc::new(HostPort::new(tx));
+        let synt_home = conductor
+            .as_ref()
+            .and_then(|(env, _)| synthesis_app::homes(env).ok())
+            .map(|h| h.synthesis);
+        let chat = conductor.map(|(env, ws)| {
+            let chat = cx.new(|cx| ConductorChat::new(env, ws, Some(port.clone()), window, cx));
+            home.update(cx, |h, cx| {
+                h.set_conversation(Some(chat.clone().into()), cx)
+            });
+            subs.push(
+                cx.subscribe_in(&chat, window, |v, _, _: &OpenEnableGuide, _, cx| {
+                    v.enable_guide(cx)
+                }),
+            );
+            chat
+        });
+        // the conductor's effects on sessions run here, on the UI thread
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(c) = rx.next().await {
+                if this
+                    .update_in(cx, |v, window, cx| v.run_cmd(c, window, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
         Self {
+            home,
+            host,
+            chat,
+            visible: false,
+            refocus: false,
+            port: port.clone(),
+            handles: Vec::new(),
+            synt_home,
+            had_guide: false,
+            goal_form_opened: false,
+            goal_prefill: None,
+            _subs: subs,
             outcomes,
             frames: Frames::default(),
             focus: cx.focus_handle(),
@@ -79,17 +172,70 @@ impl SuperAgentView {
         }
     }
 
-    /// The view was shown: the keys come here.
+    /// The view was shown: the keys come here (the home, or the front session, takes them at the next draw).
     pub fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.visible = true;
+        self.refocus = true;
+        self.sync_host(cx);
+        cx.notify();
     }
 
+    /// The shell shows another view (the TUI view, Settings over this one): no hosted chat takes a key.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.sync_host(cx);
+            cx.notify();
+        }
+    }
+
+    /// What waits for the person: decisions and sessions that wait for a tool permission, and the questions in the
+    /// embedded chats (the rail, the mode button).
     pub(crate) fn waiting(&self, cx: &App) -> usize {
         if self.count_waiting {
-            self.outcomes.read(cx).waiting_count()
+            self.outcomes.read(cx).waiting_count() + self.host.read(cx).needs_total(cx)
         } else {
             0
         }
+    }
+
+    fn sync_host(&mut self, cx: &mut Context<Self>) {
+        let (frames, visible) = (&self.frames, self.visible);
+        self.host.update(cx, |h, cx| h.sync(frames, visible, cx));
+    }
+
+    /// The outcomes view changed: the enable dialog just closed is when the setting may be on now.
+    fn outcomes_changed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let guide = self.outcomes.read(cx).state.guide.is_some();
+        if std::mem::replace(&mut self.had_guide, guide)
+            && !guide
+            && let Some(c) = &self.chat
+        {
+            c.update(cx, |c, cx| c.recheck(cx));
+        }
+        // the New goal frame lives while its form is open; the form's end ends it
+        let o = self.outcomes.read(cx);
+        if matches!(self.frames.active(), Frame::NewGoal(GoalKind::Writes))
+            && o.state.form.is_none()
+            && self.goal_form_opened
+        {
+            self.goal_form_opened = false;
+            let i = self.frames.active_index();
+            self.close_tab(i, cx);
+            self.refocus = true;
+        }
+        cx.notify();
+    }
+
+    /// The chat's "Turn on Super Agent": the existing enable dialog opens over this view.
+    fn enable_guide(&mut self, cx: &mut Context<Self>) {
+        self.outcomes.update(cx, |o, _| o.state.open_guide());
+        if self.outcomes.read(cx).state.guide.is_none() {
+            self.notice =
+                Some("Turn Super Agent on in Settings (synt.orchestrator.enabled).".into());
+        }
+        cx.notify();
     }
 
     fn collapsed(&self, window: &Window) -> bool {
@@ -99,10 +245,14 @@ impl SuperAgentView {
 
     // ------------------------------------------------------------------------------------------ frames
 
-    /// The frames changed: the active tab is brought into view.
+    /// The frames changed: the active tab is brought into view, the hosted chats follow the tabs.
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.notice = None;
+        self.refocus = true;
         self.tab_scroll.scroll_to_item(self.frames.active_index());
+        self.sync_host(cx);
+        self.refresh_port(cx);
+        self.start_goal_form(cx);
         cx.notify();
     }
 
@@ -129,8 +279,10 @@ impl SuperAgentView {
         self.changed(cx);
     }
 
-    fn alive(outcomes: &Entity<OutcomesView>, cx: &App) -> impl Fn(&Frame) -> bool + use<> {
-        let items: Vec<String> = outcomes
+    fn alive(&self, cx: &App) -> impl Fn(&Frame) -> bool + use<> {
+        let hosted = self.host.read(cx).ids();
+        let items: Vec<String> = self
+            .outcomes
             .read(cx)
             .state
             .items
@@ -139,12 +291,14 @@ impl SuperAgentView {
             .collect();
         move |f| match f {
             Frame::Outcome(id) | Frame::Worker(id, _) => items.contains(id),
+            // a closed session is not a place to go back to
+            Frame::Session(id) => hosted.contains(id),
             _ => true,
         }
     }
 
     pub(crate) fn can_nav(&self, back: bool, cx: &App) -> bool {
-        let alive = Self::alive(&self.outcomes, cx);
+        let alive = self.alive(cx);
         if back {
             self.frames.can_back(alive)
         } else {
@@ -153,7 +307,7 @@ impl SuperAgentView {
     }
 
     pub fn nav(&mut self, back: bool, cx: &mut Context<Self>) {
-        let alive = Self::alive(&self.outcomes, cx);
+        let alive = self.alive(cx);
         let _ = if back {
             self.frames.back(alive)
         } else {
@@ -162,18 +316,194 @@ impl SuperAgentView {
         self.changed(cx);
     }
 
-    /// A new session of the kind picker started in `p` (a folder the person chose or a scratch folder): a session
-    /// frame opens in this view. Until the chat is hosted here (phase C1) the frame is a placeholder; the folder is
-    /// its id.
-    pub fn open_session_folder(&mut self, p: &std::path::Path, cx: &mut Context<Self>) {
+    /// A new session started in folder `p` (a folder the person chose, a scratch folder, or the conductor's): its
+    /// chat is hosted in a session frame of this view, never in the TUI view. `Err(why)`: nothing opened, `why` is
+    /// shown (the sample, the cap of open sessions, a refused folder). The frame id is the folder.
+    pub fn open_session_folder(
+        &mut self,
+        p: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
         let id = p.to_string_lossy().into_owned();
-        let title = p
-            .file_name()
-            .map_or_else(|| id.clone(), |n| n.to_string_lossy().into_owned());
-        if !self.sessions.iter().any(|(i, _)| *i == id) {
-            self.sessions.push((id.clone(), title));
+        let opened = self.host.update(cx, |h, cx| h.open(&id, p, window, cx));
+        if let Err(why) = opened {
+            self.notice = Some(why.clone());
+            cx.notify();
+            return Err(why);
         }
-        self.open(Frame::Session(id), cx);
+        self.register_session(&id, p);
+        self.open(Frame::Session(id.clone()), cx);
+        Ok(id)
+    }
+
+    /// The rail row and the conductor's `s<N>` handle of a hosted session.
+    fn register_session(&mut self, id: &str, p: &std::path::Path) {
+        if !self.sessions.iter().any(|(i, _)| i == id) {
+            let title = p
+                .file_name()
+                .map_or_else(|| id.to_string(), |n| n.to_string_lossy().into_owned());
+            self.sessions.push((id.to_string(), title));
+        }
+        if !self.handles.iter().any(|(_, i)| i == id) {
+            let n = self.handles.len() + 1;
+            self.handles.push((format!("s{n}"), id.to_string()));
+        }
+    }
+
+    /// What the conductor reads of the sessions of this window (live or ended), and the rail's titles.
+    fn refresh_port(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.read(cx);
+        let mut snap = port::Snapshot::default();
+        for (handle, id) in &self.handles {
+            let info = host.info(id, cx);
+            let (sid, report) = host.read(id, cx).unzip();
+            let title = info.as_ref().map(|i| i.title.clone()).or_else(|| {
+                self.sessions
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .map(|(_, t)| t.clone())
+            });
+            let state = match &info {
+                None => "ended",
+                Some(i) if i.needs > 0 => "needs_you",
+                Some(i) if i.busy => "running",
+                Some(_) => "idle",
+            };
+            snap.rows.push(SessionRow {
+                handle: handle.clone(),
+                sid: sid.unwrap_or_default(),
+                title: title.unwrap_or_default(),
+                state: state.into(),
+                model: String::new(),
+                mode: String::new(),
+                cwd_label: std::path::Path::new(id)
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                spent_usd: 0.0,
+                task_summary: String::new(),
+                live: info.is_some(),
+            });
+            if let Some(r) = report {
+                snap.reports.insert(handle.clone(), r);
+            }
+        }
+        if let Ok(mut s) = self.port.shared.lock() {
+            *s = snap;
+        }
+        // the rail keeps the first thing the person asked as the row's title, also after the tab closed
+        for (id, title) in &mut self.sessions {
+            if let Some(i) = self.host.read(cx).info(id, cx) {
+                *title = i.title;
+            }
+        }
+    }
+
+    fn id_of(&self, handle: &str) -> Option<String> {
+        self.handles
+            .iter()
+            .find(|(h, _)| h == handle)
+            .map(|(_, i)| i.clone())
+    }
+
+    /// An effect the conductor's card asked for (the person confirmed it; the proof came with it).
+    fn run_cmd(&mut self, c: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        match c {
+            Cmd::Start(req, reply) => {
+                let _ = reply.send(self.start_for_conductor(&req, window, cx));
+            }
+            Cmd::Send(handle, text, approval, reply) => {
+                let r = match self.id_of(&handle) {
+                    Some(id) => self.host.read(cx).send(&id, text, approval, cx),
+                    None => Err("no such session".into()),
+                };
+                let _ = reply.send(r);
+            }
+            Cmd::Interrupt(handle, reply) => {
+                let r = match self.id_of(&handle) {
+                    Some(id) => self.host.read(cx).interrupt(&id, cx),
+                    None => Err("no such session".into()),
+                };
+                let _ = reply.send(r);
+            }
+            Cmd::Close(handle, reply) => {
+                let at = self.id_of(&handle).and_then(|id| {
+                    self.frames
+                        .tabs()
+                        .iter()
+                        .position(|f| matches!(f, Frame::Session(i) if *i == id))
+                });
+                let r = match at {
+                    Some(i) => {
+                        self.close_tab(i, cx);
+                        Ok(())
+                    }
+                    None => Err("that session is not open".into()),
+                };
+                let _ = reply.send(r);
+            }
+            Cmd::Goal(draft, reply) => {
+                let _ = reply.send(self.open_goal_form(Some(&draft), cx));
+            }
+        }
+    }
+
+    fn start_for_conductor(
+        &mut self,
+        req: &synthesis_app::conductor::SessionStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let folder = match &req.folder {
+            Some(f) => PathBuf::from(f),
+            None => {
+                let home = self.synt_home.as_ref().ok_or("sessions need a live app")?;
+                crate::outcomes_view::kind_picker::make_scratch(home)?
+            }
+        };
+        let id = self.open_session_folder(&folder, window, cx)?;
+        let text = req.first_message.clone();
+        self.host
+            .update(cx, |h, cx| h.first_message(&id, text, window, cx));
+        self.handles
+            .iter()
+            .find(|(_, i)| *i == id)
+            .map(|(h, _)| h.clone())
+            .ok_or_else(|| "the session has no handle".into())
+    }
+
+    /// The New goal frame: the contract form (the old one, as a modal) opens. `draft`: what a conductor card
+    /// proposed, filled in; the person still finishes the contract and approves it. A read-only goal has no form yet.
+    fn open_goal_form(
+        &mut self,
+        draft: Option<&synthesis_app::conductor::GoalDraft>,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let kind = match draft.map(|d| d.kind.as_str()) {
+            Some("read_only" | "read-only" | "readonly") => GoalKind::ReadOnly,
+            _ => GoalKind::Writes,
+        };
+        self.goal_prefill = draft.map(|d| (d.contract.clone(), d.folder.clone()));
+        self.open(Frame::NewGoal(kind), cx);
+        self.goal_prefill = None;
+        if self.frames.active() != &Frame::NewGoal(kind) {
+            return Err(CAP_NOTE.into());
+        }
+        Ok(match kind {
+            GoalKind::Writes => "New goal form".into(),
+            GoalKind::ReadOnly => "New read-only goal (its form is not built yet)".into(),
+        })
+    }
+
+    /// Opens the form of the active New goal frame once (the read-only form comes with its own phase).
+    fn start_goal_form(&mut self, cx: &mut Context<Self>) {
+        if self.frames.active() != &Frame::NewGoal(GoalKind::Writes) || self.goal_form_opened {
+            return;
+        }
+        let prefill = self.goal_prefill.take();
+        self.goal_form_opened = true;
+        self.outcomes
+            .update(cx, |o, cx| o.open_goal_form(prefill, cx));
     }
 
     fn toggle_rail(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -197,10 +527,17 @@ impl SuperAgentView {
                 .map_or_else(|| clean(id), |i| clean(&i.row.goal)),
             Frame::Worker(o, i) => clean(&format!("{o} {i}")),
             Frame::Session(id) => self
-                .sessions
-                .iter()
-                .find(|(i, _)| i == id)
-                .map_or_else(|| "Session".into(), |(_, t)| clean(t)),
+                .host
+                .read(cx)
+                .info(id, cx)
+                .map(|i| i.title)
+                .or_else(|| {
+                    self.sessions
+                        .iter()
+                        .find(|(i, _)| i == id)
+                        .map(|(_, t)| t.clone())
+                })
+                .map_or_else(|| "Session".into(), |t| clean(&t)),
             Frame::NewGoal(GoalKind::Writes) => "New goal".into(),
             Frame::NewGoal(GoalKind::ReadOnly) => "New read-only goal".into(),
             Frame::Picker => "New".into(),
@@ -222,6 +559,11 @@ impl SuperAgentView {
         if self.picker_open(cx) {
             return self.picker_key(ev, window, cx);
         }
+        let o = self.outcomes.read(cx);
+        if o.state.form.is_some() || o.state.guide.is_some() {
+            // the contract form and the enable dialog are modal: their keys are the outcomes view's
+            return self.outcomes.update(cx, |o, cx| o.on_key(ev, window, cx));
+        }
         let bare = !(m.control || m.alt || m.platform || m.shift);
         // before the Cmd/Ctrl chords: on Windows and Linux Ctrl is the secondary key, and Ctrl+Tab is not one of them
         if m.control && !m.alt && !m.platform && key == "tab" {
@@ -242,7 +584,16 @@ impl SuperAgentView {
             self.nav(key == "left", cx);
             return true;
         }
-        let mine = self.focus.is_focused(window) || self.rail_focus.is_focused(window);
+        if m.alt && !m.control && !m.platform && !m.shift && key == "a" {
+            // the next thing that waits for the person: the home shows it
+            self.frames.focus(0);
+            self.changed(cx);
+            self.home.update(cx, |h, cx| h.next_decision(cx));
+            return true;
+        }
+        let mine = self.focus.is_focused(window)
+            || self.rail_focus.is_focused(window)
+            || self.home.focus_handle(cx).is_focused(window);
         if !bare || !mine {
             return false;
         }
@@ -297,8 +648,9 @@ pub(super) fn ib(
 }
 
 impl SuperAgentView {
-    /// The body of a frame. Home and the others are placeholders until their phases (B2, B3, C1, C3).
-    fn frame_body(&self, f: &Frame, cx: &mut Context<Self>) -> AnyElement {
+    /// The body of a frame: the home (B2) with the orchestrator chat in its slot (B3), a hosted session chat (C1),
+    /// or a placeholder for the frames of the later phases.
+    fn frame_body(&mut self, f: &Frame, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let col = || {
             div()
                 .size_full()
@@ -310,45 +662,47 @@ impl SuperAgentView {
                 .px(px(t::S5))
         };
         match f {
-            Frame::Home => col()
-                .debug_selector(|| "sa-home".to_string())
-                .child(
-                    kit::text(t::T5, t::W_SEMIBOLD, t::TEXT_STRONG)
-                        .child("What should we work on?"),
-                )
-                .child(
-                    div()
-                        .max_w(px(480.))
-                        .pb(px(t::S3))
-                        .text_size(px(t::T3.0))
-                        .line_height(px(t::T3.1))
-                        .text_color(hsla(t::TEXT))
-                        .child("Start with a chat, or give Super-Agent a goal. Anything that needs a decision will wait for you on the home screen."),
-                )
-                .child(kit::button(
-                    "sa-home-new",
-                    "New",
-                    ButtonKind::Primary,
-                    false,
-                    Some(Box::new(cx.listener(|v, _, w, cx| v.new_picker(w, cx)))),
-                ))
+            Frame::Home => div()
+                .size_full()
+                .child(self.home.clone())
                 .into_any_element(),
+            Frame::Session(id) => {
+                let body = self.host.update(cx, |h, cx| h.render_frame(id, window, cx));
+                if let Some(b) = body {
+                    return div()
+                        .debug_selector(|| "sa-session".to_string())
+                        .size_full()
+                        .child(b)
+                        .into_any_element();
+                }
+                col()
+                    .debug_selector(|| "sa-frame".to_string())
+                    .child(kit::text(t::T3, t::W_REGULAR, t::TEXT).child("This session has ended."))
+                    .into_any_element()
+            }
             f => col()
                 .debug_selector(|| "sa-frame".to_string())
                 .child(
                     kit::card("sa-frame-card", false)
-                        .child(kit::text(t::T4, t::W_SEMIBOLD, t::TEXT_STRONG).child(self.title(f, cx)))
                         .child(
-                            kit::text(t::T2, t::W_REGULAR, t::TEXT)
-                                .child("This frame is filled in a later phase."),
-                        ),
+                            kit::text(t::T4, t::W_SEMIBOLD, t::TEXT_STRONG)
+                                .child(self.title(f, cx)),
+                        )
+                        .child(kit::text(t::T2, t::W_REGULAR, t::TEXT).child(match f {
+                            Frame::NewGoal(GoalKind::ReadOnly) => {
+                                "The read-only goal form is coming. Nothing was created."
+                            }
+                            _ => "This frame is filled in a later phase.",
+                        })),
                 )
                 .into_any_element(),
         }
     }
 
-    fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let notice = self.notice.clone();
+        let active = self.frames.active().clone();
+        let body = self.frame_body(&active, window, cx);
         div()
             .debug_selector(|| "sa-panel".to_string())
             .flex_1()
@@ -368,18 +722,22 @@ impl SuperAgentView {
                     .bg(hsla(t::ELEVATED))
                     .child(n)
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(self.frame_body(self.frames.active(), cx)),
-            )
+            .child(div().flex_1().min_h(px(0.)).child(body))
     }
 }
 
 impl Render for SuperAgentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.collapsed(window);
+        if std::mem::take(&mut self.refocus) && self.visible {
+            match self.frames.active() {
+                Frame::Home => self.home.update(cx, |h, cx| h.shown(window, cx)),
+                // a hosted chat takes its own focus; the others keep the keys on this view
+                Frame::Session(_) => {}
+                _ => window.focus(&self.focus, cx),
+            }
+        }
+        let modals = self.outcomes.update(cx, |o, cx| o.modals(window, cx));
         let picker = self.picker_overlay(cx);
         div()
             .id("superagent")
@@ -410,9 +768,10 @@ impl Render for SuperAgentView {
                             .flex()
                             .pr(px(t::S2))
                             .pb(px(t::S2))
-                            .child(self.panel(cx)),
+                            .child(self.panel(window, cx)),
                     ),
             )
+            .children(modals)
             .children(picker)
     }
 }

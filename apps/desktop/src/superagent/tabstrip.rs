@@ -52,7 +52,11 @@ impl SuperAgentView {
                 .iter()
                 .find(|i| i.row.id == *id)
                 .map_or(Status::Idle, |i| outcome_status(&i.row)),
-            Frame::Session(_) => Status::Idle,
+            Frame::Session(id) => match self.host.read(cx).info(id, cx) {
+                Some(i) if i.needs > 0 => Status::Needs,
+                Some(i) if i.busy => Status::Running,
+                _ => Status::Idle,
+            },
             Frame::NewGoal(_) | Frame::Picker => Status::Draft,
         };
         kit::text(t::T3, t::W_REGULAR, 0)
