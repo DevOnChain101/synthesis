@@ -5,6 +5,7 @@
 
 pub mod chat;
 pub mod frames;
+pub mod goal;
 pub mod home;
 pub mod kit;
 pub mod material;

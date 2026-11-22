@@ -14,6 +14,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::Value;
 use synthesis_app::outcome_client::{ClientError, OutcomeClient, Transport};
 use synthesis_config::Env;
+use synthesis_core::outcome::ContractKind;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
     AttemptView, BudgetView, CommandReply, CriteriaView, DecisionCard, InspectorContent,
@@ -773,7 +774,12 @@ fn submit<T: Transport>(
             base_commit,
             contract,
             key,
-        } => match head(&workspace) {
+        } => match if contract.kind == ContractKind::ReadOnly {
+            // a read-only goal has no base commit and its folder need not be a git repository
+            Ok(base_commit.clone())
+        } else {
+            head(&workspace)
+        } {
             // HEAD is read again now: a base that moved since the form showed it is not used
             Ok(now) if now != base_commit => {
                 let text = format!(

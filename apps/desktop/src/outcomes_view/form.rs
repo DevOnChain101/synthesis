@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use synthesis_core::outcome::{
-    Budgets, Capability, CapabilityMode, Contract, ContractCheck, ContractCriterion, Envelope,
-    TrustClass, validate_contract,
+    Budgets, Capability, CapabilityMode, Contract, ContractCheck, ContractCriterion,
+    DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM, Envelope, MAX_ATTEMPTS_PER_WORK_ITEM, TrustClass,
+    validate_contract,
 };
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_view::outcomes::CriteriaView;
@@ -24,6 +25,8 @@ pub struct FormText {
     pub budget: String,
     pub scope: String,
     pub workspace: String,
+    /// Read-only goals only: attempts per work item (empty: the core's default).
+    pub attempts: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +63,7 @@ pub fn text_of(c: &Contract) -> FormText {
         budget: c.envelope.budgets.max_cost_usd.to_string(),
         scope: c.envelope.allowed_paths.join("\n"),
         workspace: String::new(),
+        attempts: String::new(),
     }
 }
 
@@ -227,6 +231,43 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
     Ok(c)
 }
 
+/// The contract of a read-only goal (S1 section 1): `criteria` holds the rubric lines (optional), `scope` and
+/// `checks` are not used. The core builds the contract and `validate_contract` (kind `read_only`) checks it.
+pub fn build_read_only(t: &FormText) -> Result<Contract, Vec<String>> {
+    let mut errs = vec![];
+    let goal = t.goal.trim().to_string();
+    if goal.is_empty() {
+        errs.push("Goal: say what the goal must check or find out.".to_string());
+    }
+    let budget = t.budget.trim().parse::<f64>().ok();
+    if budget.is_none() {
+        errs.push(
+            "Budget: enter the most you accept to spend, in USD (for example 2); there is no default."
+                .to_string(),
+        );
+    }
+    let attempts = match t.attempts.trim() {
+        "" => Some(DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM),
+        a => a
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=MAX_ATTEMPTS_PER_WORK_ITEM).contains(n)),
+    };
+    if attempts.is_none() {
+        errs.push(format!(
+            "Attempts: a whole number from 1 to {MAX_ATTEMPTS_PER_WORK_ITEM}, or leave it empty for {DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM}."
+        ));
+    }
+    let (true, Some(budget), Some(attempts)) = (errs.is_empty(), budget, attempts) else {
+        return Err(errs);
+    };
+    let mut budgets = Budgets::new(budget);
+    budgets.max_attempts_per_work_item = attempts;
+    let c = Contract::read_only(goal, &lines(&t.criteria), budgets);
+    validate_contract(&c).map_err(|e| vec![e.to_string()])?;
+    Ok(c)
+}
+
 // ------------------------------------------------------------------------------------------ server's diff
 
 #[derive(Clone, Debug, PartialEq)]
@@ -370,6 +411,8 @@ pub struct Form {
     pub initial: FormText,
     pub head: Option<Head>,
     pub stage: Stage,
+    /// A read-only goal: the folder is any directory and there is no base commit (S1 section 1).
+    pub read_only: bool,
     /// Inline errors and refusals, one line each; typed text is never cleared by one.
     pub errors: Vec<String>,
     /// The last request sent whose answer is not known: sent again unchanged, it carries the same key.
@@ -387,8 +430,17 @@ impl Form {
             },
             head: None,
             stage: Stage::Edit,
+            read_only: false,
             errors: vec![],
             sent: None,
+        }
+    }
+
+    /// "New goal (read-only)": a new outcome whose contract has kind `read_only`; no `HEAD` is read.
+    pub fn new_read_only(workspace: &str) -> Self {
+        Self {
+            read_only: true,
+            ..Self::new_outcome(workspace)
         }
     }
 
@@ -402,6 +454,7 @@ impl Form {
             prev: Some(prev),
             head: None,
             stage: Stage::Edit,
+            read_only: false,
             errors: vec![],
             sent: None,
         }
@@ -417,6 +470,7 @@ impl Form {
             initial: FormText::default(),
             head: None,
             stage: Stage::Sending,
+            read_only: false,
             errors: vec![],
             sent: None,
         }
@@ -450,7 +504,7 @@ impl Form {
             Some(Head::Known { ws, .. } | Head::Failed { ws, .. }) => ws,
             None => "",
         };
-        (self.is_new() && !ws.is_empty() && known != ws).then(|| ws.to_string())
+        (self.is_new() && !self.read_only && !ws.is_empty() && known != ws).then(|| ws.to_string())
     }
 
     /// Edit stage only: the request for the text, or the errors (inline, text kept). A request equal to
@@ -460,7 +514,12 @@ impl Form {
             return None;
         }
         let mut errs = vec![];
-        let contract = match build(t, self.prev.as_ref()) {
+        let built = if self.read_only {
+            build_read_only(t)
+        } else {
+            build(t, self.prev.as_ref())
+        };
+        let contract = match built {
             Ok(c) => Some(c),
             Err(e) => {
                 errs = e;
@@ -469,6 +528,12 @@ impl Form {
         };
         let ws = t.workspace.trim().to_string();
         let base = match (&self.mode, &self.head) {
+            (Mode::New, _) if self.read_only => {
+                if !std::path::Path::new(&ws).is_absolute() {
+                    errs.push("Folder: give the absolute path of the folder.".into());
+                }
+                None
+            }
             (Mode::Revise { .. } | Mode::Draft { .. }, _) => None,
             (Mode::New, _) if !std::path::Path::new(&ws).is_absolute() => {
                 errs.push("Workspace: give the absolute path of the repository's folder.".into());
