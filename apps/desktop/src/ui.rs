@@ -195,6 +195,11 @@ impl Shell {
         cx.notify();
     }
 
+    #[cfg(feature = "shot")]
+    pub(crate) fn superagent(&self) -> &Entity<SuperAgentView> {
+        &self.sa
+    }
+
     /// The Settings popup (the offscreen shots seed it).
     #[cfg(feature = "shot")]
     pub(crate) fn settings(&self) -> &Entity<SettingsView> {

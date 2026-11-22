@@ -404,25 +404,6 @@ impl OutcomesView {
         }
     }
 
-    /// The Super Agent's New goal frame: opens the contract form (the old one, drawn as a modal by `modals`, until
-    /// the frame's own form lands), with the goal and folder a conductor card proposed filled in. Nothing is created:
-    /// the person finishes the contract and approves it.
-    pub(crate) fn open_goal_form(
-        &mut self,
-        draft: Option<(String, String)>,
-        cx: &mut Context<Self>,
-    ) {
-        let eff = self.state.open_new();
-        if let (Some((goal, ws)), Some(f)) = (draft, self.state.form.as_mut()) {
-            f.initial.goal = goal;
-            if !ws.trim().is_empty() {
-                f.initial.workspace = ws;
-            }
-        }
-        self.run(eff, cx);
-        cx.notify();
-    }
-
     /// The open form and the enable dialog as modals over the Super Agent view; their keys come back here.
     pub(crate) fn modals(
         &mut self,
