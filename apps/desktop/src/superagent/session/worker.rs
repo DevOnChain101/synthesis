@@ -11,6 +11,8 @@
 //! applies it as `user:superagent` (the surface principal); nothing here builds a `PersonClick`, and message text is
 //! never logged or echoed except through the redactor.
 
+use std::cell::Cell;
+
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, ScrollHandle,
@@ -20,6 +22,7 @@ use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use synthesis_view::outcomes::{InspectorContent, MessageRow};
 
 use super::outcome::{AttemptRow, item_finished, item_status, word};
+use crate::live::{ARM_MS, now_ms};
 use crate::outcomes_view::link::Delivery;
 use crate::outcomes_view::model::{Screen, State};
 use crate::outcomes_view::{MessageSent, OutcomesView};
@@ -256,6 +259,8 @@ pub struct WorkerFrame {
     result: Option<Result<String, String>>,
     scroll: ScrollHandle,
     focus: FocusHandle,
+    /// Enter does nothing until this time (ms): a held Enter that opened the frame must not send a kept draft.
+    arm_until: Cell<i64>,
 }
 
 impl WorkerFrame {
@@ -307,6 +312,7 @@ impl WorkerFrame {
             result: None,
             scroll: ScrollHandle::new(),
             focus,
+            arm_until: Cell::new(now_ms() + ARM_MS),
         }
     }
 
@@ -344,6 +350,7 @@ impl WorkerFrame {
 
     /// Where the shell puts the keys when this frame comes forward: the composer when it takes text.
     pub fn focus_target(&self, cx: &App) -> FocusHandle {
+        self.arm_until.set(now_ms() + ARM_MS);
         if matches!(self.gate(cx), Gate::Open { .. }) {
             self.composer.read(cx).focus_handle(cx)
         } else {
@@ -358,6 +365,11 @@ impl WorkerFrame {
         }
         if let Gate::Closed(why) = self.gate(cx) {
             self.result = Some(Err(why));
+            cx.notify();
+            return;
+        }
+        if now_ms() < self.arm_until.get() {
+            self.result = Some(Err("Look at the message first, then press Enter.".into()));
             cx.notify();
             return;
         }
@@ -812,6 +824,7 @@ mod tests {
             c.update(cx, |c, cx| c.set_value(text.to_string(), w, cx));
         });
         v.run_until_parked();
+        r.frame.read_with(v, |f, _| f.arm_until.set(0));
     }
 
     fn text_of(r: &Rig, v: &mut VisualTestContext) -> String {
@@ -877,6 +890,22 @@ mod tests {
         let again = reqs(&r);
         assert_eq!(again.len(), 1);
         assert_ne!(again[0].3, key);
+    }
+
+    #[gpui::test]
+    fn an_enter_that_arrives_with_the_frame_sends_nothing(cx: &mut TestAppContext) {
+        let (r, v) = mount(cx, st());
+        type_text(&r, v, "kept draft");
+        // the frame just came forward (a held Enter opened it): the guard time has not passed
+        r.frame
+            .read_with(v, |f, _| f.arm_until.set(now_ms() + ARM_MS));
+        v.simulate_keystrokes("enter");
+        assert!(reqs(&r).is_empty());
+        assert!(matches!(result(&r, v), Some(Err(w)) if w.contains("Look at the message first")));
+        assert_eq!(text_of(&r, v), "kept draft");
+        r.frame.read_with(v, |f, _| f.arm_until.set(0));
+        v.simulate_keystrokes("enter");
+        assert_eq!(reqs(&r).len(), 1, "one Enter after the guard sends it");
     }
 
     #[gpui::test]
