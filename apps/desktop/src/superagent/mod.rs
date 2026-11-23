@@ -679,7 +679,7 @@ impl SuperAgentView {
                 .map_or_else(|| clean(id), |i| clean(&i.row.goal)),
             Frame::Worker(o, i) => {
                 let st = &self.outcomes.read(cx).state;
-                match session::worker::build(st, o, i, cfg!(windows)) {
+                match session::worker::build(st, o, i, session::worker::is_windows()) {
                     session::worker::Body::Ready(v) => clean(&v.title),
                     _ => clean(&format!("{o} {i}")),
                 }

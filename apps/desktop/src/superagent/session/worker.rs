@@ -89,6 +89,24 @@ fn mask(s: &str) -> String {
     synthesis_view::toolview::redact_text(s)
 }
 
+/// Native Windows, where the owner refuses worker messages. Tests run as "not Windows" on every OS unless one
+/// forces it, so the open-composer paths are exercised everywhere.
+pub fn is_windows() -> bool {
+    #[cfg(test)]
+    {
+        FORCE_WINDOWS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        cfg!(windows)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_WINDOWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Why the composer is off, or the chip when it is on. `windows` is `cfg!(windows)` (a parameter so both are tested).
 fn gate(
     st: &State,
@@ -325,7 +343,7 @@ impl WorkerFrame {
             &self.outcomes.read(cx).state,
             &self.outcome,
             &self.item,
-            cfg!(windows),
+            is_windows(),
         )
     }
 
@@ -959,6 +977,20 @@ mod tests {
         );
         v.simulate_keystrokes("enter");
         assert_ne!(reqs(&r).remove(0).3, k2);
+    }
+
+    #[gpui::test]
+    fn on_native_windows_the_composer_is_closed_with_the_wsl_words_and_sends_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        FORCE_WINDOWS.with(|c| c.set(true));
+        let (r, v) = mount(cx, st());
+        type_text(&r, v, "hello");
+        v.simulate_keystrokes("enter");
+        assert!(reqs(&r).is_empty());
+        let g = r.frame.read_with(v, |f, cx| f.gate(cx));
+        assert_eq!(g, Gate::Closed(WINDOWS_WHY.into()));
+        FORCE_WINDOWS.with(|c| c.set(false));
     }
 
     #[gpui::test]
