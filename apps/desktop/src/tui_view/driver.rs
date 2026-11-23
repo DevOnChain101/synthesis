@@ -4459,6 +4459,13 @@ mod switch_tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         drop(rx);
         deliver(tx, Ok(l));
+        // the close finishes on the engine's own threads: poll, bounded
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !synthesis_app::peers::session_lock_free(&c.synthesis_home, &sid)
+            && std::time::Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(synthesis_app::peers::session_lock_free(
             &c.synthesis_home,
             &sid
