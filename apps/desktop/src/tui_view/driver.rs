@@ -206,12 +206,16 @@ pub struct LiveUi {
     /// `set_live` fed the conversation: no engine is launched.
     fixture: bool,
     store_task: Option<Task<()>>,
+    branch_task: Option<Task<()>>,
     peer_task: Option<Task<()>>,
     /// Recently read stored conversations (id, the row's `last` they were read at, conversation), oldest first.
     previews: Vec<(String, i64, Arc<Convo>)>,
     /// Session ids being read right now, and the one the chat waits to show.
     loading: Vec<String>,
     want: Option<String>,
+    /// A new workspace was opened: its session gets the keys (the composer) once it is live and no dialog
+    /// (the trust decision) waits.
+    pub(super) focus_new: bool,
     /// A line typed while the engine was not there yet (a previewed session starts, or a relaunch runs): it is
     /// handled as soon as the engine is attached.
     after_start: Option<String>,
@@ -340,10 +344,12 @@ impl TuiView {
             engine_task: None,
             fixture: false,
             store_task: None,
+            branch_task: None,
             peer_task: None,
             previews: vec![],
             loading: vec![],
             want: None,
+            focus_new: false,
             after_start: None,
             busy_hint: false,
             blink: Default::default(),
@@ -992,6 +998,40 @@ impl TuiView {
         }
         lu.dirty = true;
         cx.notify();
+        self.refresh_branches(cx);
+    }
+
+    /// Reads each listed folder's git branch off the UI thread (no `git` process; local folders only).
+    fn refresh_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if lu.live.engine.as_ref().is_some_and(|e| e.is_remote()) {
+            return;
+        }
+        let roots: Vec<(String, String)> = lu
+            .live
+            .view
+            .workspaces
+            .workspaces
+            .iter()
+            .map(|w| (w.key.clone(), w.root.clone()))
+            .collect();
+        let job = cx.background_spawn(async move {
+            roots
+                .into_iter()
+                .filter_map(|(k, r)| Some((k, crate::git_head::branch_of(Path::new(&r))?)))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
+        lu.branch_task = Some(cx.spawn(async move |this, cx| {
+            let b = job.await;
+            this.update(cx, |t, cx| {
+                if let Some(lu) = &mut t.live {
+                    lu.live.branches = b;
+                    lu.dirty = true;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Once a second: the clock, the MCP states, the peers every fifth time.
@@ -2698,7 +2738,10 @@ impl TuiView {
         match checked_folder(p) {
             Ok(c) => {
                 let key = format!("folder:{}", c.display());
-                self.switch(Target::New(c), key, cx)
+                self.switch(Target::New(c), key, cx);
+                if let Some(lu) = &mut self.live {
+                    lu.focus_new = lu.live.starting;
+                }
             }
             Err(why) => {
                 lu.live.note(why, true);
@@ -2899,7 +2942,9 @@ fn item_sig(it: &Item) -> u64 {
     std::mem::discriminant(it).hash(&mut h);
     match it {
         Item::User(t) | Item::Thinking(t) | Item::Internal(t) => t.len().hash(&mut h),
-        Item::Assistant { text, streaming } => (text.len(), streaming).hash(&mut h),
+        Item::Assistant {
+            text, streaming, ..
+        } => (text.len(), streaming).hash(&mut h),
         Item::Tool {
             summary,
             state,
@@ -3809,11 +3854,13 @@ mod tests {
         items[39] = Item::Assistant {
             text: "a".into(),
             streaming: true,
+            tainted: false,
         };
         let before = sigs(&items);
         items[39] = Item::Assistant {
             text: "ab".into(),
             streaming: true,
+            tainted: false,
         };
         assert_eq!(stale_rows(&before, &sigs(&items)).collect::<Vec<_>>(), [39]);
         // the plan card and the working line are always measured again
@@ -4260,6 +4307,105 @@ mod switch_tests {
         });
         press(&mut w, "up");
         assert!(!w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.ws_new));
+    }
+
+    #[gpui::test]
+    fn a_new_workspace_starts_one_session_and_the_composer_gets_the_keys_after_it_is_live(
+        cx: &mut TestAppContext,
+    ) {
+        let (t, cfg, mut l) = setup();
+        l.focus = Focus::Workspace;
+        let other = t.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let mut w = open(cx, cfg, l, true);
+        w.0.update(w.1, |t, cx| t.open_folder(&other, cx));
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(starting && launched, "exactly one session is being started");
+        assert!(w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().focus_new));
+        forget_engine(&mut w);
+        // the start failed (no engine): the note is the answer, the flag is dropped, the focus left alone
+        w.0.update(w.1, |t, cx| {
+            let lu = t.live.as_mut().unwrap();
+            lu.live.starting = false;
+            lu.live.engine = None;
+            lu.dirty = true;
+            cx.notify();
+        });
+        w.1.run_until_parked();
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            assert!(!lu.focus_new && lu.live.focus == Focus::Workspace);
+        });
+    }
+
+    #[gpui::test]
+    fn the_composer_waits_for_the_trust_decision_then_takes_the_keys(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind};
+        use gpui::Focusable;
+        let (t, cfg, mut l) = setup();
+        l.focus = Focus::Workspace;
+        let dir = t.path().join("proj");
+        let script = t.path().join("script.json");
+        let (e, _rx) = engine::for_tests::start(
+            &dir,
+            &cfg.env,
+            None,
+            Some(&format!("fake:{}", script.display())),
+            Some("off"),
+        )
+        .expect("engine starts");
+        l.engine = Some(Arc::new(e));
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "x".into(),
+            },
+            options: vec![("yes".into(), "Yes".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        });
+        let mut w = open(cx, cfg, l, true);
+        w.0.update(w.1, |t, _| t.live.as_mut().unwrap().focus_new = true);
+        w.0.update(w.1, |t, _| t.live.as_mut().unwrap().dirty = true);
+        w.1.run_until_parked();
+        let at = |w: &mut Win<'_>| {
+            w.0.update_in(w.1, |t, window, cx| {
+                let lu = t.live.as_ref().unwrap();
+                (
+                    lu.focus_new,
+                    lu.live.focus,
+                    lu.prompt.focus_handle(cx).is_focused(window),
+                )
+            })
+        };
+        assert_eq!(
+            at(&mut w),
+            (true, Focus::Workspace, false),
+            "the decision comes first"
+        );
+        w.0.update(w.1, |t, cx| {
+            t.live.as_mut().unwrap().live.dialogs.clear();
+            cx.notify();
+        });
+        w.1.run_until_parked();
+        assert_eq!(at(&mut w), (false, Focus::Chat, true));
+        let e =
+            w.0.update(w.1, |t, _| t.live.as_mut().unwrap().live.engine.take());
+        engine::close_shared(e.unwrap());
+    }
+
+    #[gpui::test]
+    fn a_refused_folder_or_a_cancelled_picker_starts_and_focuses_nothing(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let mut w = open(cx, cfg, l, true);
+        // a cancelled picker never reaches `open_folder`; a folder that cannot be opened is refused
+        w.0.update(w.1, |t, cx| {
+            t.open_folder(Path::new("/no/such/folder/for/the/test"), cx)
+        });
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(!starting && !launched);
+        assert!(!w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().focus_new));
     }
 
     /// Two embedded frames in one window: a key is taken only by the one its owner marks active and shown.

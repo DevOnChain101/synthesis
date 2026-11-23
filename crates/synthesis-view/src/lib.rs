@@ -6,6 +6,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod codeblock;
 pub mod conductor;
 pub mod convo;
 pub mod lifecycle;

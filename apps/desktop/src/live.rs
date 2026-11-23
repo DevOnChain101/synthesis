@@ -693,6 +693,8 @@ pub struct Live {
     pub focus: Focus,
     /// Selected workspace (its `key`); Running lists its sessions.
     pub ws_key: String,
+    /// Git branch of each workspace folder (by workspace key); a folder outside a work tree has none.
+    pub branches: std::collections::HashMap<String, String>,
     pub run_sel: usize,
     pub quit_armed_until: Option<i64>,
     /// A second click/Enter on this session id within [`SWITCH_ARM_MS`] switches while a task runs.
@@ -797,6 +799,7 @@ impl Live {
             expanded: HashSet::new(),
             focus: Focus::Chat,
             ws_key: String::new(),
+            branches: Default::default(),
             run_sel: 0,
             quit_armed_until: None,
             switch_armed: None,

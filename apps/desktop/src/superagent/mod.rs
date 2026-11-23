@@ -127,6 +127,11 @@ impl SuperAgentView {
             v.refresh_port(cx);
             cx.notify();
         }));
+        subs.push(
+            cx.subscribe(&host, |v, _, e: &session::host::WantTerminal, cx| {
+                v.show_terminal(&e.0, cx)
+            }),
+        );
         let home = cx.new(|cx| HomeView::new(outcomes.clone(), cx));
         subs.push(cx.subscribe(&home, |v, _, e: &HomeEvent, cx| match e {
             HomeEvent::OpenOutcome(id) => v.open(Frame::Outcome(id.clone()), cx),

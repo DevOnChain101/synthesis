@@ -278,7 +278,7 @@ fn run_row_selected(
     }
 }
 
-fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Running> {
+fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
     let v = &l.view;
     let Some(ws) = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key) else {
         return vec![];
@@ -330,13 +330,10 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
                 } else {
                     r.title.clone()
                 },
-                folder: folder.to_string(),
-                // the open session shows its git branch; a stored one only has its status
-                branch: if open && !v.session.git_branch.is_empty() {
-                    v.session.git_branch.clone()
-                } else {
-                    status_word(r.status).to_string()
-                },
+                // the row runs in the folder of the workspace it is listed under
+                folder: ws.label.clone(),
+                // only a git work tree has a branch (the state is the dot and `status`)
+                branch: l.branches.get(&ws.key).cloned().unwrap_or_default(),
                 state,
                 status: if open {
                     activity_word(l)
@@ -369,7 +366,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             p.task.clone()
         },
         folder: tilde(&p.workspace_label, home),
-        branch: p.status.to_string(),
+        branch: String::new(),
         age: String::new(),
         last: now,
         live: true,
@@ -681,7 +678,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 closable: w.key != l.live_ws_key(),
             })
             .collect(),
-        running: session_rows(l, now, home, &cur_ws),
+        running: session_rows(l, now, home),
         session: SessionInfo {
             status: if l.starting {
                 "starting".into()
@@ -971,6 +968,59 @@ mod tests {
         assert_eq!(names(&l), ("first prompt".into(), "first prompt".into()));
         l.renamed = Some(("s1".into(), "My name".into()));
         assert_eq!(names(&l), ("My name".into(), "My name".into()));
+    }
+
+    /// The owner's screenshot: the selected workspace is not the open session's folder. Its rows name their own
+    /// folder, the top bar and cwd stay the open session's (the engine runs there), and only a git folder has a branch.
+    #[test]
+    fn rows_name_their_workspace_folder_and_only_git_folders_have_a_branch() {
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/old-proj".into();
+        l.sid = "open".into();
+        let ws = |root: &str, label: &str, id: &str| WorkspaceRow {
+            root: root.into(),
+            key: fold_dir(root),
+            label: label.into(),
+            sessions: vec![SessionRow {
+                id: id.into(),
+                title: format!("t-{id}"),
+                status: synthesis_core::SessionStatus::Idle,
+                updated_at: String::new(),
+                mtime: 0,
+                is_live: false,
+            }],
+            available: true,
+            changes: None,
+        };
+        l.view.workspaces.workspaces = vec![
+            ws("/w/old-proj", "old-proj", "open"),
+            ws("/w/synthesis", "synthesis", "other"),
+        ];
+        l.ws_key = fold_dir("/w/synthesis");
+        l.branches.insert(fold_dir("/w/synthesis"), "main".into());
+        let s = build(&l, 0, 0, None);
+        assert_eq!(s.running.len(), 1);
+        let r = &s.running[0];
+        assert_eq!(
+            (r.id.as_str(), r.folder.as_str(), r.branch.as_str()),
+            ("other", "synthesis", "main")
+        );
+        assert_eq!(s.top.workspace, "old-proj", "the open session's folder");
+        assert!(
+            s.session
+                .rows
+                .iter()
+                .any(|(k, v)| k == "cwd" && v.ends_with("old-proj"))
+        );
+        l.ws_key = fold_dir("/w/old-proj");
+        let s = build(&l, 0, 0, None);
+        assert_eq!(
+            (s.running[0].folder.as_str(), s.running[0].branch.as_str()),
+            ("old-proj", ""),
+            "no git: no branch"
+        );
     }
 
     #[test]

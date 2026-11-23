@@ -461,7 +461,7 @@ impl ConductorChat {
                         .text_size(px(t::T3.0))
                         .line_height(px(t::T3.1))
                         .text_color(hsla(t::TEXT_STRONG))
-                        .child(md(idx, s)),
+                        .child(md_blocks(idx, s)),
                 )),
                 Item::Tool { name, summary, .. } => out.push(tool_row(name, summary)),
                 Item::TaskEnd {
@@ -653,6 +653,23 @@ fn md(idx: usize, text: &str) -> TextView {
         .selectable(true)
         .on_link_click(|_, _, _, _| {})
         .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
+}
+
+/// The reply with each fenced block as its own section (Copy only: this chat has no terminal); the prose stays
+/// the inert `md`. A reply without a fence is the plain `md`.
+fn md_blocks(idx: usize, text: &str) -> AnyElement {
+    let segs = synthesis_view::codeblock::split(text);
+    if !crate::widgets::codeblock::has_blocks(&segs) {
+        return md(idx, text).into_any_element();
+    }
+    crate::widgets::codeblock::message(
+        &format!("sa-chat-{idx}"),
+        &segs,
+        false,
+        &mut |i, p| md(idx * 1024 + i, &p).into_any_element(),
+        &mut |_, _, _| None,
+    )
+    .into_any_element()
 }
 
 /// Bidi, zero-width and control characters (but not newline or tab) become visible `\u{..}` escapes.
