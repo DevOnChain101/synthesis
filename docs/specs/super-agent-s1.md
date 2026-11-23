@@ -324,6 +324,8 @@ Deliberately absent: approving, resolving, starting, resuming or cancelling, ena
 
 ### 4.7 Rate limits and the read/write split
 
+> **Deviation, owner sign-off pending (C3, 2026-11-23).** The worker composer builds no `PersonClick`: the send is `OutcomeClient::send_worker_message` on the link, whose principal is the link surface `user:superagent`, with `via="person"` when `proposal_sha256` is absent. Any local process that can use that link can therefore send as the person. The impact is limited because a message is guidance only and cannot widen the contract (T13). A source test keeps the call sites to the worker composer.
+
 - **Per conductor turn:** ≤ 12 tool calls, ≤ 3 proposals, ≤ 1 `propose_goal`.
 - **Open proposals:** ≤ 10.
 - **Own sessions:** ≤ 10 sends per target per 10 min, and ≤ 6 live sessions.

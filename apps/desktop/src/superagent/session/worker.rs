@@ -23,7 +23,7 @@ use synthesis_view::outcomes::{InspectorContent, MessageRow};
 
 use super::outcome::{AttemptRow, item_finished, item_status, word};
 use crate::live::{ARM_MS, now_ms};
-use crate::outcomes_view::link::Delivery;
+use crate::outcomes_view::link::{Delivery, UNSETTLED};
 use crate::outcomes_view::model::{Screen, State};
 use crate::outcomes_view::{MessageSent, OutcomesView};
 use crate::superagent::home::{RowSpec, row, section};
@@ -255,6 +255,9 @@ pub struct WorkerFrame {
     composer: Entity<TextareaState>,
     /// The idempotency key of the message in flight: a second Enter does nothing until the answer.
     pending: Option<String>,
+    /// The key and text of a send whose fate is unknown (lost link, not confirmed): the same text goes out with the
+    /// same key until the owner applies or refuses it, so a resend can never be a second message.
+    keep: Option<(String, String)>,
     /// What became of the last send: the words, and whether it went.
     result: Option<Result<String, String>>,
     scroll: ScrollHandle,
@@ -309,6 +312,7 @@ impl WorkerFrame {
             item,
             composer,
             pending: None,
+            keep: None,
             result: None,
             scroll: ScrollHandle::new(),
             focus,
@@ -380,7 +384,11 @@ impl WorkerFrame {
             cx.notify();
             return;
         }
-        let key = uuid::Uuid::new_v4().to_string();
+        let key = match self.keep.take() {
+            Some((k, t)) if t == text => k,
+            _ => uuid::Uuid::new_v4().to_string(),
+        };
+        self.keep = Some((key.clone(), text.clone()));
         self.pending = Some(key.clone());
         self.result = None;
         let (o, i) = (self.outcome.clone(), self.item.clone());
@@ -394,6 +402,9 @@ impl WorkerFrame {
             return;
         }
         self.pending = None;
+        if !matches!(&e.result, Err(w) if w.starts_with(UNSETTLED)) {
+            self.keep = None;
+        }
         self.result = Some(match &e.result {
             Ok(d) => {
                 self.composer
@@ -909,6 +920,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_resend_after_a_lost_link_or_no_confirmation_reuses_the_key_until_the_owner_answers(
+        cx: &mut TestAppContext,
+    ) {
+        let (r, v) = mount(cx, st());
+        type_text(&r, v, "hello");
+        v.simulate_keystrokes("enter");
+        let k1 = reqs(&r).remove(0).3;
+        // not confirmed: the same text goes out again with the same key
+        answer(&r, v, &k1, Err(format!("{UNSETTLED} yet: x")));
+        v.simulate_keystrokes("enter");
+        assert_eq!(reqs(&r).remove(0).3, k1, "same text, same key");
+        // an edit is another message
+        answer(&r, v, &k1, Err(format!("{UNSETTLED} yet: x")));
+        type_text(&r, v, "hello there");
+        v.simulate_keystrokes("enter");
+        let k2 = reqs(&r).remove(0).3;
+        assert_ne!(k2, k1);
+        // a lost link keeps the key too
+        r.outcomes.update(v, |o, cx| {
+            o.state.screen = Screen::Unreachable("closed".into());
+            cx.notify();
+        });
+        v.run_until_parked();
+        r.outcomes.update(v, |o, cx| {
+            o.state.screen = Screen::Ready;
+            cx.notify();
+        });
+        v.run_until_parked();
+        v.simulate_keystrokes("enter");
+        assert_eq!(reqs(&r).remove(0).3, k2, "after a lost link");
+        // a refusal ends it: the next send is a new command
+        answer(
+            &r,
+            v,
+            &k2,
+            Err("at most 20 messages to one outcome in an hour".into()),
+        );
+        v.simulate_keystrokes("enter");
+        assert_ne!(reqs(&r).remove(0).3, k2);
+    }
+
+    #[gpui::test]
     fn queued_and_denied_are_told_and_a_refusal_keeps_the_text(cx: &mut TestAppContext) {
         let (r, v) = mount(cx, st());
         type_text(&r, v, "hold on");
@@ -1032,7 +1085,9 @@ mod tests {
                 .filter(|l| !l.trim_start().starts_with("//"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let n = code.matches("send_message(").count() + code.matches("Req::Message").count();
+            let n = code.matches("send_message(").count()
+                + code.matches("send_worker_message(").count()
+                + code.matches("Req::Message").count();
             if n > 0 {
                 callers.push(
                     f.strip_prefix(root)

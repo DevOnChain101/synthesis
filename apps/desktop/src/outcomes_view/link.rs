@@ -96,6 +96,9 @@ pub enum FormMsg {
     },
 }
 
+/// Starts the words of a message whose fate is unknown: the same key is used again for the same text.
+pub const UNSETTLED: &str = "Not confirmed";
+
 /// How the owner took a worker message (S1 4.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -670,7 +673,11 @@ fn message<T: Transport>(
     };
     let r = match settle(c, outcome, r, key)? {
         Ok(r) => r,
-        Err(e) => return Ok(Err(format!("Sent; the state could not be read: {e}"))),
+        Err(e) => {
+            return Ok(Err(format!(
+                "{UNSETTLED} yet: the state could not be read: {e}"
+            )));
+        }
     };
     Ok(match r.state {
         CommandState::Applied => match r.result.get("delivery").and_then(Value::as_str) {
