@@ -52,6 +52,11 @@ pub struct OpenEnableGuide;
 
 impl EventEmitter<OpenEnableGuide> for ConductorChat {}
 
+/// The person asked for Settings (a start failure that Settings fixes: model, API key).
+pub struct OpenSettings;
+
+impl EventEmitter<OpenSettings> for ConductorChat {}
+
 /// An open edit box. `original` is the proposal's own text (the box shows `shown`, which is cleaned for display):
 /// a box left untouched is no edit, so the original bytes go on, never the cleaned ones.
 struct Edit {
@@ -232,7 +237,7 @@ impl ConductorChat {
         cx: &mut Context<Self>,
     ) {
         match r {
-            Err(e) => self.phase = Phase::Failed(sanitize_for_display(&e)),
+            Err(e) => self.phase = Phase::Failed(model::explain(&sanitize_for_display(&e))),
             Ok(s) => {
                 self.notes = s.notes.iter().map(|n| sanitize_for_display(n)).collect();
                 self.live = Some(s.live);
@@ -543,6 +548,16 @@ impl ConductorChat {
                         )
                     }),
             )
+            .children(matches!(self.phase, Phase::Failed(_)).then(|| {
+                kit::button(
+                    "sa-chat-settings",
+                    "Open Settings",
+                    ButtonKind::Secondary,
+                    false,
+                    Some(Box::new(cx.listener(|_, _, _, cx| cx.emit(OpenSettings)))),
+                )
+                .self_start()
+            }))
             .children(hint.map(|h| {
                 text(t::T2, t::W_REGULAR, t::TEXT)
                     .debug_selector(|| "sa-chat-hint".to_string())

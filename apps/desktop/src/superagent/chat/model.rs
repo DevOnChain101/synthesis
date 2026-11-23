@@ -42,6 +42,18 @@ pub fn gate(env: &Env) -> Gate {
     Gate::Ready
 }
 
+/// What the person reads when the engine did not start: the CLI's own wording ("pass --model", "set
+/// SYNT_MODEL") names flags this window does not have, so the two config errors say what to do here.
+pub fn explain(e: &str) -> String {
+    if e.starts_with("no model configured") || e.starts_with("no model for provider") {
+        "No model for Super-Agent: set synt.conductor.model (provider/model) or a default model, add its API key, then Send again.".into()
+    } else if e.starts_with("no API key") {
+        format!("{e}. Add the key in Settings, then Send again.")
+    } else {
+        e.to_string()
+    }
+}
+
 /// One card as the person was shown it: the snapshot, the full hash a click is bound to, and when those bytes
 /// first appeared. A new hash is a new card, so the clock starts again.
 pub struct Shown {
@@ -109,6 +121,13 @@ mod tests {
         let changed = snapshot(&[p("bb")], &a, 9, t1);
         assert_eq!(changed[0].since, t1);
         assert!(!changed[0].armed(t1));
+    }
+
+    #[test]
+    fn start_errors_say_what_to_do_in_this_window() {
+        assert!(explain("no model configured: pass --model x").contains("synt.conductor.model"));
+        assert!(explain("no API key for provider \"a\": set K and restart").contains("Settings"));
+        assert_eq!(explain("boom"), "boom");
     }
 
     #[test]

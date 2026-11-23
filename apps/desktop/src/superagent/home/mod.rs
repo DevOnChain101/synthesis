@@ -605,6 +605,11 @@ pub fn render(
     home.sync(cx);
     let m = home.model(cx);
     let centred = m.is_empty();
+    let (conversation_centred, conversation) = if centred {
+        (conversation, None)
+    } else {
+        (None, conversation)
+    };
     let body: Vec<AnyElement> = if m.loading {
         vec![home.skeleton()]
     } else if centred {
@@ -639,6 +644,17 @@ pub fn render(
                 .px(px(t::S5))
                 .pb(px(96.))
                 .child(home.invite(cx))
+        }))
+        // the chat is there from the first launch too: with nothing yet, it sits under the invitation
+        .children(centred.then(|| {
+            div()
+                .debug_selector(|| "home-conversation".to_string())
+                .w_full()
+                .max_w(px(728.))
+                .mx_auto()
+                .px(px(t::S5))
+                .pb(px(t::S6))
+                .children(conversation_centred)
         }))
         .children((!centred).then(|| {
             div()
