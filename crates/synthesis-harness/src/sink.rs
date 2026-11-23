@@ -84,6 +84,12 @@ impl EventSink {
         w.redactor().redact_str(s)
     }
 
+    /// The session's redactor; clones share the values learned from now on (the secret gate's input).
+    pub fn redactor(&self) -> Redactor {
+        let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
+        w.redactor().clone()
+    }
+
     /// Masks every value of a `KEY=value` / `key: value` file read from now on (a secret file the
     /// user approved reading), wherever it appears in events and logs.
     pub fn add_secrets_from(&self, text: &str) {

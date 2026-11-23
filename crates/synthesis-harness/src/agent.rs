@@ -329,7 +329,7 @@ impl Harness {
         task: &TaskRun,
         agent: &AgentCtx,
         turn: &str,
-        req: &Request,
+        req: &synthesis_providers::SealedRequest,
     ) -> Result<Streamed, StreamFail> {
         let mut stream = self.provider.stream(req, agent.cancel.clone());
         let mut builder = MessageBuilder::new();
@@ -853,7 +853,41 @@ impl Harness {
                 },
             );
 
-            let streamed = self.stream_once(task, agent, &turn, &req).await;
+            // the last step before the send: nothing leaves without passing the secret gate
+            let sealed = match synthesis_providers::SecretGate::new(self.sink.redactor()).seal(&req)
+            {
+                Ok(s) => s,
+                Err(b) => {
+                    reservation.release();
+                    self.notice(task, "error", format!("secret gate: {b}"));
+                    return AgentEnd::ModelError {
+                        blocked: true,
+                        reason: format!("secret_gate: {b}"),
+                    };
+                }
+            };
+            let note = format!(
+                "secret gate: masked {} value(s) in the model request ({}){}",
+                sealed.redactions().values().sum::<usize>(),
+                sealed
+                    .redactions()
+                    .iter()
+                    .map(|(k, n)| format!("{k}:{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if sealed.images_dropped() > 0 {
+                    format!("; {} image(s) withheld", sealed.images_dropped())
+                } else {
+                    String::new()
+                }
+            );
+            if (!sealed.redactions().is_empty() || sealed.images_dropped() > 0)
+                && st.gate_note != note
+            {
+                self.notice(task, "warning", note.clone());
+                st.gate_note = note;
+            }
+            let streamed = self.stream_once(task, agent, &turn, &sealed).await;
             if streamed.is_err() {
                 reservation.release();
             }

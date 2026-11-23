@@ -380,7 +380,6 @@ mod tests {
             approval_token: None,
             deadline: None,
             cancel: tokio_util::sync::CancellationToken::new(),
-            skip_secrets: false,
             sub_agent: false,
         };
         Rig {

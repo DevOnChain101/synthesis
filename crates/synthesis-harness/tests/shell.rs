@@ -433,9 +433,12 @@ async fn secrets_are_masked_in_live_output_and_in_the_completed_output() {
         rig.buf.text()
     );
     assert!(rig.buf.text().contains("[REDACTED:secret]"));
-    // the model still sees the real output
+    // the model does not see it either
     let (t, _) = tool_result(&rig.requests()[1], "b1").unwrap();
-    assert!(t.contains("TOPSECRETVALUE"));
+    assert!(
+        !t.contains("TOPSECRETVALUE") && t.contains("[REDACTED:secret]"),
+        "{t}"
+    );
 }
 
 // ---- approvals for autonomous command running ---------------------------------------------

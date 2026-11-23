@@ -628,7 +628,8 @@ pub fn commit_diff(
     let mut budget = DIFF_MAX_PATCH;
     for (i, e) in ents.iter().take(DIFF_MAX_FILES).enumerate() {
         let (added, removed) = counts.get(i).copied().unwrap_or((None, None));
-        let secret = synthesis_core::secrets::is_secret_shaped(Path::new(&e.path));
+        let secret = // repo-relative: the empty root makes every component count
+        synthesis_core::secrets::is_secret_shaped_in(Path::new(&e.path), Path::new(""));
         // a binary file counts `-`; a listing cut short by its cap says nothing either way
         let binary = !secret && counts.get(i).is_some_and(|c| *c == (None, None));
         let mut f = DiffFile {

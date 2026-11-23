@@ -17,7 +17,6 @@ fn ctx(dir: &std::path::Path) -> ToolContext {
         env: Arc::new(BTreeMap::new()),
         read_ledger: Arc::new(Mutex::new(HashMap::new())),
         permission_mode: PermissionMode::Default,
-        skip_secrets: false,
         sub_agent: false,
         approval_token: None,
         deadline: None,

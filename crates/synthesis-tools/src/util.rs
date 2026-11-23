@@ -204,7 +204,6 @@ mod tests {
             env: Arc::new(BTreeMap::new()),
             read_ledger: Arc::new(Mutex::new(HashMap::new())),
             permission_mode: PermissionMode::Default,
-            skip_secrets: false,
             sub_agent: false,
             approval_token: None,
             deadline: None,
@@ -310,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_walks_skip_secret_files_unless_the_call_names_them() {
+    fn directory_walks_and_named_secret_files_are_never_returned() {
         let (_d, base, c) = fx();
         fs::write(base.join("ws/.env"), "TOKEN=hunter2").unwrap();
         fs::write(base.join("ws/key.pem"), "hunter2").unwrap();
@@ -323,16 +322,21 @@ mod tests {
         );
         let by_path = g(json!({"pattern": "hunter2", "path": ".", "glob": "*"}));
         assert!(!by_path.contains(".env"), "{by_path}");
-        // naming it with `glob` is what the permission layer asks about; then it is searched
+        // naming it changes nothing: no override
         let named =
             g(json!({"pattern": "hunter2", "glob": ".env", "output_mode": "files_with_matches"}));
-        assert!(named.contains(".env"), "{named}");
+        assert!(!named.contains(".env"), "{named}");
+        let read = out(&crate::read::run(&json!({"file_path": "key.pem"}), &c));
+        assert!(
+            read.contains("blocked") && !read.contains("hunter2"),
+            "{read}"
+        );
         let list = out(&crate::glob::run(&json!({"pattern": "**/*"}), &c));
         assert!(
             list.contains("ok.txt") && !list.contains("key.pem"),
             "{list}"
         );
         let list = out(&crate::glob::run(&json!({"pattern": "*.pem"}), &c));
-        assert!(list.contains("key.pem"), "{list}");
+        assert!(!list.contains("key.pem"), "{list}");
     }
 }

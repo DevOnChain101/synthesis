@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::capabilities::ProviderCapabilities;
 use crate::error::{ErrorKind, ProviderError};
+use crate::gate::SealedRequest;
 use crate::http::EventStream;
 use crate::provider::{ModelInfo, ModelProvider};
-use crate::types::Request;
 use synthesis_config::Protocol;
 
 /// One fallback: its provider, the model it is asked for and its `provider/model` label.
@@ -90,7 +90,7 @@ impl ModelProvider for FailoverProvider {
         }
     }
 
-    fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
+    fn stream(&self, req: &SealedRequest, cancel: CancellationToken) -> EventStream {
         let (primary, label, fbs, active, notify, switched, reprobe) = (
             self.primary.clone(),
             self.primary_label.clone(),
@@ -119,9 +119,7 @@ impl ModelProvider for FailoverProvider {
                     primary.stream(&req, cancel.clone())
                 } else {
                     let f = &fbs[at - 1];
-                    let mut r = req.clone();
-                    r.model.clone_from(&f.model);
-                    f.provider.stream(&r, cancel.clone())
+                    f.provider.stream(&req.with_model(&f.model), cancel.clone())
                 }
             };
             let mut cur = start(at);
@@ -166,7 +164,8 @@ impl ModelProvider for FailoverProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Content, Message, Role, StreamEvent};
+    use crate::gate::SecretGate;
+    use crate::types::{Content, Message, Request, Role, StreamEvent};
     use std::sync::Mutex;
 
     /// Plays `items` for every request and records the model asked for.
@@ -185,7 +184,7 @@ mod tests {
         fn capabilities(&self, _: &str) -> ProviderCapabilities {
             ProviderCapabilities::defaults(Protocol::Anthropic)
         }
-        fn stream(&self, req: &Request, _: CancellationToken) -> EventStream {
+        fn stream(&self, req: &SealedRequest, _: CancellationToken) -> EventStream {
             self.models.lock().unwrap().push(req.model.clone());
             stream::iter(self.items.clone()).boxed()
         }
@@ -204,20 +203,22 @@ mod tests {
         })
     }
 
-    fn req() -> Request {
-        Request {
-            model: "m1".into(),
-            max_tokens: 10,
-            system: None,
-            messages: vec![Message {
-                role: Role::User,
-                content: Content::Text("hi".into()),
-            }],
-            tools: vec![],
-            temperature: None,
-            thinking: None,
-            reasoning_effort: None,
-        }
+    fn req() -> SealedRequest {
+        SecretGate::default()
+            .seal(&Request {
+                model: "m1".into(),
+                max_tokens: 10,
+                system: None,
+                messages: vec![Message {
+                    role: Role::User,
+                    content: Content::Text("hi".into()),
+                }],
+                tools: vec![],
+                temperature: None,
+                thinking: None,
+                reasoning_effort: None,
+            })
+            .unwrap()
     }
 
     fn setup(primary: Arc<Mock>, fb: Arc<Mock>) -> (FailoverProvider, Arc<Mutex<Vec<String>>>) {
@@ -277,7 +278,7 @@ mod tests {
             fn capabilities(&self, _: &str) -> ProviderCapabilities {
                 ProviderCapabilities::defaults(Protocol::Anthropic)
             }
-            fn stream(&self, _: &Request, _: CancellationToken) -> EventStream {
+            fn stream(&self, _: &SealedRequest, _: CancellationToken) -> EventStream {
                 let mut n = self.0.lock().unwrap();
                 *n += 1;
                 let item = if *n == 1 {

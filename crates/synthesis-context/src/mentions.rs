@@ -2,7 +2,7 @@
 //! `WorkspaceContext::resolve`, to an existing file or directory inside the workspace is appended
 //! as a data block; anything else stays plain text.
 
-use crate::{attr, defang, is_secret_path};
+use crate::{attr, defang};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -153,7 +153,9 @@ pub fn expand_mentions(text: &str, ws: &WorkspaceContext, opts: &MentionOptions)
         {
             continue; // images keep their attach path
         }
-        if is_secret_path(&abs) || opts.deny.is_some_and(|d| d(&abs)) {
+        if synthesis_core::secrets::is_secret_shaped_in(&abs, &ws.root)
+            || opts.deny.is_some_and(|d| d(&abs))
+        {
             blocks.push(format!(
                 "<file path=\"{}\">[not included: blocked by permissions]</file>",
                 attr(&rel)

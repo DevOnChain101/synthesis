@@ -76,18 +76,11 @@ fn glob_hits(re: &Regex, rel: &str, win: bool) -> bool {
     re.is_match(&rel) || re.is_match(rel.rsplit('/').next().unwrap_or(&rel))
 }
 
-/// `explicit`: the call named secret files itself (a `glob` such as `.env`), which the permission
-/// layer asked about, so a directory walk keeps them. Otherwise a walk always skips them.
-fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext, explicit: bool) -> Vec<PathBuf> {
-    let secret = |p: &Path| {
-        (!explicit || ctx.skip_secrets)
-            && (synthesis_core::secrets::is_secret_shaped(p)
-                || std::fs::canonicalize(p)
-                    .is_ok_and(|r| synthesis_core::secrets::is_secret_shaped(&r)))
-    };
+/// Secret-shaped files (and links to them) are never searched, named or walked: what Grep
+/// finds goes to the model.
+fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf> {
     if !is_dir {
-        // a file named as `path` is the person's call (asked for); only peers never read one
-        return if ctx.skip_secrets && secret(search) {
+        return if synthesis_core::secrets::is_secret_target_in(search, &ctx.workspace.root) {
             vec![]
         } else {
             vec![search.to_path_buf()]
@@ -113,7 +106,7 @@ fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext, explicit: bool)
         // symlinks are not followed (`is_file` is false for them), so a link to a secret is skipped too
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(ignore::DirEntry::into_path)
-        .filter(|p| !secret(p))
+        .filter(|p| !synthesis_core::secrets::is_secret_target_in(p, &ctx.workspace.root))
         .collect()
 }
 
@@ -140,8 +133,7 @@ fn search(
         _ => Mode::Files,
     };
 
-    let explicit = str_field(input, "glob").is_some_and(synthesis_core::secrets::names_secret);
-    let mut files = collect_files(search_path, is_dir, ctx, explicit);
+    let mut files = collect_files(search_path, is_dir, ctx);
     if ctx.cancel.is_cancelled() {
         return Err("cancelled".to_string());
     }

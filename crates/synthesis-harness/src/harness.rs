@@ -532,6 +532,8 @@ pub(crate) struct AgentState {
     pub drain_at: &'static str,
     /// The "model does not take images" notice was given for this agent.
     pub image_note: bool,
+    /// The last secret-gate notice (repeated only when it changes).
+    pub gate_note: String,
     /// Images already reported as left out of requests (the notice repeats only when more go).
     pub images_omitted: usize,
     /// The "output limit lowered to fit the cost cap" notice was given.
@@ -551,6 +553,7 @@ impl AgentState {
             auto_pause_until: 0,
             drain_at: "tool_round",
             image_note: false,
+            gate_note: String::new(),
             images_omitted: 0,
             clamp_note: false,
         }
@@ -1719,7 +1722,6 @@ impl Harness {
             approval_token: None,
             deadline: task.deadline,
             cancel: task.cancel.child_token(),
-            skip_secrets: lock(&agent.perms).env.deny_secret_reads,
             sub_agent: agent.agent_id.is_some(),
         }
     }

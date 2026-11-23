@@ -96,6 +96,7 @@ pub struct ProviderSummarizer {
     /// Sum of every call since the last `take_spent` (what compaction cost the task).
     spent: Mutex<synthesis_providers::Usage>,
     max_tokens: u32,
+    gate: synthesis_providers::SecretGate,
 }
 
 impl ProviderSummarizer {
@@ -115,7 +116,13 @@ impl ProviderSummarizer {
         self
     }
 
-    pub fn new(provider: Arc<dyn ModelProvider>, model: String, cancel: CancellationToken) -> Self {
+    /// `redactor` is the session's: the gate masks its registered values before anything is sent.
+    pub fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: String,
+        cancel: CancellationToken,
+        redactor: synthesis_events::Redactor,
+    ) -> Self {
         Self {
             provider,
             model,
@@ -124,6 +131,7 @@ impl ProviderSummarizer {
             usage: Mutex::default(),
             spent: Mutex::default(),
             max_tokens: 4096,
+            gate: synthesis_providers::SecretGate::new(redactor),
         }
     }
 }
@@ -143,6 +151,10 @@ impl Summarizer for ProviderSummarizer {
             thinking: None,
             reasoning_effort: None,
         };
+        let req = self
+            .gate
+            .seal(&req)
+            .map_err(|e| SummarizeError(e.to_string()))?;
         let mut stream = self.provider.stream(&req, self.cancel.clone());
         let mut text = String::new();
         let mut usage = synthesis_providers::Usage::default();
@@ -363,6 +375,7 @@ impl SynthesisContext {
         model: String,
         cancel: CancellationToken,
         put: PutArtifact,
+        redactor: synthesis_events::Redactor,
     ) -> Self {
         Self {
             instructions,
@@ -370,15 +383,7 @@ impl SynthesisContext {
                 goal: (!goal.is_empty()).then(|| goal.into()),
                 ..TaskState::default()
             }),
-            summarizer: Arc::new(ProviderSummarizer {
-                provider,
-                model,
-                cancel,
-                last: Mutex::default(),
-                usage: Mutex::default(),
-                spent: Mutex::default(),
-                max_tokens: 4096,
-            }),
+            summarizer: Arc::new(ProviderSummarizer::new(provider, model, cancel, redactor)),
             put,
             skills: None,
             memory: Mutex::new(None),
@@ -1005,6 +1010,31 @@ mod tests {
         assert!(RULES.contains("Write/Edit"));
     }
 
+    #[tokio::test]
+    async fn the_summarizer_masks_the_sessions_registered_values_before_sending() {
+        use synthesis_context::Summarizer;
+        let secret = format!("{}-{}", "hunter", "13572468");
+        let fake = Arc::new(synthesis_harness::testing::FakeProvider::new(vec![
+            synthesis_harness::testing::Turn::text("summary"),
+        ]));
+        let r = synthesis_events::Redactor::new([]);
+        let sum = ProviderSummarizer::new(
+            fake.clone(),
+            "m".into(),
+            CancellationToken::new(),
+            r.clone(),
+        );
+        r.add_secret(&secret); // learned after construction: the gate still sees it
+        sum.summarize("sys", &format!("history with {secret}"))
+            .await
+            .unwrap();
+        let sent = format!("{:?}", fake.requests());
+        assert!(
+            !sent.contains(&secret) && sent.contains("[REDACTED:secret]"),
+            "{sent}"
+        );
+    }
+
     #[test]
     fn append_system_prompt_reaches_the_request_and_system_prompt_replaces_the_rules() {
         let provider: Arc<dyn ModelProvider> =
@@ -1017,6 +1047,7 @@ mod tests {
                 "m".into(),
                 CancellationToken::new(),
                 Box::new(|_| Err("unused".into())),
+                synthesis_events::Redactor::new([]),
             )
             .with_system_prompt(replace.map(Into::into), append.map(Into::into))
         };
@@ -1056,6 +1087,7 @@ mod tests {
             "m".into(),
             CancellationToken::new(),
             put,
+            synthesis_events::Redactor::new([]),
         )
     }
 

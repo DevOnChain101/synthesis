@@ -328,11 +328,15 @@ impl ModelProvider for FakeProvider {
             .clone()
     }
 
-    fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
+    fn stream(
+        &self,
+        req: &synthesis_providers::SealedRequest,
+        cancel: CancellationToken,
+    ) -> EventStream {
         self.requests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(req.clone());
+            .push((**req).clone());
         let turn = self.responder.as_ref().and_then(|f| f(req)).or_else(|| {
             self.script
                 .lock()

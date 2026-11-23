@@ -5,7 +5,6 @@
 //! must resolve (after symlinks) inside the workspace, and `~/` imports are honoured only in
 //! user-scope files, so a cloned repo cannot pull `~/.ssh/...` into the prompt.
 
-use crate::is_secret_path;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -74,7 +73,8 @@ struct Ctx<'a> {
 /// No instruction file or `@import`, user-scope included (a `#` note can plant an import), may
 /// pull secret files (or anything the permission layer denies) into the prompt.
 fn read_denied(real: &Path, ctx: &Ctx) -> bool {
-    is_secret_path(real) || ctx.deny.is_some_and(|d| d(real))
+    synthesis_core::secrets::is_secret_shaped_in(real, &ctx.ws.root)
+        || ctx.deny.is_some_and(|d| d(real))
 }
 
 fn inside_workspace(ws: &WorkspaceContext, real: &Path) -> bool {

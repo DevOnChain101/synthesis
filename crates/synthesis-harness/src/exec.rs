@@ -1215,7 +1215,8 @@ impl Harness {
         let max = self.config.max_tool_result_chars;
         match c {
             ToolContent::Text(t) => {
-                let (capped, cut) = cap_text(t, max);
+                // masked before it enters the history (the raw `t` is returned for the learner)
+                let (capped, cut) = cap_text(&self.sink.redact(t), max);
                 (
                     Value::String(wrap_tool_output(name, &capped)),
                     t.clone(),
@@ -1228,7 +1229,7 @@ impl Harness {
                 for b in bs {
                     match b {
                         ToolBlock::Text { text: t } => {
-                            let (capped, cut) = cap_text(t, max);
+                            let (capped, cut) = cap_text(&self.sink.redact(t), max);
                             vals.push(
                                 json!({"type": "text", "text": wrap_tool_output(name, &capped)}),
                             );
@@ -1515,7 +1516,10 @@ impl Harness {
                                 w.first().map(String::as_str),
                                 Some("cat" | "less" | "more" | "head" | "tail" | "bat")
                             ) && w.iter().skip(1).any(|a| {
-                                synthesis_core::secrets::is_secret_shaped(std::path::Path::new(a))
+                                synthesis_core::secrets::is_secret_shaped_in(
+                                    std::path::Path::new(a),
+                                    &task.workspace.root,
+                                )
                             })
                         })
                 })
@@ -1527,7 +1531,12 @@ impl Harness {
             && input
                 .get("file_path")
                 .and_then(Value::as_str)
-                .is_some_and(|p| synthesis_core::secrets::is_secret_shaped(std::path::Path::new(p)))
+                .is_some_and(|p| {
+                    synthesis_core::secrets::is_secret_shaped_in(
+                        std::path::Path::new(p),
+                        &task.workspace.root,
+                    )
+                })
         {
             self.sink.add_secrets_from(&text);
         }

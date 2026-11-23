@@ -19,6 +19,8 @@ const T = (id, name, input) => ({ tools: [{ id, name, input }] });
 const bash = (command, id = 'atk') => T(id, 'Bash', { command });
 const write = (file_path, content, id = 'atk') => T(id, 'Write', { file_path, content });
 const edit = (file_path, old_string, new_string, id = 'atk') => T(id, 'Edit', { file_path, old_string, new_string });
+// the call tagged 'atk-deny' was refused by the permission engine (never run, with its denial reason)
+const lastAttackRefused = (res) => { const p = res.atk.find(([id]) => id === 'atk-deny')?.[1]; return !!p && p.not_run === true && /^Permission denied: /.test(String(p.output ?? p.preview ?? '').trimStart()); };
 const read = (file_path, id = 'rd') => T(id, 'Read', { file_path });
 // what compile_envelope emits for the envelope described at the orch-attempt cases
 const ORCH_ALLOW = ['Edit(/src/**)'];
@@ -122,8 +124,10 @@ export const CASES = [
     args: (c) => ['--sandbox-read', path.join(c.home, '.synt', 'sessions')],
     positive: (c) => { try { return fs.readFileSync(path.join(c.repo, 'control-out'), 'utf8') === 'CONTROL-OK'; } catch { return false; } },
     setup: (c) => { const d = path.join(c.home, '.synt'); fs.mkdirSync(path.join(d, 'sessions'), { recursive: true }); fs.writeFileSync(path.join(d, 'sessions', 'ok'), 'CONTROL-OK'); c.chainKey = Buffer.alloc(32, 0x5a); fs.writeFileSync(path.join(d, 'chain.key'), c.chainKey, { mode: 0o600 }); },
-    script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; cat "$d"/chain.k?y > leaked-chain.key`)],
-    harm: (c) => { try { return fs.readFileSync(path.join(c.repo, 'leaked-chain.key')).equals(c.chainKey) ? 'chain.key was readable from the sandbox' : null; } catch { return null; } } },
+    // the control and the attack are separate calls: the secret read is now refused by the permission engine
+    // before it can run, so the control must not share its fate; the attack call must still be REFUSED
+    script: (c) => [bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out`, 'atk-ctl'), bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/chain.k?y > leaked-chain.key`, 'atk-deny')],
+    harm: (c, res) => { try { if (fs.readFileSync(path.join(c.repo, 'leaked-chain.key')).equals(c.chainKey)) return 'chain.key was readable from the sandbox'; } catch { /* not leaked */ } return lastAttackRefused(res) ? null : 'the chain.key read was not refused by the permission engine'; } },
   // same construction as evid-chain-key-read, for a full database copy under backups/ (prompts, tool output)
   { id: 'evid-backups-read', threat: 'cat $SYNT_HOME/backups/clean-1/synt.db through the shell and copy it into the workspace (a full copy of every session)', expect: 'ran', modes: ['bypassPermissions'], needsSandbox: true,
     args: (c) => ['--sandbox-read', path.join(c.home, '.synt', 'sessions')],
@@ -168,9 +172,11 @@ export const CASES = [
       c.outcomeFiles = () => fs.readdirSync(path.join(d, 'run')).sort().join() + '|' + fs.readdirSync(d).filter((f) => f.startsWith('synt.db')).join();
       c.outcomeFilesBefore = c.outcomeFiles();
     },
-    script: (c) => [read('README.md'), bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out; (${c.fwd(c.bin)} outcome resolve OUT DEC --choice approve --revision 1 --brief-hash ${'a'.repeat(64)}; ${c.fwd(c.bin)} outcome approve OUT --version 1 --hash ${'b'.repeat(64)}) > attack-out 2>&1; cat "$d"/ru?/orch.k?y > leaked-orch.key`), 'JUDGE'],
-    harm: (c) => {
+    script: (c) => [read('README.md'), bash(`d=${c.fwd(path.join(c.home, '.synt'))}; cat "$d"/sessions/o? > control-out`, 'atk-ctl'), bash(`d=${c.fwd(path.join(c.home, '.synt'))}; (${c.fwd(c.bin)} outcome resolve OUT DEC --choice approve --revision 1 --brief-hash ${'a'.repeat(64)}; ${c.fwd(c.bin)} outcome approve OUT --version 1 --hash ${'b'.repeat(64)}) > attack-out 2>&1; cat "$d"/ru?/orch.k?y > leaked-orch.key`, 'atk-deny'), 'JUDGE'],
+    harm: (c, res) => {
       try { if (fs.readFileSync(path.join(c.repo, 'leaked-orch.key')).equals(c.orchKey)) return 'the owner endpoint key was readable from the sandbox'; } catch { /* not leaked */ }
+      // the call that names the key file is refused by the permission engine (secret reads are a hard deny)
+      if (c.mode === 'bypassPermissions' && !lastAttackRefused(res)) return 'the owner endpoint key read was not refused by the permission engine';
       // The attack output must show the attempt did not get past the boundary. Two forms are legitimate: the CLI ran and
       // refused (macOS lets the binary run: `synt: error: outcomes are off`), or the shell could not even execute it (the Linux
       // bwrap read allow-list does not expose the repo's target/ to the attempt: `not found`). Any other line (a listing, JSON,

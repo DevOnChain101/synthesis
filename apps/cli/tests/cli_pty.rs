@@ -272,10 +272,10 @@ fn approval_subagent_model_switch_and_new_folder() {
     assert!(used >= 2, "usage not persisted per task: {used} session(s)");
 }
 
-/// "Don't ask again" on a secret-file read stores a rule for that path, not a tool-wide `Read`,
-/// so a later read of another secret file asks again.
+/// A secret-file read is a hard deny: no question, no "don't ask again" to offer, no rule saved,
+/// and the content never reaches the model, for either file.
 #[test]
-fn dont_ask_again_on_a_secret_read_is_scoped_to_that_path() {
+fn a_secret_read_is_denied_without_a_question_and_saves_no_rule() {
     let rig = Rig::new(json!([{"text": "unused"}]));
     let (env, key) = (rig.ws().join(".env"), rig.ws().join("id_rsa"));
     std::fs::write(&env, "A=1\n").unwrap();
@@ -286,31 +286,49 @@ fn dont_ask_again_on_a_secret_read_is_scoped_to_that_path() {
         {"tools": [{"name": "Read", "input": {"file_path": key}}]},
         {"text": "read key"}
     ]));
-    rig.drive_with(
+    let text = rig.drive_with(
         json!([
             expect("Enter send"),
             send("go\r"),
-            expect("Do you want to proceed"),
-            quiet(),
-            send("2"),
             expect("read env"),
             quiet(),
             send("again\r"),
-            // another secret file: the question comes back
-            expect_new("Do you want to proceed"),
-            quiet(),
-            send("\u{1b}")
+            expect("read key"),
+            quiet()
         ]),
         &["--trust-project"],
     );
-    let saved = rig.ws().join(".synt/settings.local.json");
-    let t0 = std::time::Instant::now();
-    while !saved.exists() && t0.elapsed() < std::time::Duration::from_secs(5) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
-    let want = format!("Read(//{})", env.to_string_lossy().trim_start_matches('/'));
-    assert_eq!(v["permissions"]["allow"], json!([want]), "{v}");
+    assert!(
+        !text.contains("Do you want to proceed"),
+        "{}",
+        squash(&text)
+    );
+    let events = rig.events();
+    assert!(
+        !events.iter().any(|e| e.0 == "tool.approval_required"),
+        "no approval was asked"
+    );
+    let done: Vec<(String, bool)> = events
+        .iter()
+        .filter(|e| e.0 == "tool.completed")
+        .map(|e| {
+            (
+                e.1["name"].as_str().unwrap_or("").to_string(),
+                e.1["is_error"].as_bool().unwrap_or(false)
+                    || e.1["not_run"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    assert_eq!(done.len(), 2, "{done:?}");
+    assert!(
+        done.iter().all(|d| d.1),
+        "both reads were refused: {done:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.1.to_string().contains("A=1")),
+        "the file content is nowhere in the events"
+    );
+    assert!(!rig.ws().join(".synt/settings.local.json").exists());
 }
 
 /// The chat hides internal rows (memory, approval, mode bookkeeping, `key=value`) but still says

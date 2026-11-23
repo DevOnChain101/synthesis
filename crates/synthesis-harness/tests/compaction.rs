@@ -603,7 +603,12 @@ fn image_count(m: &Message) -> usize {
 
 #[tokio::test]
 async fn older_images_leave_the_request_but_not_the_history() {
-    let mut r = Rig::new(Opts::default(), vec![Turn::text("seen")]);
+    // no registered secret: with one, the secret gate withholds every image
+    let o = Opts {
+        secrets: vec![],
+        ..Opts::default()
+    };
+    let mut r = Rig::new(o, vec![Turn::text("seen")]);
     let mut req = synthesis_harness::TaskRequest::new("and now?");
     // 4 screenshots of 1.5 MB each (decoded): the oldest two exceed the keep-2 policy
     req.history = (0..4)
