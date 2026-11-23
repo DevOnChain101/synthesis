@@ -977,7 +977,7 @@ mod tests {
         use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
         let mut l = Live::new();
         l.starting = false;
-        l.cwd = "/w/nemo-cli".into();
+        l.cwd = "/w/old-proj".into();
         l.sid = "open".into();
         let ws = |root: &str, label: &str, id: &str| WorkspaceRow {
             root: root.into(),
@@ -995,7 +995,7 @@ mod tests {
             changes: None,
         };
         l.view.workspaces.workspaces = vec![
-            ws("/w/nemo-cli", "nemo-cli", "open"),
+            ws("/w/old-proj", "old-proj", "open"),
             ws("/w/synthesis", "synthesis", "other"),
         ];
         l.ws_key = fold_dir("/w/synthesis");
@@ -1007,18 +1007,18 @@ mod tests {
             (r.id.as_str(), r.folder.as_str(), r.branch.as_str()),
             ("other", "synthesis", "main")
         );
-        assert_eq!(s.top.workspace, "nemo-cli", "the open session's folder");
+        assert_eq!(s.top.workspace, "old-proj", "the open session's folder");
         assert!(
             s.session
                 .rows
                 .iter()
-                .any(|(k, v)| k == "cwd" && v.ends_with("nemo-cli"))
+                .any(|(k, v)| k == "cwd" && v.ends_with("old-proj"))
         );
-        l.ws_key = fold_dir("/w/nemo-cli");
+        l.ws_key = fold_dir("/w/old-proj");
         let s = build(&l, 0, 0, None);
         assert_eq!(
             (s.running[0].folder.as_str(), s.running[0].branch.as_str()),
-            ("nemo-cli", ""),
+            ("old-proj", ""),
             "no git: no branch"
         );
     }
