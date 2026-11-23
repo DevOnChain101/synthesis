@@ -664,9 +664,6 @@ enum Scan {
 }
 
 /// `.ssh` / `.aws` / `.gnupg` directories and secret-shaped file names.
-fn secret_shaped(p: &Path) -> bool {
-    synthesis_core::secrets::is_secret_shaped(p)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleSpec {
@@ -1038,6 +1035,12 @@ impl Permissions {
         v
     }
 
+    /// Secret-shaped, with the secret directory names counted only below the project root.
+    fn secret_shaped(&self, p: &Path) -> bool {
+        let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
+        synthesis_core::secrets::is_secret_shaped_in(p, root)
+    }
+
     /// Engine-enforced read ban (`Env::deny_read`, `Env::deny_secret_reads`); no rule or mode lifts it.
     fn hard_read_denied(&self, tool: &str, input: &Value) -> Option<&'static str> {
         const WHY: &str = "blocked: that path is Synthesis state or a secret and may not be read";
@@ -1099,7 +1102,7 @@ impl Permissions {
                     paths::within(x, &c, policy)
                         || (self.env.deny_secret_reads && paths::within(&c, x, policy))
                 });
-                if hit || (secrets && secret_shaped(&c)) {
+                if hit || (secrets && self.secret_shaped(&c)) {
                     return Some(WHY);
                 }
             }
@@ -1159,7 +1162,7 @@ impl Permissions {
                     if !t.contains(['$', '`', '*', '?', '[']) {
                         for b in &bases {
                             if let Some((p, _)) = self.resolve_operand(t, b)
-                                && paths::real_of(&p).is_some_and(|r| secret_shaped(&r))
+                                && paths::real_of(&p).is_some_and(|r| self.secret_shaped(&r))
                             {
                                 return true;
                             }
@@ -2191,7 +2194,9 @@ impl Permissions {
             [Some(paths::lexical_normalize(p)), paths::real_of(p)]
                 .into_iter()
                 .flatten()
-                .any(|c| secret_shaped(&c) || roots.iter().any(|x| paths::within(x, &c, policy)))
+                .any(|c| {
+                    self.secret_shaped(&c) || roots.iter().any(|x| paths::within(x, &c, policy))
+                })
         };
         let mut bases = vec![self.env.cwd.clone()];
         let mut unclear = false;

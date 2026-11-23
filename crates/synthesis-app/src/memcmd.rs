@@ -589,6 +589,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             let store = Mutex::new(Store::open(&h.synthesis, res.secrets.clone()).map_err(e)?);
             let rmodel = res.model.clone();
             let rf = Reflector {
+                redactor: synthesis_events::Redactor::new(res.secrets.clone()),
                 provider: res.provider,
                 model: res.model,
                 cancel: CancellationToken::new(),
@@ -951,6 +952,8 @@ pub struct Reflector {
     pub pricing: Option<synthesis_harness::Pricing>,
     /// Daily USD cap (memory.md D5).
     pub budget_usd: f64,
+    /// The session's redactor (or the run's secret values): the summarizer's gate masks with it.
+    pub redactor: synthesis_events::Redactor,
 }
 
 /// `synt.memory.daily_budget_usd` of the user settings (default 0.50, memory.md D5).
@@ -1069,6 +1072,10 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         None => (None, None),
     };
     let reflect = (reflection_enabled(&settings) && !read_only).then(|| Reflector {
+        redactor: a.sink.as_ref().map_or_else(
+            || synthesis_events::Redactor::new(a.secrets.to_vec()),
+            EventSink::redactor,
+        ),
         provider: a.provider.clone(),
         model: a.model.clone(),
         cancel,
@@ -1736,9 +1743,13 @@ async fn reflect_one(
         let existing = s.search(&d.request, &f).map_err(|e| e.to_string())?;
         synthesis_memory::prompt(&d, &existing)
     };
-    let sum =
-        crate::ctx::ProviderSummarizer::new(r.provider.clone(), r.model.clone(), r.cancel.clone())
-            .with_max_tokens(2000);
+    let sum = crate::ctx::ProviderSummarizer::new(
+        r.provider.clone(),
+        r.model.clone(),
+        r.cancel.clone(),
+        r.redactor.clone(),
+    )
+    .with_max_tokens(2000);
     let reply = tokio::time::timeout(REFLECT_TIMEOUT, sum.summarize(&system, &user))
         .await
         .map_err(|_| "timed out after 60 s".to_string())?

@@ -2110,8 +2110,8 @@ pub fn prepare(
         res.model.clone(),
         cancel.clone(),
         put,
+        sink.redactor(),
     )
-    .with_redactor(sink.redactor())
     .with_skills(&skills)
     .with_memory(memory_block)
     .with_system_prompt(

@@ -94,7 +94,7 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         Ok(p) => p,
         Err(m) => return ToolOutput::error(m),
     };
-    if synthesis_core::secrets::is_secret_target(&abs) {
+    if synthesis_core::secrets::is_secret_target_in(&abs, &ctx.workspace.root) {
         return ToolOutput::error(
             "Read: blocked: that file is a secret (key, credentials, .env) and is never sent to a model.",
         );

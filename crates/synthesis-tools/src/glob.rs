@@ -55,7 +55,7 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         if rel.as_os_str().is_empty() || !matcher.is_match(rel) {
             continue;
         }
-        if synthesis_core::secrets::is_secret_target(entry.path()) {
+        if synthesis_core::secrets::is_secret_target_in(entry.path(), &ctx.workspace.root) {
             continue;
         }
         let mtime = fs::metadata(entry.path())

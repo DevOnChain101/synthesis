@@ -120,63 +120,112 @@ impl SecretGate {
     }
 }
 
-/// Image data and provider-issued signatures are opaque base64: masking inside would corrupt them.
-fn opaque(o: &serde_json::Map<String, Value>, key: &str) -> bool {
-    let kind = o.get("type").and_then(Value::as_str);
-    kind == Some("image")
-        || key == "signature"
-        || (kind == Some("redacted_thinking") && key == "data")
-}
+type Visit<'a> = &'a mut dyn FnMut(&mut String);
 
-fn scrub(r: &Redactor, v: &mut Value) {
+/// Visits every string, object keys included (maps are rebuilt with the visited keys).
+fn visit(v: &mut Value, f: Visit) {
     match v {
-        Value::String(s) => *s = r.redact_str(s),
-        Value::Array(a) => a.iter_mut().for_each(|x| scrub(r, x)),
-        Value::Object(o) => {
-            let keys: Vec<String> = o.keys().cloned().collect();
-            for k in keys {
-                if !opaque(o, &k) {
-                    scrub(r, o.get_mut(&k).expect("key listed"));
-                }
-            }
-        }
+        Value::String(s) => f(s),
+        Value::Array(a) => a.iter_mut().for_each(|x| visit(x, f)),
+        Value::Object(o) => visit_map(o, f, &|_| false),
         _ => {}
     }
 }
 
-fn leak(r: &Redactor, v: &Value) -> Option<&'static str> {
-    match v {
-        Value::String(s) => r.leak_class(s),
-        Value::Array(a) => a.iter().find_map(|x| leak(r, x)),
-        Value::Object(o) => o
-            .iter()
-            .filter(|(k, _)| !opaque(o, k))
-            .find_map(|(_, x)| leak(r, x)),
-        _ => None,
+/// `exempt(key)`: that value is opaque base64 and is not visited (its key still is).
+fn visit_map(o: &mut serde_json::Map<String, Value>, f: Visit, exempt: &dyn Fn(&str) -> bool) {
+    for (mut k, mut v) in std::mem::take(o) {
+        f(&mut k);
+        if !exempt(&k) {
+            visit(&mut v, f);
+        }
+        o.insert(k, v);
     }
+}
+
+/// One content block. The ONLY exemptions are the exact shapes the provider needs verbatim:
+/// `source.data` of an image block, `signature` of a thinking block, `data` of a redacted_thinking
+/// block. The same keys anywhere else (tool results, tool input) are ordinary text.
+fn visit_block(b: &mut Value, f: Visit) {
+    let Value::Object(o) = b else {
+        return visit(b, f);
+    };
+    let kind = o
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    for (mut k, mut v) in std::mem::take(o) {
+        let name = k.clone(); // the structural key itself is not data
+        f(&mut k);
+        match (kind.as_str(), name.as_str(), &mut v) {
+            ("thinking", "signature", _) | ("redacted_thinking", "data", _) => {}
+            ("image", "source", Value::Object(src))
+                if src.get("type").and_then(Value::as_str) == Some("base64") =>
+            {
+                visit_map(src, f, &|key| key == "data")
+            }
+            _ => visit(&mut v, f),
+        }
+        o.insert(k, v);
+    }
+}
+
+/// Walks the serialized `Request`: blocks at `messages[*].content[*]` get the exact exemptions
+/// of [`visit_block`], everything else is visited whole.
+fn visit_request(v: &mut Value, f: Visit) {
+    let Value::Object(root) = v else {
+        return visit(v, f);
+    };
+    for (mut k, mut val) in std::mem::take(root) {
+        f(&mut k);
+        match (k.as_str(), &mut val) {
+            ("messages", Value::Array(msgs)) => {
+                for m in msgs {
+                    let Value::Object(mo) = m else {
+                        visit(m, f);
+                        continue;
+                    };
+                    for (mut mk, mut mv) in std::mem::take(mo) {
+                        f(&mut mk);
+                        match (mk.as_str(), &mut mv) {
+                            ("content", Value::Array(bs)) => {
+                                bs.iter_mut().for_each(|b| visit_block(b, f))
+                            }
+                            _ => visit(&mut mv, f),
+                        }
+                        mo.insert(mk, mv);
+                    }
+                }
+            }
+            _ => visit(&mut val, f),
+        }
+        root.insert(k, val);
+    }
+}
+
+fn scrub(r: &Redactor, v: &mut Value) {
+    visit_request(v, &mut |s| *s = r.redact_str(s));
+}
+
+fn leak(r: &Redactor, v: &Value) -> Option<&'static str> {
+    let mut found = None;
+    visit_request(&mut v.clone(), &mut |s| {
+        found = found.or_else(|| r.leak_class(s));
+    });
+    found
 }
 
 /// `[REDACTED:<class>]` markers by class in all strings.
 fn markers(v: &Value) -> BTreeMap<String, usize> {
-    fn walk(v: &Value, m: &mut BTreeMap<String, usize>) {
-        match v {
-            Value::String(s) => {
-                for part in s.split("[REDACTED:").skip(1) {
-                    if let Some((c, _)) = part.split_once(']') {
-                        *m.entry(c.to_string()).or_default() += 1;
-                    }
-                }
-            }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, m)),
-            Value::Object(o) => o
-                .iter()
-                .filter(|(k, _)| !opaque(o, k))
-                .for_each(|(_, x)| walk(x, m)),
-            _ => {}
-        }
-    }
     let mut m = BTreeMap::new();
-    walk(v, &mut m);
+    visit_request(&mut v.clone(), &mut |s| {
+        for part in s.split("[REDACTED:").skip(1) {
+            if let Some((c, _)) = part.split_once(']') {
+                *m.entry(c.to_string()).or_default() += 1;
+            }
+        }
+    });
     m
 }
 
@@ -301,6 +350,60 @@ mod tests {
         assert!(!serde_json::to_string(&*sealed).unwrap().contains(&secret));
         assert_eq!(sealed.images_dropped(), 1);
         assert_eq!(sealed.redactions().get("secret"), Some(&4));
+    }
+
+    #[test]
+    fn lookalike_image_and_signature_shapes_in_tool_data_are_still_masked() {
+        let tok = format!("ghp_{}", "Q".repeat(36));
+        let mut r = req_with("x".into());
+        r.messages.push(Message {
+            role: Role::User,
+            content: Content::Blocks(vec![
+                Block::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: Some(json!({"type": "image", "note": tok, "signature": tok,
+                        "source": {"type": "base64", "data": tok}})),
+                    is_error: None,
+                },
+                Block::ToolUse {
+                    id: "u".into(),
+                    name: "n".into(),
+                    input: Some(json!({"signature": tok, tok.clone(): 1})),
+                },
+            ]),
+        });
+        let sealed = SecretGate::default().seal(&r).unwrap();
+        let out = serde_json::to_string(&*sealed).unwrap();
+        assert!(!out.contains(&tok), "{out}");
+        assert!(
+            sealed.redactions().get("github") >= Some(&5),
+            "{:?}",
+            sealed.redactions()
+        );
+    }
+
+    #[test]
+    fn real_image_data_and_thinking_signatures_stay_verbatim() {
+        let data = format!("AKIA{}", "B".repeat(16)); // base64 that happens to look like a key
+        let mut r = req_with("x".into());
+        r.messages.push(Message {
+            role: Role::Assistant,
+            content: Content::Blocks(vec![
+                Block::Thinking {
+                    thinking: "t".into(),
+                    signature: Some(data.clone()),
+                },
+                Block::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: data.clone(),
+                    },
+                },
+            ]),
+        });
+        let sealed = SecretGate::default().seal(&r).unwrap();
+        let out = serde_json::to_string(&*sealed).unwrap();
+        assert_eq!(out.matches(&data).count(), 2, "{out}");
     }
 
     #[test]
