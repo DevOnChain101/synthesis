@@ -1,18 +1,13 @@
 use std::path::Path;
 
-/// Source and documentation files: a name like `secrets.rs` is code that talks about secrets.
+/// Compiled-language source and prose docs: a name like `secrets.rs` is code that talks about
+/// secrets. Scripting and web files (`.py`, `.sh`, `.js`, `.rb`, `.php`, `.html`) often hold real
+/// literals, so they are not exempt.
 fn is_source_name(lower_name: &str) -> bool {
     lower_name.rsplit_once('.').is_some_and(|(_, e)| {
         matches!(
             e,
-            "rs" | "py"
-                | "js"
-                | "mjs"
-                | "cjs"
-                | "jsx"
-                | "ts"
-                | "tsx"
-                | "go"
+            "rs" | "go"
                 | "java"
                 | "kt"
                 | "c"
@@ -21,15 +16,10 @@ fn is_source_name(lower_name: &str) -> bool {
                 | "cpp"
                 | "hpp"
                 | "cs"
-                | "rb"
-                | "php"
                 | "swift"
                 | "scala"
-                | "sh"
                 | "md"
                 | "rst"
-                | "html"
-                | "css"
         )
     })
 }
@@ -81,7 +71,7 @@ pub fn is_secret_path(path: &Path) -> bool {
         || n.contains(".tfstate.")
         || n.ends_with(".kdbx")
         || n.ends_with(".kdb")
-        || (!code && n.starts_with("secrets."))
+        || (!code && (n.starts_with("secrets.") || n == "secrets"))
         || {
             // `<dir>/<file>` pairs compared lowercase like the rest (case-insensitive volumes):
             // kube and docker client configs, `gh` hosts, and `.git/config` (remote URLs can carry a token)
@@ -268,7 +258,7 @@ mod tests {
             "crates/x/src/secrets.rs",
             "crates/x/src/Credentials.RS",
             "docs/credentials.md",
-            "a/secrets.py",
+            "a/secrets.go",
         ] {
             assert!(!super::is_secret_shaped(Path::new(p)), "{p}");
         }
@@ -300,6 +290,9 @@ mod tests {
         }
         for p in ["tests/secrets/helper.rs", "tests/secrets/README.md"] {
             assert!(!super::is_secret_shaped_in(&root.join(p), root), "{p}");
+        }
+        for p in ["secrets/prod.sh", "secrets/x.py", "secrets/app.js"] {
+            assert!(super::is_secret_shaped_in(&root.join(p), root), "{p}");
         }
         // outside the root the whole path counts
         assert!(super::is_secret_shaped_in(

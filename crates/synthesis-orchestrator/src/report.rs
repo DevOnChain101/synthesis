@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use synthesis_core::outcome::{ContractKind, DecisionState, TrustClass, hidden_char};
-use synthesis_core::secrets::is_secret_shaped;
+use synthesis_core::secrets::is_secret_shaped_in;
 use synthesis_session::outcome::{
     AttemptRecord, Effects, NewDecision, NewEvidence, OutcomeWriter, WorkItemRecord,
 };
@@ -184,7 +184,7 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
             )
         })
     };
-    if rel.components().any(state) || is_secret_shaped(rel) {
+    if rel.components().any(state) || is_secret_shaped_in(rel, std::path::Path::new("")) {
         return no("a secret or state path is never cited");
     }
     // Windows reads `name.` and `name ` as `name`, and `PROGRA~1` as another name

@@ -92,7 +92,8 @@ pub(crate) fn build(path: &str, kind: &str, old: &str, new: &str, hide: bool) ->
 
 /// `build` for a file path: secret files get counts only.
 pub fn for_file(path: &str, kind: &str, old: &str, new: &str) -> Value {
-    let hide = synthesis_core::secrets::is_secret_path(std::path::Path::new(path));
+    let hide = // no root here: the whole path counts (a diff hidden too often is safe)
+    synthesis_core::secrets::is_secret_shaped_in(std::path::Path::new(path), std::path::Path::new(""));
     build(path, kind, old, new, hide)
 }
 
