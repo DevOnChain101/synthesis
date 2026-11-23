@@ -27,6 +27,10 @@ pub struct Info {
     pub needs: usize,
 }
 
+/// A hosted session asks to show its Terminal pane (a Run click in its chat): the frame's id.
+pub struct WantTerminal(pub String);
+impl gpui::EventEmitter<WantTerminal> for SessionHost {}
+
 pub struct SessionHost {
     cfg: Option<LiveCfg>,
     views: Vec<(String, Entity<TuiView>)>,
@@ -105,6 +109,11 @@ impl SessionHost {
         }
         // the owner's tab, rail and conductor snapshot follow the chat
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        let fid = id.to_string();
+        cx.subscribe(&view, move |_, _, _: &crate::tui_view::WantTerminal, cx| {
+            cx.emit(WantTerminal(fid.clone()))
+        })
+        .detach();
         self.views.push((id.to_string(), view));
         Ok(())
     }

@@ -153,7 +153,7 @@ fn tool_look(name: &str) -> (&'static str, gpui::Hsla) {
 }
 
 /// Text colour of a [`Tone`] of a tool card.
-fn tone_fg(tone: Tone) -> gpui::Hsla {
+pub(crate) fn tone_fg(tone: Tone) -> gpui::Hsla {
     match tone {
         Tone::Text => text(),
         Tone::Dim => dim(),
@@ -167,7 +167,7 @@ fn tone_fg(tone: Tone) -> gpui::Hsla {
 }
 
 /// Background of a diff row.
-fn tone_bg(tone: Tone) -> Option<gpui::Hsla> {
+pub(crate) fn tone_bg(tone: Tone) -> Option<gpui::Hsla> {
     match tone {
         Tone::Add => Some(with_alpha(hsla(t::SUCCESS), 0.10)),
         Tone::Del => Some(with_alpha(hsla(t::ERROR), 0.10)),
@@ -634,7 +634,9 @@ impl TuiView {
                 )
                 .into_any_element()
             }
-            Item::Assistant { text: s, .. } => msg(
+            Item::Assistant {
+                text: s, streaming, ..
+            } => msg(
                 div().size_full().child(
                     crate::brand::avatar_img(32.)
                         .size_full()
@@ -644,9 +646,13 @@ impl TuiView {
                 hsla(t::ACCENT),
                 &time,
                 div().min_w(px(0.)).text_color(strong()).child(
-                    TextView::markdown(("assistant", idx), s.clone())
-                        .style(table_head_style())
-                        .selectable(true),
+                    match self.assistant_blocks(idx, s, *streaming, cx) {
+                        Some(blocks) => blocks,
+                        None => TextView::markdown(("assistant", idx), s.clone())
+                            .style(table_head_style())
+                            .selectable(true)
+                            .into_any_element(),
+                    },
                 ),
             )
             .into_any_element(),
@@ -1688,7 +1694,7 @@ pub fn input_box(
 
 /// A table's header row stands out in the chat: bold, in the strong text colour on the elevated ground (the theme default
 /// is the muted grey of a body cell).
-fn table_head_style() -> TextViewStyle {
+pub(crate) fn table_head_style() -> TextViewStyle {
     TextViewStyle::default().table_head(
         gpui::StyleRefinement::default()
             .font_weight(FontWeight::BOLD)

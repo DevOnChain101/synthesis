@@ -198,6 +198,17 @@ fold; "approval needed" in the title bar has a fixed line box and only its dot b
 metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/cli-palette.md). At the reference sizes of `design_tests`
 nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
 (Files and Browser tabs unseeded).
+Fenced blocks in assistant messages (desktop extension, owner request 2026-11-23; `cli.html` has no such design, so this is the
+one place the chat departs from it, and only inside a message with a fence): each block is its own section with a header
+(kind and language) and buttons: COMMAND (Copy, Run in terminal), CODE, DIFF (`+` green, `-` red, `@@` blue, file headers
+strong; the diff tab's colours) and TEXT (Copy). Classification is pure (`synthesis-view/src/codeblock.rs`, shared by the
+TUI view, the Super Agent session chats and the conductor chat, which has Copy only): a shell label, or an unlabelled block
+whose every line looks like a shell command; an agent's `/slash` command and prose stay text. Run in terminal types the
+command into the person's shell (TUI view: Terminal tab; Super Agent session: the sidebar Terminal segment) only from a
+real single mouse click, 400 ms after the block was drawn whole, never while the message streams; a multi-line command
+("Run N lines") or a risky one ("Run anyway") needs a second click at least 400 ms later; a block with invisible or bidi
+characters is shown escaped with no buttons. The terminal's output never goes back to the engine. Messages without a fence
+are unchanged; no design_tests/shot baseline contains a fenced assistant message.
 Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
 selects the whole conversation. The list is virtual, so this is a flag: the rows built tint like a selection, a pill says
 so, and Cmd/Ctrl+C copies the transcript assembled from the same items and `toolview` cards the rows paint (same

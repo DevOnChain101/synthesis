@@ -210,6 +210,15 @@ impl SuperAgentView {
         cx.notify();
     }
 
+    /// A Run click in the chat of session `id`: its Terminal pane opens in the sidebar (only for the front session).
+    pub(crate) fn show_terminal(&mut self, id: &str, cx: &mut Context<Self>) {
+        let a = self.side_avail(cx);
+        if self.front_session(cx).as_deref() == Some(id) && a.has(Segment::Terminal) {
+            (self.side.open, self.side.seg) = (true, Segment::Terminal);
+            self.sync_side(cx);
+        }
+    }
+
     /// A title-bar icon or shortcut.
     pub(crate) fn toggle_side(&mut self, s: Segment, cx: &mut Context<Self>) {
         let a = self.side_avail(cx);
