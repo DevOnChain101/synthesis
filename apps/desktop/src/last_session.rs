@@ -32,12 +32,61 @@ pub fn save(home: &Path, scope: &str, last: &Last) -> std::io::Result<()> {
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({}));
     doc["version"] = 1.into();
-    doc["scopes"][scope] = serde_json::json!({"sid": last.sid, "root": last.root});
+    let mut e = entry(&doc, scope);
+    e["sid"] = last.sid.clone().into();
+    e["root"] = last.root.clone().into();
+    doc["scopes"][scope] = e;
+    write(home, &doc)
+}
+
+/// The scope's entry as an object (what a damaged file holds there is dropped).
+fn entry(doc: &serde_json::Value, scope: &str) -> serde_json::Value {
+    doc.get("scopes")
+        .and_then(|s| s.get(scope))
+        .filter(|e| e.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write(home: &Path, doc: &serde_json::Value) -> std::io::Result<()> {
     std::fs::create_dir_all(home)?;
     synthesis_config::write_private_atomic(
         &home.join(FILE),
-        (serde_json::to_string_pretty(&doc)? + "\n").as_bytes(),
+        (serde_json::to_string_pretty(doc)? + "\n").as_bytes(),
     )
+}
+
+/// The last active session of each workspace (workspace key -> session id) of `scope`; damaged: empty.
+pub fn load_active(home: &Path, scope: &str) -> std::collections::HashMap<String, String> {
+    let doc: Option<serde_json::Value> = std::fs::read(home.join(FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    doc.as_ref()
+        .and_then(|d| d.get("scopes")?.get(scope)?.get("active")?.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Records the last active session of each workspace for `scope`, keeping everything else.
+pub fn save_active(
+    home: &Path,
+    scope: &str,
+    active: &std::collections::HashMap<String, String>,
+) -> std::io::Result<()> {
+    let mut doc: serde_json::Value = std::fs::read(home.join(FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    doc["version"] = 1.into();
+    let mut e = entry(&doc, scope);
+    e["active"] = serde_json::to_value(active)?;
+    doc["scopes"][scope] = e;
+    write(home, &doc)
 }
 
 /// Where a launch without flags starts.
@@ -139,6 +188,17 @@ mod tests {
             None
         );
         assert_eq!(resolve(None, &[], |_, _| true, |_| true), None);
+    }
+
+    #[test]
+    fn the_active_sessions_survive_a_session_save_and_back() {
+        let d = tempfile::tempdir().unwrap();
+        let m: std::collections::HashMap<_, _> = [("w".to_string(), "s1".to_string())].into();
+        save_active(d.path(), LOCAL, &m).unwrap();
+        save(d.path(), LOCAL, &last()).unwrap();
+        assert_eq!(load_active(d.path(), LOCAL), m);
+        assert_eq!(load(d.path(), LOCAL), Some(last()));
+        assert!(load_active(d.path(), "wsl:x").is_empty());
     }
 
     #[test]

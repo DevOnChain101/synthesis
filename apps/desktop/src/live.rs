@@ -648,6 +648,12 @@ pub struct Live {
     pub preview: Option<Preview>,
     /// The Workspace selection is on its `new workspace` row (Running: `run_sel` past the last row).
     pub ws_new: bool,
+    /// The last active session of each workspace (persisted by the driver).
+    pub active: crate::tui_view::select::LastActive,
+    /// The stored session whose transcript is being waited for (debounce or read): the chat head says `loading`.
+    pub awaiting: Option<String>,
+    /// The list the keys came from when the composer took them (Esc on an empty composer goes back there).
+    pub back_to: Option<Focus>,
     pub engine: Option<Arc<Engine>>,
     /// The engine is being built (first start or a relaunch).
     pub starting: bool,
@@ -772,6 +778,9 @@ impl Live {
             view: ViewState::default(),
             preview: None,
             ws_new: false,
+            active: Default::default(),
+            awaiting: None,
+            back_to: None,
             engine: None,
             starting: true,
             starting_distro: false,

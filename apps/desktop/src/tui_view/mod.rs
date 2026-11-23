@@ -21,6 +21,7 @@ mod quote;
 mod rewind;
 mod run_block;
 pub mod sample;
+pub mod select;
 #[cfg(feature = "shot")]
 pub mod shot;
 pub mod snapshot;
@@ -847,11 +848,16 @@ impl TuiView {
             // changes); a waiting approval's red wins over it
             .border_color(self.attention_colour().unwrap_or_else(|| {
                 hsla(
-                    if self
-                        .live
-                        .as_ref()
-                        .is_some_and(|l| l.live.focus == crate::live::Focus::Chat)
-                    {
+                    if self.live.as_ref().is_some_and(|l| {
+                        let f = l.live.focus;
+                        select::chat_highlight(
+                            f == crate::live::Focus::Chat,
+                            f != crate::live::Focus::Chat,
+                            l.live.engine.is_some()
+                                || l.live.preview.is_some()
+                                || l.live.awaiting.is_some(),
+                        )
+                    }) {
                         t::ACCENT
                     } else {
                         t::BORDER
@@ -859,6 +865,11 @@ impl TuiView {
                 )
             }))
             .rounded(px(layout::PANEL_RADIUS))
+            // a click inside the chat pane gives it the keys (from a sidebar list)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.click_chat_pane(window, cx)),
+            )
             .child(self.chat_head())
             .when(!embedded, |d| d.child(strip))
             .child(body)
@@ -2201,10 +2212,12 @@ mod tests {
         assert_eq!(state(&view, vcx).0, 0, "Esc cancels");
     }
 
-    /// A click on a Running row selects it and hands the keys to the chat (the prompt holds the focus), even
-    /// when the Workspace/Running panel had them; the order of the rows does not change.
+    /// A click on a Running row selects and loads it and the list keeps the keys; a second click on the
+    /// highlighted row hands the keys to the chat (the prompt holds the focus); the rows never reorder.
     #[gpui::test]
-    fn clicking_a_running_row_focuses_the_chat_and_keeps_the_order(cx: &mut TestAppContext) {
+    fn a_row_click_only_selects_and_a_click_on_the_highlighted_row_enters_it(
+        cx: &mut TestAppContext,
+    ) {
         use crate::live::{Focus, Live};
         use gpui::Focusable as _;
         use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
@@ -2258,7 +2271,14 @@ mod tests {
                 lu.prompt.focus_handle(cx).is_focused(window),
             )
         });
-        assert_eq!((focus, sel, focused), (Focus::Chat, 1, true));
+        assert_eq!((focus, sel, focused), (Focus::Running, 1, false));
         assert_eq!(ids(&view, vcx), before, "the click moves no row");
+        view.update_in(vcx, |t, window, cx| t.click_running(1, window, cx));
+        vcx.run_until_parked();
+        let (focus, focused) = view.update_in(vcx, |t, window, cx| {
+            let lu = t.live.as_ref().unwrap();
+            (lu.live.focus, lu.prompt.focus_handle(cx).is_focused(window))
+        });
+        assert_eq!((focus, focused), (Focus::Chat, true));
     }
 }
