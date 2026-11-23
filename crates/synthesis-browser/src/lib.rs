@@ -315,6 +315,8 @@ pub struct BrowserRuntime {
     /// Armed capture guards: (tab session, document id) -> a value too short to mask was typed.
     /// Armed BEFORE the fill is sent and kept whatever happens to the call.
     filled: Mutex<HashMap<(String, String), bool>>,
+    /// A secret was typed with `fill_secret` at some point of this runtime (never cleared).
+    secret_typed: AtomicBool,
     /// Serialises `view` so activate + startScreencast of two calls cannot interleave.
     view_lock: tokio::sync::Mutex<()>,
     /// The tab (session) whose viewport follows the person's pane, and how: the agent's own capture puts the
@@ -322,6 +324,14 @@ pub struct BrowserRuntime {
     fitted: Mutex<Option<(String, ViewMetrics)>>,
     /// Tool calls of the agent in flight (`agent_busy`).
     agent_busy: AtomicUsize,
+}
+
+/// The page URL, or `"!"` when the page has a password field (open shadow roots, same-origin frames).
+const CREDENTIALED_JS: &str = r#"(()=>{const q=r=>{if(r.querySelector('input[type=password]'))return true;for(const e of r.querySelectorAll('*'))if(e.shadowRoot&&q(e.shadowRoot))return true;return false};try{if(q(document))return '!';for(const f of document.querySelectorAll('iframe,frame')){let d=null;try{d=f.contentDocument}catch(e){}if(d&&q(d))return '!'}}catch(e){return '!'}return location.href})()"#;
+
+/// `"!"` (a password field) or a URL that carries userinfo or a secret-named query/fragment value.
+fn url_credentialed(url: &str) -> bool {
+    url == "!" || redact_url(url) != url
 }
 
 /// Held for the length of one agent tool call.
@@ -1033,6 +1043,7 @@ impl BrowserRuntime {
             shots: AtomicU32::new(0),
             profile_lock: Mutex::new(profile_lock),
             filled: Mutex::default(),
+            secret_typed: AtomicBool::new(false),
             view_lock: tokio::sync::Mutex::new(()),
             fitted: Mutex::default(),
             agent_busy: AtomicUsize::new(0),
@@ -1742,6 +1753,7 @@ impl BrowserRuntime {
         value: &str,
     ) -> Result<bool> {
         let short = !mask_secret(value);
+        self.secret_typed.store(true, Ordering::SeqCst);
         let tab = self.current()?;
         let oid = self.isolated_object(&tab, r).await?;
         let kind = match spec.field_kind {
@@ -1811,6 +1823,22 @@ impl BrowserRuntime {
             ));
         }
         Ok(())
+    }
+
+    /// Whether a screenshot of the current page could show credentials (pixels cannot be masked,
+    /// so the caller keeps the image out of the model request). Fail-closed: any doubt is `true`.
+    /// A persistent login profile, a secret typed earlier, a password field (open shadow roots and
+    /// same-origin frames included) or credentials in the page URL.
+    pub async fn page_credentialed(&self) -> bool {
+        if self.opts.profile.is_some() || self.secret_typed.load(Ordering::SeqCst) {
+            return true;
+        }
+        let Ok(tab) = self.current() else { return true };
+        let v = self.eval(&tab, CREDENTIALED_JS).await;
+        match v.as_ref().ok().and_then(Value::as_str) {
+            Some(url) => url_credentialed(url),
+            None => true,
+        }
     }
 
     /// Fails while the current tab holds a short secret in its document: its console, network
@@ -2245,6 +2273,15 @@ fn group_alive(pgid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credentialed_page_urls() {
+        use super::url_credentialed as c;
+        assert!(c("!"));
+        assert!(c("https://bob:pw@example.com/"));
+        assert!(c("https://example.com/cb?access_token=abc"));
+        assert!(!c("https://example.com/docs?page=2"));
+    }
+
     /// The connect-src CSP is only a guard while nothing turns CSP off for a page.
     #[test]
     fn nothing_bypasses_csp() {

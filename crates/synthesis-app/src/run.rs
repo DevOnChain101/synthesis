@@ -920,7 +920,8 @@ pub fn expand_file_mentions(
         .iter()
         .map(|x| format!("@{}: no such file", sanitize_for_display(x)))
         .collect();
-    (request + &m.text, notes)
+    // file content is data the model reads: secret-shaped values in it are masked, not dropped
+    (request + &harness.redact(&m.text), notes)
 }
 
 /// Refusals of the governed (headless / engine) runs and of `--unattended`; `Err` is the exit-2 text.
@@ -1250,6 +1251,12 @@ pub fn prepare(
     // exact values of the stored browser secrets are masked in events, transcript and database
     let mut res = res;
     res.secrets.extend(browser.values(env));
+    for n in browser.unprotectable(env) {
+        eprintln!(
+            "synt: warning: synt.browser.secrets.{}: the value is under 4 characters and cannot be masked; it is not protected in output, events or the transcript",
+            sanitize_for_display(n)
+        );
+    }
     // files that hold stored secrets are state too: hidden from commands, Read/Grep/Glob and writes
     synthesis_deny.extend(browser.secret_files());
 
@@ -1684,6 +1691,8 @@ pub fn prepare(
 
     let mut resumed_from_seq = None;
     let mut model_changed = None;
+    // one redactor for events, the session store and the gate: a value learned by one is masked by all
+    let session_redactor = synthesis_events::Redactor::new(res.secrets.clone());
     let store: Option<Store> = if c.no_session_store {
         None
     } else {
@@ -1697,6 +1706,7 @@ pub fn prepare(
             ..StoreOptions::default()
         };
         let w = SessionStore::open(&h.synthesis, opts)
+            .map(|s| s.with_redactor(session_redactor.clone()))
             .and_then(|s| {
                 if in_place {
                     if c.attempt_session {
@@ -1816,7 +1826,7 @@ pub fn prepare(
         }
     };
     let taint = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sink = EventSink::new(
+    let sink = EventSink::with_redactor(
         Persist::new(
             out,
             tee,
@@ -1827,7 +1837,7 @@ pub fn prepare(
         )
         .with_taint(taint.clone()),
         sid.clone(),
-        res.secrets.clone(),
+        session_redactor.clone(),
     );
     *failover_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
     if let Some(t) = &transcript {
@@ -2058,6 +2068,10 @@ pub fn prepare(
     }
     if c.bare {
         instructions.clear();
+    }
+    // AGENTS.md, imports and rules may hold a pasted key: masked here, not just by the gate
+    for i in &mut instructions {
+        i.content = session_redactor.redact_str(&i.content);
     }
     let repo = crate::memcmd::repo_of(&ws.root);
     let small = crate::memcmd::small_model(&cfg, &res.label, &res.model);

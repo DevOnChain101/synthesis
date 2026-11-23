@@ -122,13 +122,22 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
 
 impl BrowserSettings {
     /// Values of the secrets that resolve right now and are long enough to mask by content, for
-    /// exact-value masking in events, the transcript and the session database. A secret that is
+    /// exact-value masking in events, the transcript and the session database (4-7 characters match whole tokens only). A secret that is
     /// unset now is simply not masked there (its value is masked in page captures when typed).
     pub fn values(&self, env: &Env) -> Vec<String> {
         self.secrets
             .iter()
             .filter_map(|(n, s)| resolve(n, s, env).ok())
-            .filter(|v| v.len() >= synthesis_browser::MASK_MIN)
+            .filter(|v| v.chars().count() >= 4)
+            .collect()
+    }
+
+    /// Names of the secrets that resolve to a value under 4 characters: nothing can mask those.
+    pub fn unprotectable(&self, env: &Env) -> Vec<&str> {
+        self.secrets
+            .iter()
+            .filter(|(n, s)| resolve(n, s, env).is_ok_and(|v| v.chars().count() < 4))
+            .map(|(n, _)| n.as_str())
             .collect()
     }
 
@@ -919,6 +928,14 @@ mod tests {
         assert_eq!(s.values(&e), ["hunter2-xyz"]);
         let short = Env::from_pairs([("SYNT_A_PASSWORD", "abc")]);
         assert!(s.values(&short).is_empty(), "too short to mask by content");
+        assert_eq!(s.unprotectable(&short), ["ok"]);
+        let four = Env::from_pairs([("SYNT_A_PASSWORD", "abcd")]);
+        assert_eq!(
+            s.values(&four),
+            ["abcd"],
+            "4-7 characters match whole tokens"
+        );
+        assert!(s.unprotectable(&four).is_empty());
         assert!(s.values(&Env::default()).is_empty());
         assert!(!parse_settings(&Map::new()).allow_unsandboxed);
     }

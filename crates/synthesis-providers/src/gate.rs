@@ -98,6 +98,16 @@ impl SecretGate {
         };
         let mut v = serde_json::to_value(&req).map_err(|_| internal())?;
         let before = markers(&v);
+        // a value split over adjacent blocks is masked per block as nothing, or only its head
+        for pieces in joined_runs(&v) {
+            let whole = pieces.concat();
+            let parts: String = pieces.iter().map(|p| self.redactor.redact_str(p)).collect();
+            if self.redactor.redact_str(&whole) != parts {
+                return Err(Blocked {
+                    class: self.redactor.leak_class(&whole).unwrap_or("secret").into(),
+                });
+            }
+        }
         scrub(&self.redactor, &mut v);
         if let Some(class) = leak(&self.redactor, &v) {
             return Err(Blocked {
@@ -214,6 +224,41 @@ fn leak(r: &Redactor, v: &Value) -> Option<&'static str> {
         found = found.or_else(|| r.leak_class(s));
     });
     found
+}
+
+/// Adjacent text blocks of one message or tool result, joined: a value split across two blocks
+/// survives the per-string masking, and the model could read the halves together.
+fn joined_runs(v: &Value) -> Vec<Vec<String>> {
+    fn runs(blocks: &[Value], out: &mut Vec<Vec<String>>) {
+        let mut cur: Vec<String> = vec![];
+        fn flush(out: &mut Vec<Vec<String>>, cur: &mut Vec<String>) {
+            if cur.len() > 1 {
+                out.push(std::mem::take(cur));
+            }
+            cur.clear();
+        }
+        for b in blocks {
+            match (b["type"].as_str(), b["text"].as_str()) {
+                (Some("text"), Some(t)) => {
+                    cur.push(t.to_string());
+                }
+                _ => {
+                    flush(out, &mut cur);
+                    if let Some(inner) = b["content"].as_array() {
+                        runs(inner, out);
+                    }
+                }
+            }
+        }
+        flush(out, &mut cur);
+    }
+    let mut out = vec![];
+    for m in v["messages"].as_array().into_iter().flatten() {
+        if let Some(bs) = m["content"].as_array() {
+            runs(bs, &mut out);
+        }
+    }
+    out
 }
 
 /// `[REDACTED:<class>]` markers by class in all strings.
@@ -407,13 +452,80 @@ mod tests {
     }
 
     #[test]
-    fn a_surviving_secret_blocks_the_send() {
-        // masking the first value forms the second (registered earlier, so already passed over)
+    fn a_value_split_across_blocks_blocks_the_send() {
+        let secret = format!("{}-{}", "hunter", "42424242");
+        let (a, b) = secret.split_at(7);
+        let r = Redactor::new([secret.clone()]);
+        let g = SecretGate::new(r);
+        let mut req = req_with("x".into());
+        req.messages.push(Message {
+            role: Role::User,
+            content: Content::Blocks(vec![
+                Block::Text {
+                    text: format!("one {a}"),
+                },
+                Block::Text {
+                    text: format!("{b} two"),
+                },
+            ]),
+        });
+        assert_eq!(g.seal(&req).unwrap_err().class, "secret");
+        // the same split inside one tool result
+        let mut req = req_with("x".into());
+        req.messages.push(Message {
+            role: Role::User,
+            content: Content::Blocks(vec![Block::ToolResult {
+                tool_use_id: "t".into(),
+                content: Some(json!([{"type": "text", "text": a}, {"type": "text", "text": b}])),
+                is_error: None,
+            }]),
+        });
+        assert_eq!(g.seal(&req).unwrap_err().class, "secret");
+        // a split pattern is caught without any registered value
+        let tok = format!("ghp_{}", "Q".repeat(36));
+        let (a, b) = tok.split_at(10);
+        let mut req = req_with("x".into());
+        req.messages.push(Message {
+            role: Role::User,
+            content: Content::Blocks(vec![
+                Block::Text { text: a.into() },
+                Block::Text { text: b.into() },
+            ]),
+        });
+        assert_eq!(
+            SecretGate::default().seal(&req).unwrap_err().class,
+            "github"
+        );
+        // unrelated neighbours pass
+        let mut req = req_with("x".into());
+        req.messages.push(Message {
+            role: Role::User,
+            content: Content::Blocks(vec![
+                Block::Text { text: "one".into() },
+                Block::Text { text: "two".into() },
+            ]),
+        });
+        assert!(g.seal(&req).is_ok());
+    }
+
+    #[test]
+    fn an_encoded_registered_value_never_survives() {
+        let secret = format!("{}-{}", "hunter", "42424242");
+        let enc: String = secret.bytes().map(|b| format!("{b:02x}")).collect();
+        let r = Redactor::new([secret]);
+        let sealed = SecretGate::new(r)
+            .seal(&req_with(format!("hex {enc}")))
+            .unwrap();
+        assert!(!serde_json::to_string(&*sealed).unwrap().contains(&enc));
+    }
+
+    #[test]
+    fn a_marker_lookalike_value_cannot_block_every_request() {
         let r = Redactor::new([]);
         let g = SecretGate::new(r.clone());
-        r.add_secret("[REDACTED:secret]");
-        r.add_secret("12345678");
-        let e = g.seal(&req_with("12345678".into())).unwrap_err();
-        assert_eq!(e.class, "secret");
+        assert!(r.add_secret_min("[REDACTED:secret]", 4).is_err());
+        assert!(r.add_secret_min("REDACTED", 4).is_err());
+        let ghp = format!("ghp_{}", "Q".repeat(36));
+        assert!(g.seal(&req_with(ghp)).is_ok());
     }
 }

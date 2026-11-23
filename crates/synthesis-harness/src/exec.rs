@@ -1562,13 +1562,13 @@ impl Harness {
                 agent,
                 Some(turn),
                 HookEvent::PostToolUse,
-                json!({"tool_name": name, "tool_use_id": id, "tool_input": self.tools.redact_input(name, &input), "tool_response": text}),
+                json!({"tool_name": name, "tool_use_id": id, "tool_input": self.tools.redact_input(name, &input), "tool_response": self.sink.redact(&text)}),
                 Some(name),
             )
             .await
             && !post.additional_context.is_empty()
         {
-            let extra = post.additional_context.join("\n");
+            let extra = self.sink.redact(&post.additional_context.join("\n"));
             match &mut content {
                 Value::String(s) => {
                     s.push_str("\n\n");

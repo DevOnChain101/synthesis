@@ -343,7 +343,7 @@ The fake providers are scripted to comply with the attack; the host must stop it
 | T12 | Card fatigue | No preselection; a taint reason; the full payload | Manual check (R1) |
 | T13 | A message tries to widen scope or budget | Scope is fixed in argv and the policy hash; the message is fenced | **`msg-grants-nothing`** |
 | T14 | A forged inbox row | The store is denied to tools; chain link and sha256 are checked | **`msg-forged-row-dropped`** |
-| T15 | A page or terminal output in a Super Agent session steers the conductor | Terminal output is never an event; browser frames never reach a model (5.3) | **`sa-term-not-in-digest`**, **`sa-browser-frames-not-in-digest`** |
+| T15 | A page or terminal output in a Super Agent session steers the conductor | Terminal output is never an event; browser frames never reach a model (5.3); whatever else reaches a request passes the secret gate (docs/SECURITY.md: encodings, split values, images withheld when a page may show credentials) | **`sa-term-not-in-digest`**, **`sa-browser-frames-not-in-digest`** |
 
 `RT7` is unchanged: a direct engine send to an attempt's session id is `not_found`.
 

@@ -722,6 +722,11 @@ impl Harness {
         self.permissions.clone()
     }
 
+    /// Masks secrets with the session's redactor (file content that enters the context).
+    pub fn redact(&self, text: &str) -> String {
+        self.sink.redact(text)
+    }
+
     /// Switches the permission mode for the tasks that start from now on (a running task keeps
     /// the mode it was sent in). The one entry point for every front end. Entering
     /// `bypassPermissions` needs `confirmed_bypass`: the caller vouches that the person said yes
@@ -1127,6 +1132,21 @@ impl Harness {
                 budget: task.budget.clone(),
             },
         );
+        // a secret the person pasted into the goal: the gate masks it in every request, and the
+        // person is told once (class only, never the value)
+        let mut typed = vec![req.request.as_str()];
+        typed.extend(req.criteria.iter().map(|c| c.text.as_str()));
+        let classes = masked_classes(&self.sink.redactor(), &typed);
+        if !classes.is_empty() {
+            self.notice(
+                &task,
+                "warning",
+                format!(
+                    "a secret-shaped value in your message ({}) was masked before it is sent to the model; the model will see [REDACTED:...] instead",
+                    classes.join(", ")
+                ),
+            );
+        }
         self.set_status(&task, SessionStatus::Running, "task started");
         // Fail closed (synthesis-hooks): a hook that cannot run blocks the prompt.
         let prompt_hook = self
@@ -1769,6 +1789,30 @@ impl Harness {
 }
 
 /// The message holds an image block, or a tool result that carries one.
+/// Classes of the secrets the redactor masks in the texts the person typed (sorted, no values).
+fn masked_classes(r: &synthesis_events::Redactor, texts: &[&str]) -> Vec<String> {
+    fn markers(t: &str) -> Vec<String> {
+        t.split("[REDACTED:")
+            .skip(1)
+            .filter_map(|p| p.split_once(']').map(|(c, _)| c.to_string()))
+            .collect()
+    }
+    let count = |all: &[String], c: &str| all.iter().filter(|x| *x == c).count();
+    let before: Vec<String> = texts.iter().flat_map(|t| markers(t)).collect();
+    let after: Vec<String> = texts
+        .iter()
+        .flat_map(|t| markers(&r.redact_str(t)))
+        .collect();
+    let mut v: Vec<String> = after
+        .iter()
+        .filter(|c| count(&after, c) > count(&before, c))
+        .cloned()
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 fn carries_image(m: &Message) -> bool {
     fn json_image(v: &serde_json::Value) -> bool {
         match v {

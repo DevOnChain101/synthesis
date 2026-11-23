@@ -43,3 +43,31 @@ async fn a_registered_secret_and_a_token_shaped_value_never_reach_the_provider()
         "{note:?}"
     );
 }
+
+#[tokio::test]
+async fn an_encoded_registered_secret_never_reaches_the_provider_and_a_pasted_one_is_announced() {
+    let registered = format!("{}-{}", "hunter", "98765432");
+    let hex: String = registered.bytes().map(|b| format!("{b:02x}")).collect();
+    let pct = registered.replace('-', "%2D");
+    let o = Opts {
+        secrets: vec![registered.clone()],
+        ..Opts::default()
+    };
+    let mut rig = Rig::new(o, vec![Turn::text("ok")]);
+    let r = TaskRequest::new(format!("hex {hex} url {pct} tok {}", fake_token()));
+    rig.run_with(r, CancellationToken::new()).await;
+    let sent = format!("{:?}", rig.provider.requests());
+    assert!(
+        !sent.contains(&hex) && !sent.contains(&fake_token()),
+        "{sent}"
+    );
+    let notes = rig.find(|e| match e {
+        Event::Notice { text, .. } if text.contains("in your message") => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("github") && notes[0].contains("secret") && !notes[0].contains(&hex),
+        "{notes:?}"
+    );
+}

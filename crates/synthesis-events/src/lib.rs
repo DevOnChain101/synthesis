@@ -7,7 +7,7 @@ mod io;
 pub mod outcome;
 mod types;
 
-pub use io::{EventReader, EventWriter, Record, Redactor};
+pub use io::{EventReader, EventWriter, Record, Redactor, Rejected};
 pub use types::*;
 
 /// Schema major version written to `v`.

@@ -104,7 +104,20 @@ pub fn is_secret_path(path: &Path) -> bool {
 /// A secret file by name, or anything under a credential directory (`.ssh`, `.aws`, `.gnupg`),
 /// compared lowercase. For readers that walk trees (Grep) and for the responder's read ban.
 pub fn is_secret_shaped(path: &Path) -> bool {
-    is_secret_path(path)
+    let parts: Vec<String> = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    // committed history is binary or a log of URLs: a secret once committed lives on in objects
+    let git_data = parts.windows(2).any(|w| {
+        w[0] == ".git"
+            && matches!(
+                w[1].as_str(),
+                "objects" | "refs" | "logs" | "orig_head" | "fetch_head"
+            )
+    });
+    git_data
+        || is_secret_path(path)
         || path.components().any(|c| {
             c.as_os_str().to_str().is_some_and(|s| {
                 matches!(
@@ -221,6 +234,11 @@ mod tests {
             "h/.dockercfg",
             "h/Vault.kdbx",
             "a/.git/packed-refs",
+            "a/.git/objects/ab/cdef0123",
+            "a/.GIT/objects/pack/pack-1.pack",
+            "a/.git/refs/heads/main",
+            "a/.git/ORIG_HEAD",
+            "a/.git/logs/HEAD",
             "h/.vault-token",
             "h/.config/gcloud/credentials.db",
             "h/.config/glab-cli/config.yml",
@@ -231,6 +249,9 @@ mod tests {
         // the case-folding the other names get applies here too
         assert!(super::is_secret_shaped(std::path::Path::new("a/ID_RSA")));
         for p in [
+            "a/.git/HEAD",
+            "a/objects/x",
+            "a/refs/x",
             "a/private/x.txt",
             "/private/var/x",
             "a/terraform.tf",

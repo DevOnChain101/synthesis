@@ -11,13 +11,101 @@ use crate::{Envelope, Event, RawEnvelope, SCHEMA_VERSION};
 /// Clones share the registered values: a value learned through one is masked by all.
 #[derive(Clone)]
 pub struct Redactor {
-    secrets: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    secrets: std::sync::Arc<std::sync::Mutex<Vec<Secret>>>,
     patterns: std::sync::Arc<Vec<(&'static str, Regex)>>,
     credential: Regex,
 }
 
+/// A registered exact value with every spelling a tool result or page could echo it in.
+struct Secret {
+    value: String,
+    /// `(text, token-bounded)`: spellings of 4-7 characters only match as whole tokens.
+    spellings: Vec<(String, bool)>,
+}
+
+/// Why `Redactor::add_secret_min` did not register a value (never carries the value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejected {
+    /// Shorter than the minimum: it cannot be protected.
+    TooShort,
+    /// It (or an encoding of it) occurs inside a `[REDACTED:...]` marker: registering it would
+    /// make every request fail the gate's survivor check.
+    MarkerLookalike,
+}
+
+fn is_word(c: Option<char>) -> bool {
+    c.is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Positions of `pat` in `s`; a token-bounded pattern must not touch a word character.
+fn hits<'a>(s: &'a str, pat: &'a str, bounded: bool) -> impl Iterator<Item = usize> + 'a {
+    s.match_indices(pat).map(|(i, _)| i).filter(move |&i| {
+        !bounded
+            || !(is_word(s[..i].chars().next_back()) || is_word(s[i + pat.len()..].chars().next()))
+    })
+}
+
+fn percent(value: &str, keep: &str, upper: bool) -> String {
+    let mut o = String::new();
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || keep.as_bytes().contains(&b) {
+            o.push(b as char);
+        } else if upper {
+            o.push_str(&format!("%{b:02X}"));
+        } else {
+            o.push_str(&format!("%{b:02x}"));
+        }
+    }
+    o
+}
+
+/// The value as written: raw, base64 (standard/url-safe, padded or not), hex, percent-encoding and
+/// JSON string escape. Shortcut: a base64 value embedded at a non-zero offset of a longer base64
+/// text is not recognised; the pattern masks and the exact-value check still run on decoded text.
+fn spellings(value: &str) -> Vec<(String, bool)> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let json = serde_json::to_string(value).unwrap_or_default();
+    let hex = |up: bool| -> String {
+        value
+            .bytes()
+            .map(|b| {
+                if up {
+                    format!("{b:02X}")
+                } else {
+                    format!("{b:02x}")
+                }
+            })
+            .collect()
+    };
+    let mut v = vec![
+        value.to_owned(),
+        STANDARD.encode(value),
+        STANDARD_NO_PAD.encode(value),
+        URL_SAFE.encode(value),
+        URL_SAFE_NO_PAD.encode(value),
+        hex(false),
+        hex(true),
+        percent(value, "-_.~", true),
+        percent(value, "-_.~", false),
+        percent(value, "-_.!~*'()", true),
+        json[1..json.len().saturating_sub(1)].to_owned(),
+    ];
+    v.retain(|x| x.chars().count() >= 4);
+    v.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b))); // longest first: none hides inside another
+    v.dedup();
+    v.into_iter()
+        .map(|x| {
+            let bounded = x.chars().count() < 8;
+            (x, bounded)
+        })
+        .collect()
+}
+
 /// Most bytes of exact values `add_secret` keeps; the oldest are dropped first.
 const MAX_SECRET_BYTES: usize = 32 * 1024;
+/// Shortest value that can be protected at all (4-7 chars: whole-token matches only).
+const MIN_SECRET: usize = 4;
 /// Values too ordinary to mask: they would corrupt unrelated text.
 const TRIVIAL: &[&str] = &[
     "true",
@@ -83,11 +171,8 @@ impl Redactor {
                 r"(?i)aws_?secret_?(?:access_?)?key[\x22']?\s*[:=]\s*[\x22']?[A-Za-z0-9/+=]{40}",
             ),
         ];
-        Self {
-            // Empty secrets would match everywhere.
-            secrets: std::sync::Arc::new(std::sync::Mutex::new(
-                secrets.into_iter().filter(|s| !s.is_empty()).collect(),
-            )),
+        let r = Self {
+            secrets: Default::default(),
             patterns: std::sync::Arc::new(
                 defs.iter()
                     .map(|(k, p)| (*k, Regex::new(p).expect("static regex")))
@@ -99,31 +184,68 @@ impl Redactor {
                 r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key|private_?key|credential))(["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
             )
             .expect("static regex"),
+        };
+        for v in secrets {
+            let _ = r.add_secret_min(&v, MIN_SECRET); // callers that must warn use `add_secret_min`
         }
+        r
     }
 
     /// Registers an exact value to mask from now on (a value read from a secret file the user
-    /// approved). Values shorter than 6 chars are ignored (they would match everywhere).
+    /// approved). Values shorter than 8 chars are ignored (they would match everywhere).
     /// Returns `true` when older values had to be dropped to make room (the caller should warn).
     pub fn add_secret(&self, s: &str) -> bool {
+        self.add_secret_min(s, 8).unwrap_or(false)
+    }
+
+    /// Like [`add_secret`](Self::add_secret) for a value the user marked secret (a secret-named
+    /// variable or file entry): `min` may be 4, and a value of 4-7 characters is matched only as a
+    /// whole token (never inside a longer word). `Err` means the value is NOT protected; the
+    /// caller must tell the person. `Ok(true)`: older values were dropped to make room.
+    pub fn add_secret_min(&self, s: &str, min: usize) -> Result<bool, Rejected> {
         let s = s.trim().trim_matches(['"', '\'', ',', ';', '`']);
-        if s.chars().count() < 8 || TRIVIAL.contains(&s.to_lowercase().as_str()) {
-            return false;
+        if s.is_empty() || TRIVIAL.contains(&s.to_lowercase().as_str()) {
+            return Ok(false);
+        }
+        if s.chars().count() < min.max(MIN_SECRET) {
+            return Err(Rejected::TooShort);
+        }
+        let spellings = spellings(s);
+        let marker_text = self.markers().to_lowercase();
+        if spellings
+            .iter()
+            .any(|(x, _)| marker_text.contains(&x.to_lowercase()))
+        {
+            return Err(Rejected::MarkerLookalike);
         }
         let mut v = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
-        if v.iter().any(|x| x == s) {
-            return false;
+        if v.iter().any(|x| x.value == s) {
+            return Ok(false);
         }
         let mut evicted = false;
-        while !v.is_empty() && v.iter().map(String::len).sum::<usize>() + s.len() > MAX_SECRET_BYTES
+        while !v.is_empty()
+            && v.iter().map(|x| x.value.len()).sum::<usize>() + s.len() > MAX_SECRET_BYTES
         {
             v.remove(0);
             evicted = true;
         }
         if s.len() <= MAX_SECRET_BYTES {
-            v.push(s.to_string());
+            v.push(Secret {
+                value: s.to_string(),
+                spellings,
+            });
         }
-        evicted
+        Ok(evicted)
+    }
+
+    /// Every marker this redactor can write, one after another.
+    fn markers(&self) -> String {
+        self.patterns
+            .iter()
+            .map(|(k, _)| *k)
+            .chain(["secret", "credential"])
+            .map(|k| format!("[REDACTED:{k}]"))
+            .collect()
     }
 
     /// Any exact value registered (at start or learned from a secret file).
@@ -143,7 +265,11 @@ impl Redactor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|x| s.contains(x.as_str()))
+            .any(|x| {
+                x.spellings
+                    .iter()
+                    .any(|(t, b)| hits(s, t, *b).next().is_some())
+            })
         {
             return Some("secret");
         }
@@ -161,7 +287,12 @@ impl Redactor {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
         {
-            out = out.replace(secret.as_str(), "[REDACTED:secret]");
+            for (t, bounded) in &secret.spellings {
+                let at: Vec<usize> = hits(&out, t, *bounded).collect();
+                for i in at.into_iter().rev() {
+                    out.replace_range(i..i + t.len(), "[REDACTED:secret]");
+                }
+            }
         }
         for (kind, re) in self.patterns.iter() {
             out = re
@@ -1107,6 +1238,54 @@ mod tests {
         assert!(evicted, "the byte cap evicts the oldest");
         assert_eq!(r.redact_str("secret-value-0000"), "secret-value-0000");
         assert_eq!(r.redact_str("secret-value-3999"), "[REDACTED:secret]");
+    }
+
+    #[test]
+    fn registered_values_are_masked_in_their_common_encodings() {
+        use base64::Engine;
+        let v = format!("{}-{}!", "pw", "zq7x&k2");
+        let r = Redactor::new([v.clone()]);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&v);
+        let b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&v);
+        let hex: String = v.bytes().map(|b| format!("{b:02x}")).collect();
+        let pct = v.replace('&', "%26").replace('!', "%21");
+        let json = serde_json::to_string(&format!("a\"{v}")).unwrap();
+        for form in [&v, &b64, &b64u, &hex, &hex.to_uppercase(), &pct, &json] {
+            let out = r.redact_str(&format!("x {form} y"));
+            assert!(r.leak_class(&out).is_none(), "{form}");
+            assert!(out.contains("[REDACTED:secret]"), "{form}");
+        }
+        assert!(
+            r.leak_class(&format!("q={b64}")).is_some(),
+            "the check sees it too"
+        );
+    }
+
+    #[test]
+    fn short_values_match_whole_tokens_only_and_never_a_marker() {
+        let r = Redactor::new([]);
+        assert_eq!(r.add_secret_min("ab1", 4), Err(Rejected::TooShort));
+        assert_eq!(r.add_secret_min("pass", 4), Ok(false));
+        assert_eq!(
+            r.redact_str("my password is pass, pass1 and passed"),
+            "my password is [REDACTED:secret], pass1 and passed"
+        );
+        assert!(r.leak_class("password pass1").is_none());
+        // a value that is part of a marker would block every request
+        for v in ["REDACTED", "secret", "ACTED:s", "credential", "github"] {
+            assert_eq!(
+                r.add_secret_min(v, 4),
+                Err(Rejected::MarkerLookalike),
+                "{v}"
+            );
+        }
+        assert!(
+            r.leak_class("[REDACTED:secret] [REDACTED:github]")
+                .is_none()
+        );
+        // the ordinary entry point still ignores values under 8
+        assert!(!r.add_secret("abcdefg"));
+        assert_eq!(r.redact_str("abcdefg"), "abcdefg");
     }
 
     #[test]

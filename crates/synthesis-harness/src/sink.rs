@@ -5,7 +5,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use synthesis_events::{Envelope, Event, EventWriter, Redactor};
+use synthesis_events::{Envelope, Event, EventWriter, Redactor, Rejected};
 
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
@@ -34,9 +34,18 @@ impl EventSink {
         session_id: impl Into<String>,
         secrets: impl IntoIterator<Item = String>,
     ) -> Self {
+        Self::with_redactor(out, session_id, Redactor::new(secrets))
+    }
+
+    /// The session's own redactor (shared with the session store, which learns the same values).
+    pub fn with_redactor(
+        out: impl Write + Send + 'static,
+        session_id: impl Into<String>,
+        redactor: Redactor,
+    ) -> Self {
         let out: Box<dyn Write + Send> = Box::new(out);
         Self(Arc::new(Inner {
-            writer: Mutex::new(EventWriter::new(out, session_id, Redactor::new(secrets))),
+            writer: Mutex::new(EventWriter::new(out, session_id, redactor)),
             broken: AtomicBool::new(false),
             last_seq: AtomicU64::new(0),
             observer: Mutex::new(None),
@@ -95,8 +104,17 @@ impl EventSink {
     pub fn add_secrets_from(&self, text: &str) {
         let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
         let r = w.redactor();
-        let mut evicted = false;
-        let mut add = |v: &str| evicted |= r.add_secret(v);
+        let (mut evicted, mut unprotected) = (false, 0usize);
+        // a value of a secret-named key (DB_PASSWORD, API_TOKEN) is registered from 4 characters
+        let mut add = |v: &str, min: usize| match r.add_secret_min(v, min) {
+            Ok(e) => evicted |= e,
+            Err(rejected) => {
+                // a short value of an ordinary key (PORT=80) is just not a secret
+                if min < 8 || rejected == Rejected::MarkerLookalike {
+                    unprotected += 1;
+                }
+            }
+        };
         // a PEM body: every base64 line is a secret by itself
         let mut in_pem = false;
         for line in text.lines().take(2000) {
@@ -106,14 +124,20 @@ impl EventSink {
             } else if l.starts_with("-----END") {
                 in_pem = false;
             } else if in_pem {
-                add(l);
-            } else if let Some((_, v)) = l.split_once(['=', ':']) {
-                add(v.trim());
+                add(l, 8);
+            } else if let Some((k, v)) = l.split_once(['=', ':']) {
+                let named = synthesis_config::is_secret_shaped(k.trim().trim_matches(['"', '\'']));
+                add(v.trim(), if named { 4 } else { 8 });
             }
         }
         if evicted {
             eprintln!(
                 "synt: warning: the list of secret values to mask is full; the oldest were dropped"
+            );
+        }
+        if unprotected > 0 {
+            eprintln!(
+                "synt: warning: {unprotected} secret value(s) read from that file are too short (under 4 characters) or look like Synthesis's own markers, so they cannot be masked; treat them as exposed"
             );
         }
     }
@@ -124,5 +148,20 @@ impl EventSink {
 
     pub fn last_seq(&self) -> u64 {
         self.0.last_seq.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_file_registers_short_values_of_secret_named_keys_only() {
+        let sink = EventSink::new(Vec::new(), "s", []);
+        sink.add_secrets_from("DB_PASSWORD=zq7x\nPORT=8081\nAPI_TOKEN=ab\nNAME=longvalue-1234");
+        assert_eq!(
+            sink.redact("a zq7x b 8081 c ab d zq7xy longvalue-1234"),
+            "a [REDACTED:secret] b 8081 c ab d zq7xy [REDACTED:secret]"
+        );
     }
 }
