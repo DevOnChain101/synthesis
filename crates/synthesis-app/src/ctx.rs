@@ -96,6 +96,7 @@ pub struct ProviderSummarizer {
     /// Sum of every call since the last `take_spent` (what compaction cost the task).
     spent: Mutex<synthesis_providers::Usage>,
     max_tokens: u32,
+    gate: synthesis_providers::SecretGate,
 }
 
 impl ProviderSummarizer {
@@ -124,6 +125,7 @@ impl ProviderSummarizer {
             usage: Mutex::default(),
             spent: Mutex::default(),
             max_tokens: 4096,
+            gate: synthesis_providers::SecretGate::default(),
         }
     }
 }
@@ -143,6 +145,10 @@ impl Summarizer for ProviderSummarizer {
             thinking: None,
             reasoning_effort: None,
         };
+        let req = self
+            .gate
+            .seal(&req)
+            .map_err(|e| SummarizeError(e.to_string()))?;
         let mut stream = self.provider.stream(&req, self.cancel.clone());
         let mut text = String::new();
         let mut usage = synthesis_providers::Usage::default();
@@ -378,6 +384,7 @@ impl SynthesisContext {
                 usage: Mutex::default(),
                 spent: Mutex::default(),
                 max_tokens: 4096,
+                gate: synthesis_providers::SecretGate::default(),
             }),
             put,
             skills: None,
@@ -389,6 +396,14 @@ impl SynthesisContext {
             rules: RULES.to_string(),
             append: None,
         }
+    }
+
+    /// The summarizer's secret gate shares the session's redactor (values learned later are masked too).
+    pub fn with_redactor(mut self, r: synthesis_events::Redactor) -> Self {
+        if let Some(s) = Arc::get_mut(&mut self.summarizer) {
+            s.gate = synthesis_providers::SecretGate::new(r);
+        }
+        self
     }
 
     pub fn with_system_prompt(mut self, replace: Option<String>, append: Option<String>) -> Self {

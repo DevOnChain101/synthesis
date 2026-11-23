@@ -238,7 +238,12 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
         .skip(c.start_line as usize - 1)
         .take((c.end_line - c.start_line + 1) as usize)
         .collect();
-    if norm(&window.join("\n")).contains(&quote) {
+    let cited = window.join("\n");
+    let gate = synthesis_events::Redactor::new([]);
+    if gate.redact_str(&cited) != cited || gate.redact_str(&c.quote) != c.quote {
+        return no("the cited lines or the quote hold a secret");
+    }
+    if norm(&cited).contains(&quote) {
         Checked {
             ok: true,
             why: "verified",
@@ -258,6 +263,9 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
 fn show(text: &str) -> (String, usize, bool) {
     let mut hidden = 0;
     let mut out = String::new();
+    // a secret in the report (pasted or read from a file) is masked before anyone, or any later
+    // model request, sees it
+    let text = synthesis_events::Redactor::new([]).redact_str(text);
     for ch in text.chars() {
         if out.len() + ch.len_utf8() > REPORT_MAX {
             return (out, hidden, true);

@@ -258,7 +258,7 @@ mod tests {
         }
         fn stream(
             &self,
-            _: &synthesis_providers::Request,
+            _: &synthesis_providers::SealedRequest,
             _: CancellationToken,
         ) -> synthesis_providers::EventStream {
             unimplemented!()

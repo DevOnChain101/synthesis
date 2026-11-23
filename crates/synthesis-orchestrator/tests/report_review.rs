@@ -315,6 +315,27 @@ fn a_sql_inserted_human_review_row_is_not_an_acceptance() {
 }
 
 #[test]
+fn a_citation_over_lines_that_hold_a_secret_is_refused() {
+    let r = rig();
+    let root = folder(&r);
+    // the fake token is assembled here so no secret-looking literal sits in the source
+    let line = format!("note {}_{}", "ghp", "Z".repeat(36));
+    std::fs::write(root.join("notes.txt"), format!("{line}\n")).unwrap();
+    let c = Citation {
+        path: "notes.txt".into(),
+        start_line: 1,
+        end_line: 1,
+        quote: "note".into(),
+    };
+    let checked = check_citation(&root, &c);
+    assert!(
+        !checked.ok && checked.why.contains("secret"),
+        "{}",
+        checked.why
+    );
+}
+
+#[test]
 fn citations_that_escape_the_folder_are_refused() {
     let r = rig();
     let root = folder(&r);

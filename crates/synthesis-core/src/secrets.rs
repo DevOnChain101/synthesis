@@ -28,11 +28,22 @@ pub fn is_secret_path(path: &Path) -> bool {
             ".git-credentials",
             ".htpasswd",
             ".dockerconfigjson",
+            ".dockercfg",
+            "packed-refs",
+            ".vault-token",
+            ".boto",
+            ".s3cfg",
+            ".terraformrc",
+            "terraform.rc",
             ".pypirc",
             "kubeconfig",
         ]
         .contains(&n)
         || n.ends_with(".tfvars")
+        || n.ends_with(".tfstate")
+        || n.contains(".tfstate.")
+        || n.ends_with(".kdbx")
+        || n.ends_with(".kdb")
         || n.starts_with("secrets.")
         || {
             // `<dir>/<file>` pairs compared lowercase like the rest (case-insensitive volumes):
@@ -49,7 +60,16 @@ pub fn is_secret_path(path: &Path) -> bool {
                 ),
                 (Some("config"), Some(".kube" | ".git"))
                     | (Some("config.json"), Some(".docker"))
-                    | (Some("hosts.yml"), Some("gh"))
+                    | (Some("hosts.yml" | "oauth_token"), Some("gh"))
+                    | (
+                        Some(
+                            "credentials.db"
+                                | "access_tokens.db"
+                                | "application_default_credentials.json"
+                        ),
+                        Some("gcloud")
+                    )
+                    | (Some("hub" | "config.yml"), Some("hub" | "glab-cli"))
             )
         }
 }
@@ -62,10 +82,23 @@ pub fn is_secret_shaped(path: &Path) -> bool {
             c.as_os_str().to_str().is_some_and(|s| {
                 matches!(
                     s.to_ascii_lowercase().as_str(),
-                    ".ssh" | ".aws" | ".gnupg" | ".git-credentials"
+                    ".ssh"
+                        | ".aws"
+                        | ".gnupg"
+                        | ".git-credentials"
+                        | "secrets" // not `private`: macOS paths start with /private
+                        | ".terraform"
+                        | ".azure"
+                        | ".kube"
                 )
             })
         })
+}
+
+/// Secret-shaped by its own name or through a link (the real path). The model-facing readers
+/// (Read, Grep, Glob) refuse such a file with no override.
+pub fn is_secret_target(path: &Path) -> bool {
+    is_secret_shaped(path) || std::fs::canonicalize(path).is_ok_and(|r| is_secret_shaped(&r))
 }
 
 /// `*`/`?` wildcard match of `name` against `pat` (shell style, no classes).
@@ -119,6 +152,49 @@ pub fn names_secret(segment_or_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_files_credential_stores_and_dirs_are_secret_shaped() {
+        for p in [
+            "a/terraform.tfstate",
+            "a/terraform.tfstate.backup",
+            "a/prod.TFSTATE",
+            "h/.dockercfg",
+            "h/Vault.kdbx",
+            "a/.git/packed-refs",
+            "h/.vault-token",
+            "h/.config/gcloud/credentials.db",
+            "h/.config/glab-cli/config.yml",
+            "a/secrets/db.yaml",
+            "a/.terraform/terraform.tfstate",
+            "h/.kube/cache/x",
+            "h/.azure/accessTokens.json",
+        ] {
+            assert!(super::is_secret_shaped(std::path::Path::new(p)), "{p}");
+        }
+        // the case-folding the other names get applies here too
+        assert!(super::is_secret_shaped(std::path::Path::new("a/SECRETS/x")));
+        for p in [
+            "a/private/x.txt",
+            "/private/var/x",
+            "a/terraform.tf",
+            "a/src/state.rs",
+        ] {
+            assert!(!super::is_secret_shaped(std::path::Path::new(p)), "{p}");
+        }
+        let d = std::env::temp_dir().join(format!("sg-target-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let real = d.join("x.pem");
+        std::fs::write(&real, "k").unwrap();
+        assert!(super::is_secret_target(&real));
+        #[cfg(unix)]
+        {
+            let link = d.join("innocent.txt");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(super::is_secret_target(&link), "a link to a key is a key");
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     #[test]
     fn token_carrying_client_configs_are_secret_paths() {
         for p in [

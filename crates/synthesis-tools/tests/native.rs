@@ -57,7 +57,6 @@ fn fx_with(reg: Registry, env: &[(&str, &str)]) -> Fx {
         env: Arc::new(e),
         read_ledger: Arc::new(Mutex::new(HashMap::new())),
         permission_mode: PermissionMode::Default,
-        skip_secrets: false,
         sub_agent: false,
         approval_token: None,
         deadline: None,
@@ -93,8 +92,8 @@ fn json_of(o: &ToolOutput) -> Value {
 }
 
 #[tokio::test]
-async fn grep_for_a_responder_skips_secret_shaped_files_and_links_to_them() {
-    let mut f = fx();
+async fn grep_skips_secret_shaped_files_and_links_to_them_for_every_agent() {
+    let f = fx();
     let w = f.root.clone();
     for (n, body) in [
         (".env", "TOKEN=needle-env"),
@@ -122,15 +121,14 @@ async fn grep_for_a_responder_skips_secret_shaped_files_and_links_to_them() {
         "{}",
         text(&all)
     );
-    // naming one with `glob` (which the permission layer asks about) searches it
+    // naming one with `glob` does not search it either: no override
     let named = f
         .run(
             "Grep",
             json!({"pattern": "needle", "path": w, "glob": ".env", "output_mode": "content"}),
         )
         .await;
-    assert!(text(&named).contains("needle-env"), "{}", text(&named));
-    f.ctx.skip_secrets = true;
+    assert!(!text(&named).contains("needle-env"), "{}", text(&named));
     let o = f
         .run(
             "Grep",
@@ -541,12 +539,17 @@ async fn child_env_is_allowlisted() {
         &[
             ("GITHUB_TOKEN", "tok"),
             ("SYNT_API_KEY", "k"),
+            ("SYNT_APIKEY", "k2"),
+            ("SYNT_DEEPSEEK_AUTH", "k3"),
             ("AWS_SECRET_ACCESS_KEY", "s"),
             ("LANG", "C"),
         ],
     );
     let o = f.run("Bash", json!({"command": "env"})).await;
     let t = text(&o);
+    for leak in ["SYNT_APIKEY", "SYNT_DEEPSEEK_AUTH"] {
+        assert!(!t.contains(leak), "{leak} leaked: {t}");
+    }
     assert!(t.contains("LANG=C") && t.contains("PATH="), "{t}");
     for leak in [
         "GITHUB_TOKEN",
@@ -557,6 +560,34 @@ async fn child_env_is_allowlisted() {
     ] {
         assert!(!t.contains(leak), "{leak} leaked: {t}");
     }
+}
+
+/// The terminal runtime (`terminal_spawn`) gets the same scrubbed env as Bash.
+#[tokio::test]
+async fn terminal_spawn_env_has_no_secret_names() {
+    let f = fx_with(
+        Registry::unsandboxed_for_tests().with_new_tools(),
+        &[
+            ("GITHUB_TOKEN", "tok"),
+            ("SYNT_API_KEY", "k"),
+            ("SYNT_APIKEY", "k2"),
+            ("LANG", "C"),
+        ],
+    );
+    let o = f.run("terminal_spawn", json!({"command": "env"})).await;
+    let id = json_of(&o)["process_id"].as_str().unwrap().to_string();
+    for _ in 0..100 {
+        let o = f.run("terminal_logs", json!({"process_id": id})).await;
+        let t = text(&o);
+        if t.contains("LANG=C") {
+            for leak in ["GITHUB_TOKEN", "SYNT_API_KEY", "SYNT_APIKEY", "tok"] {
+                assert!(!t.contains(leak), "{leak} leaked: {t}");
+            }
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("env output not seen");
 }
 
 #[tokio::test]

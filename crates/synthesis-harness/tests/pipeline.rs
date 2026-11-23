@@ -462,7 +462,7 @@ async fn tool_output_cannot_change_permissions() {
 }
 
 #[tokio::test]
-async fn secrets_never_reach_events_but_the_model_sees_real_output() {
+async fn secrets_never_reach_events_or_the_model() {
     let p = Probe::new(
         "Probe",
         SideEffectClass::Read,
@@ -482,8 +482,11 @@ async fn secrets_never_reach_events_but_the_model_sees_real_output() {
     assert!(!log.contains("sk-ant-api03"), "pattern secret leaked");
     assert!(log.contains("[REDACTED"));
     let (text, _) = tool_result(&rig.requests()[1], "p1").unwrap();
-    assert!(text.contains(SECRET), "the model must see the real output");
-    assert!(out.final_text.contains(SECRET));
+    assert!(
+        !text.contains(SECRET) && !text.contains("sk-ant-api03") && text.contains("[REDACTED"),
+        "the model must not see the secret: {text}"
+    );
+    assert!(out.final_text.contains(SECRET)); // the scripted reply itself is not a request
     // tool env is the allowlisted child env: no secret-shaped variable
     assert!(!format!("{:?}", rig.harness.permissions().lock().unwrap().env).contains(SECRET));
 }

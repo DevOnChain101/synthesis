@@ -366,18 +366,11 @@ fn plan_mode_ignores_allow_rules_for_non_read_calls() {
 }
 
 #[test]
-fn secret_file_reads_ask_by_mode_and_an_allow_rule_wins() {
+fn secret_file_reads_are_denied_in_every_mode_and_no_rule_lifts_it() {
     let f = fx();
     let env = json!({ "file_path": f.cwd.join(".env") });
-    for (mode, want) in [
-        (Mode::Default, Q),
-        (Mode::AcceptEdits, Q),
-        (Mode::Auto, Q),
-        (Mode::Plan, D),
-        (Mode::DontAsk, D),
-        (Mode::BypassPermissions, A),
-    ] {
-        assert_eq!(d(&f.perms(mode), "Read", env.clone()), want, "{mode:?}");
+    for mode in Mode::ALL {
+        assert_eq!(d(&f.perms(mode), "Read", env.clone()), D, "{mode:?}");
     }
     assert_eq!(
         d(
@@ -385,7 +378,7 @@ fn secret_file_reads_ask_by_mode_and_an_allow_rule_wins() {
             "Grep",
             json!({ "pattern": "x", "path": f.cwd.join(".env") })
         ),
-        Q
+        D
     );
     assert_eq!(
         d(
@@ -396,11 +389,11 @@ fn secret_file_reads_ask_by_mode_and_an_allow_rule_wins() {
         A
     );
     let allowed = f.with(rules(&["Read(.env)"], &[], &[]), Mode::Default);
-    assert_eq!(d(&allowed, "Read", env), A);
+    assert_eq!(d(&allowed, "Read", env), D);
 }
 
 #[test]
-fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
+fn secret_files_are_denied_through_grep_globs_and_bash_readers_in_every_mode() {
     let f = fx();
     let cwd = f.cwd.to_string_lossy().into_owned();
     let calls = [
@@ -417,17 +410,10 @@ fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
         ("Bash", json!({ "command": "sed -n p sub/../.env" })),
     ];
     for (tool, input) in &calls {
-        for (mode, want) in [
-            (Mode::Default, Q),
-            (Mode::AcceptEdits, Q),
-            (Mode::Auto, Q),
-            (Mode::Plan, D),
-            (Mode::DontAsk, D),
-            (Mode::BypassPermissions, A),
-        ] {
+        for mode in Mode::ALL {
             assert_eq!(
                 d(&f.perms(mode), tool, input.clone()),
-                want,
+                D,
                 "{mode:?} {tool} {input}"
             );
         }
@@ -448,15 +434,15 @@ fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
             );
         }
     }
-    // a rule that names the file is the person's decision; a tool-wide one is not
+    // no rule lifts it, not even one that names the file
     let cat = json!({ "command": "cat .env" });
     let p = f.with(rules(&["Bash(cat .env)"], &[], &[]), Mode::Default);
-    assert_eq!(d(&p, "Bash", cat.clone()), A);
+    assert_eq!(d(&p, "Bash", cat.clone()), D);
     let p = f.with(
         rules(&["Bash(cat:*)", "Read(.env)"], &[], &[]),
         Mode::Default,
     );
-    assert_eq!(d(&p, "Bash", cat), Q);
+    assert_eq!(d(&p, "Bash", cat), D);
 }
 
 /// The real path of `p` the way the matcher sees it: no `\\?\` prefix, `/` separators on Windows.
@@ -471,35 +457,12 @@ fn real_spelled(p: &Path) -> PathBuf {
 
 /// The rule path the engine offers for `<dir>/.env`.
 fn env_rule(dir: &Path) -> String {
-    crate::rule_path(&dir.join(".env").to_string_lossy(), cfg!(windows)).unwrap()
+    let p = dir.join(".env").to_string_lossy().replace('\\', "/");
+    format!("//{}", p.trim_start_matches('/'))
 }
 
 #[test]
-fn rule_paths_drop_the_verbatim_prefix_and_refuse_glob_characters_on_every_os() {
-    use crate::rule_path;
-    for p in [r"\\?\C:\proj\.env", r"C:\proj\.env", "C:/proj/.env"] {
-        assert_eq!(rule_path(p, true).as_deref(), Some("//C:/proj/.env"), "{p}");
-    }
-    assert_eq!(
-        rule_path("/home/u/.env", false).as_deref(),
-        Some("//home/u/.env")
-    );
-    for p in [
-        r"C:\proj\*.pem",
-        r"C:\proj\[a]\.env",
-        r"\\?\C:\proj\.env?",
-        r"\\?\UNC\s\h\.env",
-        r"\\s\h\.env",
-    ] {
-        assert_eq!(rule_path(p, true), None, "{p}");
-    }
-    // POSIX: `\` and `?` are literal name characters, `?` suppresses
-    assert_eq!(rule_path("/h/a?b/.env", false), None);
-    assert_eq!(rule_path("/h/*/.env", false), None);
-}
-
-#[test]
-fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
+fn no_allow_rule_lifts_the_secret_file_denial() {
     let f = fx();
     let calls = [
         ("Read", json!({ "file_path": f.cwd.join(".env") })),
@@ -522,36 +485,25 @@ fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
         &["Read(?*)", "Read(**/?*)", "Grep(?*)", "Glob(**/?*)"],
     ] {
         for (tool, input) in &calls {
-            for (mode, want) in [
-                (Mode::Default, Q),
-                (Mode::AcceptEdits, Q),
-                (Mode::Auto, Q),
-                (Mode::Plan, D),
-                (Mode::DontAsk, D),
-                (Mode::BypassPermissions, A),
-            ] {
+            for mode in Mode::ALL {
                 let p = f.with(rules(blanket, &[], &[]), mode);
-                assert_eq!(
-                    d(&p, tool, input.clone()),
-                    want,
-                    "{blanket:?} {mode:?} {tool}"
-                );
+                assert_eq!(d(&p, tool, input.clone()), D, "{blanket:?} {mode:?} {tool}");
             }
         }
     }
-    // an absolute rule for that one file lifts it, another secret file still asks
-    let real = real_spelled(&f.cwd); // a rule must match the lexical and the real path
+    // not even an absolute rule for that one file
+    let real = real_spelled(&f.cwd);
     let rule = format!("Read({})", env_rule(&real));
     let p = f.with(rules(&["Read", &rule], &[], &[]), Mode::Default);
-    assert_eq!(d(&p, "Read", json!({ "file_path": real.join(".env") })), A);
+    assert_eq!(d(&p, "Read", json!({ "file_path": real.join(".env") })), D);
     assert_eq!(
         d(&p, "Read", json!({ "file_path": real.join("id_rsa") })),
-        Q
+        D
     );
 }
 
 #[test]
-fn a_secret_ask_offers_a_rule_for_that_path_only() {
+fn a_denied_secret_read_offers_no_rule() {
     let f = fx();
     let p = f.perms(Mode::Default);
     let one = |tool: &str, input: Value| -> Vec<String> {
@@ -572,30 +524,16 @@ fn a_secret_ask_offers_a_rule_for_that_path_only() {
             })
             .collect()
     };
+    // a denied secret read has no rule to offer
     let env = real_spelled(&f.cwd).join(".env");
-    let want = format!("Read({})", env_rule(&real_spelled(&f.cwd)));
-    assert_eq!(one("Read", json!({ "file_path": env })), [want]);
-    // the offered rule lifts that ask and no other
-    let mut q = f.perms(Mode::Default);
-    q.apply(&p.suggestions("Read", &json!({ "file_path": env })));
-    assert_eq!(d(&q, "Read", json!({ "file_path": env })), A);
-    assert_eq!(
-        d(
-            &q,
-            "Read",
-            json!({ "file_path": env.with_file_name("id_rsa") })
-        ),
-        Q
-    );
-    // a secret file whose own name holds a glob character gets no rule (it would be broader)
-    assert!(one("Read", json!({ "file_path": f.cwd.join("sub/*.pem") })).is_empty());
-    assert!(one("Read", json!({ "file_path": f.cwd.join("**/.env") })).is_empty());
-    // a pattern with no secret path, and a glob command, offer nothing; an exact command does
+    assert!(one("Read", json!({ "file_path": env })).is_empty());
     assert!(one("Glob", json!({ "pattern": ".env*" })).is_empty());
     assert!(one("Bash", json!({ "command": "cat .e*" })).is_empty());
+    assert!(one("Bash", json!({ "command": "cat .env" })).is_empty());
+    // a secret named by a command that only lists it is still an ask with an exact rule
     assert_eq!(
-        one("Bash", json!({ "command": "cat .env" })),
-        ["Bash(cat .env)"]
+        one("Bash", json!({ "command": "ls .env" })),
+        ["Bash(ls .env)"]
     );
     // an ordinary read still offers the tool rule
     assert_eq!(
@@ -818,7 +756,7 @@ fn protected_path_decision_per_mode() {
 }
 
 #[test]
-fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
+fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_for_everyone() {
     let f = fx();
     let state = f.home.join("synthesis-home");
     fs::create_dir_all(state.join("run")).unwrap();
@@ -844,10 +782,9 @@ fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
             assert_eq!(d(&p, tool, input.clone()), D, "{mode:?} {tool}");
         }
     }
-    // the main agent may still read a project .env; the responder (deny_secret_reads) may not,
-    // by name or through `..`
+    // no agent reads a project .env any more, whatever the mode (the responder also by `..`)
     let main = mk(Mode::BypassPermissions, false);
-    assert_eq!(d(&main, "Read", json!({ "file_path": f.path(".env") })), A);
+    assert_eq!(d(&main, "Read", json!({ "file_path": f.path(".env") })), D);
     let resp = mk(Mode::Plan, true);
     assert_eq!(d(&resp, "Read", json!({ "file_path": f.path(".env") })), D);
     assert_eq!(
@@ -888,6 +825,9 @@ fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
         "cat `cat .env`",
         "cat sub/../.env",
         "cat ~/.ssh/id_rsa",
+        "cat $HOME/.ssh/id_rsa", // the file name is enough
+        "cat .e*",               // a reader with a glob that could match one
+        "cat *.pem",
         "echo x >> ~/.synt/settings.json",
         "echo x>>~/.synt/settings.json",
         "tee ~/.synt/settings.json",
@@ -895,11 +835,8 @@ fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
     ];
     // could build one: a hard ask (a deny when nobody can answer)
     let unclear = [
-        "cat $HOME/.ssh/id_rsa",
         "cat ${HOME}/x",
         "cat `date`/x",
-        "cat .e*",
-        "cat *.pem",
         "cat ~root/x",
         "cat \"unterminated",
     ];
@@ -927,7 +864,7 @@ fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
     // the main agent (no deny_secret_reads) keeps `$HOME` and globs
     let main = mk(Mode::BypassPermissions, true, false);
     assert_eq!(
-        d(&main, "Bash", json!({ "command": "cat $HOME/x *.pem" })),
+        d(&main, "Bash", json!({ "command": "cat $HOME/x *.rs" })),
         A
     );
 }
@@ -3215,8 +3152,8 @@ fn read_deny_blocks_bash_file_readers_and_redirects() {
     for c in ["cat a.rs", "ls -la", "echo .env"] {
         assert_ne!(bx(&p, c), D, "{c}");
     }
-    // no Read deny rule: nothing changes
-    assert_ne!(bx(&f.perms(Mode::Default), "cat .env"), D);
+    // a secret file is denied to the readers with or without a deny rule
+    assert_eq!(bx(&f.perms(Mode::Default), "cat .env"), D);
     // the sandbox of bypass does not lift it
     let b = f.with(rules(&[], &["Read(sec.txt)"], &[]), Mode::BypassPermissions);
     assert_eq!(bx(&b, "cat sec.txt"), D);
@@ -3251,14 +3188,14 @@ fn edit_deny_blocks_bash_redirects_tee_sed_i_cp_mv_under_bypass() {
             }
         }
     }
-    assert_ne!(
+    assert_eq!(
         bx(
             &f.with(rules(&[], &["Edit(.env)"], &[]), Mode::Default),
             "cat .env"
         ),
         D
     );
-    assert_ne!(
+    assert_eq!(
         bx(
             &f.with(rules(&[], &["Edit(.env)"], &[]), Mode::Default),
             "sed -n 1p .env"
@@ -3532,8 +3469,9 @@ fn bash_writers_beyond_the_fs_list_are_denied_on_a_denied_path() {
         ] {
             assert_eq!(bx(&p, c), D, "{mode:?}: {c}");
         }
+        // a plain read of a secret file is denied on its own, not as a write
+        assert_eq!(bx(&p, "sed -n 1p .env"), D, "{mode:?}");
         for c in [
-            "sed -n 1p .env",
             "echo .env",
             "ls .env",
             "git status",

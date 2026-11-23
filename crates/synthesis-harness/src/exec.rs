@@ -1215,7 +1215,8 @@ impl Harness {
         let max = self.config.max_tool_result_chars;
         match c {
             ToolContent::Text(t) => {
-                let (capped, cut) = cap_text(t, max);
+                // masked before it enters the history (the raw `t` is returned for the learner)
+                let (capped, cut) = cap_text(&self.sink.redact(t), max);
                 (
                     Value::String(wrap_tool_output(name, &capped)),
                     t.clone(),
@@ -1228,7 +1229,7 @@ impl Harness {
                 for b in bs {
                     match b {
                         ToolBlock::Text { text: t } => {
-                            let (capped, cut) = cap_text(t, max);
+                            let (capped, cut) = cap_text(&self.sink.redact(t), max);
                             vals.push(
                                 json!({"type": "text", "text": wrap_tool_output(name, &capped)}),
                             );

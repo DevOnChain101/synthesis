@@ -1041,7 +1041,16 @@ impl Permissions {
     /// Engine-enforced read ban (`Env::deny_read`, `Env::deny_secret_reads`); no rule or mode lifts it.
     fn hard_read_denied(&self, tool: &str, input: &Value) -> Option<&'static str> {
         const WHY: &str = "blocked: that path is Synthesis state or a secret and may not be read";
-        if self.env.deny_read.is_empty() && !self.env.deny_secret_reads {
+        // Secret files are never model-bound for any agent or mode: no ask, no rule, no bypass.
+        if self.names_secret_file(tool, input)
+            || (tool == "Bash" && self.bash_reads_secret(command_of(input), true))
+        {
+            return Some(WHY);
+        }
+        // The readers hand file content to the model. (Edit and Write stay a person's call: they
+        // change files; what an Edit echoes back still passes the secret gate.)
+        let secrets = self.env.deny_secret_reads || matches!(tool, "Read" | "Grep" | "Glob");
+        if self.env.deny_read.is_empty() && !secrets {
             return None;
         }
         let policy = self.policy();
@@ -1090,7 +1099,7 @@ impl Permissions {
                     paths::within(x, &c, policy)
                         || (self.env.deny_secret_reads && paths::within(&c, x, policy))
                 });
-                if hit || (self.env.deny_secret_reads && secret_shaped(&c)) {
+                if hit || (secrets && secret_shaped(&c)) {
                     return Some(WHY);
                 }
             }
@@ -1124,7 +1133,8 @@ impl Permissions {
     /// A read-only (or auto-safe) command, or a known reader, with an operand that names a secret file or could match
     /// one, lexically or through a link: `cat .env`, `head -1 .e*`, `grep x *.pem`. Other commands
     /// are not scanned (a `git add .env` is not a read; the sandbox is the real boundary).
-    fn bash_reads_secret(&self, cmd: &str) -> bool {
+    /// `readers_only`: judge the known readers (`cat`, `grep`, ...) only, not `ls .env` or `echo .env`.
+    fn bash_reads_secret(&self, cmd: &str, readers_only: bool) -> bool {
         let all_safe = self.bash_safe(cmd, true);
         let Some(segs) = bash::deep_segments(cmd, 0) else {
             return false;
@@ -1136,7 +1146,7 @@ impl Permissions {
             if prog == "cd" {
                 self.widen_bases(&mut bases, w.get(1));
             }
-            if !all_safe && !READERS.contains(&prog) {
+            if !(all_safe && !readers_only) && !READERS.contains(&prog) {
                 continue;
             }
             for word in &seg {
@@ -2701,7 +2711,7 @@ impl Permissions {
         // search `glob` or a wildcard; only an allow rule or bypassPermissions skips the question
         // (only a rule that names the path lifts it, never a tool-wide one: `Read`, `Bash(cat:*)`)
         if (self.names_secret_file(tool, input)
-            || (tool == "Bash" && self.bash_reads_secret(bash_cmd)))
+            || (tool == "Bash" && self.bash_reads_secret(bash_cmd, false)))
             && !self.specific_allow(mode, tool, input)
         {
             return match mode {
@@ -2951,20 +2961,13 @@ impl Permissions {
                 behavior: Decision::Allow,
             }]
         };
-        // a secret file is the person's call each time: offer a rule for that path only
-        if self.names_secret_file(tool, input) {
-            let field = if tool == "Read" { "file_path" } else { "path" };
-            let abs = non_empty(input, field).map(|t| {
-                paths::lexical_normalize(&paths::resolve(&self.env.cwd, t))
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            return abs
-                .filter(|a| synthesis_core::secrets::is_secret_path(Path::new(a)))
-                .and_then(|a| rule_path(&a, self.policy().windows_separators))
-                .map_or(vec![], |p| add(tool, Some(p)));
+        // a denied secret read has nothing to allow
+        if self.names_secret_file(tool, input)
+            || (tool == "Bash" && self.bash_reads_secret(command_of(input), true))
+        {
+            return vec![];
         }
-        if tool == "Bash" && self.bash_reads_secret(command_of(input)) {
+        if tool == "Bash" && self.bash_reads_secret(command_of(input), false) {
             let cmd = command_of(input).trim();
             return if exact_unsafe(cmd) || cmd.contains('*') {
                 vec![]
@@ -3064,24 +3067,6 @@ impl Permissions {
         }
         mode
     }
-}
-
-/// The `//abs` spelling of an absolute path for an allow rule, or `None` when no rule may be
-/// offered: a glob character in the name would make the rule broader than that file, and a UNC
-/// path has no `//` form. On Windows the verbatim prefix (`\\?\C:\x`) is dropped first (its `?` is
-/// not a glob character) and `\` becomes `/`, the spelling the matcher expects (`//C:/x`).
-fn rule_path(abs: &str, windows: bool) -> Option<String> {
-    let p = if windows {
-        let p = abs.strip_prefix(r"\\?\").unwrap_or(abs);
-        if p.starts_with(r"UNC\") || p.starts_with(r"\\") {
-            return None;
-        }
-        p.replace('\\', "/")
-    } else {
-        abs.to_string()
-    };
-    (!p.contains(['*', '?', '[', ']', '{', '}']))
-        .then(|| format!("//{}", p.trim_start_matches('/')))
 }
 
 /// `path.parse(p).root`.

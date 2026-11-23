@@ -8,9 +8,11 @@ use crate::{Envelope, Event, RawEnvelope, SCHEMA_VERSION};
 
 /// Masks secrets in string values. Built-in patterns follow spec §5.2; `secrets` are exact
 /// values (e.g. env values of API keys) masked wherever they appear.
+/// Clones share the registered values: a value learned through one is masked by all.
+#[derive(Clone)]
 pub struct Redactor {
-    secrets: std::sync::Mutex<Vec<String>>,
-    patterns: Vec<(&'static str, Regex)>,
+    secrets: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    patterns: std::sync::Arc<Vec<(&'static str, Regex)>>,
     credential: Regex,
 }
 
@@ -47,14 +49,17 @@ const TRIVIAL: &[&str] = &[
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
         // Order matters: `sk-ant-` must run before the generic `sk-`.
-        let defs: [(&str, &str); 15] = [
+        let defs: [(&str, &str); 18] = [
             ("sk-ant", r"sk-ant-[A-Za-z0-9_-]+"),
             ("sk", r"sk-[A-Za-z0-9_-]{20,}"),
             (
                 "github",
-                r"(?:gh[po]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)",
+                r"(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)",
             ),
-            ("aws", r"AKIA[0-9A-Z]{16}"),
+            ("aws", r"A[KS]IA[0-9A-Z]{16}"),
+            ("huggingface", r"hf_[A-Za-z0-9]{30,}"),
+            ("sendgrid", r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"),
+            ("slack-app", r"xapp-[0-9]-[A-Za-z0-9-]{10,}"),
             (
                 "private-key",
                 r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
@@ -80,15 +85,18 @@ impl Redactor {
         ];
         Self {
             // Empty secrets would match everywhere.
-            secrets: std::sync::Mutex::new(secrets.into_iter().filter(|s| !s.is_empty()).collect()),
-            patterns: defs
-                .iter()
-                .map(|(k, p)| (*k, Regex::new(p).expect("static regex")))
-                .collect(),
+            secrets: std::sync::Arc::new(std::sync::Mutex::new(
+                secrets.into_iter().filter(|s| !s.is_empty()).collect(),
+            )),
+            patterns: std::sync::Arc::new(
+                defs.iter()
+                    .map(|(k, p)| (*k, Regex::new(p).expect("static regex")))
+                    .collect(),
+            ),
             // `NAME_TOKEN=value`, `"password": "value"`; group 3 is the next character (type syntax
             // such as `token: Option<String>` is told apart from a value there)
             credential: Regex::new(
-                r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key))(["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
+                r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key|private_?key|credential))(["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
             )
             .expect("static regex"),
         }
@@ -118,6 +126,33 @@ impl Redactor {
         evicted
     }
 
+    /// Any exact value registered (at start or learned from a secret file).
+    pub fn has_secrets(&self) -> bool {
+        !self
+            .secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    /// The class of a secret that survives in `s`: a registered value or a built-in pattern.
+    /// Run on redacted text, it is the fail-closed check of the secret gate.
+    pub fn leak_class(&self, s: &str) -> Option<&'static str> {
+        if self
+            .secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|x| s.contains(x.as_str()))
+        {
+            return Some("secret");
+        }
+        self.patterns
+            .iter()
+            .find(|(_, re)| re.is_match(s))
+            .map(|(k, _)| *k)
+    }
+
     pub fn redact_str(&self, s: &str) -> String {
         let mut out = s.to_string();
         for secret in self
@@ -128,7 +163,7 @@ impl Redactor {
         {
             out = out.replace(secret.as_str(), "[REDACTED:secret]");
         }
-        for (kind, re) in &self.patterns {
+        for (kind, re) in self.patterns.iter() {
             out = re
                 .replace_all(&out, format!("[REDACTED:{kind}]").as_str())
                 .into_owned();

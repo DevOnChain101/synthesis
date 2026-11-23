@@ -264,6 +264,9 @@ impl Harness {
         };
         let cancel = task.cancel.child_token();
         let run = async {
+            let req = synthesis_providers::SecretGate::new(self.sink.redactor())
+                .seal(&req)
+                .map_err(|e| e.to_string())?;
             let mut stream = self.provider.stream(&req, cancel.clone());
             let mut b = MessageBuilder::new();
             while let Some(ev) = stream.next().await {

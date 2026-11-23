@@ -3,12 +3,12 @@
 
 use crate::capabilities::ProviderCapabilities;
 use crate::error::{ErrorKind, ProviderError, Redaction};
+use crate::gate::SealedRequest;
 use crate::http::{
     Endpoint, EventStream, Mapper, NetSettings, build_client, header, proxy_secrets, spawn_stream,
 };
 use crate::modelinfo::{self, ModelInfoStore};
 use crate::retry::RetryPolicy;
-use crate::types::Request;
 use crate::{anthropic, openai};
 use futures_util::future::BoxFuture;
 use indexmap::IndexMap;
@@ -116,7 +116,7 @@ pub trait ModelProvider: Send + Sync {
     /// Dropping the stream or cancelling `cancel` aborts the request. Pre-stream failures are
     /// retried per policy; after the first byte this layer never replays the stream (the harness
     /// may re-request the whole turn: it runs no tool before a stream has completed).
-    fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream;
+    fn stream(&self, req: &SealedRequest, cancel: CancellationToken) -> EventStream;
     /// `provider/model` label of the fallback that answered the last request, `None` when it was
     /// the model the request named (only a failover wrapper answers otherwise).
     fn answered_by(&self) -> Option<String> {
@@ -442,7 +442,7 @@ impl ModelProvider for HttpProvider {
         })
     }
 
-    fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
+    fn stream(&self, req: &SealedRequest, cancel: CancellationToken) -> EventStream {
         let (url, body, mapper): (String, Value, Box<dyn Mapper>) = match self.protocol {
             Protocol::Anthropic => (
                 format!("{}/v1/messages", self.base),

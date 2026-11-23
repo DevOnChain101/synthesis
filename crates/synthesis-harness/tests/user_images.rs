@@ -21,7 +21,12 @@ fn req() -> TaskRequest {
 
 #[tokio::test]
 async fn an_attached_image_reaches_the_model_as_a_block_after_the_text() {
-    let mut rig = Rig::new(Opts::default(), vec![Turn::text("a cat")]);
+    // no registered secret: with one, the secret gate withholds images
+    let o = Opts {
+        secrets: vec![],
+        ..Opts::default()
+    };
+    let mut rig = Rig::new(o, vec![Turn::text("a cat")]);
     rig.run_with(req(), CancellationToken::new()).await;
     let sent = rig.provider.requests();
     let m = sent[0]

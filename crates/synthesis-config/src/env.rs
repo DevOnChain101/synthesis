@@ -76,7 +76,14 @@ impl Env {
             .filter(|(k, _)| {
                 let k = k.as_str();
                 if let Some(rest) = k.strip_prefix("SYNT_") {
-                    return !is_secret_shaped(rest);
+                    // secret words anywhere in the name, not only as `_` segments (`SYNT_APIKEY`)
+                    let u = rest.to_ascii_uppercase();
+                    return !is_secret_shaped(rest)
+                        && ![
+                            "KEY", "TOKEN", "SECRET", "PASSW", "CRED", "AUTH", "COOKIE", "PRIVATE",
+                        ]
+                        .iter()
+                        .any(|w| u.contains(w));
                 }
                 CHILD_ENV_ALLOWLIST.contains(&k) || k.starts_with("LC_") || k.starts_with("XDG_")
             })

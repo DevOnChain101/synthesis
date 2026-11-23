@@ -211,7 +211,7 @@ async fn collect(
     p: &dyn ModelProvider,
     cancel: CancellationToken,
 ) -> (Vec<StreamEvent>, Option<ProviderError>) {
-    let mut s = p.stream(&req(), cancel);
+    let mut s = p.stream(&seal(req()), cancel);
     let (mut ev, mut err) = (vec![], None);
     while let Some(i) = s.next().await {
         match i {
@@ -822,7 +822,7 @@ async fn the_effort_tier_reaches_both_protocols() {
         let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
         let mut r = req();
         r.reasoning_effort = Some("high".into());
-        let mut s = p.stream(&r, CancellationToken::new());
+        let mut s = p.stream(&seal(r), CancellationToken::new());
         while s.next().await.is_some() {}
         let sent = mock.req(0);
         assert!(
@@ -837,7 +837,7 @@ async fn the_effort_tier_reaches_both_protocols() {
         }])
         .await;
         let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
-        let mut s = p.stream(&req(), CancellationToken::new());
+        let mut s = p.stream(&seal(req()), CancellationToken::new());
         while s.next().await.is_some() {}
         assert!(!mock.req(0).contains(key));
     }
@@ -1177,4 +1177,8 @@ async fn an_endless_error_body_is_cut_and_the_error_still_arrives() {
     .unwrap_err();
     assert_eq!(e.status, Some(400));
     assert!(e.to_string().len() < 2000, "{}", e.to_string().len());
+}
+
+fn seal(r: synthesis_providers::Request) -> synthesis_providers::SealedRequest {
+    synthesis_providers::SecretGate::default().seal(&r).unwrap()
 }
