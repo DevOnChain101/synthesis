@@ -1,3 +1,4 @@
+#![cfg(not(windows))]
 //! The person's line to a worker, end to end without a model (S1 4.6, P2c): a surface queues
 //! `attempt.message` through the client, the owner applies it, the worker's `deliver_inbox` hands it
 //! to the harness and acks it in its own session, and what the worker never took goes back to the
