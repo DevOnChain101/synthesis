@@ -128,6 +128,49 @@ async fn m9_hook_payloads_are_redacted() {
     }
 }
 
+/// The tool output a hook command sees is masked, and so is what the hook adds to the context.
+#[cfg(unix)]
+#[tokio::test]
+async fn post_tool_hook_payload_and_added_context_are_masked() {
+    let secret = format!("{}-{}", "hunter", "98765432");
+    let tools = ToolBox::empty().with_tool(Probe::new(
+        "Probe",
+        SideEffectClass::Read,
+        0,
+        &format!("output {secret}"),
+    ));
+    let o = Opts {
+        tools,
+        allow: vec!["Probe".into()],
+        secrets: vec![secret.clone()],
+        ..Opts::default()
+    };
+    let turns = vec![
+        Turn::tool("p1", "Probe", json!({"x": "a"})),
+        Turn::text("done"),
+    ];
+    let mut rig = Rig::build(o, turns, |h, r| {
+        let cmd = format!(
+            r#"cat >> "$SYNT_PROJECT_DIR/payloads.log"; echo '{{"additionalContext":"hook says {secret}"}}'"#
+        );
+        h.with_hooks(hooks_for(
+            r,
+            json!({"PostToolUse": [{"matcher": "Probe", "hooks": [{"type": "command", "command": cmd}]}]}),
+        ))
+    });
+    rig.run("go").await;
+    let payloads = std::fs::read_to_string(rig.work().join("payloads.log")).unwrap();
+    assert!(
+        payloads.contains("tool_response") && !payloads.contains(&secret),
+        "{payloads}"
+    );
+    let sent = format!("{:?}", rig.requests());
+    assert!(
+        sent.contains("hook says") && !sent.contains(&secret),
+        "{sent}"
+    );
+}
+
 // ---- M10 ------------------------------------------------------------------------------------
 
 fn sub_agents() -> AgentTable {

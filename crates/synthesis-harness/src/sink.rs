@@ -5,7 +5,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use synthesis_events::{Envelope, Event, EventWriter, Redactor};
+use synthesis_events::{Envelope, Event, EventWriter, Redactor, Rejected};
 
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
@@ -24,6 +24,9 @@ struct Inner {
 /// Called with every persisted (already redacted) envelope, outside the writer lock. Must not block.
 pub type Observer = Arc<dyn Fn(&Envelope) + Send + Sync>;
 
+/// Most values registered from one secret file.
+const MAX_FILE_VALUES: usize = 4096;
+
 #[derive(Clone)]
 pub struct EventSink(Arc<Inner>);
 
@@ -34,9 +37,18 @@ impl EventSink {
         session_id: impl Into<String>,
         secrets: impl IntoIterator<Item = String>,
     ) -> Self {
+        Self::with_redactor(out, session_id, Redactor::new(secrets))
+    }
+
+    /// The session's own redactor (shared with the session store, which learns the same values).
+    pub fn with_redactor(
+        out: impl Write + Send + 'static,
+        session_id: impl Into<String>,
+        redactor: Redactor,
+    ) -> Self {
         let out: Box<dyn Write + Send> = Box::new(out);
         Self(Arc::new(Inner {
-            writer: Mutex::new(EventWriter::new(out, session_id, Redactor::new(secrets))),
+            writer: Mutex::new(EventWriter::new(out, session_id, redactor)),
             broken: AtomicBool::new(false),
             last_seq: AtomicU64::new(0),
             observer: Mutex::new(None),
@@ -91,31 +103,60 @@ impl EventSink {
     }
 
     /// Masks every value of a `KEY=value` / `key: value` file read from now on (a secret file the
-    /// user approved reading), wherever it appears in events and logs.
-    pub fn add_secrets_from(&self, text: &str) {
+    /// user approved reading), wherever it appears in events and logs. `false`: not every value
+    /// could be registered (too many, or no room); the caller must NOT hand the file to a model.
+    #[must_use]
+    pub fn add_secrets_from(&self, text: &str) -> bool {
         let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
         let r = w.redactor();
-        let mut evicted = false;
-        let mut add = |v: &str| evicted |= r.add_secret(v);
+        let (mut unprotected, mut tried, mut over) = (0usize, 0usize, 0usize);
+        // a value of a secret-named key (DB_PASSWORD, API_TOKEN) is registered from 4 characters
+        let mut add = |v: &str, min: usize| {
+            // one file registers at most MAX_FILE_VALUES values
+            if tried >= MAX_FILE_VALUES {
+                over += 1;
+                return;
+            }
+            match r.add_secret_min(v, min) {
+                Ok(()) => tried += usize::from(!v.is_empty()),
+                Err(rejected) => {
+                    if rejected == Rejected::Capacity {
+                        over += 1;
+                        return;
+                    }
+                    // a short value of an ordinary key (PORT=80) is just not a secret
+                    if min < 8 || rejected != Rejected::TooShort {
+                        unprotected += 1;
+                    }
+                }
+            }
+        };
         // a PEM body: every base64 line is a secret by itself
         let mut in_pem = false;
-        for line in text.lines().take(2000) {
+        for line in text.lines() {
             let l = line.trim();
             if l.starts_with("-----BEGIN") {
                 in_pem = true;
             } else if l.starts_with("-----END") {
                 in_pem = false;
             } else if in_pem {
-                add(l);
-            } else if let Some((_, v)) = l.split_once(['=', ':']) {
-                add(v.trim());
+                add(l, 8);
+            } else if let Some((k, v)) = l.split_once(['=', ':']) {
+                let named = synthesis_config::is_secret_shaped(k.trim().trim_matches(['"', '\'']));
+                add(v.trim(), if named { 4 } else { 8 });
             }
         }
-        if evicted {
+        if unprotected > 0 {
             eprintln!(
-                "synt: warning: the list of secret values to mask is full; the oldest were dropped"
+                "synt: warning: {unprotected} secret value(s) read from that file are too short (under 4 characters), look like Synthesis's own markers or are words of the request format, so they cannot be masked; treat them as exposed"
             );
         }
+        if over > 0 {
+            eprintln!(
+                "synt: warning: that file holds more secret values than can be protected ({over} not registered); it is not sent to the model"
+            );
+        }
+        over == 0
     }
 
     pub fn is_broken(&self) -> bool {
@@ -124,5 +165,37 @@ impl EventSink {
 
     pub fn last_seq(&self) -> u64 {
         self.0.last_seq.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_file_registers_short_values_of_secret_named_keys_only() {
+        let sink = EventSink::new(Vec::new(), "s", []);
+        assert!(
+            sink.add_secrets_from("DB_PASSWORD=zq7x\nPORT=8081\nAPI_TOKEN=ab\nNAME=longvalue-1234")
+        );
+        assert_eq!(
+            sink.redact("a zq7x b 8081 c ab d zq7xy longvalue-1234"),
+            "a [REDACTED:secret] b 8081 c ab d zq7xy [REDACTED:secret]"
+        );
+    }
+
+    #[test]
+    fn a_file_with_more_values_than_can_be_protected_is_reported() {
+        let sink = EventSink::new(Vec::new(), "s", []);
+        let big: String = (0..MAX_FILE_VALUES + 10)
+            .map(|i| format!("K{i}=value-number-{i:06}\n"))
+            .collect();
+        assert!(!sink.add_secrets_from(&big));
+        // comments and short ordinary values do not count against the cap
+        let sink = EventSink::new(Vec::new(), "s", []);
+        let many: String = (0..MAX_FILE_VALUES * 2)
+            .map(|i| format!("PORT{i}=80\n"))
+            .collect();
+        assert!(sink.add_secrets_from(&many));
     }
 }

@@ -1357,7 +1357,9 @@ async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
     let (w, h) = png_size(&s.png);
     let frame = json!({"url": rt.page_origin().await.unwrap_or_default(), "w": w, "h": h, "bytes": s.png.len()});
     let meta = json!({"artifact_path": path, "frame": frame});
-    if lock(&sh.browser_cfg).supports_images {
+    // pixels cannot be masked: a page that may show credentials goes to the model as text only
+    let credentialed = rt.page_credentialed().await;
+    if lock(&sh.browser_cfg).supports_images && !credentialed {
         return Ok(ToolOutput {
             content: Content::Blocks(vec![
                 Block::Image {
@@ -1377,7 +1379,12 @@ async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
     }
     let t = rt.snapshot(80).await?;
     Ok(ToolOutput::text(format!(
-        "Screenshot saved as artifact {path} (images are not supported by this model; page summary follows).\n{}",
+        "Screenshot saved as artifact {path} ({}; page summary follows).\n{}",
+        if credentialed {
+            "the image is withheld from the model: the page may show credentials"
+        } else {
+            "images are not supported by this model"
+        },
         untrusted(format!("{}\n\n{}", page_text(&t.page), t.tree.expose()))
     ))
     .with_meta(meta))

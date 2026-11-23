@@ -708,6 +708,13 @@ impl Store {
         &self.home
     }
 
+    /// Persists through the run's own redactor: values it learns later (a secret file the person
+    /// let the agent read) are masked in everything stored from then on.
+    pub fn with_redactor(mut self, r: Redactor) -> Self {
+        self.redactor = Arc::new(r);
+        self
+    }
+
     /// Masks the configured secrets in `v` (everything persisted goes through this).
     pub(crate) fn redact_value(&self, v: &mut Value) {
         self.redactor.redact_value(v);

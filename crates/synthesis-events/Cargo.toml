@@ -14,3 +14,5 @@ serde_json = "1.0.154"
 # time: smaller than chrono and has an RFC 3339 formatter with fixed ms precision.
 time = { version = "0.3", features = ["formatting", "macros"] }
 regex = "1"
+base64 = "0.22"
+aho-corasick = "1.1"

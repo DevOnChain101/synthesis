@@ -1498,7 +1498,8 @@ impl Harness {
             self.emit(task, agent, Some(turn), Event::TodoUpdated { todos });
         }
 
-        let (mut content, text, cut) = self.render(name, &out.content);
+        let (mut content, mut text, cut) = self.render(name, &out.content);
+        let mut protected = true;
         // `cat .env` and friends: the values the person approved reading are masked from now on
         if name == "Bash"
             && !out.is_error
@@ -1524,7 +1525,7 @@ impl Harness {
                         })
                 })
         {
-            self.sink.add_secrets_from(&text);
+            protected &= self.sink.add_secrets_from(&text);
         }
         if name == "Read"
             && !out.is_error
@@ -1538,7 +1539,14 @@ impl Harness {
                     )
                 })
         {
-            self.sink.add_secrets_from(&text);
+            protected &= self.sink.add_secrets_from(&text);
+        }
+        // not every value of the file could be registered: the file never reaches the model
+        if !protected {
+            let note = "file has more secret values than can be protected; not sent";
+            self.notice(task, "warning", format!("{name}: {note}"));
+            text = note.into();
+            content = Value::String(note.into());
         }
         // An image result taints the actions after it for the rest of the task (a Read result does
         // not wash the image out of the context). Only the person's own answer clears it.
@@ -1562,13 +1570,13 @@ impl Harness {
                 agent,
                 Some(turn),
                 HookEvent::PostToolUse,
-                json!({"tool_name": name, "tool_use_id": id, "tool_input": self.tools.redact_input(name, &input), "tool_response": text}),
+                json!({"tool_name": name, "tool_use_id": id, "tool_input": self.tools.redact_input(name, &input), "tool_response": self.sink.redact(&text)}),
                 Some(name),
             )
             .await
             && !post.additional_context.is_empty()
         {
-            let extra = post.additional_context.join("\n");
+            let extra = self.sink.redact(&post.additional_context.join("\n"));
             match &mut content {
                 Value::String(s) => {
                     s.push_str("\n\n");
