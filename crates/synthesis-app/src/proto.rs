@@ -27,8 +27,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// What this build's `orchestrator.status` says it can do beyond the base protocol, so a surface
 /// shows only the controls that work (PROTOCOL stays 4: an old surface ignores the extra field).
 /// `read_only_goal` and `report_review` go together: a goal whose report cannot be reviewed must
-/// not be offered. `attempt_message` joins with P2c.
-pub const FEATURES: [&str; 2] = ["read_only_goal", "report_review"];
+/// not be offered. `attempt_message` (S1 4.6, P2c): the owner delivers a person's line to a running
+/// worker or queues it; a surface that does not see it must not offer the control.
+pub const FEATURES: [&str; 3] = ["read_only_goal", "report_review", "attempt_message"];
 // ---- end S1 P2a/P2b --------------------------------------------------------------------------------
 /// Longest accepted line (a tool result can carry a big file).
 pub const MAX_LINE: usize = 8 << 20;
@@ -372,6 +373,23 @@ pub enum Call {
         #[serde(flatten)]
         cmd: CommandArgs,
     },
+    /// A person's line to the worker of a work item (S1 4.6): live to a running attempt, queued for the
+    /// next one otherwise, refused when the work is finished. `expected_revision` is the outcome
+    /// revision the person saw. `proposal_sha256` is set only by a conductor card the person clicked.
+    #[serde(rename = "attempt.message")]
+    AttemptMessage {
+        outcome: String,
+        work_item: String,
+        text: String,
+        #[serde(default)]
+        brief_change: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposal_sha256: Option<String>,
+        #[serde(flatten)]
+        cmd: CommandArgs,
+    },
     #[serde(rename = "evidence.get")]
     EvidenceGet {
         outcome: String,
@@ -456,6 +474,7 @@ impl Call {
                 | Call::DecisionList { .. }
                 | Call::DecisionGet { .. }
                 | Call::DecisionResolve { .. }
+                | Call::AttemptMessage { .. }
                 | Call::EvidenceGet { .. }
                 | Call::CommandStatus { .. }
                 | Call::EventsSubscribe { .. }
@@ -470,6 +489,7 @@ impl Call {
             }
             Call::OutcomeContractApprove { cmd, .. }
             | Call::OutcomeContractRevise { cmd, .. }
+            | Call::AttemptMessage { cmd, .. }
             | Call::DecisionResolve { cmd, .. } => Some(cmd.surface),
             Call::OutcomeStart(c)
             | Call::OutcomePause(c)
@@ -495,6 +515,7 @@ impl Call {
             Call::OutcomeCancel(_) => Some(Action::Cancel),
             Call::OutcomeAck(_) => Some(Action::Ack),
             Call::DecisionResolve { .. } => Some(Action::ResolveDecision),
+            Call::AttemptMessage { .. } => Some(Action::MessageWorker),
             Call::OrchestratorStatus
             | Call::OutcomeList { .. }
             | Call::OutcomeGet { .. }

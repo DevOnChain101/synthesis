@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use synthesis_core::outcome::{DecisionId, DecisionState, OutcomeId, OutcomeState, WorkItemId};
-use synthesis_session::outcome::{CommandRecord, DecisionRecord, NewCommand};
+use synthesis_session::outcome::{CommandRecord, DecisionRecord, NewCommand, check_message_text};
 use synthesis_session::{
     Reader, SCHEMA_VERSION_OUTCOMES, SCHEMA_VERSION_SUPPORTED, Store, StoreOptions,
 };
@@ -389,6 +389,31 @@ impl Service {
                     &cmd,
                 )
             }
+            Call::AttemptMessage {
+                outcome,
+                work_item,
+                text,
+                brief_change,
+                expected_revision,
+                proposal_sha256,
+                cmd,
+            } => {
+                // the same checks as the owner's, so a refusal comes back at once (the owner repeats them)
+                if cfg!(windows) {
+                    return Err(
+                        "worker messages are not available on native Windows; open the folder in WSL2"
+                            .into(),
+                    );
+                }
+                check_message_text(&text).map_err(s)?;
+                WorkItemId::parse(&work_item).map_err(s)?;
+                let mut params =
+                    json!({"work_item": work_item, "text": text, "brief_change": brief_change});
+                if let Some(h) = proposal_sha256 {
+                    params["proposal_sha256"] = json!(h);
+                }
+                self.queue(&outcome, "attempt.message", params, expected_revision, &cmd)
+            }
             Call::OutcomeCreate { .. } | Call::OrchestratorEnable { .. } => {
                 Err("this call is served by the orchestrator process only".into())
             }
@@ -403,7 +428,12 @@ impl Service {
         )
         .and_then(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
         .ok();
-        json!({"enabled": self.enabled, "protocol": PROTOCOL, "features": FEATURES, "schema": schema,
+        // worker messages are refused on native Windows until a real Windows run (S1 Q5)
+        let features: Vec<_> = FEATURES
+            .iter()
+            .filter(|f| !(cfg!(windows) && **f == "attempt_message"))
+            .collect();
+        json!({"enabled": self.enabled, "protocol": PROTOCOL, "features": features, "schema": schema,
                "ready": self.enabled && schema.is_some_and(|v| (SCHEMA_VERSION_OUTCOMES..=SCHEMA_VERSION_SUPPORTED).contains(&v))})
     }
 
@@ -486,6 +516,11 @@ fn attempts_json(r: &Reader, item: &WorkItemId) -> Result<Value, String> {
             let mut v = json!({"id": a.id, "ordinal": a.ordinal, "session_id": a.session_id, "state": a.state,
                "task_status": a.task_status, "subject_commit": a.subject_commit,
                "retained_reason": a.retained_reason, "started_at": a.started_at, "ended_at": a.ended_at});
+            // the `seq`s of the person's messages this worker acked (S1 4.6): "sent (live)" becomes "delivered"
+            let delivered = r.owner_deliveries(&a.session_id).unwrap_or_default();
+            if !delivered.is_empty() {
+                v["messages_delivered"] = json!(delivered);
+            }
             // what the owner recorded at launch; an older attempt has none, so the key is omitted
             if let (Some(b), Some(g)) = (&a.sandbox_backend, &a.sandbox_guarantee) {
                 v["sandbox"] = json!({"backend": b, "guarantee": g});

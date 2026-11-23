@@ -244,6 +244,92 @@ fn mode_file(home: &std::path::Path, sid: &str) -> PathBuf {
 /// read must not be treated as "not asked".
 const STOP_POLL_FAILURES: u32 = 5;
 
+/// Hands a message to the harness (`Harness::send_owner_message`); the error is its sentence.
+pub type SendFn = Arc<
+    dyn Fn(
+            u64,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+/// Writes the ack (`owner_message.delivered`) of message `seq` with its sha256.
+pub type AckFn = Arc<dyn Fn(u64, &str) -> Result<(), String> + Send + Sync>;
+
+/// One poll of the worker's inbox (S1 4.6): the verified messages of this attempt above `cursor`
+/// (the store row of `sid` names the attempt; a row failing its chain link or sha256 is skipped),
+/// each handed to `send` and, once taken, acked in order. A task that has not started yet
+/// (`NO_TASK_RUNNING`) is retried by the next poll with the cursor where it was; any other refusal
+/// is said once and the message is left unacked, so the owner re-queues it ("not delivered"). A
+/// message is never sent twice: the ack comes after the send and the cursor moves with it.
+/// Returns the new cursor.
+pub async fn deliver_inbox(
+    home: &std::path::Path,
+    sid: &str,
+    mut cursor: u64,
+    send: &SendFn,
+    ack: &AckFn,
+) -> Result<u64, String> {
+    let inbox = Reader::open(home)
+        .and_then(|r| r.inbox_after(sid, cursor))
+        .map_err(|e| e.to_string())?;
+    for m in inbox.messages {
+        match send(m.seq, m.text).await {
+            Ok(()) => {
+                if let Err(e) = ack(m.seq, &m.sha256) {
+                    eprintln!(
+                        "synt: warning: message {} delivered, ack not written: {e}",
+                        m.seq
+                    );
+                }
+            }
+            Err(e) if e == synthesis_harness::NO_TASK_RUNNING => return Ok(cursor),
+            Err(e) => eprintln!(
+                "synt: warning: owner message {} not delivered: {}",
+                m.seq,
+                sanitize_for_display(&e)
+            ),
+        }
+        cursor = m.seq;
+    }
+    Ok(inbox.scanned.max(cursor))
+}
+
+/// `synt run --attempt-session`: polls [`deliver_inbox`] every second beside [`watch_stop`] until
+/// `ended`. The cursor starts after the newest ack this session already wrote (a restart replays
+/// nothing that was acked). A failed read is said once and tried again.
+pub fn watch_inbox(
+    home: PathBuf,
+    sid: String,
+    send: SendFn,
+    ack: AckFn,
+    ended: tokio_util::sync::CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut cursor = Reader::open(&home)
+            .and_then(|r| r.owner_deliveries(&sid))
+            .ok()
+            .and_then(|d| d.into_iter().max())
+            .unwrap_or(0);
+        let mut said = false;
+        loop {
+            tokio::select! {
+                () = ended.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            match deliver_inbox(&home, &sid, cursor, &send, &ack).await {
+                Ok(c) => (cursor, said) = (c, false),
+                Err(e) if !said => {
+                    said = true;
+                    eprintln!("synt: warning: cannot read the owner inbox ({e}); trying again");
+                }
+                Err(_) => {}
+            }
+        }
+    });
+}
+
 /// Polls the store once a second for a stop request made at or after `since`; on one calls
 /// `cancel`, and after the grace period `hard` and exits 130 (or, in-process, returns). `ended`
 /// stops the watcher when the session or process ends: it then neither polls nor acts. Five failed polls in a row count as a

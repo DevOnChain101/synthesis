@@ -2614,6 +2614,28 @@ pub fn prepare(
             stop_end.clone(),
         );
     }
+    // an outcome worker reads the person's lines from the owner's store (S1 4.6)
+    if c.attempt_session
+        && let Some(st) = store.clone()
+    {
+        let _enter = tokio_rt.enter();
+        let hx = harness.clone();
+        crate::sessions::watch_inbox(
+            h.synthesis.clone(),
+            sid.clone(),
+            Arc::new(move |seq, text| {
+                let hx = hx.clone();
+                Box::pin(async move { hx.send_owner_message(seq, text).await })
+            }),
+            Arc::new(move |seq, sha| {
+                st.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .append_owner_delivered(seq, sha)
+                    .map_err(|e| e.to_string())
+            }),
+            stop_end.clone(),
+        );
+    }
     learned_guard.0 = None; // the session owns the hook now; `Live::close` clears it
     Ok(Prepared {
         harness,
