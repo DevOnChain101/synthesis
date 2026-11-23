@@ -1714,6 +1714,8 @@ const MOUSE_PAGE: &str = r#"<html><head><title>Mouse</title><style>body{margin:0
 m.onmouseover=()=>L('over-menu');m.ondblclick=()=>L('dbl');m.oncontextmenu=e=>{e.preventDefault();L('ctx')};
 h.onmousedown=()=>{drag=true;L('drag-start')};
 addEventListener('mouseup',e=>{if(drag){drag=false;L('drag-end:'+e.clientX)}});
+// each move of a drag takes ~25ms to handle, so the drag outlasts the page's drag-start being seen
+addEventListener('mousemove',()=>{if(drag){const t=Date.now();while(Date.now()-t<25);}});
 addEventListener('scroll',()=>L('scrolled'));</script></body></html>"#;
 
 async fn serve_html(html: &'static str) -> String {
@@ -1817,7 +1819,7 @@ async fn a_cancelled_drag_lets_go_of_the_button() {
     }
     let base = serve_html(MOUSE_PAGE).await;
     let d = tempfile::tempdir().unwrap();
-    let reg = registry(false, true);
+    let reg = Arc::new(registry(false, true));
     let c = ctx(d.path(), "mouse3");
     ok(
         &reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
@@ -1834,10 +1836,19 @@ async fn a_cancelled_drag_lets_go_of_the_button() {
         .await,
         "move",
     );
-    // the cancel arrives while the pointer is on its way; the button must come up (the page logs the mouseup)
+    // the cancel arrives once the page has seen the press (a timer could fire before a slow runner sent it, and
+    // then nothing is held); the pointer is still on its way, and the button must come up (the page logs the mouseup)
     let stop = c.cancel.clone();
+    let (reg2, c3) = (Arc::clone(&reg), ctx(d.path(), "mouse3"));
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        let seen = reg2
+            .execute(
+                "browser_wait_for",
+                json!({"text": "drag-start", "timeout_ms": 10000}),
+                &c3,
+            )
+            .await;
+        assert!(!seen.is_error, "{}", text(&seen));
         stop.cancel();
     });
     let o = reg
