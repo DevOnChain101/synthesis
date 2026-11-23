@@ -209,6 +209,18 @@ real single mouse click, 400 ms after the block was drawn whole, never while the
 ("Run N lines") or a risky one ("Run anyway") needs a second click at least 400 ms later; a block with invisible or bidi
 characters is shown escaped with no buttons. The terminal's output never goes back to the engine. Messages without a fence
 are unchanged; no design_tests/shot baseline contains a fenced assistant message.
+Run safety, after the security review: a block longer than what is drawn (400 lines or 16 KiB) or with a tab is Copy only;
+a command block shows exactly the text that Copy and Run take (prompts stripped), the text as written follows dimmed when
+different; clicks are ignored while any message streams or a turn runs, within 500 ms of a scroll or layout change of the
+transcript, and unless the pointer rested on the button 300 ms; a message written after a web, browser or MCP tool ran in the
+session (`Item::Assistant.tainted`, sticky) asks twice for every command and says "based on web/untrusted content"; a
+many-line command goes only to a shell that takes a bracketed paste; Run always uses a shell tab (never the agent's log
+view) and the pane says "Sent to terminal N" or "Queued until the shell is ready". The risky list (`codeblock::risky`) is a
+DENYLIST (deletion, privilege, pipes into interpreters, uploads and downloads, inline interpreters, paths and URLs outside
+the project, installs, destructive git, deploys, truncating redirects, quote tricks): it widens what asks twice, it does
+not prove anything safe. Whether to invert it to an allowlist of programs is an owner decision, not taken.
+Accepted risk: single-click Run of model-authored commands under prompt injection: mitigated by risky/tainted confirmations,
+not eliminated; local automation can synthesize real clicks.
 Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
 selects the whole conversation. The list is virtual, so this is a flag: the rows built tint like a selection, a pill says
 so, and Cmd/Ctrl+C copies the transcript assembled from the same items and `toolview` cards the rows paint (same

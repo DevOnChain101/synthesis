@@ -650,6 +650,7 @@ fn md_blocks(idx: usize, text: &str) -> AnyElement {
     crate::widgets::codeblock::message(
         &format!("sa-chat-{idx}"),
         &segs,
+        false,
         &mut |i, p| md(idx * 1024 + i, &p).into_any_element(),
         &mut |_, _, _| None,
     )

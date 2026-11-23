@@ -3,9 +3,12 @@
 //! block is drawn whole, a second click for a multi-line or risky command), and only then the command goes to
 //! the person's shell. The terminal's output never goes back to the engine.
 
+use std::hash::{Hash as _, Hasher as _};
+
 use gpui::{AnyElement, ClickEvent, Context, IntoElement as _};
 use gpui_component::text::TextView;
 use synthesis_view::codeblock::{self as cb, Need, Press};
+use synthesis_view::convo::Item;
 
 use super::{ChatTab, TuiView, WantTerminal, chat};
 use crate::widgets::codeblock::{self as ui, RunUi};
@@ -24,13 +27,45 @@ impl TuiView {
             .then_some("no shell for this engine")
     }
 
+    /// Nothing streams anywhere in the chat and no turn runs.
+    fn chat_quiet(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| {
+            let c = &l.live.view.convo;
+            !c.running
+                && !c.items.iter().any(|i| {
+                    matches!(
+                        i,
+                        Item::Assistant {
+                            streaming: true,
+                            ..
+                        }
+                    )
+                })
+        })
+    }
+
+    /// The transcript was drawn with this scroll offset, height, row count and width (see `Gate::layout`).
+    pub(super) fn note_chat_shape(&self, at: f32, max: f32, rows: usize) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            at.round() as i64,
+            max.round() as i64,
+            rows,
+            self.centre_w.round() as i64,
+        )
+            .hash(&mut h);
+        self.gate.borrow_mut().layout(h.finish(), self.gate_ms());
+    }
+
     /// An assistant message: its prose as markdown and each fenced block as its own section. `None` when the text
-    /// has no fenced block (it keeps its plain markdown).
+    /// has no fenced block (it keeps its plain markdown). `tainted`: the message follows web, browser or MCP
+    /// content, so every command asks twice.
     pub(super) fn assistant_blocks(
         &self,
         idx: usize,
         text: &str,
         streaming: bool,
+        tainted: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let segs = cb::split(text);
@@ -39,6 +74,7 @@ impl TuiView {
         }
         let now = self.gate_ms();
         let blocked = self.run_blocked();
+        let bracketed = self.term.as_ref().and_then(|p| p.read(cx).bracketed());
         let mut prose = |i: usize, s: String| {
             TextView::markdown(gpui::SharedString::from(format!("assistant-{idx}-{i}")), s)
                 .style(chat::table_head_style())
@@ -48,44 +84,70 @@ impl TuiView {
         let mut run = |_: usize, b: &cb::Block, cmd: &str| {
             let k = cb::key(cmd);
             self.gate.borrow_mut().drawn(k, now, b.closed && !streaming);
+            let off = |why: &str| RunUi {
+                label: format!("Run unavailable: {why}").into(),
+                warn: false,
+                on_click: Box::new(|_, _, _| {}),
+                on_hover: None,
+            };
             if let Some(why) = blocked {
-                return Some(RunUi {
-                    label: format!("Run unavailable: {why}").into(),
-                    warn: false,
-                    on_click: Box::new(|_, _, _| {}),
-                });
+                return Some(off(why));
             }
-            let confirming = self.gate.borrow().confirming(k, now);
-            let need = Need::of(cmd).filter(|_| confirming);
-            let cmd = cmd.to_string();
+            // a many-line command goes as one bracketed paste; a shell that does not take it gets Copy only
+            if cmd.contains('\n') && bracketed == Some(false) {
+                return Some(off("this shell has no bracketed paste"));
+            }
+            let need = Need::of(cmd, tainted).filter(|_| self.gate.borrow().confirming(k, now));
+            let (cmd, block) = (cmd.to_string(), b.clone());
+            let this = cx.entity();
             Some(RunUi {
                 label: need.map_or("Run in terminal".into(), |n| n.label().into()),
                 warn: need.is_some(),
                 on_click: Box::new(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    this.run_command(&cmd, streaming, ev, cx)
+                    this.run_command(&block, &cmd, streaming, tainted, ev, cx)
+                })),
+                on_hover: Some(Box::new(move |on, _, cx| {
+                    this.update(cx, |t, _| {
+                        let now = t.gate_ms();
+                        t.gate.borrow_mut().hovered(k, *on, now)
+                    })
                 })),
             })
         };
         Some(
-            ui::message(&format!("assistant-{idx}"), &segs, &mut prose, &mut run)
-                .into_any_element(),
+            ui::message(
+                &format!("assistant-{idx}"),
+                &segs,
+                tainted,
+                &mut prose,
+                &mut run,
+            )
+            .into_any_element(),
         )
     }
 
     /// A click on Run of a command block (the gate decides; see `codeblock::Gate`).
-    fn run_command(&mut self, cmd: &str, streaming: bool, ev: &ClickEvent, cx: &mut Context<Self>) {
+    fn run_command(
+        &mut self,
+        block: &cb::Block,
+        cmd: &str,
+        streaming: bool,
+        tainted: bool,
+        ev: &ClickEvent,
+        cx: &mut Context<Self>,
+    ) {
         let ctx = cb::Ctx {
             // a key press on a focused button, a double click and a touch long press are not a decision
             mouse: matches!(ev, ClickEvent::Mouse(_))
                 && ev.standard_click()
                 && ev.click_count() == 1,
             streaming,
-            // blocks are drawn for assistant messages only, never for a tool result or a quoted file
-            tainted: false,
+            quiet: self.chat_quiet(),
+            tainted,
             runnable: self.run_blocked().is_none(),
         };
         let now = self.gate_ms();
-        let press = self.gate.borrow_mut().press(cmd, ctx, now);
+        let press = self.gate.borrow_mut().press(block, cmd, ctx, now);
         match press {
             Press::Run => self.send_to_terminal(cmd.to_string(), cx),
             Press::Confirm(_) => cx.notify(),

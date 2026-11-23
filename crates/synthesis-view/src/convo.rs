@@ -59,6 +59,8 @@ pub enum Item {
     Assistant {
         text: String,
         streaming: bool,
+        /// A web, browser or MCP tool ran earlier in the session: what the model wrote may follow untrusted content.
+        tainted: bool,
     },
     Tool {
         id: String,
@@ -160,6 +162,8 @@ pub struct Convo {
     task_tokens0: u64,
     /// The session's latest status (`session.status_changed` `to`: `running`, `verifying`, `waiting_approval`...).
     pub session_status: String,
+    /// A web, browser or MCP tool was used in this session (conservative: it never clears).
+    pub untrusted: bool,
     /// Summary of the last verification report of the task in progress.
     checks: Option<String>,
 }
@@ -440,23 +444,31 @@ impl Convo {
                     Some(Item::Assistant {
                         text: t,
                         streaming: true,
+                        ..
                     }) => t.push_str(text),
                     _ => self.items.push(Item::Assistant {
                         text: text.clone(),
                         streaming: true,
+                        tainted: self.untrusted,
                     }),
                 }
             }
             Event::AssistantMessage { content, .. } if main => {
                 let full = text_blocks(content);
                 match self.items.last_mut() {
-                    Some(Item::Assistant { text, streaming }) if *streaming => {
+                    Some(Item::Assistant {
+                        text,
+                        streaming,
+                        tainted,
+                    }) if *streaming => {
                         *text = full;
                         *streaming = false;
+                        *tainted = self.untrusted;
                     }
                     _ if !full.is_empty() => self.items.push(Item::Assistant {
                         text: full,
                         streaming: false,
+                        tainted: self.untrusted,
                     }),
                     _ => {}
                 }
@@ -603,6 +615,10 @@ impl Convo {
                 ..
             } if main => {
                 self.close_stream();
+                self.untrusted |= matches!(
+                    crate::toolview::kind_of(name),
+                    crate::toolview::Kind::Web | crate::toolview::Kind::Mcp
+                ) || name.starts_with("browser_");
                 self.items.push(Item::Tool {
                     id: tool_call_id.clone(),
                     name: name.clone(),
@@ -988,7 +1004,8 @@ mod tests {
             c.items,
             vec![Item::Assistant {
                 text: "Hello".into(),
-                streaming: true
+                streaming: true,
+                tainted: false
             }]
         );
         c.apply(&ev(
@@ -999,9 +1016,51 @@ mod tests {
             c.items,
             vec![Item::Assistant {
                 text: "Hello!".into(),
-                streaming: false
+                streaming: false,
+                tainted: false
             }]
         );
+    }
+
+    #[test]
+    fn a_web_browser_or_mcp_tool_taints_every_later_assistant_message() {
+        let say = |c: &mut Convo, t: &str| {
+            c.apply(&ev(
+                "assistant.message",
+                json!({"content":[{"type":"text","text":t}],"stop_reason":"end_turn"}),
+            ))
+        };
+        let tool = |c: &mut Convo, name: &str| {
+            c.apply(&ev(
+                "tool.requested",
+                json!({"tool_call_id":"t","name":name,"input":{},"input_truncated":false}),
+            ))
+        };
+        let mut c = Convo::default();
+        say(&mut c, "a");
+        tool(&mut c, "Bash");
+        say(&mut c, "b");
+        for (i, name) in ["WebFetch", "mcp__x__y", "browser_navigate"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut d = Convo::default();
+            tool(&mut d, name);
+            say(&mut d, "after");
+            assert!(
+                matches!(d.items.last(), Some(Item::Assistant { tainted: true, .. })),
+                "{i}"
+            );
+        }
+        let t: Vec<bool> = c
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Assistant { tainted, .. } => Some(*tainted),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(t, [false, false]);
     }
 
     #[test]

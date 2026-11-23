@@ -44,7 +44,9 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
         // `!cmd`: the Bash card below it already names the command
         Item::User(t) => !t.starts_with('!'),
         Item::Agent { .. } => true,
-        Item::Assistant { text, streaming } => *streaming || !text.trim().is_empty(),
+        Item::Assistant {
+            text, streaming, ..
+        } => *streaming || !text.trim().is_empty(),
         _ => true,
     }
 }
@@ -401,6 +403,7 @@ impl TuiView {
         // only when the content is taller than the viewport and the person has scrolled up away from the end
         let max = f32::from(lu.list.max_offset_for_scrollbar().y);
         let at = -f32::from(lu.list.scroll_px_offset_for_scrollbar().y);
+        self.note_chat_shape(at, max, lu.live.view.convo.items.len());
         if jump_visible(max, at) {
             wrap = wrap.child(
                 div()
@@ -635,7 +638,9 @@ impl TuiView {
                 .into_any_element()
             }
             Item::Assistant {
-                text: s, streaming, ..
+                text: s,
+                streaming,
+                tainted,
             } => msg(
                 div().size_full().child(
                     crate::brand::avatar_img(32.)
@@ -646,7 +651,7 @@ impl TuiView {
                 hsla(t::ACCENT),
                 &time,
                 div().min_w(px(0.)).text_color(strong()).child(
-                    match self.assistant_blocks(idx, s, *streaming, cx) {
+                    match self.assistant_blocks(idx, s, *streaming, *tainted, cx) {
                         Some(blocks) => blocks,
                         None => TextView::markdown(("assistant", idx), s.clone())
                             .style(table_head_style())
@@ -1805,7 +1810,8 @@ mod tests {
         assert!(!visible(
             &Item::Assistant {
                 text: " ".into(),
-                streaming: false
+                streaming: false,
+                tainted: false
             },
             false,
             false,

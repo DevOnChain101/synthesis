@@ -347,6 +347,7 @@ mod tests {
         let a = Item::Assistant {
             text: "yo".into(),
             streaming: false,
+            tainted: false,
         };
         assert_eq!(item_piece(&a, 80, false).unwrap(), "SYNTHESIS\nyo");
         let n = Item::Notice {

@@ -18,8 +18,10 @@ use super::syntax;
 use crate::theme::hsla;
 use crate::tui_view::chat::{tone_bg, tone_fg};
 
-/// Lines of one section drawn at most; Copy still takes them all.
-const MAX_LINES: usize = 400;
+use cb::MAX_LINES;
+
+/// The pointer entered (`true`) or left a button.
+pub type OnHover = Box<dyn Fn(&bool, &mut gpui::Window, &mut gpui::App)>;
 
 /// The Run button of a command section: its label (a second click asks for a different one), and the handler.
 pub struct RunUi {
@@ -27,6 +29,8 @@ pub struct RunUi {
     /// The label asks for a deliberate second click.
     pub warn: bool,
     pub on_click: OnClick,
+    /// The pointer entered (`true`) or left the button: the gate wants it resting before a click counts.
+    pub on_hover: Option<OnHover>,
 }
 
 /// Whether `segs` holds a fenced block at all (a message without one keeps its plain markdown).
@@ -39,6 +43,7 @@ pub fn has_blocks(segs: &[Seg]) -> bool {
 pub fn message(
     id: &str,
     segs: &[Seg],
+    tainted: bool,
     prose: &mut dyn FnMut(usize, String) -> AnyElement,
     run: &mut dyn FnMut(usize, &Block, &str) -> Option<RunUi>,
 ) -> Div {
@@ -49,8 +54,21 @@ pub fn message(
             Seg::Block(b) => {
                 let cmd = (b.kind == Kind::Command && b.closed && !b.hidden)
                     .then(|| cb::command_text(&b.lang, &b.body));
-                let r = cmd.as_deref().and_then(|c| run(i, b, c));
-                section(SharedString::from(format!("{id}-b{i}")), b, cmd, r).into_any_element()
+                // a block longer than what is drawn, or with a tab, is Copy only
+                let refusal = cmd.as_deref().and_then(|c| cb::run_refusal(b, c));
+                let r = cmd
+                    .as_deref()
+                    .filter(|_| refusal.is_none())
+                    .and_then(|c| run(i, b, c));
+                section(
+                    SharedString::from(format!("{id}-b{i}")),
+                    b,
+                    cmd,
+                    r,
+                    refusal,
+                    tainted,
+                )
+                .into_any_element()
             }
         });
     }
@@ -62,6 +80,7 @@ fn button(
     label: SharedString,
     warn: bool,
     on_click: OnClick,
+    on_hover: Option<OnHover>,
 ) -> impl IntoElement {
     let c = if warn { hsla(t::WARN) } else { dim() };
     let sel = id.to_string();
@@ -79,14 +98,27 @@ fn button(
         .cursor_pointer()
         .hover(|d| d.bg(hsla(t::ELEVATED)).text_color(strong()))
         .on_click(on_click)
+        .when_some(on_hover, |d, f| d.on_hover(f))
         .child(label)
 }
 
-fn section(id: SharedString, b: &Block, cmd: Option<String>, run: Option<RunUi>) -> Div {
+fn section(
+    id: SharedString,
+    b: &Block,
+    cmd: Option<String>,
+    run: Option<RunUi>,
+    refusal: Option<&str>,
+    tainted: bool,
+) -> Div {
     let head = if b.lang.is_empty() || b.lang == b.kind.label() {
         b.kind.label().to_string()
     } else {
         format!("{} \u{b7} {}", b.kind.label(), b.lang)
+    };
+    let head = match (refusal, tainted && b.kind == Kind::Command) {
+        (Some(why), _) => format!("{head} \u{b7} Run off: {why}"),
+        (None, true) => format!("{head} \u{b7} based on web/untrusted content"),
+        _ => head,
     };
     let mut buttons = div().flex().items_center().gap(px(6.));
     if b.hidden {
@@ -105,6 +137,7 @@ fn section(id: SharedString, b: &Block, cmd: Option<String>, run: Option<RunUi>)
             Box::new(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
             }),
+            None,
         ));
         if let Some(r) = run {
             buttons = buttons.child(button(
@@ -112,14 +145,20 @@ fn section(id: SharedString, b: &Block, cmd: Option<String>, run: Option<RunUi>)
                 r.label,
                 r.warn,
                 r.on_click,
+                r.on_hover,
             ));
         }
     }
+    // a command shows exactly what Copy and Run take (prompts stripped); the text as written follows, dimmed
     let shown = if b.hidden {
         cb::escape_invisible(&b.body)
     } else {
-        b.body.clone()
+        cmd.clone().unwrap_or_else(|| b.body.clone())
     };
+    let as_written = cmd
+        .as_ref()
+        .filter(|c| c.as_str() != b.body.trim_end())
+        .map(|_| b.body.clone());
     let lines: Vec<&str> = shown.lines().collect();
     let more = lines.len().saturating_sub(MAX_LINES);
     let tones: Vec<_> = if b.kind == Kind::Diff && !b.hidden {
@@ -154,6 +193,28 @@ fn section(id: SharedString, b: &Block, cmd: Option<String>, run: Option<RunUi>)
             st = st.highlights(syntax::highlights(l));
         }
         body = body.child(row.child(st));
+    }
+    if let Some(w) = as_written {
+        body = body.child(
+            div()
+                .px(px(10.))
+                .pt(px(4.))
+                .text_color(dim())
+                .child("as written:"),
+        );
+        for (i, l) in w.lines().take(MAX_LINES).enumerate() {
+            body = body.child(
+                div()
+                    .px(px(10.))
+                    .min_w(px(0.))
+                    .whitespace_normal()
+                    .text_color(dim())
+                    .child(SelText::new(
+                        SharedString::from(format!("{id}-w{i}")),
+                        if l.is_empty() { " " } else { l }.to_string(),
+                    )),
+            );
+        }
     }
     if more > 0 {
         body = body.child(
@@ -209,6 +270,7 @@ mod tests {
             message(
                 "p",
                 &segs,
+                false,
                 &mut |_, s| div().child(s).into_any_element(),
                 &mut |_, _, _| {
                     let runs = runs.clone();
@@ -216,6 +278,7 @@ mod tests {
                         label: "Run in terminal".into(),
                         warn: false,
                         on_click: Box::new(move |_, _, _| runs.set(runs.get() + 1)),
+                        on_hover: None,
                     })
                 },
             )
@@ -270,6 +333,16 @@ mod tests {
         for s in ["p-b0-copy", "p-b0-run", "p-b1-copy", "p-b1-run"] {
             assert!(v.debug_bounds(s).is_none(), "{s}");
         }
+    }
+
+    #[gpui::test]
+    fn a_block_longer_than_what_is_drawn_or_with_a_tab_is_copy_only(cx: &mut TestAppContext) {
+        let long: &'static str =
+            Box::leak(format!("```sh\n{}\n```", "echo a\n".repeat(401)).into_boxed_str());
+        let (v, _) = open(cx, long);
+        assert!(v.debug_bounds("p-b0-copy").is_some() && v.debug_bounds("p-b0-run").is_none());
+        let (v, _) = open(cx, "```sh\necho\ta\n```");
+        assert!(v.debug_bounds("p-b0-copy").is_some() && v.debug_bounds("p-b0-run").is_none());
     }
 
     #[gpui::test]

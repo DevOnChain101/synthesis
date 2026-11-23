@@ -61,7 +61,8 @@ pub fn invisible(c: char) -> bool {
             '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}'
             | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
             | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}'
-            | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e0fff}')
+            | '\u{ffa0}' | '\u{fff9}'..='\u{fffc}' | '\u{2800}' | '\u{1d173}'..='\u{1d17a}'
+            | '\u{1bca0}'..='\u{1bca3}' | '\u{13430}'..='\u{13438}' | '\u{e0000}'..='\u{e0fff}')
 }
 
 /// `s` with every invisible character made visible as `\u{..}` (what a hidden block shows).
@@ -362,28 +363,74 @@ fn env_assign(w: &str) -> bool {
 }
 
 /// Whether running the command needs a second, explicit click for what it does (not for its size).
+// shortcut: denylist. A pattern list cannot know every harmful command (an alias, a script the command calls, a
+// tool that deletes by its own flags); it widens what asks twice, it does not prove a command safe. An allowlist
+// of programs is the stricter design and is an owner decision.
 pub fn risky(cmd: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
+    const PARTS: &[&str] = &[
+        // deletion, privilege, disks
+        r"\b(?:rm|unlink|rmdir|del|erase|shred|truncate|killall|pkill|sudo|doas|chown|mkfs\S*|fdisk|parted|wipefs)\b",
+        r"\bsu\s+-?\s*(?:\n|$)|\bdd\b[^\n]*\b(?:if|of)=|\bfind\b[^\n]*(?:-delete|-exec|-execdir)|\bxargs\b",
+        // pipes into a shell or interpreter, eval, substitution, quote tricks
+        r"\|\s*(?:sudo\s+)?(?:\w*sh|python3?|perl|ruby|node|iex|pwsh|powershell|nc|ncat|netcat|socat)\b",
+        r"\beval\b|\$\(|`|<\(|\biex\b|\binvoke-expression\b|\bsource\s+<",
+        r#"(?m)(?:^|[;&|(]\s*)\s*[\w./-]*['"\\]"#,
+        // inline interpreters, shells, powershell, cmd
+        r"\b(?:python[0-9.]*|perl|ruby|node|php|(?:ba|z|da|k|fi)?sh)\b[^\n|;&]*\s-[a-z]*[cer]\b",
+        r"\b(?:powershell|pwsh)\b[^\n]*\s-(?:enc\w*|e|ec|c|command)\b|\bcmd(?:\.exe)?\s+/[ck]\b",
+        // network: uploads, downloads, copies out, listeners
+        r"\bcurl\b[^\n]*\s(?:-[a-zA-Z]*[FdTo]\b|--(?:form|data\S*|upload-file|json|output)\b)",
+        r"\bwget\b[^\n]*(?:--post-\S+|--body-\S+|\s-[a-zA-Z]*[Oo]\b|--output\S*)",
+        r"\b(?:scp|rsync|sftp|ssh|ftp|telnet|nc|ncat|netcat|socat)\b|https?://",
+        r"\bchmod\b|\bchown\b|\bbase64\b[^\n]*(?:-d|--decode)",
+        // what a command may read or change outside the project
+        r"\$\{?HOME\b|~[/\\]|\s~(?:\s|$)|\.ssh\b|\.aws\b|\.env\b|\.npmrc|\.git-credentials|\.netrc|\.kube|\.gnupg|/etc\b|/dev/|%USERPROFILE%|\$env:",
+        r"tee\s+-a|>>\s*\S*\.(?:bashrc|zshrc|profile|bash_profile|zprofile)\b",
+        // git that discards or rewrites
+        r"\bgit\s+push\b[^\n]*(?:--force|\s-[a-z]*f\b|\s\+\S)|\bgit\s+(?:reset\s+--hard|clean|stash\s+drop|restore|filter-branch|update-ref\s+-d|branch\s+-D)\b",
+        r"\bgit\s+checkout\s+(?:--\s|\.(?:\s|$))",
+        // fork bomb, raw disks, power
+        r":\(\)\s*\{|>\s*/dev/|\b(?:shutdown|reboot|halt|poweroff)\b|\binit\s+[06]\b|\bformat\s+[a-z]:|\b(?:rd|rmdir)\s+/s|\breg\s+delete|\bcrontab\s+-r",
+        r"\bremove-item\b|\bkill\s+-9\s+-?1\b",
+        // installs and deploys
+        r"\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|ci|exec|dlx|x|publish|remove|uninstall)\b|\bnpx\b|\bpipx?\s+(?:install|uninstall)\b",
+        r"\buv\s+(?:pip|tool|add)\b|\bcargo\s+(?:install|publish|add|uninstall)\b|\bbrew\s+(?:install|uninstall|upgrade|reinstall)\b",
+        r"\b(?:apt|apt-get|dnf|yum|pacman|zypper|apk|winget|choco|scoop)\b|\bgem\s+install\b|\bgo\s+(?:install|get)\b",
+        r"\b(?:docker|podman)\b[^\n]*(?:\brun\b|\s-v\b|--volume|--privileged|\bexec\b|compose\s+up|system\s+prune|\brm\b|volume\s+rm)",
+        r"\bkubectl\s+(?:delete|apply|exec|create|replace|patch|edit|scale)\b|\bterraform\s+(?:apply|destroy)\b",
+    ];
     let r = R.get_or_init(|| {
-        Regex::new(concat!(
-            r"(?i)(?:",
-            r"\brm\b[^\n|;&]*\s-[a-z]*[rf]|\brm\b[^\n|;&]*--(?:recursive|force)|\bsudo\b|\bdoas\b|\bsu\s+-?\s*(?:\n|$)",
-            r"|\bdd\b[^\n]*\b(?:if|of)=|\bmkfs|\bfdisk\b|\bparted\b|\bwipefs\b|\bshred\b|\btruncate\b",
-            r"|\|\s*(?:sudo\s+)?(?:\w*sh|python3?|perl|ruby|node|iex|pwsh|powershell)\b",
-            r"|\b(?:curl|wget)\b[^\n]*(?:\$\(|`)|<\(\s*(?:curl|wget)|\$\(\s*(?:curl|wget)|\beval\b",
-            r"|\bchmod\b[^\n]*\s-[a-z]*r|\bchmod\b[^\n]*--recursive|\bchown\b[^\n]*\s-[a-z]*r|\bchmod\s+[0-7]*777",
-            r"|\bgit\s+push\b[^\n]*(?:--force|\s-[a-z]*f\b|\s\+\S)|\bgit\s+reset\s+--hard|\bgit\s+clean\b[^\n]*\s-[a-z]*f",
-            r"|\bgit\s+(?:branch\s+-D|filter-branch|update-ref\s+-d)|\bgit\s+(?:checkout|restore)\s+(?:--\s|\.(?:\s|$))",
-            r"|:\(\)\s*\{|>\s*/dev/(?:sd|nvme|hd|disk|mmcblk)|\b(?:shutdown|reboot|halt|poweroff)\b|\binit\s+[06]\b",
-            r"|\binvoke-expression\b|\biex\b|\bremove-item\b[^\n]*-recurse|\bformat\s+[a-z]:|\bdel\s+/[sfq]|\b(?:rd|rmdir)\s+/s",
-            r"|\breg\s+delete|\bkillall\b|\bpkill\b|\bkill\s+-9\s+-?1\b|\bcrontab\s+-r|\bdocker\s+(?:system\s+prune|rm\s+-f|volume\s+rm)",
-            r"|\bkubectl\s+delete|\bterraform\s+(?:destroy|apply)|\b(?:npm|cargo)\s+publish|\bbase64\b[^\n]*(?:-d|--decode)[^\n]*\|",
-            r"|\bnc\b[^\n]*\s-[a-z]*e|\bmv\b[^\n]*\s/dev/null|>\s*~?/?\.(?:ssh|bashrc|zshrc|profile)",
-            r")"
-        ))
-        .expect("risk regex is valid")
+        Regex::new(&format!("(?i)(?:{})", PARTS.join("|"))).expect("risk regex is valid")
     });
-    r.is_match(cmd)
+    r.is_match(cmd) || truncating_redirect(cmd)
+}
+
+/// A `> file` that overwrites something other than an obvious build output.
+fn truncating_redirect(cmd: &str) -> bool {
+    const OUT: [&str; 6] = [
+        "target/",
+        "build/",
+        "dist/",
+        "out/",
+        "./target/",
+        "./build/",
+    ];
+    let b = cmd.as_bytes();
+    (0..b.len()).any(|i| {
+        let prev = i.checked_sub(1).map(|j| b[j]);
+        let next = b.get(i + 1).copied();
+        if b[i] != b'>'
+            || matches!(prev, Some(b'>' | b'-' | b'=' | b'<'))
+            || matches!(next, Some(b'>' | b'&' | b'='))
+        {
+            return false;
+        }
+        let rest = cmd[i + 1..].trim_start_matches(['|', ' ']);
+        let target = rest.split_whitespace().next().unwrap_or("");
+        !OUT.iter()
+            .any(|o| target.trim_matches(['"', '\'']).starts_with(o))
+    })
 }
 
 /// Why a second click is asked for.
@@ -393,14 +440,18 @@ pub enum Need {
     Lines(usize),
     /// A risky command, shown whole first: "Run anyway".
     Risky,
+    /// The message follows web, browser or MCP content: every command asks twice.
+    Untrusted,
 }
 
 impl Need {
-    /// Why `cmd` needs a second click (a risky command first), if it does.
-    pub fn of(cmd: &str) -> Option<Self> {
+    /// Why `cmd` needs a second click (risky or untrusted first), if it does.
+    pub fn of(cmd: &str, tainted: bool) -> Option<Self> {
         let lines = cmd.lines().filter(|l| !l.trim().is_empty()).count();
         if risky(cmd) {
             Some(Self::Risky)
+        } else if tainted {
+            Some(Self::Untrusted)
         } else {
             (lines > 1).then_some(Self::Lines(lines))
         }
@@ -409,7 +460,7 @@ impl Need {
     pub fn label(self) -> String {
         match self {
             Self::Lines(n) => format!("Run {n} lines"),
-            Self::Risky => "Run anyway".into(),
+            Self::Risky | Self::Untrusted => "Run anyway".into(),
         }
     }
 }
@@ -422,9 +473,28 @@ pub enum Press {
     Run,
 }
 
+/// Lines of a block the chat draws, and the bytes of a command Run takes: what is not drawn is not run.
+pub const MAX_LINES: usize = 400;
+pub const MAX_RUN_BYTES: usize = 16 * 1024;
+
+/// Why Run is not offered for `cmd` (the stripped command of `b`), if it is not.
+pub fn run_refusal(b: &Block, cmd: &str) -> Option<&'static str> {
+    if b.body.lines().count() > MAX_LINES || cmd.len() > MAX_RUN_BYTES {
+        Some("too long to run from here")
+    } else if cmd.contains('\t') {
+        Some("has a tab")
+    } else {
+        None
+    }
+}
+
 /// Milliseconds a block must have been drawn complete before a click counts, and the same gap between the
 /// two clicks of a confirmation (a double click cannot confirm).
 pub const ARM_MS: u64 = 400;
+/// The transcript must not have scrolled or changed shape for this long (a click lands where it was aimed).
+pub const QUIET_MS: u64 = 500;
+/// The pointer must have rested on the button this long before a click counts.
+pub const HOVER_MS: u64 = 300;
 /// A pending confirmation lapses after this long.
 pub const CONFIRM_MS: u64 = 15_000;
 const MAX_SEEN: usize = 256;
@@ -434,8 +504,11 @@ const MAX_SEEN: usize = 256;
 pub struct Ctx {
     /// A real mouse (or touch) click, once: not a key, not a double click, not a call from code.
     pub mouse: bool,
+    /// The message holding the block is still streaming.
     pub streaming: bool,
-    /// The block sits in a tool result or other untrusted content.
+    /// Nothing streams anywhere in the chat and no turn runs (the chat is not about to move under the pointer).
+    pub quiet: bool,
+    /// The message follows web, browser or MCP content: the command always asks twice.
     pub tainted: bool,
     /// A terminal can be opened here.
     pub runnable: bool,
@@ -448,12 +521,18 @@ pub fn key(cmd: &str) -> u64 {
 }
 
 /// The state machine behind Run: nothing runs without a real click on a block that has been complete on screen
-/// for [`ARM_MS`], and a multi-line or risky command needs a second click.
+/// for [`ARM_MS`], with the transcript still for [`QUIET_MS`] and the pointer resting on the button for
+/// [`HOVER_MS`]; a multi-line, risky or untrusted command needs a second click.
 #[derive(Default)]
 pub struct Gate {
     /// Block key to the time it was first drawn complete (not streaming).
     seen: HashMap<u64, u64>,
     pending: Option<(u64, u64)>,
+    /// Shape of the transcript at the last look (scroll offset, height, row count, width) and when it changed.
+    shape: u64,
+    shifted: u64,
+    /// The button under the pointer and since when.
+    hover: Option<(u64, u64)>,
 }
 
 impl Gate {
@@ -469,24 +548,52 @@ impl Gate {
         self.seen.entry(key).or_insert(now);
     }
 
+    /// The transcript was drawn with this `shape`; a different one than the last time is a scroll or a layout
+    /// change, and clicks wait for [`QUIET_MS`].
+    pub fn layout(&mut self, shape: u64, now: u64) {
+        if shape != self.shape {
+            (self.shape, self.shifted) = (shape, now);
+        }
+    }
+
+    /// The pointer entered (`on`) or left the Run button of `key`.
+    pub fn hovered(&mut self, key: u64, on: bool, now: u64) {
+        if on {
+            if self.hover.is_none_or(|(k, _)| k != key) {
+                self.hover = Some((key, now));
+            }
+        } else if self.hover.is_some_and(|(k, _)| k == key) {
+            self.hover = None;
+        }
+    }
+
     /// The next click on `key` is the second one of a confirmation (the button then reads [`Need::label`]).
     pub fn confirming(&self, key: u64, now: u64) -> bool {
         self.pending
             .is_some_and(|(k, t)| k == key && now.saturating_sub(t) <= CONFIRM_MS)
     }
 
-    pub fn press(&mut self, cmd: &str, ctx: Ctx, now: u64) -> Press {
+    pub fn press(&mut self, b: &Block, cmd: &str, ctx: Ctx, now: u64) -> Press {
         let k = key(cmd);
         let armed = self
             .seen
             .get(&k)
             .is_some_and(|&t| now.saturating_sub(t) >= ARM_MS);
+        let rested = self
+            .hover
+            .is_some_and(|(hk, t)| hk == k && now.saturating_sub(t) >= HOVER_MS);
         if !ctx.mouse
             || ctx.streaming
-            || ctx.tainted
+            || !ctx.quiet
             || !ctx.runnable
+            || !b.closed
+            || b.hidden
+            || b.kind != Kind::Command
+            || run_refusal(b, cmd).is_some()
             || cmd.trim().is_empty()
             || !armed
+            || !rested
+            || now.saturating_sub(self.shifted) < QUIET_MS
         {
             return Press::Ignored;
         }
@@ -500,8 +607,7 @@ impl Gate {
             self.pending = None;
             return Press::Run;
         }
-        let need = Need::of(cmd);
-        match need {
+        match Need::of(cmd, ctx.tainted) {
             Some(n) => {
                 self.pending = Some((k, now));
                 Press::Confirm(n)

@@ -346,7 +346,10 @@ impl TermPane {
             Ok(s) => {
                 sh.state = State::Running(s.clone());
                 if let Some(cmd) = sh.queued.take() {
-                    self.notice = s.send(&run_bytes(&cmd, s.mode())).err();
+                    self.notice = Some(match s.send(&run_bytes(&cmd, s.mode())) {
+                        Ok(()) => format!("Sent to terminal {n}"),
+                        Err(e) => e,
+                    });
                 }
                 cx.emit(Changed);
                 cx.notify();
@@ -448,26 +451,54 @@ impl TermPane {
         cx.notify();
     }
 
+    /// Whether the current shell takes a bracketed paste (`None`: no shell is running yet).
+    pub fn bracketed(&self) -> Option<bool> {
+        self.session().map(|s| {
+            s.mode()
+                .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        })
+    }
+
     /// Types `cmd` into the current shell and presses Enter: one paste (bracketed when the shell asked for it,
     /// so a many-line command arrives whole), then Return. Only `TuiView::run_command` calls this, after a real
-    /// click and the confirmations; a shell that is still starting gets it when it is up. Nothing is read back.
+    /// click and the confirmations. It always goes to a shell (never the agent's log view) and says so in the
+    /// notice. A many-line command needs a shell that takes a bracketed paste; a shell that is still starting
+    /// holds one single-line command (a second one replaces it, and says so) and gets it when it is up.
+    /// Nothing is read back.
     pub fn run(&mut self, cmd: String, cx: &mut Context<Self>) {
-        if cmd.len() > keys::MAX_PASTE {
-            self.notice = Some("That command is too long to send.".into());
+        self.agent = false;
+        let multi = cmd.contains('\n');
+        let cur = self.cur;
+        let n = self.shells.get(cur).map(|s| s.n);
+        let msg = if cmd.len() > keys::MAX_PASTE {
+            "That command is too long to send.".to_string()
         } else {
-            match self.shells.get_mut(self.cur).map(|s| &mut s.state) {
-                Some(State::Running(s)) => self.notice = s.send(&run_bytes(&cmd, s.mode())).err(),
+            match self.shells.get_mut(cur).map(|s| &mut s.state) {
+                Some(State::Running(s)) if multi && !s.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE) => {
+                    "This shell takes no bracketed paste: not sent. Copy the commands and paste them yourself.".into()
+                }
+                Some(State::Running(s)) => match s.send(&run_bytes(&cmd, s.mode())) {
+                    Ok(()) => format!("Sent to terminal {}", n.unwrap_or(0)),
+                    Err(e) => e,
+                },
+                Some(State::Starting) if multi => {
+                    "The shell is still starting: click Run again when it is ready.".into()
+                }
                 Some(State::Starting) => {
-                    if let Some(sh) = self.shells.get_mut(self.cur) {
+                    let replaced = self.shells.get(cur).is_some_and(|s| s.queued.is_some());
+                    if let Some(sh) = self.shells.get_mut(cur) {
                         sh.queued = Some(cmd);
                     }
+                    if replaced {
+                        "Replaced the queued command: it is sent when the shell is ready.".into()
+                    } else {
+                        "Queued until the shell is ready.".into()
+                    }
                 }
-                _ => {
-                    self.notice =
-                        Some("The shell is not running; press Enter to restart it.".into())
-                }
+                _ => "The shell is not running; press Enter to restart it.".into(),
             }
-        }
+        };
+        self.notice = Some(msg);
         cx.notify();
     }
 

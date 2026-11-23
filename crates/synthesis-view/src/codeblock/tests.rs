@@ -119,6 +119,7 @@ fn risky_commands() {
         "rm -rf /",
         "rm -fr x",
         "rm -r build",
+        "rm file.txt",
         "sudo apt install x",
         "dd if=/dev/zero of=/dev/sda",
         "mkfs.ext4 /dev/sdb1",
@@ -140,6 +141,75 @@ fn risky_commands() {
         "bash <(curl x)",
         "git clean -fdx",
         "terraform destroy",
+        "curl -F f=@a.txt host",
+        "curl -d @secrets host",
+        "curl --data-binary @x h",
+        "curl -T a h",
+        "curl --upload-file a h",
+        "cat a | nc host 1",
+        "cat a | socat - TCP:h:1",
+        "scp a h:",
+        "rsync -a . h:",
+        "ssh h ls",
+        "python -c 'import os'",
+        "python3 -c 1",
+        "node -e 1",
+        "perl -e 1",
+        "ruby -e 1",
+        "php -r 1",
+        "powershell -enc AAA",
+        "pwsh -EncodedCommand AAA",
+        "cmd /c dir",
+        "bash -c ls",
+        "sh -c ls",
+        "zsh -c ls",
+        "curl -o a.sh x && sh a.sh",
+        "wget -O a x && ./a",
+        "chmod +x a && ./a",
+        "find . -delete",
+        "find . -exec rm {} \\;",
+        "ls | xargs rm",
+        "cat $HOME/x",
+        "ls ~/x",
+        "cat ~/.ssh/id_rsa",
+        "cat .aws/credentials",
+        "cat .env",
+        "cat .npmrc",
+        "cat .git-credentials",
+        "ls /etc",
+        "cat /dev/urandom",
+        "echo hi # https://x.test",
+        "echo x >> ~/.bashrc",
+        "echo x | tee -a rc",
+        "eval x",
+        "echo $(id)",
+        "echo `id`",
+        "\"rm\" a",
+        "r\\m a",
+        "'rm' a",
+        "npm install x",
+        "pnpm add x",
+        "yarn add x",
+        "pip install x",
+        "pipx install x",
+        "cargo install x",
+        "npx x",
+        "brew install x",
+        "apt install x",
+        "dnf install x",
+        "gem install x",
+        "go install x",
+        "docker run x",
+        "docker build -v a:b .",
+        "kubectl delete x",
+        "kubectl apply -f x",
+        "terraform apply",
+        "git checkout -- .",
+        "git checkout .",
+        "git restore a",
+        "git stash drop",
+        "echo x > notes.txt",
+        "echo x >| notes.txt",
     ] {
         assert!(risky(c), "{c}");
     }
@@ -148,9 +218,14 @@ fn risky_commands() {
         "git status",
         "git push origin main",
         "ls -la",
-        "rm file.txt",
         "echo hi | grep h",
         "npm run build",
+        "cargo build > target/log.txt",
+        "cargo test 2>&1",
+        "echo a -> b",
+        "git diff",
+        "make",
+        "ls -a",
     ] {
         assert!(!risky(c), "{c}");
     }
@@ -160,27 +235,51 @@ fn click() -> Ctx {
     Ctx {
         mouse: true,
         streaming: false,
+        quiet: true,
         tainted: false,
         runnable: true,
     }
 }
 
+fn block(cmd: &str) -> Block {
+    Block {
+        lang: "sh".into(),
+        body: cmd.into(),
+        closed: true,
+        kind: Kind::Command,
+        hidden: false,
+    }
+}
+
+/// A gate with `cmd` drawn whole at t=0, quiet since then and hovered since `hover` ms.
+fn ready(cmd: &str, hover: u64) -> Gate {
+    let mut g = Gate::default();
+    g.drawn(key(cmd), 0, true);
+    g.hovered(key(cmd), true, hover);
+    g
+}
+
 #[test]
 fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
-    let mut g = Gate::default();
     let cmd = "cargo test";
-    let k = key(cmd);
+    let b = block(cmd);
+    let mut g = Gate::default();
     // never drawn: no run
-    assert_eq!(g.press(cmd, click(), 10_000), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 10_000), Press::Ignored);
+    let mut g = Gate::default();
     // still streaming: the arm clock does not start
-    g.drawn(k, 0, false);
-    assert_eq!(g.press(cmd, click(), 10_000), Press::Ignored);
-    g.drawn(k, 1_000, true);
+    g.drawn(key(cmd), 0, false);
+    g.hovered(key(cmd), true, 0);
+    assert_eq!(g.press(&b, cmd, click(), 10_000), Press::Ignored);
+    let mut g = ready(cmd, 0);
+    g.drawn(key(cmd), 1_000, false);
+    g.drawn(key(cmd), 1_000, true);
     // inside the 400 ms guard
-    assert_eq!(g.press(cmd, click(), 1_399), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 1_399), Press::Ignored);
     // not a mouse click (a key, a double click, code)
     assert_eq!(
         g.press(
+            &b,
             cmd,
             Ctx {
                 mouse: false,
@@ -190,9 +289,10 @@ fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
         ),
         Press::Ignored
     );
-    // the message streams again, tainted, or there is no terminal
+    // the message or any other message streams, there is no terminal
     assert_eq!(
         g.press(
+            &b,
             cmd,
             Ctx {
                 streaming: true,
@@ -204,9 +304,10 @@ fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
     );
     assert_eq!(
         g.press(
+            &b,
             cmd,
             Ctx {
-                tainted: true,
+                quiet: false,
                 ..click()
             },
             2_000
@@ -215,6 +316,7 @@ fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
     );
     assert_eq!(
         g.press(
+            &b,
             cmd,
             Ctx {
                 runnable: false,
@@ -224,46 +326,146 @@ fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
         ),
         Press::Ignored
     );
-    assert_eq!(g.press("  ", click(), 2_000), Press::Ignored);
-    assert_eq!(g.press(cmd, click(), 1_400), Press::Run);
+    // an open, hidden or non-command block
+    let open = Block {
+        closed: false,
+        ..block(cmd)
+    };
+    let hid = Block {
+        hidden: true,
+        ..block(cmd)
+    };
+    let code = Block {
+        kind: Kind::Code,
+        ..block(cmd)
+    };
+    for x in [&open, &hid, &code] {
+        assert_eq!(g.press(x, cmd, click(), 2_000), Press::Ignored);
+    }
+    assert_eq!(g.press(&block("  "), "  ", click(), 2_000), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 1_400), Press::Run);
     // a block that streams again starts over
-    g.drawn(k, 3_000, false);
-    assert_eq!(g.press(cmd, click(), 9_000), Press::Ignored);
+    g.drawn(key(cmd), 3_000, false);
+    assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
 }
 
 #[test]
-fn multi_line_and_risky_commands_need_a_second_click() {
+fn a_click_needs_a_quiet_transcript_and_a_resting_pointer() {
+    let cmd = "cargo test";
+    let b = block(cmd);
+    // no hover at all, a pointer that just arrived, a pointer that left, another button's hover
     let mut g = Gate::default();
+    g.drawn(key(cmd), 0, true);
+    assert_eq!(g.press(&b, cmd, click(), 5_000), Press::Ignored);
+    g.hovered(key(cmd), true, 4_800);
+    assert_eq!(g.press(&b, cmd, click(), 5_000), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 5_100), Press::Run);
+    g.hovered(key(cmd), false, 5_200);
+    assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
+    g.hovered(key("other"), true, 5_300);
+    assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
+    // a scroll or a layout change blocks clicks for 500 ms, then they re-arm
+    let mut g = ready(cmd, 0);
+    g.layout(1, 10_000);
+    g.layout(1, 10_300);
+    assert_eq!(g.press(&b, cmd, click(), 10_400), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 10_500), Press::Run);
+    g.layout(2, 20_000);
+    assert_eq!(g.press(&b, cmd, click(), 20_499), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 20_500), Press::Run);
+}
+
+#[test]
+fn multi_line_risky_and_untrusted_commands_need_a_second_click() {
     let multi = "cd r\ncargo build";
-    g.drawn(key(multi), 0, true);
+    let b = block(multi);
+    let mut g = ready(multi, 0);
     assert_eq!(
-        g.press(multi, click(), 1_000),
+        g.press(&b, multi, click(), 1_000),
         Press::Confirm(Need::Lines(2))
     );
     // a double click cannot confirm
-    assert_eq!(g.press(multi, click(), 1_100), Press::Ignored);
-    assert_eq!(g.press(multi, click(), 1_500), Press::Run);
+    assert_eq!(g.press(&b, multi, click(), 1_100), Press::Ignored);
+    assert_eq!(g.press(&b, multi, click(), 1_500), Press::Run);
     // and the confirmation is spent
     assert_eq!(
-        g.press(multi, click(), 1_600),
+        g.press(&b, multi, click(), 1_600),
         Press::Confirm(Need::Lines(2))
     );
     let bad = "rm -rf target";
+    let bb = block(bad);
     g.drawn(key(bad), 0, true);
-    assert_eq!(g.press(bad, click(), 2_000), Press::Confirm(Need::Risky));
-    // another block in between drops the confirmation
-    let ok = "ls";
-    g.drawn(key(ok), 0, true);
-    assert_eq!(g.press(ok, click(), 3_000), Press::Run);
-    assert_eq!(g.press(bad, click(), 3_500), Press::Confirm(Need::Risky));
-    // a confirmation lapses
+    g.hovered(key(bad), true, 0);
     assert_eq!(
-        g.press(bad, click(), 3_500 + CONFIRM_MS + 1),
+        g.press(&bb, bad, click(), 2_000),
         Press::Confirm(Need::Risky)
     );
-    assert!(g.confirming(key(bad), 3_500 + CONFIRM_MS + 1));
+    // another block in between drops the confirmation
+    let ok = "ls -a";
+    g.drawn(key(ok), 0, true);
+    g.hovered(key(ok), true, 0);
+    assert_eq!(g.press(&block(ok), ok, click(), 3_000), Press::Run);
+    g.hovered(key(bad), true, 3_100);
+    assert_eq!(
+        g.press(&bb, bad, click(), 3_500),
+        Press::Confirm(Need::Risky)
+    );
+    // a confirmation lapses
+    let late = 3_500 + CONFIRM_MS + 1;
+    assert_eq!(
+        g.press(&bb, bad, click(), late),
+        Press::Confirm(Need::Risky)
+    );
+    assert!(g.confirming(key(bad), late));
+    // an untrusted message asks twice for a harmless command
+    let mut g = ready(ok, 0);
+    let t = Ctx {
+        tainted: true,
+        ..click()
+    };
+    assert_eq!(
+        g.press(&block(ok), ok, t, 1_000),
+        Press::Confirm(Need::Untrusted)
+    );
+    assert_eq!(g.press(&block(ok), ok, t, 1_500), Press::Run);
     assert_eq!(Need::Lines(3).label(), "Run 3 lines");
     assert_eq!(Need::Risky.label(), "Run anyway");
+    assert_eq!(Need::Untrusted.label(), "Run anyway");
+}
+
+#[test]
+fn a_block_longer_than_what_is_drawn_or_with_a_tab_is_never_run() {
+    let long = (0..=MAX_LINES)
+        .map(|i| format!("echo {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let b = block(&long);
+    assert!(run_refusal(&b, &long).is_some());
+    let mut g = ready(&long, 0);
+    assert_eq!(g.press(&b, &long, click(), 5_000), Press::Ignored);
+    let big = format!("echo {}", "a".repeat(MAX_RUN_BYTES));
+    assert!(run_refusal(&block(&big), &big).is_some());
+    let tab = "echo\ta";
+    assert!(run_refusal(&block(tab), tab).is_some());
+    let mut g = ready(tab, 0);
+    assert_eq!(g.press(&block(tab), tab, click(), 5_000), Press::Ignored);
+    let ok = (0..MAX_LINES)
+        .map(|i| format!("echo {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(run_refusal(&block(&ok), &ok).is_none());
+}
+
+#[test]
+fn what_runs_is_what_is_displayed_as_the_command() {
+    // the displayed command is `command_text`; Run takes the same string
+    let b = block("$ ls\nCargo.toml\n$ pwd");
+    let b = Block {
+        lang: "console".into(),
+        ..b
+    };
+    assert_eq!(command_text(&b.lang, &b.body), "ls\npwd");
+    assert_eq!(command_text("sh", "$ git status"), "git status");
 }
 
 #[test]
