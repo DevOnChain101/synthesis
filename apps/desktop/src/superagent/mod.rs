@@ -97,6 +97,11 @@ pub struct SuperAgentView {
     conductor: Option<(synthesis_config::Env, PathBuf)>,
     /// One form per open `Frame::NewGoal`; dropping it (with its frame) ends its link.
     goals: Vec<(GoalKind, Entity<GoalForm>, Subscription)>,
+    /// The right sidebar (C2): open state, segment and width are the window's.
+    pub(crate) side: sidebar::Side,
+    /// The sidebar's grip holds the keys (Left and Right resize); the pointer is dragging it.
+    grip_focus: FocusHandle,
+    grip_drag: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -165,6 +170,9 @@ impl SuperAgentView {
             had_guide: false,
             conductor,
             goals: Vec::new(),
+            side: sidebar::Side::default(),
+            grip_focus: cx.focus_handle(),
+            grip_drag: false,
             _subs: subs,
             outcomes,
             frames: Frames::default(),
@@ -185,6 +193,7 @@ impl SuperAgentView {
         self.visible = true;
         self.refocus = true;
         self.sync_host(cx);
+        self.sync_side(cx);
         cx.notify();
     }
 
@@ -193,6 +202,7 @@ impl SuperAgentView {
         if self.visible != visible {
             self.visible = visible;
             self.sync_host(cx);
+            self.sync_side(cx);
             cx.notify();
         }
     }
@@ -247,6 +257,7 @@ impl SuperAgentView {
         self.refocus = true;
         self.tab_scroll.scroll_to_item(self.frames.active_index());
         self.sync_host(cx);
+        self.sync_side(cx);
         self.refresh_port(cx);
         let open = self.frames.tabs().to_vec();
         self.goals
@@ -626,14 +637,31 @@ impl SuperAgentView {
             return self.outcomes.update(cx, |o, cx| o.on_key(ev, window, cx));
         }
         let bare = !(m.control || m.alt || m.platform || m.shift);
+        if bare && self.grip_focus.is_focused(window) && matches!(key, "left" | "right") {
+            self.resize_side(
+                if key == "left" {
+                    sidebar::STEP
+                } else {
+                    -sidebar::STEP
+                },
+                window,
+                cx,
+            );
+            return true;
+        }
         // before the Cmd/Ctrl chords: on Windows and Linux Ctrl is the secondary key, and Ctrl+Tab is not one of them
         if m.control && !m.alt && !m.platform && key == "tab" {
             self.frames.cycle(if m.shift { -1 } else { 1 });
             self.changed(cx);
             return true;
         }
+        if m.control && !m.alt && !m.platform && !m.shift && key == "`" {
+            self.toggle_side(sidebar::Segment::Terminal, cx);
+            return true;
+        }
         if m.secondary(cx) && !m.alt {
             match key {
+                "i" => self.toggle_side(sidebar::Segment::Details, cx),
                 "t" => self.new_picker(window, cx),
                 "w" => self.close_tab(self.frames.active_index(), cx),
                 "b" => self.toggle_rail(window, cx),
@@ -815,8 +843,12 @@ impl Render for SuperAgentView {
                 _ => window.focus(&self.focus, cx),
             }
         }
+        self.close_side_if_empty(cx);
         let modals = self.outcomes.update(cx, |o, cx| o.modals(window, cx));
         let picker = self.picker_overlay(cx);
+        let side = self.sidebar(window, cx);
+        let overlay = f32::from(window.viewport_size().width) < sidebar::OVERLAY_BELOW;
+        let (side_row, side_over) = if overlay { (None, side) } else { (side, None) };
         div()
             .id("superagent")
             .debug_selector(|| "superagent".to_string())
@@ -826,6 +858,15 @@ impl Render for SuperAgentView {
                     cx.stop_propagation();
                 }
             }))
+            .on_mouse_move(cx.listener(|v, e: &gpui::MouseMoveEvent, window, cx| {
+                if v.grip_drag {
+                    v.drag_side(e.position.x.into(), window, cx);
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|v, _, _, _| v.grip_drag = false),
+            )
             .size_full()
             .flex()
             .relative()
@@ -846,9 +887,11 @@ impl Render for SuperAgentView {
                             .flex()
                             .pr(px(t::S2))
                             .pb(px(t::S2))
-                            .child(self.panel(window, cx)),
+                            .child(self.panel(window, cx))
+                            .children(side_row),
                     ),
             )
+            .children(side_over)
             .children(modals)
             .children(picker)
     }

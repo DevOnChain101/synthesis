@@ -265,6 +265,26 @@ impl SessionHost {
         }
     }
 
+    /// Which pane of which session the sidebar shows: `front` gets it, every other session none (its shells keep
+    /// running, its browser stops casting).
+    pub fn set_sides(&mut self, front: Option<(&str, ChatTab)>, cx: &mut Context<Self>) {
+        for (id, v) in &self.views {
+            let side = front.filter(|(f, _)| f == id).map(|(_, k)| k);
+            v.update(cx, |t, cx| t.embed_side(side, cx));
+        }
+    }
+
+    /// The sidebar pane of session `id` lost its last inner tab.
+    pub fn pane_closed(&self, id: &str, kind: ChatTab, cx: &App) -> bool {
+        self.view(id)
+            .is_some_and(|v| v.read(cx).embed_pane_closed(kind, cx))
+    }
+
+    /// Session `id` has no browser (WSL mode).
+    pub fn remote(&self, id: &str, cx: &App) -> bool {
+        self.view(id).is_some_and(|v| v.read(cx).embed_remote())
+    }
+
     /// The Terminal or Browser pane of session `id`, for the right sidebar.
     pub fn pane(&mut self, id: &str, kind: ChatTab, cx: &mut Context<Self>) -> Option<AnyElement> {
         let v = self.view(id)?.clone();

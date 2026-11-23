@@ -679,6 +679,21 @@ impl BrowserPane {
         });
     }
 
+    /// A fake browser showing a page titled `title`, with a frame (tests).
+    #[cfg(test)]
+    pub fn test_page(&mut self, title: &str, h: &Handle) {
+        let page = PageState {
+            url: format!("https://{title}.test/"),
+            title: title.into(),
+            tabs: vec![title.into()],
+            ids: vec!["i".into()],
+            active: 0,
+            offset: 0,
+        };
+        self.attach(FakeSource::new(sample_jpeg(16, 16), page), h.clone());
+        self.sync(true);
+    }
+
     pub fn launch_state(&self) -> Launch {
         self.launch
             .lock()
