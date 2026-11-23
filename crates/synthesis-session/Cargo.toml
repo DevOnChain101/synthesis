@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+synthesis-config = { path = "../synthesis-config" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-platform = { path = "../synthesis-platform" }

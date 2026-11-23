@@ -396,10 +396,151 @@ impl CommandReply {
     }
 }
 
+/// How a message to a worker stands (S1 4.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageState {
+    /// Sent to a running attempt; its worker has not acked yet.
+    Live,
+    /// The worker took it.
+    Delivered,
+    /// Waits for the next attempt of the work item.
+    Queued,
+    /// A live message its worker never took, queued again.
+    NotDelivered,
+    /// The next attempt carries it in its first prompt.
+    InPrompt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageRow {
+    pub seq: u64,
+    pub state: MessageState,
+    /// The attempt a live message went to (short, printable).
+    pub attempt: Option<String>,
+    pub text: String,
+}
+
+impl MessageRow {
+    /// The message rows of an outcome's control-session `events` (`events.subscribe` pages, oldest
+    /// first) and the `seq`s its workers acked (`messages_delivered` of the attempts). A live message
+    /// that was queued again is shown once, as the queued one. Printable: the server's text is not trusted.
+    pub fn from_events(events: &[Value], delivered: &[u64]) -> Vec<Self> {
+        let ev = |e: &Value| {
+            (
+                e.get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                e.get("payload").cloned().unwrap_or(Value::Null),
+            )
+        };
+        let mut requeued = vec![];
+        let mut taken = vec![];
+        for e in events {
+            match ev(e) {
+                (k, p) if k == "attempt.message.queued" => {
+                    requeued.extend(p.get("requeued_from").and_then(Value::as_u64));
+                }
+                (k, p) if k == "attempt.message.consumed" => {
+                    taken.extend(
+                        p.get("seqs")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_u64),
+                    );
+                }
+                _ => {}
+            }
+        }
+        events
+            .iter()
+            .filter_map(|e| {
+                let (kind, p) = ev(e);
+                let seq = p.get("seq")?.as_u64()?;
+                let body = clean(p.get("text")?.as_str()?);
+                let (state, attempt) = match kind.as_str() {
+                    "attempt.message" if requeued.contains(&seq) => return None,
+                    "attempt.message" if delivered.contains(&seq) => {
+                        (MessageState::Delivered, text(&p, "attempt"))
+                    }
+                    "attempt.message" => (MessageState::Live, text(&p, "attempt")),
+                    "attempt.message.queued" if taken.contains(&seq) => {
+                        (MessageState::InPrompt, None)
+                    }
+                    "attempt.message.queued" if p.get("requeued_from").is_some() => {
+                        (MessageState::NotDelivered, None)
+                    }
+                    "attempt.message.queued" => (MessageState::Queued, None),
+                    _ => return None,
+                };
+                Some(Self {
+                    seq,
+                    state,
+                    attempt: attempt.map(|a| a.chars().take(8).collect()),
+                    text: body,
+                })
+            })
+            .collect()
+    }
+
+    /// What the row says about delivery.
+    pub fn label(&self) -> String {
+        let to = self.attempt.as_deref().unwrap_or("the worker");
+        match self.state {
+            MessageState::Live => format!("sent to {to} (live)"),
+            MessageState::Delivered => format!("delivered to {to}"),
+            MessageState::Queued => "queued for the next attempt".into(),
+            MessageState::NotDelivered => "not delivered, queued for the next attempt".into(),
+            MessageState::InPrompt => "taken by the next attempt".into(),
+        }
+    }
+
+    pub fn render_text(&self) -> String {
+        format!("{}: {}\n", self.label(), self.text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn message_rows_show_live_delivered_queued_and_not_delivered_once() {
+        let msg = |seq: u64, kind: &str, p: Value| {
+            let mut p = p;
+            p["seq"] = json!(seq);
+            p["text"] = json!(format!("m{seq}\u{1b}[31m"));
+            json!({"seq": seq, "type": kind, "payload": p})
+        };
+        let events = [
+            msg(5, "attempt.message", json!({"attempt": "a7a7a7a7-1111"})),
+            msg(6, "attempt.message", json!({"attempt": "a7a7a7a7-1111"})),
+            msg(
+                7,
+                "attempt.message.queued",
+                json!({"work_item": "w", "requeued_from": 6}),
+            ),
+            msg(8, "attempt.message.queued", json!({"work_item": "w"})),
+            msg(9, "attempt.message.queued", json!({"work_item": "w"})),
+            json!({"seq": 10, "type": "attempt.message.consumed", "payload": {"seqs": [9]}}),
+        ];
+        let rows = MessageRow::from_events(&events, &[5]);
+        let got: Vec<_> = rows.iter().map(|r| (r.seq, r.label())).collect();
+        assert_eq!(
+            got,
+            [
+                (5, "delivered to a7a7a7a7".to_string()),
+                (7, "not delivered, queued for the next attempt".to_string()),
+                (8, "queued for the next attempt".to_string()),
+                (9, "taken by the next attempt".to_string()),
+            ]
+        );
+        assert!(rows.iter().all(|r| !r.text.contains('\u{1b}')));
+        let live = MessageRow::from_events(&events[..1], &[]);
+        assert_eq!(live[0].label(), "sent to a7a7a7a7 (live)");
+    }
 
     fn decision(brief: Value) -> Value {
         json!({"id": "d1", "kind": "ambiguity", "state": "pending", "revision": 2,

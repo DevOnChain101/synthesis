@@ -13,10 +13,12 @@
 //! the new plan and the outcome runs again.
 
 use serde_json::{Value, json};
-use synthesis_core::outcome::{Contract, DecisionState, OutcomeState};
+use synthesis_core::outcome::{Contract, DecisionState, OutcomeState, WorkItemId};
 use synthesis_events::Record;
 use synthesis_session::Error as StoreError;
-use synthesis_session::outcome::{CommandRecord, CommandState, Effects, OutcomeWriter, Resolution};
+use synthesis_session::outcome::{
+    CommandRecord, CommandState, Effects, NewMessage, OutcomeWriter, Resolution, Sent,
+};
 use time::OffsetDateTime;
 
 use crate::gateway::{Action, Principal, audit, authorize};
@@ -43,7 +45,10 @@ pub fn apply_queued_with(
     for c in w.queued_commands(w.id())? {
         if !matches!(
             c.kind.as_str(),
-            "decision.resolve" | "outcome.contract.approve" | "outcome.contract.revise"
+            "decision.resolve"
+                | "outcome.contract.approve"
+                | "outcome.contract.revise"
+                | "attempt.message"
         ) {
             continue;
         }
@@ -55,6 +60,7 @@ pub fn apply_queued_with(
             "decision.resolve" => resolve(w, &c),
             "outcome.contract.approve" => approve(w, &c),
             "outcome.contract.revise" => revise(w, &c),
+            "attempt.message" => message(w, &c),
             _ => continue,
         };
         done.push(match run {
@@ -253,6 +259,83 @@ fn revise(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, Sto
             CommandState::Applied,
             json!({"version": version, "hash": hash}),
         ))
+    });
+    match run {
+        Err(e) if refused(&e) => deny(w, c, e),
+        other => other,
+    }
+}
+
+/// `attempt.message` (S1 4.6): one fenced transaction decides live, queued or denied (the store checks
+/// the text, the limits and the item's state) and, with `brief_change`, re-asks the item's open
+/// decisions. The result body says which: `{delivery: "live"|"queued", seq, attempt?, rebriefed}`.
+/// Hidden characters, a finished item and the limits are `denied` with a fixed sentence. Nothing in a
+/// message is read as an instruction here: it is stored text, never a grant.
+fn message(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, StoreError> {
+    if cfg!(windows) {
+        return deny(
+            w,
+            c,
+            "worker messages are not available on native Windows; open the folder in WSL2",
+        );
+    }
+    let text = c.params.get("text").and_then(Value::as_str);
+    let item = c
+        .params
+        .get("work_item")
+        .and_then(Value::as_str)
+        .and_then(|s| WorkItemId::parse(s).ok());
+    let (Some(text), Some(item)) = (text, item) else {
+        return deny(w, c, "a message needs a work_item and its text");
+    };
+    // a conductor proposal the person clicked names its hash; the person's own line has none
+    let proposal = c.params.get("proposal_sha256").and_then(Value::as_str);
+    if proposal.is_some_and(|h| h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return deny(w, c, "the proposal hash is not valid");
+    }
+    let via = if proposal.is_some() { "card" } else { "person" };
+    let brief_change = c.params.get("brief_change").and_then(Value::as_bool) == Some(true);
+    let from = Principal::User(c.from_surface).label();
+    // decisions of this item that are open now, with the binding and action the re-brief keeps
+    let mut open = vec![];
+    if brief_change {
+        for d in w.list_decisions(w.id())? {
+            if d.row_state == DecisionState::Pending
+                && let Some((it, current)) = current_binding_for(w, &d, None)?
+                && it == item
+            {
+                let action = w.decision_action(&d.id)?;
+                open.push((d, current, action));
+            }
+        }
+    }
+    let run = w.apply_command(&c.idempotency_key, |tx, _| {
+        audit_in(tx, c)?;
+        if let Some(r) = c.expected_revision
+            && r != tx.outcome_revision()?
+        {
+            return Err(StoreError::Stale(
+                "the outcome changed since it was shown".into(),
+            ));
+        }
+        let sent = tx.send_worker_message(&NewMessage {
+            item: &item,
+            text,
+            from: &from,
+            via,
+            proposal_sha256: proposal,
+        })?;
+        let (seq, sha) = sent.id();
+        for (d, current, action) in &open {
+            tx.rebrief_for_message(&d.id, d.revision, current, (seq, sha), action.clone())?;
+        }
+        let mut body = match &sent {
+            Sent::Live { attempt, .. } => json!({"delivery": "live", "attempt": attempt}),
+            Sent::Queued { .. } => json!({"delivery": "queued"}),
+        };
+        body["seq"] = json!(seq);
+        body["rebriefed"] = json!(open.len());
+        Ok((CommandState::Applied, body))
     });
     match run {
         Err(e) if refused(&e) => deny(w, c, e),

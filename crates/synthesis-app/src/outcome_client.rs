@@ -444,6 +444,39 @@ impl<T: Transport> OutcomeClient<T> {
         }
     }
 
+    /// The person's line to the worker of `work_item` (S1 4.6; the server must list `attempt_message`
+    /// in its `features`). It is checked here before anything is sent (native Windows, the text), and
+    /// again by the server and the owner. Poll [`Self::command_status`]: the settled reply's result is
+    /// `{delivery: "live"|"queued", seq, attempt?, rebriefed}`, or the command is `denied` with a reason.
+    pub fn send_worker_message(
+        &mut self,
+        outcome: &str,
+        work_item: &str,
+        text: &str,
+        brief_change: bool,
+        expected_revision: Option<i64>,
+        key: &str,
+    ) -> Result<CommandReply, ClientError> {
+        if cfg!(windows) {
+            return Err(ClientError::Refused(
+                "worker messages are not available on native Windows; open the folder in WSL2"
+                    .into(),
+            ));
+        }
+        synthesis_session::outcome::check_message_text(text)
+            .map_err(|e| ClientError::Refused(e.into()))?;
+        let v = self.t.call(Call::AttemptMessage {
+            outcome: outcome.into(),
+            work_item: work_item.into(),
+            text: text.into(),
+            brief_change,
+            expected_revision,
+            proposal_sha256: None,
+            cmd: self.args(key),
+        })?;
+        self.reply(v, key, "attempt.message")
+    }
+
     /// `kind`: `start`, `pause`, `resume`, `cancel` or `ack`.
     pub fn command(
         &mut self,

@@ -468,7 +468,8 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn wait_free(home: &Path) {
-        for _ in 0..600 {
+        // a slow runner (Windows) may need long to tear an engine down: the bound is generous, the assertion unchanged
+        for _ in 0..2400 {
             if locks_all_free(home) {
                 return;
             }

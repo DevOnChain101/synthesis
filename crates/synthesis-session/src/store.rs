@@ -2053,6 +2053,16 @@ impl SessionWriter {
         Ok(serde_json::from_value(serde_json::to_value(raw)?)?)
     }
 
+    /// The worker's ack of an owner message (S1 4.6): chained in this session, after the harness took
+    /// message `seq` (a `sha256` of its text). The owner re-queues what is not acked when the attempt ends.
+    pub fn append_owner_delivered(&mut self, seq: u64, sha256: &str) -> Result<()> {
+        self.append_parts(
+            synthesis_events::outcome::OWNER_MESSAGE_DELIVERED,
+            json!({"seq": seq, "sha256": sha256}),
+        )
+        .map(drop)
+    }
+
     /// Untyped append, used for store-owned types such as `legacy.imported`.
     pub(crate) fn append_parts(&mut self, kind: &str, payload: Value) -> Result<RawEnvelope> {
         // A busy/locked write (another peer on the same synt.db, slow Windows disk) rolled back
@@ -2837,6 +2847,67 @@ fn append_tx(
         params![sid, seq, ts, link],
     )?;
     Ok(seq as u64)
+}
+
+/// Is the one event `seq` of `sid` a link of the session's hash chain? Its HMAC is recomputed from
+/// the row and must equal the `prev` of the next row (or the session's head when it is the last).
+/// Local on purpose: a row written without the per-user key cannot satisfy it, and a worker that
+/// polls its inbox every second must not re-walk the whole session. A legacy (unchained) row is not.
+pub(crate) fn event_link_ok(
+    conn: &Connection,
+    key: &[u8; 32],
+    sid: &str,
+    seq: i64,
+) -> Result<bool> {
+    let row = conn
+        .query_row(
+            "SELECT v,ts,task_id,turn_id,agent_id,type,payload,payload_ref,prev FROM events \
+             WHERE session_id=?1 AND seq=?2",
+            params![sid, seq],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    [r.get::<_, Option<String>>(2)?, r.get(3)?, r.get(4)?],
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((v, ts, ids, kind, body, pref, Some(prev))) = row else {
+        return Ok(false);
+    };
+    let link = chain_hash(
+        key,
+        &prev,
+        &EventRow {
+            sid,
+            seq,
+            v,
+            ts: &ts,
+            ids: [ids[0].as_deref(), ids[1].as_deref(), ids[2].as_deref()],
+            kind: &kind,
+            body: body.as_deref(),
+            pref: pref.as_deref(),
+        },
+    );
+    let next: Option<Option<String>> = conn
+        .query_row(
+            "SELECT prev FROM events WHERE session_id=?1 AND seq=?2",
+            params![sid, seq + 1],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let expect: Option<String> = match next {
+        Some(p) => p,
+        None => conn.query_row("SELECT chain_head FROM sessions WHERE id=?1", [sid], |r| {
+            r.get(0)
+        })?,
+    };
+    Ok(expect.as_deref() == Some(link.as_str()))
 }
 
 /// The fields of an event row the chain covers.
