@@ -120,7 +120,7 @@ pub fn is_secret_shaped(path: &Path) -> bool {
 /// paths start with /private.)
 const SECRET_DATA_DIRS: [&str; 4] = ["secrets", ".terraform", ".kube", ".azure"];
 
-/// [`is_secret_shaped`], plus data files below a [`SECRET_DATA_DIRS`] directory. Only the
+/// [`is_secret_shaped`], plus data files below a `SECRET_DATA_DIRS` directory. Only the
 /// components after `root` count; a path outside `root` counts whole. Component matching is
 /// case-insensitive, like the names.
 pub fn is_secret_shaped_in(path: &Path, root: &Path) -> bool {

@@ -1846,12 +1846,18 @@ fn deny_dot_ssh_matches_dot_ssh_in_other_case_on_this_platform() {
 #[test]
 fn deny_dot_ssh_is_case_sensitive_on_linux() {
     let f = fx();
-    let p = f.with(rules(&[], &["Read(~/.ssh/**)"], &[]), Mode::Default);
+    // a directory that is not secret-shaped by itself: only the rule decides (`.SSH` is always
+    // denied now, by the case-insensitive secret names)
+    let p = f.with(rules(&[], &["Read(~/vault/**)"], &[]), Mode::Default);
     assert_eq!(
-        d(&p, "Read", json!({ "file_path": f.home.join(".ssh/id") })),
+        d(&p, "Read", json!({ "file_path": f.home.join("vault/id") })),
         D
     );
     assert_ne!(
+        d(&p, "Read", json!({ "file_path": f.home.join("VAULT/id") })),
+        D
+    );
+    assert_eq!(
         d(&p, "Read", json!({ "file_path": f.home.join(".SSH/id") })),
         D
     );
