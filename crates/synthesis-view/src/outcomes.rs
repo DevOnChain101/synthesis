@@ -417,6 +417,8 @@ pub struct MessageRow {
     pub state: MessageState,
     /// The attempt a live message went to (short, printable).
     pub attempt: Option<String>,
+    /// The work item a queued message waits on (a live one names its attempt instead).
+    pub work_item: Option<String>,
     pub text: String,
 }
 
@@ -459,6 +461,7 @@ impl MessageRow {
                 let (kind, p) = ev(e);
                 let seq = p.get("seq")?.as_u64()?;
                 let body = clean(p.get("text")?.as_str()?);
+                let work_item = text(&p, "work_item");
                 let (state, attempt) = match kind.as_str() {
                     "attempt.message" if requeued.contains(&seq) => return None,
                     "attempt.message" if delivered.contains(&seq) => {
@@ -478,6 +481,7 @@ impl MessageRow {
                     seq,
                     state,
                     attempt: attempt.map(|a| a.chars().take(8).collect()),
+                    work_item,
                     text: body,
                 })
             })
@@ -538,6 +542,9 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|r| !r.text.contains('\u{1b}')));
+        // a queued row names its work item, a live one its attempt
+        assert_eq!(rows[2].work_item.as_deref(), Some("w"));
+        assert_eq!(rows[0].work_item, None);
         let live = MessageRow::from_events(&events[..1], &[]);
         assert_eq!(live[0].label(), "sent to a7a7a7a7 (live)");
     }

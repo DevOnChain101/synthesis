@@ -904,3 +904,108 @@ mod side {
         assert_eq!((d.open, d.seg, d.width), (false, Segment::Details, 340.));
     }
 }
+
+// ------------------------------------------------------------------------------------------ C3: outcome and worker frames
+
+fn outcomes_of(v: &mut VisualTestContext, sa: &Entity<SuperAgentView>) -> Entity<OutcomesView> {
+    sa.read_with(v, |s, _| s.outcomes.clone())
+}
+
+#[gpui::test]
+fn an_outcome_frame_lists_its_work_items_and_j_enter_opens_the_worker_frame(
+    cx: &mut TestAppContext,
+) {
+    let (sa, v) = open(cx);
+    sa.update(v, |s, cx| s.open(Frame::Outcome("o_auth".into()), cx));
+    v.run_until_parked();
+    assert!(
+        v.debug_bounds("sa-outcome").is_some(),
+        "the frame, not the placeholder"
+    );
+    assert!(v.debug_bounds("sa-frame").is_none());
+    for row in [
+        "oc-item-0",
+        "oc-item-1",
+        "oc-item-2",
+        "oc-item-3",
+        "oc-item-4",
+    ] {
+        assert!(v.debug_bounds(row).is_some(), "work item row {row}");
+    }
+    // the selected outcome is the one in front
+    let o = outcomes_of(v, &sa);
+    assert_eq!(
+        o.read_with(v, |o, _| o.state.selected.clone()),
+        Some("o_auth".into())
+    );
+    // the keys are on the frame: J moves the cursor, Enter opens the worker frame of that row
+    v.simulate_keystrokes("j j");
+    v.simulate_keystrokes("enter");
+    v.run_until_parked();
+    assert_eq!(active(v, &sa), Frame::Worker("o_auth".into(), "wi2".into()));
+    assert!(v.debug_bounds("sa-worker").is_some());
+    assert!(v.debug_bounds("wk-composer").is_some());
+    // Escape leaves the frame's own focus first, then goes back to the outcome frame
+    v.simulate_keystrokes("escape");
+    assert!(matches!(active(v, &sa), Frame::Worker(..)));
+    v.simulate_keystrokes("escape");
+    assert_eq!(active(v, &sa), Frame::Outcome("o_auth".into()));
+}
+
+#[gpui::test]
+fn a_pending_decision_is_answered_on_the_home_never_in_the_outcome_frame(cx: &mut TestAppContext) {
+    let (sa, v) = open(cx);
+    sa.update(v, |s, cx| s.open(Frame::Outcome("o_auth".into()), cx));
+    v.run_until_parked();
+    assert!(v.debug_bounds("oc-needs").is_some());
+    assert!(v.debug_bounds("home-send").is_none() && v.debug_bounds("home-opt-0").is_none());
+    let b = v.debug_bounds("oc-answer").unwrap();
+    v.simulate_click(b.center(), Modifiers::default());
+    v.run_until_parked();
+    assert_eq!(
+        active(v, &sa),
+        Frame::Home,
+        "the home has the one decision card"
+    );
+}
+
+#[gpui::test]
+fn typing_in_a_worker_composer_is_not_a_shell_shortcut_and_a_frame_behind_gets_no_key(
+    cx: &mut TestAppContext,
+) {
+    let (sa, v) = open(cx);
+    let o = outcomes_of(v, &sa);
+    o.update(v, |o, _| o.state.attempt_message = true);
+    sa.update(v, |s, cx| {
+        s.open(Frame::Worker("o_auth".into(), "wi3".into()), cx)
+    });
+    v.run_until_parked();
+    // `n` is a shell shortcut on the home, but the composer in front takes it as text
+    v.simulate_keystrokes("n");
+    assert_eq!(cursor(v, &sa), None, "no picker opened");
+    let w = sa.read_with(v, |s, _| s.worker_frames[0].1.clone());
+    assert_eq!(w.read_with(v, |w, cx| w.draft(cx)), "n");
+    // another frame in front: the worker frame behind takes nothing
+    sa.update(v, |s, cx| s.focus_tab(0, cx));
+    v.run_until_parked();
+    v.simulate_keystrokes("x");
+    assert_eq!(w.read_with(v, |w, cx| w.draft(cx)), "n");
+}
+
+#[gpui::test]
+fn a_closed_worker_tab_keeps_its_draft_for_when_it_is_opened_again(cx: &mut TestAppContext) {
+    let (sa, v) = open(cx);
+    let o = outcomes_of(v, &sa);
+    o.update(v, |o, _| o.state.attempt_message = true);
+    let f = Frame::Worker("o_auth".into(), "wi3".into());
+    sa.update(v, |s, cx| s.open(f.clone(), cx));
+    v.run_until_parked();
+    v.simulate_keystrokes("a b");
+    sa.update(v, |s, cx| s.close_tab(1, cx));
+    v.run_until_parked();
+    assert_eq!(sa.read_with(v, |s, _| s.frames.draft(&f).to_string()), "ab");
+    sa.update(v, |s, cx| s.open(f.clone(), cx));
+    v.run_until_parked();
+    let w = sa.read_with(v, |s, _| s.worker_frames[0].1.clone());
+    assert_eq!(w.read_with(v, |w, cx| w.draft(cx)), "ab");
+}

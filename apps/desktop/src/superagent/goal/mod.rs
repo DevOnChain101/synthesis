@@ -281,7 +281,11 @@ impl GoalForm {
             Msg::ReadOnlyGoal(on) => self.read_only_goal = on,
             Msg::Snapshot { .. } => self.screen = Screen::Ready,
             Msg::Form(m) => self.apply_form(m, cx),
-            Msg::Inspector { .. } | Msg::Answered(_) | Msg::Enabled(..) => {}
+            Msg::Inspector { .. }
+            | Msg::Answered(_)
+            | Msg::Enabled(..)
+            | Msg::AttemptMessage(_)
+            | Msg::Sent { .. } => {}
         }
         cx.notify();
     }

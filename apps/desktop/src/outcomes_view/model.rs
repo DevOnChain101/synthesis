@@ -9,7 +9,8 @@
 
 use synthesis_core::outcome::Contract;
 use synthesis_view::outcomes::{
-    ActivityTab, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab, OutcomeRow,
+    ActivityTab, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab,
+    MessageRow, OutcomeRow,
 };
 
 use super::ask::Ask;
@@ -122,12 +123,18 @@ pub struct Detail {
     pub current: Option<Contract>,
     /// `InspectorContent::Activity` of every event read, or `Unavailable`.
     pub history: InspectorContent,
+    /// `InspectorContent::Workers` (the plan with each item's attempts), or `Unavailable` with the reason.
+    pub workers: InspectorContent,
+    /// The person's lines to the workers of this outcome, from its events and the workers' acks.
+    pub messages: Vec<MessageRow>,
 }
 
 pub struct State {
     pub screen: Screen,
     /// The engine advertised `read_only_goal` and `report_review` (`orchestrator.status` features).
     pub read_only_goal: bool,
+    /// The engine advertised `attempt_message` (the person may message a worker).
+    pub attempt_message: bool,
     pub items: Vec<Item>,
     pub selected: Option<String>,
     pub detail: Option<Detail>,
@@ -210,6 +217,7 @@ impl State {
         Self {
             screen,
             read_only_goal: false,
+            attempt_message: false,
             items: vec![],
             selected: None,
             detail: None,

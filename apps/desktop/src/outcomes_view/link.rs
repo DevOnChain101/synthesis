@@ -18,7 +18,7 @@ use synthesis_core::outcome::ContractKind;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
     AttemptView, BudgetView, CommandReply, CriteriaView, DecisionCard, InspectorContent,
-    InspectorTab, OverviewTab, is_hex, valid_alt_id,
+    InspectorTab, MessageRow, OverviewTab, is_hex, valid_alt_id,
 };
 
 use super::form::{DiffView, Review, Submit};
@@ -60,6 +60,13 @@ pub enum Req {
     },
     /// Read the stored contract of an outcome whose contract is not approved, for review.
     Review(String),
+    /// The person's line to a worker (typed in its frame, sent on Enter): `key` is its idempotency key.
+    Message {
+        outcome: String,
+        item: String,
+        text: String,
+        key: String,
+    },
     /// The explicit store migration, after the person confirmed the disclosure. Only served while the
     /// orchestrator says the store is not migrated; never sent by itself.
     /// The number of the person's confirm (`State::migrations`): the reply carries it back.
@@ -89,10 +96,26 @@ pub enum FormMsg {
     },
 }
 
+/// How the owner took a worker message (S1 4.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// To the running attempt (its short id).
+    Live(Option<String>),
+    /// For the next attempt of the work item.
+    Queued,
+}
+
 pub enum Msg {
     Screen(Screen),
     /// What the connected engine advertised (`read_only_goal` with `report_review`).
     ReadOnlyGoal(bool),
+    /// The engine advertised `attempt_message`.
+    AttemptMessage(bool),
+    /// What became of the message sent with `key`: the delivery, or the words of the refusal.
+    Sent {
+        key: String,
+        result: Result<Delivery, String>,
+    },
     Snapshot {
         items: Vec<Item>,
         selected: Option<String>,
@@ -136,6 +159,19 @@ impl Link {
             let result = synthesis_view::project::head_commit(std::path::Path::new(&ws), &env);
             let _ = out.unbounded_send(Msg::Form(FormMsg::Head { ws, result }));
         });
+    }
+
+    /// A link with no worker behind it: the requests land in the returned receiver (the frames' tests read them).
+    #[cfg(test)]
+    pub(crate) fn fake() -> (Link, Receiver<Req>) {
+        let (tx, rx) = channel();
+        let (out, _) = unbounded();
+        let link = Link {
+            tx,
+            out,
+            env: Env::from_pairs([("HOME", "/nonexistent")]),
+        };
+        (link, rx)
     }
 
     pub fn send(&self, r: Req) {
@@ -291,6 +327,7 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                         let _ = out.unbounded_send(Msg::ReadOnlyGoal(
                             has("read_only_goal") && has("report_review"),
                         ));
+                        let _ = out.unbounded_send(Msg::AttemptMessage(has("attempt_message")));
                         match serve(&mut c, rx, out, HINT_WAIT, &|ws| {
                             synthesis_view::project::head_commit(std::path::Path::new(ws), env)
                         }) {
@@ -433,6 +470,17 @@ pub(super) fn serve<T: Transport>(
                     let m = review_draft(c, &id)?;
                     let _ = out.unbounded_send(Msg::Form(m));
                 }
+                Ok(Req::Message {
+                    outcome,
+                    item,
+                    text,
+                    key,
+                }) => {
+                    let result = message(c, &outcome, &item, &text, &key)?;
+                    let _ = out.unbounded_send(Msg::Sent { key, result });
+                    refresh(c, &mut w, out)?;
+                    last = Instant::now();
+                }
                 // the store is migrated already (the person's confirm came late): say so, look again
                 Ok(Req::Enable(n)) => {
                     let _ = out.unbounded_send(Msg::Enabled(
@@ -497,7 +545,18 @@ fn refresh<T: Transport>(
             Ok((evs, next)) => InspectorContent::activity(evs, *next),
             Err(e) => InspectorContent::unavailable(InspectorTab::Activity, e),
         };
-        inspector = Some(tab_content(c, w.tab, item, &contract, &events)?);
+        let (workers, delivered) = match plan_and_items(c, &id)? {
+            Ok((p, wi)) => (
+                InspectorContent::workers(&p, &wi),
+                wi.iter().flat_map(delivered_seqs).collect(),
+            ),
+            Err(e) => (Err(e), vec![]),
+        };
+        let messages = events
+            .as_ref()
+            .map(|(evs, _)| MessageRow::from_events(evs, &delivered))
+            .unwrap_or_default();
+        inspector = Some(tab_content(c, w.tab, item, &contract, &events, &workers)?);
         let current = contract
             .as_ref()
             .ok()
@@ -508,6 +567,8 @@ fn refresh<T: Transport>(
             current,
             contract: contract.and_then(|v| CriteriaView::from_json(&v)),
             history,
+            workers: InspectorContent::or_unavailable(InspectorTab::Workers, workers),
+            messages,
         }));
     }
     let _ = out.unbounded_send(Msg::Snapshot {
@@ -549,6 +610,7 @@ fn tab_content<T: Transport>(
     item: &Item,
     contract: &Result<Value, String>,
     events: &Result<(Vec<Value>, u64), String>,
+    workers: &Result<InspectorContent, String>,
 ) -> Result<InspectorContent, String> {
     let id = &item.row.id;
     let r: Result<InspectorContent, String> = match tab {
@@ -564,7 +626,7 @@ fn tab_content<T: Transport>(
                 },
             })))
         }),
-        InspectorTab::Workers => workers(c, id)?,
+        InspectorTab::Workers => workers.clone(),
         InspectorTab::Activity => match events {
             Ok((evs, next)) => Ok(InspectorContent::activity(
                 &evs[evs.len().saturating_sub(ACTIVITY_TAIL)..],
@@ -578,6 +640,58 @@ fn tab_content<T: Transport>(
         InspectorTab::Diff => diff(c, id)?,
     };
     Ok(InspectorContent::or_unavailable(tab, r))
+}
+
+/// The `seq`s of the person's messages the workers of this `work_item.get` reply acked.
+fn delivered_seqs(item: &Value) -> Vec<u64> {
+    item.get("attempts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.get("messages_delivered")?.as_array())
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect()
+}
+
+/// Sends the person's line to a worker and follows it until the owner applied or refused it. `Err(words)` is a
+/// refusal (the client's own check, the server's, or a denial with its reason); a failed link ends the worker.
+/// The text is never logged here.
+fn message<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    outcome: &str,
+    item: &str,
+    text: &str,
+    key: &str,
+) -> Result<Result<Delivery, String>, String> {
+    let r = match soft(c.send_worker_message(outcome, item, text, false, None, key))? {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(e)),
+    };
+    let r = match settle(c, outcome, r, key)? {
+        Ok(r) => r,
+        Err(e) => return Ok(Err(format!("Sent; the state could not be read: {e}"))),
+    };
+    Ok(match r.state {
+        CommandState::Applied => match r.result.get("delivery").and_then(Value::as_str) {
+            Some("live") => Ok(Delivery::Live(
+                r.result
+                    .get("attempt")
+                    .and_then(Value::as_str)
+                    .map(|a| synthesis_harness::sanitize_for_display(a).chars().take(8).collect()),
+            )),
+            Some("queued") => Ok(Delivery::Queued),
+            _ => Err("the orchestrator's answer was not understood".into()),
+        },
+        CommandState::Denied => Err(synthesis_harness::sanitize_for_display(
+            r.result
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("refused"),
+        )),
+        CommandState::Queued => Err("Not confirmed yet: the orchestrator has not applied it. Check the messages below before sending it again.".into()),
+        _ => Err(r.describe().into()),
+    })
 }
 
 fn plan_and_items<T: Transport>(
@@ -602,13 +716,6 @@ fn plan_and_items<T: Transport>(
         }
     }
     Ok(Ok((plan, items)))
-}
-
-fn workers<T: Transport>(
-    c: &mut OutcomeClient<T>,
-    id: &str,
-) -> Result<Result<InspectorContent, String>, String> {
-    Ok(plan_and_items(c, id)?.and_then(|(p, w)| InspectorContent::workers(&p, &w)))
 }
 
 /// The newest attempt that has a candidate commit, through `attempt.diff` (the server reads the repository).
