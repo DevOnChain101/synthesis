@@ -314,6 +314,14 @@ Deliberately absent: approving, resolving, starting, resuming or cancelling, ena
 - `synthesis-app/src/{proto,outcome_service}.rs`: the command.
 - `synthesis-view/src/outcomes.rs`: message rows.
 
+**Built (P2c, 2026-11-23); what the code settled that the text above leaves open.**
+- Events of the control session: `attempt.message`, `attempt.message.queued`, and `attempt.message.consumed {work_item, attempt, seqs}` (written when the next attempt has started with the queued ones in its first prompt; it is how "queued" is told from "taken"). The worker's ack is `owner_message.delivered {seq, sha256}` in its own session. `seq` in a payload is the event's own `seq`; a row whose payload `seq` or `sha256` does not match, or whose chain link is not the next row's `prev` (or the session head), is dropped by the worker, never re-queued and never offered to a prompt.
+- State rule: a running newest attempt of the item takes it live; every other state of an unfinished item queues it; a finished item (or outcome) is `denied`. Order: text, then the per-attempt and per-outcome limits, then the item's state. The text is masked by the store's redactor before it is hashed.
+- The unacked are re-queued at settle (`Runner::settle`) and again before the next attempt starts (`host.rs`), so a lost or killed worker is covered too. A live message is acked once: the worker's cursor starts after its newest ack and moves with each send.
+- `brief_change` closes each pending decision of the item and asks it again with the same stored action and binding, the same expiry and a brief that names the message (`evidence_summary.owner_message`); the machinery is the `request_evidence` re-brief, allowed from `pending` for this one case.
+- The command result is `{delivery: "live"|"queued", seq, attempt?, rebriefed}`; `attempt.inspect` lists the acked `seq`s as `messages_delivered`. `proposal_sha256` (hex) on the call marks a card the person clicked (`via: "card"`); the conductor's own card stays off (`MESSAGE_WORKER_ENABLED`) until C3.
+- Native Windows: the call, the client and the owner refuse it, and `features` omits `attempt_message`.
+
 ### 4.7 Rate limits and the read/write split
 
 - **Per conductor turn:** ≤ 12 tool calls, ≤ 3 proposals, ≤ 1 `propose_goal`.
