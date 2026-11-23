@@ -386,6 +386,16 @@ impl SettingsSchema {
         );
         f.push(
             Field::new(
+                "synt.desktop.material",
+                Appearance,
+                "Super Agent material",
+                Enum(&["opaque", "glass"]),
+            )
+            .def(json!("opaque"))
+            .help("Opaque is the default. Glass (translucent rail, title bar and sidebar over the blurred desktop) needs macOS 27 or later and is off when the system asks for reduced transparency. Read when the app starts. The TUI and Settings views never change."),
+        );
+        f.push(
+            Field::new(
                 "synt.tui.logo",
                 Interface,
                 "Welcome logo",

@@ -433,6 +433,7 @@ also set it. Restart: a running session keeps the old value. Editable = the UI m
 | `synt.tui.motion` | INTERFACE | user file only | no | yes |
 | `synt.tui.opacity` | APPEARANCE | user file only | no | yes (slider 30 to 100 %, default 100) |
 | `synt.tui.blur` | APPEARANCE | user file only | no | yes where the platform blurs (default off) |
+| `synt.desktop.material` | APPEARANCE | user file only | yes (read when the app starts) | `opaque` (default) or `glass`; glass only on macOS 27+ (disabled with the reason elsewhere) and not under reduced transparency; Super Agent shell surfaces only |
 | `synt.tui.mouse_capture` | INTERFACE | user file only | no | yes |
 | `synt.tui.copy_on_select` | INTERFACE | user file only | no | yes |
 | `synt.tui.panels.{session,mcp,tools,activity,status,tokens,topology,usage}` | INTERFACE | user file only | no | yes |

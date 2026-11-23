@@ -2472,7 +2472,10 @@ mod tests {
                     "synt.tui.verbose",
                 ],
             ),
-            ("tab-Appearance", vec!["synt.tui.opacity", "synt.tui.blur"]),
+            (
+                "tab-Appearance",
+                vec!["synt.tui.opacity", "synt.tui.blur", "synt.desktop.material"],
+            ),
             (
                 "tab-Memory",
                 vec![
