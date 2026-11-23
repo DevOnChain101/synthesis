@@ -1081,6 +1081,20 @@ impl Render for TuiView {
                 this.set_prompt(&t, window, cx)
             });
         }
+        // a new workspace's session is live and no dialog (the trust decision) waits: the composer gets the keys;
+        // a start that failed shows its note and leaves the focus alone
+        if let Some(lu) = &mut self.live
+            && lu.focus_new
+            && !lu.live.starting
+        {
+            if lu.live.engine.is_none() {
+                lu.focus_new = false;
+            } else if lu.live.dialogs.is_empty() {
+                lu.focus_new = false;
+                lu.live.focus = crate::live::Focus::Chat;
+                lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+            }
+        }
         // the refresh spinner of the model picker turns every frame
         if let Some(lu) = &mut self.live
             && lu.cfg.tui.motion
