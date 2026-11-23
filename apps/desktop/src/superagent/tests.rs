@@ -280,6 +280,7 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     use super::chat::glue::WindowPort as _;
     use synthesis_app::conductor::SessionStart;
     let (f, cfg) = super::session::host::tests::fx(2);
+    cx.executor().allow_parking();
     let (sa, v) = open_live(cx, cfg);
     let port = sa.read_with(v, |s, _| s.port.clone());
     assert!(port.sessions().is_empty());
@@ -546,4 +547,360 @@ fn a_form_with_an_approval_in_flight_keeps_its_frame_and_says_so(cx: &mut TestAp
     });
     v.run_until_parked();
     assert_eq!(active(v, &sa), Frame::Outcome("o2".into()));
+}
+
+// ------------------------------------------------------------------------------------------ the right sidebar (C2)
+
+mod side {
+    use super::*;
+    use crate::superagent::sidebar::{Segment, Side};
+    use crate::tui_view::ChatTab;
+    use gpui::ClipboardItem;
+    use synthesis_app::conductor::SessionStart;
+
+    /// Secret-shaped, so `Redactor` would catch it in a digest; here it must never get that far.
+    const CANARY: &str = "sk-ant-api03-SIDEBARCANARY0123456789abcdefghijkl";
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// Two hosted sessions s1 (f0) and s2 (f1); s2 is in front.
+    fn two(
+        cx: &mut TestAppContext,
+    ) -> (
+        super::super::session::host::tests::Fx,
+        Entity<SuperAgentView>,
+        &mut VisualTestContext,
+    ) {
+        // the engine builds on its own thread and delivers back to the window (and the last-shell test reopens a
+        // real shell): activity from other threads is expected here
+        cx.executor().allow_parking();
+        let (f, cfg) = super::super::session::host::tests::fx(2);
+        let (sa, v) = open_live(cx, cfg);
+        for i in 0..2 {
+            let req = SessionStart {
+                first_message: "hi".into(),
+                folder: Some(f.base.join(format!("f{i}")).to_string_lossy().into_owned()),
+                model: None,
+                title: None,
+            };
+            start(&sa, v, &req).unwrap();
+        }
+        // a scripted shell in each pane: the pane never starts a real PTY (its reader thread would wake the entity
+        // from another thread, which the test scheduler refuses)
+        let views = sa.read_with(v, |s, cx| s.host.read(cx).views());
+        for t in views {
+            t.update(v, |t, cx| t.test_term_feed(b"$ ", cx));
+        }
+        (f, sa, v)
+    }
+
+    fn tabs(sa: &Entity<SuperAgentView>, v: &mut VisualTestContext) -> Vec<ChatTab> {
+        sa.read_with(v, |s, cx| {
+            s.host
+                .read(cx)
+                .views()
+                .iter()
+                .map(|t| t.read(cx).pane_tab())
+                .collect()
+        })
+    }
+
+    fn shown(sa: &Entity<SuperAgentView>, v: &mut VisualTestContext) -> Option<Segment> {
+        sa.read_with(v, |s, cx| s.side_shown(cx))
+    }
+
+    fn finish(
+        f: &super::super::session::host::tests::Fx,
+        sa: &Entity<SuperAgentView>,
+        v: &mut VisualTestContext,
+    ) {
+        // the engines end with their frames
+        while let Some(i) = sa.read_with(v, |s, _| {
+            s.frames
+                .tabs()
+                .iter()
+                .position(|f| matches!(f, Frame::Session(_)))
+        }) {
+            sa.update(v, |s, cx| s.close_tab(i, cx));
+        }
+        v.update(|_, _| ());
+        v.run_until_parked();
+        super::super::session::host::tests::wait_free(&f.home);
+    }
+
+    #[gpui::test]
+    fn open_state_and_width_are_the_windows_and_the_panes_are_each_sessions(
+        cx: &mut TestAppContext,
+    ) {
+        let (f, sa, v) = two(cx);
+        assert_eq!(shown(&sa, v), None);
+        assert!(press(v, &sa, "`", ctrl()));
+        assert_eq!(shown(&sa, v), Some(Segment::Terminal));
+        // only the front session (s2) gets the pane and with it the keys
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Terminal]);
+        sa.update(v, |s, _| s.side.set_width(500., 1400.));
+        // another session frame: the same open state, segment and width; the other session's pane
+        sa.update(v, |s, cx| s.focus_tab(1, cx));
+        v.run_until_parked();
+        assert_eq!(tabs(&sa, v), [ChatTab::Terminal, ChatTab::Chat]);
+        assert_eq!(
+            sa.read_with(v, |s, _| (s.side.open, s.side.width)),
+            (true, 500.)
+        );
+        // s2's shells are kept while its pane is hidden
+        let kept = sa.read_with(v, |s, cx| {
+            s.host.read(cx).views()[1].read(cx).term.is_some()
+        });
+        assert!(kept);
+        // the home has no sidebar: nothing shows and no pane takes a key
+        sa.update(v, |s, cx| s.focus_tab(0, cx));
+        v.run_until_parked();
+        assert_eq!(shown(&sa, v), None);
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Chat]);
+        assert!(v.debug_bounds("sa-side").is_none());
+        // back in a session: it is there again (a global choice)
+        sa.update(v, |s, cx| s.focus_tab(2, cx));
+        v.run_until_parked();
+        assert_eq!(shown(&sa, v), Some(Segment::Terminal));
+        assert!(v.debug_bounds("sa-side").is_some());
+        // Browser, then Details (no pane for the Details segment), then the same icon closes
+        sa.update(v, |s, cx| s.toggle_side(Segment::Browser, cx));
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Browser]);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Details, cx));
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Chat]);
+        v.run_until_parked();
+        assert!(v.debug_bounds("sa-details").is_some());
+        sa.update(v, |s, cx| s.toggle_side(Segment::Details, cx));
+        assert_eq!(shown(&sa, v), None);
+        // the view is hidden (the TUI view on screen): no pane takes a key
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        sa.update(v, |s, cx| s.set_visible(false, cx));
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Chat]);
+        sa.update(v, |s, cx| s.set_visible(true, cx));
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Terminal]);
+        // closing the session frame ends its panes with it
+        sa.update(v, |s, cx| s.close_tab(2, cx));
+        v.run_until_parked();
+        assert_eq!(sa.read_with(v, |s, cx| s.host.read(cx).ids()), ["s1"]);
+        finish(&f, &sa, v);
+    }
+
+    #[gpui::test]
+    fn the_title_bar_icons_follow_the_availability_table(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        // a click on the Browser icon opens the sidebar on Browser
+        let b = v.debug_bounds("sa-dock-browser").unwrap();
+        v.simulate_click(b.center(), Modifiers::default());
+        assert_eq!(shown(&sa, v), Some(Segment::Browser));
+        // an outcome frame offers Details only: Terminal does nothing and says why
+        sa.update(v, |s, cx| s.open(Frame::Outcome("o1".into()), cx));
+        v.run_until_parked();
+        assert_eq!(shown(&sa, v), Some(Segment::Details));
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        assert_eq!(sa.read_with(v, |s, _| s.side.seg), Segment::Browser);
+        assert!(
+            sa.read_with(v, |s, _| s.notice.clone())
+                .unwrap()
+                .contains("Terminal")
+        );
+        // the home: nothing at all, the icons are dimmed (no click target) and say why
+        sa.update(v, |s, cx| s.focus_tab(0, cx));
+        v.run_until_parked();
+        sa.update(v, |s, cx| s.toggle_side(Segment::Details, cx));
+        assert_eq!(shown(&sa, v), None);
+        assert!(
+            sa.read_with(v, |s, _| s.notice.clone())
+                .unwrap()
+                .contains("Details")
+        );
+        finish(&f, &sa, v);
+    }
+
+    #[gpui::test]
+    fn closing_the_last_shell_closes_the_sidebar_and_reopening_starts_a_new_one(
+        cx: &mut TestAppContext,
+    ) {
+        let (f, sa, v) = two(cx);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        let front = sa.read_with(v, |s, cx| s.host.read(cx).views()[1].clone());
+        front.update(v, |t, cx| t.test_term_feed(b"zsh$ ", cx));
+        v.run_until_parked();
+        assert_eq!(shown(&sa, v), Some(Segment::Terminal));
+        front.update(v, |t, cx| t.test_term_close_all(cx));
+        v.run_until_parked();
+        assert!(!sa.read_with(v, |s, _| s.side.open));
+        assert_eq!(tabs(&sa, v), [ChatTab::Chat, ChatTab::Chat]);
+        // the next open of Terminal starts a shell again (a Failed or Starting tab at least), never an empty pane
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        v.run_until_parked();
+        let n = front.read_with(v, |t, cx| t.term.as_ref().unwrap().read(cx).tabs().len());
+        assert_eq!(n, 1);
+        assert!(sa.read_with(v, |s, _| s.side.open));
+        drop(front);
+        finish(&f, &sa, v);
+    }
+
+    #[gpui::test]
+    fn the_grip_resizes_with_the_pointer_and_with_left_and_right(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Details, cx));
+        v.run_until_parked();
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 340.);
+        sa.update_in(v, |s, w, cx| s.drag_side(900., w, cx));
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 1400. - 8. - 900.);
+        sa.update_in(v, |s, w, cx| s.drag_side(0., w, cx));
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 640.);
+        sa.update_in(v, |s, w, cx| s.drag_side(1300., w, cx));
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 280.);
+        // Left and Right on the focused grip
+        sa.update_in(v, |s, w, cx| w.focus(&s.grip_focus.clone(), cx));
+        assert!(press(v, &sa, "left", none()));
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 296.);
+        assert!(press(v, &sa, "right", none()));
+        assert_eq!(sa.read_with(v, |s, _| s.side.width), 280.);
+        finish(&f, &sa, v);
+    }
+
+    /// The directory tree holds no copy of `needle` (the session store, transcripts, logs).
+    fn home_has(dir: &std::path::Path, needle: &str) -> bool {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    home_has(&p, needle)
+                } else {
+                    std::fs::read(&p)
+                        .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+                }
+            })
+    }
+
+    /// What the conductor can read of this window's sessions, as one string.
+    fn conductor_view(sa: &Entity<SuperAgentView>, v: &mut VisualTestContext) -> String {
+        sa.update(v, |s, cx| s.refresh_port(cx));
+        sa.read_with(v, |s, _| {
+            let snap = s.port.shared.lock().unwrap();
+            format!("{:?} {:?}", snap.rows, snap.reports)
+        })
+    }
+
+    /// T15: what a person types or runs in the sidebar shell is never an event, a digest row or a transcript line.
+    #[gpui::test]
+    fn sa_term_not_in_digest(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        let front = sa.read_with(v, |s, cx| s.host.read(cx).views()[1].clone());
+        let out = format!("$ echo {CANARY}\r\n{CANARY}\r\n");
+        front.update(v, |t, cx| t.test_term_feed(out.as_bytes(), cx));
+        v.run_until_parked();
+        // it is on the person's screen ...
+        let shells = front.read_with(v, |t, cx| t.term.as_ref().unwrap().read(cx).tabs().len());
+        assert!(shells >= 1);
+        // ... and nowhere the conductor or a model reads
+        let seen = conductor_view(&sa, v);
+        assert!(
+            !seen.contains(CANARY) && !seen.contains("SIDEBARCANARY"),
+            "{seen}"
+        );
+        assert!(
+            !home_has(&f.home, "SIDEBARCANARY"),
+            "a file under the synt home holds the output"
+        );
+        drop(front);
+        finish(&f, &sa, v);
+    }
+
+    /// T15: page text and frames of the person's browser pane stay in the pane.
+    #[gpui::test]
+    fn sa_browser_frames_not_in_digest(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Browser, cx));
+        let front = sa.read_with(v, |s, cx| s.host.read(cx).views()[1].clone());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        front.update(v, |t, _| t.test_browser_page(CANARY, rt.handle()));
+        let mut seen = (false, None);
+        for _ in 0..300 {
+            seen = front.read_with(v, |t, _| t.test_browser_seen());
+            if seen.0 && seen.1.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seen.0, "a frame reached the pane");
+        assert_eq!(seen.1.as_deref(), Some(CANARY), "the page reached the pane");
+        let view = conductor_view(&sa, v);
+        assert!(!view.contains("SIDEBARCANARY"), "{view}");
+        assert!(!home_has(&f.home, "SIDEBARCANARY"));
+        drop(front);
+        finish(&f, &sa, v);
+    }
+
+    /// Spec 5.3: OSC 52 is ignored in the sidebar shell, both ways; the clipboard is the person's.
+    #[gpui::test]
+    fn osc_52_from_the_sidebar_shell_never_touches_the_clipboard(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        sa.update(v, |s, cx| s.toggle_side(Segment::Terminal, cx));
+        let front = sa.read_with(v, |s, cx| s.host.read(cx).views()[1].clone());
+        v.write_to_clipboard(ClipboardItem::new_string("keep".into()));
+        // a store ("pwned"), then a load request
+        front.update(v, |t, cx| {
+            t.test_term_feed(b"\x1b]52;c;cHduZWQ=\x07\x1b]52;c;?\x07ok", cx)
+        });
+        v.run_until_parked();
+        let got = v.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(got.as_deref(), Some("keep"));
+        drop(front);
+        finish(&f, &sa, v);
+    }
+
+    /// T2: the sidebar shell is the TUI view's `TermPane` started by the same `launch::plan`; the plan drops every
+    /// `SYNT_*` and secret-shaped name, and the sidebar has no spawn path of its own.
+    #[test]
+    fn t2_the_sidebar_shell_has_no_synt_or_secret_environment() {
+        let env = synthesis_config::Env::from_pairs([
+            ("PATH", "/usr/bin"),
+            ("SYNT_HOME", "/h"),
+            ("SYNT_API_KEY", "k"),
+            ("OPENAI_API_KEY", "k"),
+            ("GITHUB_TOKEN", "k"),
+            ("AWS_SECRET_ACCESS_KEY", "k"),
+        ]);
+        let names: Vec<String> = crate::term::launch::scrub(&env, false)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert!(names.iter().any(|k| k == "PATH"));
+        assert!(
+            !names.iter().any(|k| k.starts_with("SYNT_")
+                || k.contains("KEY")
+                || k.contains("TOKEN")
+                || k.contains("SECRET")),
+            "{names:?}"
+        );
+        // the only place a shell starts is `term_launch`, through `launch::plan` (which scrubs)
+        let pane = include_str!("../tui_view/term_pane.rs");
+        assert_eq!(pane.matches("launch::plan(").count(), 1);
+        let drv = include_str!("../tui_view/driver.rs");
+        let embed =
+            &drv[drv.find("fn embed_side").unwrap()..drv.find("fn embed_pane_closed").unwrap()];
+        assert!(!embed.contains("spawn") && !embed.contains("Command"));
+    }
+
+    #[test]
+    fn side_is_a_plain_window_state_with_the_spec_defaults() {
+        let d = Side::default();
+        assert_eq!((d.open, d.seg, d.width), (false, Segment::Details, 340.));
+    }
 }

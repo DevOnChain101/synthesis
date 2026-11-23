@@ -512,6 +512,81 @@ async fn a_session_digest_is_capped_and_a_pending_ask_names_its_kind_only() {
     );
 }
 
+// ---------------------------------------------------------------- T15: the right sidebar
+
+/// What the digest of a session is built from. The person's sidebar shell and browser are not among these fields
+/// (the window never reports them); a new field has to be added here on purpose, which is the review.
+fn pinned_session_fields(r: SessionRow, rep: SessionReport) -> usize {
+    let SessionRow {
+        handle,
+        sid,
+        title,
+        state,
+        model,
+        mode,
+        cwd_label,
+        spent_usd: _,
+        task_summary,
+        live: _,
+    } = r;
+    let SessionReport {
+        last_reply,
+        last_tools,
+        pending_ask,
+    } = rep;
+    [
+        handle,
+        sid,
+        title,
+        state,
+        model,
+        mode,
+        cwd_label,
+        task_summary,
+        last_reply,
+    ]
+    .iter()
+    .chain(&last_tools)
+    .count()
+        + usize::from(pending_ask.is_some())
+}
+
+#[tokio::test]
+async fn sa_term_not_in_digest() {
+    // terminal output has no field to ride in; whatever the host's own free text says is redacted like any other
+    let r = rig(Confirm::All);
+    assert_eq!(
+        pinned_session_fields(session(1, "t"), SessionReport::default()),
+        9
+    );
+    *r.reads.reply.lock().unwrap() = format!("$ echo {SECRET}\r\n\x1b]52;c;cHduZWQ=\x07");
+    r.h.person_turn("x");
+    let d = r
+        .call(
+            "conductor_read_digest",
+            json!({"target": {"session": "s1"}}),
+        )
+        .await
+        .unwrap();
+    let s = d["digest"].as_str().unwrap();
+    assert!(!s.contains(SECRET) && !s.contains('\x1b'), "{s}");
+}
+
+#[tokio::test]
+async fn sa_browser_frames_not_in_digest() {
+    // no frame, page title, URL or page text is a field of any row the conductor reads
+    let r = rig(Confirm::All);
+    r.h.person_turn("x");
+    for t in [json!({"session": "s1"}), json!({"outcome": "o1"})] {
+        let d = r
+            .call("conductor_read_digest", json!({"target": t}))
+            .await
+            .unwrap();
+        let s = d.to_string();
+        assert!(!s.contains("data:image") && !s.contains("jpeg") && !s.contains("https://"));
+    }
+}
+
 // ---------------------------------------------------------------- RT3, RT7: targets
 
 #[tokio::test]

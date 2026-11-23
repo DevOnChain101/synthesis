@@ -265,6 +265,26 @@ impl SessionHost {
         }
     }
 
+    /// Which pane of which session the sidebar shows: `front` gets it, every other session none (its shells keep
+    /// running, its browser stops casting).
+    pub fn set_sides(&mut self, front: Option<(&str, ChatTab)>, cx: &mut Context<Self>) {
+        for (id, v) in &self.views {
+            let side = front.filter(|(f, _)| f == id).map(|(_, k)| k);
+            v.update(cx, |t, cx| t.embed_side(side, cx));
+        }
+    }
+
+    /// The sidebar pane of session `id` lost its last inner tab.
+    pub fn pane_closed(&self, id: &str, kind: ChatTab, cx: &App) -> bool {
+        self.view(id)
+            .is_some_and(|v| v.read(cx).embed_pane_closed(kind, cx))
+    }
+
+    /// Session `id` has no browser (WSL mode).
+    pub fn remote(&self, id: &str, cx: &App) -> bool {
+        self.view(id).is_some_and(|v| v.read(cx).embed_remote())
+    }
+
     /// The Terminal or Browser pane of session `id`, for the right sidebar.
     pub fn pane(&mut self, id: &str, kind: ChatTab, cx: &mut Context<Self>) -> Option<AnyElement> {
         let v = self.view(id)?.clone();
@@ -399,6 +419,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let (f, cfg) = fx(3);
+        cx.executor().allow_parking();
         let (a, b) = (f.base.join("f0"), f.base.join("f1"));
         let (h, v) = host(cx, Some(cfg));
         assert!(open(&h, v, &a) && open(&h, v, &b));
@@ -459,6 +480,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_front_session_draws_a_real_chat_and_gets_the_prompt_focus(cx: &mut TestAppContext) {
         let (f, cfg) = fx(2);
+        cx.executor().allow_parking();
         let (a, b) = (f.base.join("f0"), f.base.join("f1"));
         let (h, v) = host(cx, Some(cfg));
         assert!(open(&h, v, &a) && open(&h, v, &b));
@@ -487,6 +509,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn at_most_six_sessions_are_hosted(cx: &mut TestAppContext) {
         let (f, cfg) = fx(7);
+        cx.executor().allow_parking();
         let (h, v) = host(cx, Some(cfg));
         for i in 0..MAX_SESSIONS {
             assert!(open(&h, v, &f.base.join(format!("f{i}"))));
@@ -505,6 +528,7 @@ pub(crate) mod tests {
         let (h, v) = host(cx, None);
         assert!(!open(&h, v, Path::new("/")));
         let (f, cfg) = fx(7);
+        cx.executor().allow_parking();
         let (h, v) = host(cx, Some(cfg));
         // a refused folder is no tab: it is not hosted and does not count against the cap
         let why = try_open(&h, v, &f.base.join("missing")).unwrap_err();
@@ -522,6 +546,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_closed_session_takes_no_key_even_while_the_entity_lives(cx: &mut TestAppContext) {
         let (f, cfg) = fx(1);
+        cx.executor().allow_parking();
         let a = f.base.join("f0");
         let (h, v) = host(cx, Some(cfg));
         assert!(open(&h, v, &a));
@@ -554,6 +579,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let (f, cfg) = fx(1);
+        cx.executor().allow_parking();
         let scratch = crate::outcomes_view::kind_picker::make_scratch(&f.home).unwrap();
         let (h, v) = host(cx, Some(cfg));
         assert!(open(&h, v, &scratch));

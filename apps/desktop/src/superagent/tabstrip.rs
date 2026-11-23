@@ -9,6 +9,7 @@ use gpui::{
 use super::frames::{Frame, MAX_SESSIONS};
 use super::kit::{self, Status};
 use super::rail::outcome_status;
+use super::sidebar::{Segment, why_not};
 use super::tokens::{self as t, hsla};
 use super::{SuperAgentView, SwitchView, TITLE_ROW_H, ib};
 use crate::ui::View;
@@ -34,9 +35,6 @@ impl Render for DragGhost {
             .child(self.0.clone())
     }
 }
-
-/// Why the tool buttons do nothing yet (the sidebar is phase C2).
-const NO_SIDEBAR: &str = "not available yet: the right sidebar comes with a later update";
 
 impl SuperAgentView {
     fn tab_glyph(&self, f: &Frame, cx: &gpui::App) -> AnyElement {
@@ -209,14 +207,22 @@ impl SuperAgentView {
             (!capped, false),
             cx.listener(|v, _, w, cx| v.new_picker(w, cx)),
         );
-        let off = |sel, glyph, name: &str, keys: &str| {
+        let a = self.side_avail(cx);
+        let shown = self.side_shown(cx);
+        let front = self.frames.active().clone();
+        let tool = |seg: Segment, sel, glyph, keys: &str| {
+            let tip = if a.has(seg) {
+                format!("{}{keys}", seg.label())
+            } else {
+                format!("{}{keys}: {}", seg.label(), why_not(&front, seg))
+            };
             ib(
                 sel,
                 glyph,
-                format!("{name}{keys}: {NO_SIDEBAR}"),
+                tip,
                 (30., 28.),
-                (false, false),
-                |_, _, _| {},
+                (a.has(seg), shown == Some(seg)),
+                cx.listener(move |v, _, _, cx| v.toggle_side(seg, cx)),
             )
         };
         let dock = div()
@@ -229,17 +235,17 @@ impl SuperAgentView {
             .bg(t::well())
             .border_1()
             .border_color(t::stroke())
-            .child(off(
+            .child(tool(
+                Segment::Terminal,
                 "sa-dock-terminal",
                 "square-terminal",
-                "Terminal",
                 "  (Ctrl+`)",
             ))
-            .child(off("sa-dock-browser", "globe", "Browser", ""))
-            .child(off(
+            .child(tool(Segment::Browser, "sa-dock-browser", "globe", ""))
+            .child(tool(
+                Segment::Details,
                 "sa-dock-details",
                 "file",
-                "Details",
                 &format!("  ({mod_key}I)"),
             ));
         let modes = div()

@@ -465,6 +465,35 @@ impl TuiView {
         )
     }
 
+    /// The person's shell shows `bytes` as if a program had printed them (tests of the sidebar's secret rules).
+    #[cfg(test)]
+    pub(crate) fn test_term_feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.term_script(bytes, cx);
+    }
+
+    /// Closes every shell of the sidebar terminal (tests).
+    #[cfg(test)]
+    pub(crate) fn test_term_close_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(p) = self.term.clone() {
+            for (n, ..) in p.read(cx).tabs() {
+                p.update(cx, |p, cx| p.close(n, cx));
+            }
+        }
+    }
+
+    /// A page the person's browser pane shows, as a browser reports it (tests of the sidebar's secret rules).
+    #[cfg(test)]
+    pub(crate) fn test_browser_page(&mut self, title: &str, h: &tokio::runtime::Handle) {
+        self.ts.bv.test_page(title, h);
+    }
+
+    /// `(a frame was decoded, the page title the pane holds)` (tests).
+    #[cfg(test)]
+    pub(crate) fn test_browser_seen(&self) -> (bool, Option<String>) {
+        let (frame, _, page, _) = self.ts.bv.snapshot();
+        (frame.is_some(), page.map(|p| p.title))
+    }
+
     /// A question waits for the person (tests of the owner's counts).
     #[cfg(test)]
     pub(crate) fn push_test_question(&mut self, cx: &mut Context<Self>) {
@@ -604,7 +633,12 @@ impl TuiView {
         match e.side {
             Some(ChatTab::Terminal) => {
                 let p = self.ensure_term(cx);
+                // the last shell was closed (that closed the sidebar): opening it again starts a new one
+                let empty = p.read(cx).tried && p.read(cx).tabs().is_empty();
                 p.update(cx, |p, _| p.shown = true);
+                if empty {
+                    self.term_new(cx);
+                }
             }
             _ => {
                 if let Some(p) = &self.term {
@@ -613,6 +647,24 @@ impl TuiView {
             }
         }
         cx.notify();
+    }
+
+    /// The sidebar pane has no inner tab left (every shell was closed): the owner closes the sidebar. The browser
+    /// keeps its last page tab, so it never is.
+    pub(crate) fn embed_pane_closed(&self, kind: ChatTab, cx: &gpui::App) -> bool {
+        kind == ChatTab::Terminal
+            && self.term.as_ref().is_some_and(|p| {
+                let p = p.read(cx);
+                p.tried && p.tabs().is_empty()
+            })
+    }
+
+    /// The session runs in WSL or remotely: its personal shell goes through `wsl.exe`, it has no browser.
+    pub(crate) fn embed_remote(&self) -> bool {
+        self.live
+            .as_ref()
+            .and_then(|l| l.live.engine.as_ref())
+            .is_some_and(|e| e.is_remote())
     }
 
     /// The Terminal or Browser pane of this embedded view, for the owner's right sidebar.
@@ -3988,6 +4040,7 @@ mod switch_tests {
     type Win<'a> = (Entity<TuiView>, &'a mut gpui::VisualTestContext);
 
     fn open(cx: &mut TestAppContext, cfg: LiveCfg, l: Live, engine: bool) -> Win<'_> {
+        cx.executor().allow_parking();
         cx.update(gpui_component::init);
         let (view, vcx) =
             cx.add_window_view(|window, cx| TuiView::live(window, cx, cfg, Default::default(), 0.));
@@ -4406,6 +4459,13 @@ mod switch_tests {
         let (tx, rx) = futures::channel::oneshot::channel();
         drop(rx);
         deliver(tx, Ok(l));
+        // the close finishes on the engine's own threads: poll, bounded
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !synthesis_app::peers::session_lock_free(&c.synthesis_home, &sid)
+            && std::time::Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(synthesis_app::peers::session_lock_free(
             &c.synthesis_home,
             &sid
