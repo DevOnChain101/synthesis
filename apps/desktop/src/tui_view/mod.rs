@@ -203,7 +203,7 @@ pub struct TuiView {
     pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
     /// `Some` when the view is one chat frame of the Super Agent surface (see [`Embed`]); `None` is the TUI view.
     pub(crate) embed: Option<Embed>,
-    /// Run in terminal of the fenced command blocks: when each was first drawn whole, and the pending second click.
+    /// Run in terminal of the fenced command blocks: when each was first drawn whole, and the pending approval click.
     gate: std::cell::RefCell<synthesis_view::codeblock::Gate>,
     /// Origin of the gate's clock.
     epoch: std::time::Instant,

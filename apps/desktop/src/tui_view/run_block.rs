@@ -97,12 +97,16 @@ impl TuiView {
             if cmd.contains('\n') && bracketed == Some(false) {
                 return Some(off("this shell has no bracketed paste"));
             }
-            let need = Need::of(cmd, tainted).filter(|_| self.gate.borrow().confirming(k, now));
+            let need = self
+                .gate
+                .borrow()
+                .confirming(k, now)
+                .then_some(Need::of(cmd, tainted));
             let (cmd, block) = (cmd.to_string(), b.clone());
             let this = cx.entity();
             Some(RunUi {
                 label: need.map_or("Run in terminal".into(), |n| n.label().into()),
-                warn: need.is_some(),
+                warn: need.is_some_and(Need::warn),
                 on_click: Box::new(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                     this.run_command(&block, &cmd, streaming, tainted, ev, cx)
                 })),

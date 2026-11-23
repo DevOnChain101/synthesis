@@ -495,39 +495,51 @@ fn truncating_redirect(cmd: &str) -> bool {
 /// Why a second click is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
-    /// Several lines, sent as one paste: "Run N lines".
+    /// Any other command: "Approve and run".
+    Always,
+    /// Several lines, sent as one paste: "Approve and run N lines".
     Lines(usize),
-    /// A risky command, shown whole first: "Run anyway".
+    /// A risky command, shown whole first.
     Risky,
-    /// The message follows web, browser or MCP content: every command asks twice.
+    /// The message follows web, browser or MCP content.
     Untrusted,
 }
 
 impl Need {
-    /// Why `cmd` needs a second click (risky or untrusted first), if it does.
-    pub fn of(cmd: &str, tainted: bool) -> Option<Self> {
+    /// Why `cmd` needs an approval click (every command does; risky or untrusted first).
+    pub fn of(cmd: &str, tainted: bool) -> Self {
         let lines = cmd.lines().filter(|l| !l.trim().is_empty()).count();
         if risky(cmd) {
-            Some(Self::Risky)
+            Self::Risky
         } else if tainted {
-            Some(Self::Untrusted)
+            Self::Untrusted
+        } else if lines > 1 {
+            Self::Lines(lines)
         } else {
-            (lines > 1).then_some(Self::Lines(lines))
+            Self::Always
         }
     }
 
+    /// The approval control's label; the warning ones keep their reason.
     pub fn label(self) -> String {
         match self {
-            Self::Lines(n) => format!("Run {n} lines"),
-            Self::Risky | Self::Untrusted => "Run anyway".into(),
+            Self::Always => "Approve and run".into(),
+            Self::Lines(n) => format!("Approve and run {n} lines"),
+            Self::Risky => "Approve: risky command, run anyway".into(),
+            Self::Untrusted => "Approve: untrusted content, run anyway".into(),
         }
+    }
+
+    /// Drawn in the danger colour.
+    pub fn warn(self) -> bool {
+        matches!(self, Self::Risky | Self::Untrusted)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Press {
     Ignored,
-    /// First click of a command that needs a second one.
+    /// First click: arms the approval (nothing runs).
     Confirm(Need),
     Run,
 }
@@ -554,7 +566,7 @@ pub const ARM_MS: u64 = 400;
 pub const QUIET_MS: u64 = 500;
 /// The pointer must have rested on the button this long before a click counts.
 pub const HOVER_MS: u64 = 300;
-/// A pending confirmation lapses after this long.
+/// A pending approval lapses after this long.
 pub const CONFIRM_MS: u64 = 15_000;
 const MAX_SEEN: usize = 256;
 
@@ -581,7 +593,7 @@ pub fn key(cmd: &str) -> u64 {
 
 /// The state machine behind Run: nothing runs without a real click on a block that has been complete on screen
 /// for [`ARM_MS`], with the transcript still for [`QUIET_MS`] and the pointer resting on the button for
-/// [`HOVER_MS`]; a multi-line, risky or untrusted command needs a second click.
+/// [`HOVER_MS`]; every command needs a second, approving click.
 #[derive(Default)]
 pub struct Gate {
     /// Block key to the time it was first drawn complete (not streaming).
@@ -612,6 +624,7 @@ impl Gate {
     pub fn layout(&mut self, shape: u64, now: u64) {
         if shape != self.shape {
             (self.shape, self.shifted) = (shape, now);
+            self.cancel();
         }
     }
 
@@ -623,7 +636,14 @@ impl Gate {
             }
         } else if self.hover.is_some_and(|(k, _)| k == key) {
             self.hover = None;
+            // the pointer left the approval control: that is "elsewhere"
+            self.cancel();
         }
+    }
+
+    /// Drops a pending approval (Esc, the pointer leaving, a scroll or layout change). Never approves.
+    pub fn cancel(&mut self) {
+        self.pending = None;
     }
 
     /// The next click on `key` is the second one of a confirmation (the button then reads [`Need::label`]).
@@ -666,16 +686,8 @@ impl Gate {
             self.pending = None;
             return Press::Run;
         }
-        match Need::of(cmd, ctx.tainted) {
-            Some(n) => {
-                self.pending = Some((k, now));
-                Press::Confirm(n)
-            }
-            None => {
-                self.pending = None;
-                Press::Run
-            }
-        }
+        self.pending = Some((k, now));
+        Press::Confirm(Need::of(cmd, ctx.tainted))
     }
 }
 

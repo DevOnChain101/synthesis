@@ -347,7 +347,13 @@ fn nothing_runs_without_a_real_click_on_an_armed_complete_block() {
         assert_eq!(g.press(x, cmd, click(), 2_000), Press::Ignored);
     }
     assert_eq!(g.press(&block("  "), "  ", click(), 2_000), Press::Ignored);
-    assert_eq!(g.press(&b, cmd, click(), 1_400), Press::Run);
+    // the first click only arms the approval, the second one at least 400 ms later runs
+    assert_eq!(
+        g.press(&b, cmd, click(), 1_400),
+        Press::Confirm(Need::Always)
+    );
+    assert_eq!(g.press(&b, cmd, click(), 1_500), Press::Ignored);
+    assert_eq!(g.press(&b, cmd, click(), 1_800), Press::Run);
     // a block that streams again starts over
     g.drawn(key(cmd), 3_000, false);
     assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
@@ -363,8 +369,13 @@ fn a_click_needs_a_quiet_transcript_and_a_resting_pointer() {
     assert_eq!(g.press(&b, cmd, click(), 5_000), Press::Ignored);
     g.hovered(key(cmd), true, 4_800);
     assert_eq!(g.press(&b, cmd, click(), 5_000), Press::Ignored);
-    assert_eq!(g.press(&b, cmd, click(), 5_100), Press::Run);
+    assert_eq!(
+        g.press(&b, cmd, click(), 5_100),
+        Press::Confirm(Need::Always)
+    );
+    // the pointer leaving the approval control cancels it, and a new rest is needed
     g.hovered(key(cmd), false, 5_200);
+    assert!(!g.confirming(key(cmd), 5_200));
     assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
     g.hovered(key("other"), true, 5_300);
     assert_eq!(g.press(&b, cmd, click(), 9_000), Press::Ignored);
@@ -373,10 +384,18 @@ fn a_click_needs_a_quiet_transcript_and_a_resting_pointer() {
     g.layout(1, 10_000);
     g.layout(1, 10_300);
     assert_eq!(g.press(&b, cmd, click(), 10_400), Press::Ignored);
-    assert_eq!(g.press(&b, cmd, click(), 10_500), Press::Run);
+    assert_eq!(
+        g.press(&b, cmd, click(), 10_500),
+        Press::Confirm(Need::Always)
+    );
+    // a scroll or layout change cancels the approval and blocks the next click for 500 ms
     g.layout(2, 20_000);
+    assert!(!g.confirming(key(cmd), 20_000));
     assert_eq!(g.press(&b, cmd, click(), 20_499), Press::Ignored);
-    assert_eq!(g.press(&b, cmd, click(), 20_500), Press::Run);
+    assert_eq!(
+        g.press(&b, cmd, click(), 20_500),
+        Press::Confirm(Need::Always)
+    );
 }
 
 #[test]
@@ -408,7 +427,10 @@ fn multi_line_risky_and_untrusted_commands_need_a_second_click() {
     let ok = "ls -a";
     g.drawn(key(ok), 0, true);
     g.hovered(key(ok), true, 0);
-    assert_eq!(g.press(&block(ok), ok, click(), 3_000), Press::Run);
+    assert_eq!(
+        g.press(&block(ok), ok, click(), 3_000),
+        Press::Confirm(Need::Always)
+    );
     g.hovered(key(bad), true, 3_100);
     assert_eq!(
         g.press(&bb, bad, click(), 3_500),
@@ -432,9 +454,47 @@ fn multi_line_risky_and_untrusted_commands_need_a_second_click() {
         Press::Confirm(Need::Untrusted)
     );
     assert_eq!(g.press(&block(ok), ok, t, 1_500), Press::Run);
-    assert_eq!(Need::Lines(3).label(), "Run 3 lines");
-    assert_eq!(Need::Risky.label(), "Run anyway");
-    assert_eq!(Need::Untrusted.label(), "Run anyway");
+    assert_eq!(Need::Always.label(), "Approve and run");
+    assert_eq!(Need::Lines(3).label(), "Approve and run 3 lines");
+    assert_eq!(Need::Risky.label(), "Approve: risky command, run anyway");
+    assert_eq!(
+        Need::Untrusted.label(),
+        "Approve: untrusted content, run anyway"
+    );
+    assert!(Need::Risky.warn() && Need::Untrusted.warn());
+    assert!(!Need::Always.warn() && !Need::Lines(2).warn());
+}
+
+#[test]
+fn esc_cancels_the_approval_and_it_lapses_or_changes_with_the_text() {
+    let cmd = "cargo test";
+    let b = block(cmd);
+    let mut g = ready(cmd, 0);
+    assert_eq!(
+        g.press(&b, cmd, click(), 1_000),
+        Press::Confirm(Need::Always)
+    );
+    assert!(g.confirming(key(cmd), 1_000));
+    g.cancel();
+    assert!(!g.confirming(key(cmd), 1_000));
+    // cancelled: the next click is a first click again, never a run
+    assert_eq!(
+        g.press(&b, cmd, click(), 2_000),
+        Press::Confirm(Need::Always)
+    );
+    // lapsed after 15 s
+    assert_eq!(
+        g.press(&b, cmd, click(), 2_000 + CONFIRM_MS + 1),
+        Press::Confirm(Need::Always)
+    );
+    // changed text is another block: its first click never runs
+    let other = "cargo test -q";
+    g.drawn(key(other), 0, true);
+    g.hovered(key(other), true, 0);
+    assert_eq!(
+        g.press(&block(other), other, click(), 30_000),
+        Press::Confirm(Need::Always)
+    );
 }
 
 #[test]
