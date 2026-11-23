@@ -55,10 +55,13 @@ pub enum Action {
     Notify,
     /// Starts a model planning run (B7 uses it): the owner only; nothing calls it yet.
     SpawnPlanner,
+    /// The person's line to a work item's worker (S1 4.6): a person only, never the conductor,
+    /// a worker or the read-only engine.
+    MessageWorker,
 }
 
 impl Action {
-    pub const ALL: [Action; 13] = [
+    pub const ALL: [Action; 14] = [
         Action::CreateOutcome,
         Action::Enable,
         Action::ApproveContract,
@@ -72,6 +75,7 @@ impl Action {
         Action::PlanInstall,
         Action::Notify,
         Action::SpawnPlanner,
+        Action::MessageWorker,
     ];
 
     /// The command kind (or call name) of the action.
@@ -90,6 +94,7 @@ impl Action {
             Action::PlanInstall => "plan.install",
             Action::Notify => "notify",
             Action::SpawnPlanner => "planner.spawn",
+            Action::MessageWorker => "attempt.message",
         }
     }
 
@@ -230,6 +235,20 @@ mod tests {
             Principal::Orchestrator,
         ] {
             assert!(!allowed(p, Action::ReviseContract), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_worker_message_is_a_person_action_only() {
+        for s in SURFACES {
+            assert!(allowed(Principal::User(s), Action::MessageWorker));
+        }
+        for p in [
+            Principal::Engine,
+            Principal::Attempt,
+            Principal::Orchestrator,
+        ] {
+            assert!(!allowed(p, Action::MessageWorker), "{p:?}");
         }
     }
 

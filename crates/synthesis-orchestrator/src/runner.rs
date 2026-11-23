@@ -666,6 +666,9 @@ impl Runner<'_> {
                 time::OffsetDateTime::now_utc(),
             )?;
         }
+        // what the worker never acked goes back to the item's queue (S1 4.6); best effort, the next
+        // attempt's start does the same, so a failure here loses nothing
+        let _ = w.requeue_unacked(&attempt.work_item_id);
         let item = settle_item(w, attempt, end)?;
         Ok(Settled {
             end,
