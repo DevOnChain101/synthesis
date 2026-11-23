@@ -273,6 +273,11 @@ pub fn detail(item: &Item) -> Detail {
         current: serde_json::from_value(contract()["contract"].clone()).ok(),
         contract: CriteriaView::from_json(&contract()),
         history: InspectorContent::activity(&events(), 5),
+        workers: InspectorContent::or_unavailable(
+            InspectorTab::Workers,
+            InspectorContent::workers(&plan(), &work_items()),
+        ),
+        messages: vec![],
     }
 }
 

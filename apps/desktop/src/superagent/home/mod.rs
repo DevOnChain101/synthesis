@@ -497,7 +497,7 @@ impl Focusable for HomeView {
 }
 
 /// A section: the header (title, count) over its rows.
-pub(super) fn section(
+pub(in crate::superagent) fn section(
     id: &'static str,
     title: &'static str,
     count: usize,
@@ -513,7 +513,7 @@ pub(super) fn section(
 }
 
 /// What one list row shows: the glyph, the title, plain meta parts then beige notes, trailing controls.
-pub(super) struct RowSpec {
+pub(in crate::superagent) struct RowSpec {
     pub status: Status,
     pub title: String,
     pub meta: Vec<String>,
@@ -524,7 +524,7 @@ pub(super) struct RowSpec {
 
 /// min h 52, p 8 x 16, r 8: glyph, title 13/500 over meta 12, trailing. `on_click` is the title area's (the buttons
 /// have their own), so a click never fires two handlers.
-pub(super) fn row(
+pub(in crate::superagent) fn row(
     id: (&'static str, usize),
     s: RowSpec,
     on_click: Option<OnClick>,

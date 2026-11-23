@@ -17,6 +17,7 @@ use gpui::{
     IntoElement as _, ParentElement as _, ScrollHandle, Styled as _, Task, Window, div, point, px,
 };
 use gpui_component::input::{InputEvent, InputState, TextareaState};
+use std::ops::Not as _;
 use synthesis_config::Env;
 
 use crate::live::now_ms;
@@ -76,6 +77,14 @@ pub struct OpenFolder(pub std::path::PathBuf);
 
 impl gpui::EventEmitter<OpenFolder> for OutcomesView {}
 
+/// What became of a worker message (`OutcomesView::send_message`): the key is the one it was sent with.
+pub struct MessageSent {
+    pub key: String,
+    pub result: Result<link::Delivery, String>,
+}
+
+impl gpui::EventEmitter<MessageSent> for OutcomesView {}
+
 /// The text inputs and the two buttons' focus of the form. Lists are one entry per line.
 struct FormUi {
     goal: Entity<TextareaState>,
@@ -132,6 +141,12 @@ impl OutcomesView {
         }
     }
 
+    /// The frames' tests give the view a link whose requests they can read.
+    #[cfg(test)]
+    pub(crate) fn set_link(&mut self, l: Link) {
+        self.link = Some(l);
+    }
+
     /// The tab was opened: the keys go to it, and it connects the first time (else it looks again).
     pub fn shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
@@ -155,6 +170,40 @@ impl OutcomesView {
         if let Some(i) = self.state.items.iter().position(|i| i.row.id == id) {
             let e = self.state.select(i);
             self.run(e, cx);
+        }
+    }
+
+    /// The person's line to the worker of `item`, typed in its frame and sent on Enter there. `MessageSent`
+    /// follows with the same `key`. Only the worker frame calls this (a source test keeps it so); the text is
+    /// never logged, and the sample sends nothing.
+    pub(crate) fn send_message(
+        &mut self,
+        outcome: &str,
+        item: &str,
+        text: String,
+        key: String,
+        cx: &mut Context<Self>,
+    ) {
+        let failed = match &self.link {
+            None => Some("Sample data: nothing was sent.".to_string()),
+            Some(l) => l
+                .try_send(Req::Message {
+                    outcome: outcome.into(),
+                    item: item.into(),
+                    text,
+                    key: key.clone(),
+                })
+                .not()
+                .then(|| {
+                    "The link to the orchestrator has ended. Press r on the home to check again."
+                        .to_string()
+                }),
+        };
+        if let Some(e) = failed {
+            cx.emit(MessageSent {
+                key,
+                result: Err(e),
+            });
         }
     }
 
@@ -192,9 +241,12 @@ impl OutcomesView {
                 Msg::Screen(s) => {
                     // a failed or restarted link: what that engine advertised no longer holds
                     self.state.read_only_goal = false;
+                    self.state.attempt_message = false;
                     self.state.set_screen(s);
                 }
                 Msg::ReadOnlyGoal(on) => self.state.read_only_goal = on,
+                Msg::AttemptMessage(on) => self.state.attempt_message = on,
+                Msg::Sent { key, result } => cx.emit(MessageSent { key, result }),
                 Msg::Snapshot {
                     items,
                     selected,

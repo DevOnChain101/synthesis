@@ -40,6 +40,8 @@ use goal::{GoalEvent, GoalForm};
 use home::{HomeEvent, HomeView};
 use port::{Cmd, HostPort};
 use session::host::SessionHost;
+use session::outcome::{OutcomeEvent, OutcomeFrame};
+use session::worker::{WorkerEvent, WorkerFrame};
 use synthesis_app::conductor::SessionRow;
 use tokens::{self as t, hsla};
 
@@ -97,6 +99,9 @@ pub struct SuperAgentView {
     conductor: Option<(synthesis_config::Env, PathBuf)>,
     /// One form per open `Frame::NewGoal`; dropping it (with its frame) ends its link.
     goals: Vec<(GoalKind, Entity<GoalForm>, Subscription)>,
+    /// One per open `Frame::Outcome` and `Frame::Worker` (C3); a worker's draft goes to `frames` when its tab closes.
+    outcome_frames: Vec<(String, Entity<OutcomeFrame>, Subscription)>,
+    worker_frames: Vec<((String, String), Entity<WorkerFrame>, Subscription)>,
     /// The right sidebar (C2): open state, segment and width are the window's.
     pub(crate) side: sidebar::Side,
     /// The sidebar's grip holds the keys (Left and Right resize); the pointer is dragging it.
@@ -170,6 +175,8 @@ impl SuperAgentView {
             had_guide: false,
             conductor,
             goals: Vec::new(),
+            outcome_frames: Vec::new(),
+            worker_frames: Vec::new(),
             side: sidebar::Side::default(),
             grip_focus: cx.focus_handle(),
             grip_drag: false,
@@ -262,6 +269,24 @@ impl SuperAgentView {
         let open = self.frames.tabs().to_vec();
         self.goals
             .retain(|(k, ..)| open.contains(&Frame::NewGoal(*k)));
+        self.outcome_frames
+            .retain(|(o, ..)| open.contains(&Frame::Outcome(o.clone())));
+        // a closed worker frame keeps what was typed (not what was sent) with its frame key
+        let gone: Vec<_> = self
+            .worker_frames
+            .iter()
+            .filter(|((o, i), ..)| !open.contains(&Frame::Worker(o.clone(), i.clone())))
+            .map(|((o, i), e, _)| (Frame::Worker(o.clone(), i.clone()), e.read(cx).draft(cx)))
+            .collect();
+        for (f, draft) in gone {
+            self.frames.set_draft(f, draft);
+        }
+        self.worker_frames
+            .retain(|((o, i), ..)| open.contains(&Frame::Worker(o.clone(), i.clone())));
+        // the outcome or worker frame in front reads the selected outcome: select it
+        if let Frame::Outcome(id) | Frame::Worker(id, _) = self.frames.active().clone() {
+            self.outcomes.update(cx, |o, cx| o.select_id(&id, cx));
+        }
         cx.notify();
     }
 
@@ -551,6 +576,61 @@ impl SuperAgentView {
         form
     }
 
+    /// The entity of an outcome frame (made on first use).
+    fn outcome_frame(&mut self, id: &str, cx: &mut Context<Self>) -> Entity<OutcomeFrame> {
+        if let Some((_, e, _)) = self.outcome_frames.iter().find(|(o, ..)| o == id) {
+            return e.clone();
+        }
+        let (outcomes, oid) = (self.outcomes.clone(), id.to_string());
+        let e = cx.new(|cx| OutcomeFrame::new(outcomes, oid, cx));
+        let at = id.to_string();
+        let sub = cx.subscribe(&e, move |v, _, ev: &OutcomeEvent, cx| match ev {
+            OutcomeEvent::OpenWorker(item) => v.open(Frame::Worker(at.clone(), item.clone()), cx),
+            OutcomeEvent::AnswerOnHome => {
+                v.frames.focus(0);
+                v.changed(cx);
+                v.home.update(cx, |h, cx| h.review(&at, cx));
+            }
+        });
+        self.outcome_frames.push((id.to_string(), e.clone(), sub));
+        e
+    }
+
+    /// The entity of a worker frame (made on first use, with the draft its closed tab kept).
+    fn worker_frame(
+        &mut self,
+        o: &str,
+        i: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WorkerFrame> {
+        if let Some((_, e, _)) = self
+            .worker_frames
+            .iter()
+            .find(|((a, b), ..)| a == o && b == i)
+        {
+            return e.clone();
+        }
+        let draft = self
+            .frames
+            .draft(&Frame::Worker(o.into(), i.into()))
+            .to_string();
+        let (outcomes, oid, iid) = (self.outcomes.clone(), o.to_string(), i.to_string());
+        let e = cx.new(|cx| WorkerFrame::new(outcomes, oid, iid, &draft, window, cx));
+        let at = o.to_string();
+        let sub = cx.subscribe_in(
+            &e,
+            window,
+            move |v, _, ev: &WorkerEvent, window, cx| match ev {
+                WorkerEvent::OpenOutcome => v.open(Frame::Outcome(at.clone()), cx),
+                WorkerEvent::Blur => window.focus(&v.focus, cx),
+            },
+        );
+        self.worker_frames
+            .push(((o.to_string(), i.to_string()), e.clone(), sub));
+        e
+    }
+
     /// A conductor goal card: the New goal frame opens (or comes forward) and its text is filled in. The person
     /// still finishes the contract, sends it and approves the stored version; nothing is approved here.
     fn open_goal_form(
@@ -597,7 +677,13 @@ impl SuperAgentView {
                 .iter()
                 .find(|i| i.row.id == *id)
                 .map_or_else(|| clean(id), |i| clean(&i.row.goal)),
-            Frame::Worker(o, i) => clean(&format!("{o} {i}")),
+            Frame::Worker(o, i) => {
+                let st = &self.outcomes.read(cx).state;
+                match session::worker::build(st, o, i, session::worker::is_windows()) {
+                    session::worker::Body::Ready(v) => clean(&v.title),
+                    _ => clean(&format!("{o} {i}")),
+                }
+            }
             Frame::Session(id) => self
                 .host
                 .read(cx)
@@ -682,7 +768,11 @@ impl SuperAgentView {
         }
         let mine = self.focus.is_focused(window)
             || self.rail_focus.is_focused(window)
-            || self.home.focus_handle(cx).is_focused(window);
+            || self.home.focus_handle(cx).is_focused(window)
+            || self
+                .outcome_frames
+                .iter()
+                .any(|(_, e, _)| e.read(cx).focus.is_focused(window));
         if !bare || !mine {
             return false;
         }
@@ -769,6 +859,14 @@ impl SuperAgentView {
                     .child(kit::text(t::T3, t::W_REGULAR, t::TEXT).child("This session has ended."))
                     .into_any_element()
             }
+            Frame::Outcome(id) => div()
+                .size_full()
+                .child(self.outcome_frame(id, cx))
+                .into_any_element(),
+            Frame::Worker(o, i) => div()
+                .size_full()
+                .child(self.worker_frame(o, i, window, cx))
+                .into_any_element(),
             Frame::NewGoal(k) => {
                 let form = self.goal_form(*k, None, window, cx);
                 div()
@@ -777,7 +875,7 @@ impl SuperAgentView {
                     .child(form)
                     .into_any_element()
             }
-            f => col()
+            f @ Frame::Picker => col()
                 .debug_selector(|| "sa-frame".to_string())
                 .child(
                     kit::card("sa-frame-card", false)
@@ -829,6 +927,18 @@ impl Render for SuperAgentView {
                 Frame::Home => self.home.update(cx, |h, cx| h.shown(window, cx)),
                 // a hosted chat takes its own focus; the others keep the keys on this view
                 Frame::Session(_) => {}
+                Frame::Outcome(id) => {
+                    let f = self.outcome_frame(&id.clone(), cx).read(cx).focus.clone();
+                    window.focus(&f, cx);
+                }
+                Frame::Worker(o, i) => {
+                    let (o, i) = (o.clone(), i.clone());
+                    let f = self
+                        .worker_frame(&o, &i, window, cx)
+                        .read(cx)
+                        .focus_target(cx);
+                    window.focus(&f, cx);
+                }
                 // a form already used keeps its own focus; a new one takes its first field when it first draws
                 Frame::NewGoal(k) if self.goals.iter().any(|(g, ..)| g == k) => {
                     let f = self

@@ -40,6 +40,12 @@ struct Fake {
     diff_fails: bool,
     /// `outcome.contract.get` for version 2 reports another hash than the revise reply did.
     wrong_hash: bool,
+    /// What `attempt.message` answers: `live`, `queued`, `denied` (a rate limit) or `pending` (never applied).
+    msg: Rc<RefCell<&'static str>>,
+    /// Every `attempt.message` call, as sent.
+    msgs: Rc<RefCell<Vec<Value>>>,
+    /// The control session's inbox events (`events.subscribe` adds them) and the acked `seq` of attempt `at4`.
+    inbox: bool,
 }
 
 impl Transport for Fake {
@@ -113,6 +119,11 @@ impl Transport for Fake {
                     .into_iter()
                     .find(|s| !s.is_empty())
                     .unwrap_or("applied");
+                let state = if *self.msg.borrow() == "pending" {
+                    "queued"
+                } else {
+                    state
+                };
                 json!({"idempotency_key": p["idempotency_key"], "kind": "outcome.contract.approve", "state": state, "result": {}})
             }
             "outcome.contract.diff" if self.diff_fails => {
@@ -127,17 +138,44 @@ impl Transport for Fake {
                 }
                 json!({"decisions": cards})
             }
+            "attempt.message" => {
+                self.msgs.borrow_mut().push(p.clone());
+                let (state, result) = match *self.msg.borrow() {
+                    "queued" => (
+                        "applied",
+                        json!({"delivery": "queued", "seq": 9, "rebriefed": 0}),
+                    ),
+                    "denied" => (
+                        "denied",
+                        json!({"reason": "at most 5 messages to one attempt in 10 minutes; wait, or the worker is flooded"}),
+                    ),
+                    "pending" => ("queued", json!({})),
+                    _ => (
+                        "applied",
+                        json!({"delivery": "live", "attempt": "at4-1111-2222", "seq": 9, "rebriefed": 0}),
+                    ),
+                };
+                json!({"idempotency_key": p["idempotency_key"], "kind": "attempt.message", "state": state, "result": result})
+            }
             "events.subscribe" => {
-                let evs = sample::events();
+                let mut evs = sample::events();
+                if self.inbox {
+                    evs.push(json!({"seq": 6, "type": "attempt.message", "payload": {"seq": 6, "attempt": "at4-1111-2222", "text": "use REST\u{1b}[31m", "sha256": "a"}}));
+                    evs.push(json!({"seq": 7, "type": "attempt.message.queued", "payload": {"seq": 7, "work_item": "wi4", "text": "later", "sha256": "b"}}));
+                }
                 json!({"events": evs, "next_event_id": evs.len()})
             }
             "plan.get" => sample::plan(),
             "work_item.get" => {
                 let id = p["id"].as_str().unwrap();
-                sample::work_items()
+                let mut w = sample::work_items()
                     .into_iter()
                     .find(|w| w["id"] == id)
-                    .unwrap()
+                    .unwrap();
+                if self.inbox && id == "wi3" {
+                    w["attempts"][0]["messages_delivered"] = json!([6]);
+                }
+                w
             }
             "evidence.get" => json!({"evidence": sample::evidence()}),
             "attempt.diff" => sample::diff(),
@@ -1006,4 +1044,142 @@ fn a_read_only_create_reads_no_head_and_sends_an_empty_base_commit() {
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].1["base_commit"].as_str(), Some(""));
     assert!(matches!(forms(&msgs)[..], [FormMsg::Review(_)]));
+}
+
+fn say(key: &str, text: &str) -> Req {
+    Req::Message {
+        outcome: "o_auth".into(),
+        item: "wi3".into(),
+        text: text.into(),
+        key: key.into(),
+    }
+}
+
+fn sent(m: &[Msg]) -> Vec<(&str, &Result<Delivery, String>)> {
+    m.iter()
+        .filter_map(|m| match m {
+            Msg::Sent { key, result } => Some((key.as_str(), result)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_worker_message_is_sent_once_with_its_text_and_key_and_the_delivery_is_reported() {
+    let f = fake();
+    let msgs = run(&f, vec![say("k1", "  use REST\n")]);
+    let calls = f.msgs.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["text"], "  use REST\n", "the exact text");
+    assert_eq!(calls[0]["idempotency_key"], "k1");
+    assert_eq!(
+        (calls[0]["outcome"].as_str(), calls[0]["work_item"].as_str()),
+        (Some("o_auth"), Some("wi3"))
+    );
+    assert_eq!(
+        calls[0]["surface"], "superagent",
+        "the person's surface, not a card"
+    );
+    assert!(
+        calls[0].get("proposal_sha256").is_none_or(Value::is_null),
+        "no card: {:?}",
+        calls[0]
+    );
+    assert_eq!(
+        sent(&msgs),
+        [("k1", &Ok(Delivery::Live(Some("at4-1111".into()))))]
+    );
+    // the list is looked at again afterwards
+    assert!(snapshots(&msgs).len() >= 2);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn queued_denied_and_never_applied_are_told_in_words() {
+    for (mode, want) in [
+        ("queued", Ok(Delivery::Queued)),
+        (
+            "denied",
+            Err(
+                "at most 5 messages to one attempt in 10 minutes; wait, or the worker is flooded"
+                    .to_string(),
+            ),
+        ),
+    ] {
+        let f = fake();
+        *f.msg.borrow_mut() = mode;
+        let msgs = run(&f, vec![say("k", "hi")]);
+        assert_eq!(sent(&msgs), [("k", &want)], "{mode}");
+    }
+    // the owner has not applied it within the wait: not claimed as sent
+    let f = fake();
+    *f.msg.borrow_mut() = "pending";
+    let msgs = run(&f, vec![say("k", "hi")]);
+    assert!(
+        matches!(sent(&msgs)[0].1, Err(w) if w.contains("Not confirmed yet")),
+        "{:?}",
+        sent(&msgs)
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn hidden_characters_and_an_empty_or_long_text_never_reach_the_server() {
+    let f = fake();
+    let long = "x".repeat(4097);
+    let msgs = run(
+        &f,
+        vec![say("a", "a\u{202e}b"), say("b", "  "), say("c", &long)],
+    );
+    assert!(f.msgs.borrow().is_empty());
+    let s = sent(&msgs);
+    assert!(matches!(s[0].1, Err(w) if w.contains("hidden, bidi or control")));
+    assert!(matches!(s[1].1, Err(w) if w.contains("empty")));
+    assert!(matches!(s[2].1, Err(w) if w.contains("longer than 4096")));
+}
+
+#[cfg(windows)]
+#[test]
+fn on_native_windows_nothing_is_sent_and_the_words_name_wsl() {
+    let f = fake();
+    let msgs = run(&f, vec![say("k", "hi")]);
+    assert!(f.msgs.borrow().is_empty());
+    assert!(matches!(sent(&msgs)[0].1, Err(w) if w.contains("WSL2")));
+}
+
+#[test]
+fn the_snapshot_carries_the_workers_and_the_message_rows_with_their_acks() {
+    let f = fake();
+    let f = Fake { inbox: true, ..f };
+    let msgs = run(&f, vec![]);
+    let d = snapshots(&msgs)[0].1.clone().unwrap();
+    assert!(matches!(d.workers, InspectorContent::Workers(_)));
+    let got: Vec<_> = d.messages.iter().map(|m| (m.seq, m.label())).collect();
+    assert_eq!(
+        got,
+        [
+            (6, "delivered to at4-1111".to_string()),
+            (7, "queued for the next attempt".to_string())
+        ]
+    );
+    assert!(d.messages.iter().all(|m| !m.text.contains('\u{1b}')));
+    assert_eq!(d.messages[1].work_item.as_deref(), Some("wi4"));
+}
+
+#[test]
+fn the_engines_features_say_whether_a_worker_may_be_messaged() {
+    let has = |s: &Value, f: &str| {
+        s["features"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == f))
+    };
+    assert!(has(
+        &json!({"features": ["read_only_goal", "attempt_message"]}),
+        "attempt_message"
+    ));
+    assert!(!has(
+        &json!({"features": ["read_only_goal", "report_review"]}),
+        "attempt_message"
+    ));
 }
