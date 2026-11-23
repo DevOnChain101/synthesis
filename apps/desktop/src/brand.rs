@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use gpui::{Image, ImageFormat};
-
 /// The symbol with transparent background (256 px), for the rail.
 pub const MARK_PNG: &[u8] =
     include_bytes!("../../../design/01-brand/logo/png/synthesis-symbol-transparent-256.png");
@@ -33,12 +31,6 @@ pub const MONO_FONT_FILES: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/FiraCode-Medium.ttf"),
     include_bytes!("../assets/fonts/FiraCode-Bold.ttf"),
 ];
-
-pub fn mark() -> Arc<Image> {
-    static MARK: OnceLock<Arc<Image>> = OnceLock::new();
-    MARK.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, MARK_PNG.to_vec())))
-        .clone()
-}
 
 /// The mark as a texture of exactly `logical * scale` device pixels. gpui samples a texture bilinearly without
 /// mipmaps, so drawing the 256 px PNG at 16-96 px skips most source pixels and the edge turns into stairs; this
@@ -162,6 +154,16 @@ mod tests {
     fn mark_is_a_png_and_embedded() {
         assert!(MARK_PNG.starts_with(b"\x89PNG"));
         assert!(MARK_PNG.len() > 1000);
+    }
+
+    #[test]
+    fn mark_is_resampled_to_the_device_size_with_transparent_corners() {
+        for d in [28u32, 64, 256] {
+            let r = mark_at(MARK_PNG, d);
+            let b = r.as_bytes(0).unwrap();
+            assert_eq!(r.size(0).width.0 as u32, d);
+            assert_eq!(b[3], 0, "corner alpha at {d}");
+        }
     }
 
     #[test]
