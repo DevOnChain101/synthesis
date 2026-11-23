@@ -375,14 +375,13 @@ pub fn risky(cmd: &str) -> bool {
         // pipes into a shell or interpreter, eval, substitution, quote tricks
         r"\|\s*(?:sudo\s+)?(?:\w*sh|python3?|perl|ruby|node|iex|pwsh|powershell|nc|ncat|netcat|socat)\b",
         r"\beval\b|\$\(|`|<\(|\biex\b|\binvoke-expression\b|\bsource\s+<",
-        r#"(?m)(?:^|[;&|(]\s*)\s*[\w./-]*['"\\]"#,
         // inline interpreters, shells, powershell, cmd
         r"\b(?:python[0-9.]*|perl|ruby|node|php|(?:ba|z|da|k|fi)?sh)\b[^\n|;&]*\s-[a-z]*[cer]\b",
         r"\b(?:powershell|pwsh)\b[^\n]*\s-(?:enc\w*|e|ec|c|command)\b|\bcmd(?:\.exe)?\s+/[ck]\b",
         // network: uploads, downloads, copies out, listeners
         r"\bcurl\b[^\n]*\s(?:-[a-zA-Z]*[FdTo]\b|--(?:form|data\S*|upload-file|json|output)\b)",
         r"\bwget\b[^\n]*(?:--post-\S+|--body-\S+|\s-[a-zA-Z]*[Oo]\b|--output\S*)",
-        r"\b(?:scp|rsync|sftp|ssh|ftp|telnet|nc|ncat|netcat|socat)\b|https?://",
+        r"\b(?:scp|rsync|sftp|ssh|ftp|telnet|nc|ncat|netcat|socat|curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b|https?://",
         r"\bchmod\b|\bchown\b|\bbase64\b[^\n]*(?:-d|--decode)",
         // what a command may read or change outside the project
         r"\$\{?HOME\b|~[/\\]|\s~(?:\s|$)|\.ssh\b|\.aws\b|\.env\b|\.npmrc|\.git-credentials|\.netrc|\.kube|\.gnupg|/etc\b|/dev/|%USERPROFILE%|\$env:",
@@ -393,6 +392,12 @@ pub fn risky(cmd: &str) -> bool {
         // fork bomb, raw disks, power
         r":\(\)\s*\{|>\s*/dev/|\b(?:shutdown|reboot|halt|poweroff)\b|\binit\s+[06]\b|\bformat\s+[a-z]:|\b(?:rd|rmdir)\s+/s|\breg\s+delete|\bcrontab\s+-r",
         r"\bremove-item\b|\bkill\s+-9\s+-?1\b",
+        // Windows and macOS: registry, tasks, downloaders, script hosts, files written by cmdlets, launch agents
+        r"\breg\s+(?:add|delete|import)\b|\b(?:schtasks|bitsadmin|certutil|mshta|rundll32|regsvr32|start-process|osascript|launchctl|wmic|msiexec)\b",
+        r"\b(?:powershell|pwsh)\b[^\n]*\s-(?:file|executionpolicy|ep)\b|\bsc\s+(?:create|config|delete)\b|\bdefaults\s+write\b",
+        r"\b(?:set-content|out-file|add-content|new-item|copy-item|move-item|set-itemproperty|invoke-command|stop-process)\b",
+        // files overwritten or processes ended
+        r"\b(?:mv|cp|ln|tee|install|ren|rename|move|copy|xcopy|robocopy|kill|taskkill)\b|\bsed\b[^\n]*\s-[a-z]*i|\bperl\b[^\n]*\s-[a-z]*i",
         // installs and deploys
         r"\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|ci|exec|dlx|x|publish|remove|uninstall)\b|\bnpx\b|\bpipx?\s+(?:install|uninstall)\b",
         r"\buv\s+(?:pip|tool|add)\b|\bcargo\s+(?:install|publish|add|uninstall)\b|\bbrew\s+(?:install|uninstall|upgrade|reinstall)\b",
@@ -403,7 +408,61 @@ pub fn risky(cmd: &str) -> bool {
     let r = R.get_or_init(|| {
         Regex::new(&format!("(?i)(?:{})", PARTS.join("|"))).expect("risk regex is valid")
     });
-    r.is_match(cmd) || truncating_redirect(cmd)
+    // a continuation joins the next line (`\`, `^` of cmd, a backtick of PowerShell), so its flags count
+    let joined = join_continuations(cmd);
+    r.is_match(&joined) || truncating_redirect(&joined) || disguised_command_word(&joined)
+}
+
+fn join_continuations(cmd: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"[\\^`][ \t]*\r?\n").expect("continuation regex is valid"))
+        .replace_all(cmd, " ")
+        .into_owned()
+}
+
+/// Splits at `;`, `&`, `|`, `(`, `)` and newlines outside quotes, then at spaces outside quotes.
+fn command_words(cmd: &str) -> Vec<Vec<String>> {
+    let (mut segs, mut words, mut w) = (Vec::new(), Vec::new(), String::new());
+    let mut quote: Option<char> = None;
+    let mut esc = false;
+    for c in cmd.chars() {
+        if esc {
+            (esc, _) = (false, w.push(c));
+        } else if c == '\\' && quote != Some('\'') {
+            (esc, _) = (true, w.push(c));
+        } else if let Some(q) = quote {
+            quote = (c != q).then_some(q);
+            w.push(c);
+        } else if c == '\'' || c == '"' {
+            (quote, _) = (Some(c), w.push(c));
+        } else if c.is_whitespace() && c != '\n' || matches!(c, ';' | '&' | '|' | '(' | ')' | '\n')
+        {
+            if !w.is_empty() {
+                words.push(std::mem::take(&mut w));
+            }
+            if !c.is_whitespace() || c == '\n' {
+                segs.push(std::mem::take(&mut words));
+            }
+        } else {
+            w.push(c);
+        }
+    }
+    if !w.is_empty() {
+        words.push(w);
+    }
+    segs.push(words);
+    segs
+}
+
+/// A command word (the first word of a statement, after `NAME=value` words) that holds a quote, a backslash,
+/// `$` or a glob character: `r''m`, `$'\x72m'`, `r${x}m`, `/bin/r?`. What it runs is not what it says.
+fn disguised_command_word(cmd: &str) -> bool {
+    command_words(cmd).iter().any(|ws| {
+        ws.iter().find(|w| !env_assign(w)).is_some_and(|w| {
+            !matches!(w.as_str(), "[" | "[[")
+                && w.contains(['\'', '"', '\\', '$', '*', '?', '[', '`'])
+        })
+    })
 }
 
 /// A `> file` that overwrites something other than an obvious build output.

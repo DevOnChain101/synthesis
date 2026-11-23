@@ -346,6 +346,13 @@ impl Convo {
     fn apply_event(&mut self, e: &Envelope) {
         // sub-agent chatter is shown on the Activity page, not in the main conversation
         let main = e.agent_id.is_none();
+        // web, browser, MCP and sub-agent tools taint every later message, whichever agent called them; what the
+        // model read from a file is not tracked
+        if let Event::ToolRequested { name, .. } = &e.event {
+            use crate::toolview::{Kind, kind_of};
+            self.untrusted |= matches!(kind_of(name), Kind::Web | Kind::Mcp | Kind::Agent)
+                || name.starts_with("browser_");
+        }
         match &e.event {
             Event::TaskStarted { .. } => {
                 self.running = true;
@@ -615,10 +622,6 @@ impl Convo {
                 ..
             } if main => {
                 self.close_stream();
-                self.untrusted |= matches!(
-                    crate::toolview::kind_of(name),
-                    crate::toolview::Kind::Web | crate::toolview::Kind::Mcp
-                ) || name.starts_with("browser_");
                 self.items.push(Item::Tool {
                     id: tool_call_id.clone(),
                     name: name.clone(),
@@ -1040,7 +1043,7 @@ mod tests {
         say(&mut c, "a");
         tool(&mut c, "Bash");
         say(&mut c, "b");
-        for (i, name) in ["WebFetch", "mcp__x__y", "browser_navigate"]
+        for (i, name) in ["WebFetch", "mcp__x__y", "browser_navigate", "Task", "Agent"]
             .into_iter()
             .enumerate()
         {
@@ -1061,6 +1064,29 @@ mod tests {
             })
             .collect();
         assert_eq!(t, [false, false]);
+    }
+
+    #[test]
+    fn a_sub_agents_web_tool_taints_the_session_and_a_replay_derives_it() {
+        let mut e = ev(
+            "tool.requested",
+            json!({"tool_call_id":"t","name":"WebFetch","input":{},"input_truncated":false}),
+        );
+        e.agent_id = Some("a1".into());
+        let m = ev(
+            "assistant.message",
+            json!({"content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}),
+        );
+        // the session is rebuilt by replaying its stored events, so the flag comes back with them
+        let mut c = Convo::default();
+        for x in [&e, &m] {
+            c.apply(x);
+        }
+        assert!(c.untrusted);
+        assert!(matches!(
+            c.items.last(),
+            Some(Item::Assistant { tainted: true, .. })
+        ));
     }
 
     #[test]

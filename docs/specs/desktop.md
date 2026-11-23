@@ -219,6 +219,11 @@ view) and the pane says "Sent to terminal N" or "Queued until the shell is ready
 DENYLIST (deletion, privilege, pipes into interpreters, uploads and downloads, inline interpreters, paths and URLs outside
 the project, installs, destructive git, deploys, truncating redirects, quote tricks): it widens what asks twice, it does
 not prove anything safe. Whether to invert it to an allowlist of programs is an owner decision, not taken.
+Scope of the taint: web, browser, MCP and sub-agent (Task/Agent) tools, from any agent, sticky for the session; it is derived
+from the stored events, so a resumed session replays it. What the model read from a file or a mention is NOT tracked
+(file-borne injection): there the risky list and its "Run anyway" are the only defence. The list also flags disguised command
+words (quotes, backslashes, `$`, globs in the word that names the program), joins `\`, `^` and backtick line continuations
+before matching, and the Windows and macOS tools that change the system (registry, tasks, script hosts, launch agents).
 Accepted risk: single-click Run of model-authored commands under prompt injection: mitigated by risky/tainted confirmations,
 not eliminated; local automation can synthesize real clicks.
 Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
