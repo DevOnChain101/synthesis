@@ -198,6 +198,34 @@ fold; "approval needed" in the title bar has a fixed line box and only its dot b
 metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/cli-palette.md). At the reference sizes of `design_tests`
 nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
 (Files and Browser tabs unseeded).
+Fenced blocks in assistant messages (desktop extension, owner request 2026-11-23; `cli.html` has no such design, so this is the
+one place the chat departs from it, and only inside a message with a fence): each block is its own section with a header
+(kind and language) and buttons: COMMAND (Copy, Run in terminal), CODE, DIFF (`+` green, `-` red, `@@` blue, file headers
+strong; the diff tab's colours) and TEXT (Copy). Classification is pure (`synthesis-view/src/codeblock.rs`, shared by the
+TUI view, the Super Agent session chats and the conductor chat, which has Copy only): a shell label, or an unlabelled block
+whose every line looks like a shell command; an agent's `/slash` command and prose stay text. Run in terminal types the
+command into the person's shell (TUI view: Terminal tab; Super Agent session: the sidebar Terminal segment) only from a
+real single mouse click, 400 ms after the block was drawn whole, never while the message streams; a multi-line command
+("Run N lines") or a risky one ("Run anyway") needs a second click at least 400 ms later; a block with invisible or bidi
+characters is shown escaped with no buttons. The terminal's output never goes back to the engine. Messages without a fence
+are unchanged; no design_tests/shot baseline contains a fenced assistant message.
+Run safety, after the security review: a block longer than what is drawn (400 lines or 16 KiB) or with a tab is Copy only;
+a command block shows exactly the text that Copy and Run take (prompts stripped), the text as written follows dimmed when
+different; clicks are ignored while any message streams or a turn runs, within 500 ms of a scroll or layout change of the
+transcript, and unless the pointer rested on the button 300 ms; a message written after a web, browser or MCP tool ran in the
+session (`Item::Assistant.tainted`, sticky) asks twice for every command and says "based on web/untrusted content"; a
+many-line command goes only to a shell that takes a bracketed paste; Run always uses a shell tab (never the agent's log
+view) and the pane says "Sent to terminal N" or "Queued until the shell is ready". The risky list (`codeblock::risky`) is a
+DENYLIST (deletion, privilege, pipes into interpreters, uploads and downloads, inline interpreters, paths and URLs outside
+the project, installs, destructive git, deploys, truncating redirects, quote tricks): it widens what asks twice, it does
+not prove anything safe. Whether to invert it to an allowlist of programs is an owner decision, not taken.
+Scope of the taint: web, browser, MCP and sub-agent (Task/Agent) tools, from any agent, sticky for the session; it is derived
+from the stored events, so a resumed session replays it. What the model read from a file or a mention is NOT tracked
+(file-borne injection): there the risky list and its "Run anyway" are the only defence. The list also flags disguised command
+words (quotes, backslashes, `$`, globs in the word that names the program), joins `\`, `^` and backtick line continuations
+before matching, and the Windows and macOS tools that change the system (registry, tasks, script hosts, launch agents).
+Accepted risk: single-click Run of model-authored commands under prompt injection: mitigated by risky/tainted confirmations,
+not eliminated; local automation can synthesize real clicks.
 Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
 selects the whole conversation. The list is virtual, so this is a flag: the rows built tint like a selection, a pill says
 so, and Cmd/Ctrl+C copies the transcript assembled from the same items and `toolview` cards the rows paint (same

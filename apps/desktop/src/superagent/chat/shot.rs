@@ -177,7 +177,7 @@ pub fn render(a: Args) -> Result<(), Err> {
                 },
                 Item::Assistant {
                     text: "Two sessions could match. **s1 \"auth tests\"** is the closest, so I drafted a message for it. Nothing is sent until you press **Send**.".into(),
-                    streaming: false,
+                    streaming: false, tainted: false
                 },
             ];
             c.refresh_cards();

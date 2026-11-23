@@ -372,7 +372,7 @@ pub fn top_bar(left: &[Chip], right: &[Chip]) -> Div {
                 .flex_none()
                 .items_center()
                 .gap(px(12.))
-                .child(gpui::img(brand::mark()).size(px(32.)).flex_none())
+                .child(brand::mark_img(32.).size(px(32.)).flex_none())
                 .child(
                     tracked("SYNTHESIS", 14., 0.32, strong()).font_weight(gpui::FontWeight::BOLD),
                 ),
