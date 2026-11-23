@@ -504,3 +504,126 @@ fn start_checks_the_gate_again_and_refuses_when_super_agent_is_off() {
     };
     assert_eq!(e, want);
 }
+
+fn open_window(cx: &mut TestAppContext) -> (Entity<ConductorChat>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    let (chat, v) = cx.add_window_view(|window, cx| {
+        let mut c = ConductorChat::new(
+            Env::from_pairs([("HOME", "/nonexistent")]),
+            PathBuf::from("/"),
+            None,
+            window,
+            cx,
+        );
+        c.gate = Gate::Ready;
+        c
+    });
+    v.simulate_resize(size(px(900.), px(900.)));
+    (chat, v)
+}
+
+fn hint(chat: &Entity<ConductorChat>, v: &mut VisualTestContext) -> (Phase, bool) {
+    v.run_until_parked();
+    (
+        chat.read_with(v, |c, _| c.phase.clone()),
+        v.debug_bounds("sa-chat-settings").is_some(),
+    )
+}
+
+#[gpui::test]
+fn a_start_with_no_model_says_what_to_set_and_offers_settings(cx: &mut TestAppContext) {
+    let (chat, v) = open_window(cx);
+    chat.update_in(v, |c, window, cx| {
+        c.started(Err(synthesis_app::run::NO_MODEL.into()), window, cx)
+    });
+    let (phase, settings) = hint(&chat, v);
+    let Phase::Failed(m) = phase else {
+        panic!("not failed")
+    };
+    assert!(
+        m.contains("synt.conductor.model") && !m.contains("--model"),
+        "{m}"
+    );
+    assert!(settings, "Open Settings is offered");
+    assert!(v.debug_bounds("sa-chat-hint").is_some());
+}
+
+#[gpui::test]
+fn an_engine_start_failure_is_visible(cx: &mut TestAppContext) {
+    let (chat, v) = open_window(cx);
+    chat.update_in(v, |c, window, cx| {
+        c.started(Err("the engine could not start".into()), window, cx)
+    });
+    let (phase, settings) = hint(&chat, v);
+    assert_eq!(phase, Phase::Failed("the engine could not start".into()));
+    assert!(settings && v.debug_bounds("sa-chat-hint").is_some());
+}
+
+#[gpui::test]
+fn a_reply_from_the_engine_is_rendered(cx: &mut TestAppContext) {
+    let (chat, v) = open_window(cx);
+    let h = Arc::new(ConductorHost::new(
+        HostConfig {
+            max_sessions: 6,
+            confirm: Confirm::All,
+            home: PathBuf::from("/nonexistent"),
+            synt_home: PathBuf::from("/nonexistent/.synt"),
+            models: vec![],
+            secrets: vec![],
+        },
+        Arc::new(Reads(Mutex::new(true))),
+    ));
+    let exec = Arc::new(ProposalExecutor::new(
+        h.clone(),
+        Arc::new(DesktopEffects {
+            port: Arc::new(Port::default()),
+            outcomes: Arc::new(OutcomeWorker::start(std::env::temp_dir())),
+        }),
+    ));
+    let env = |t: &str, p: Value| -> Box<synthesis_events::Envelope> {
+        let mut j = json!({"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z","session_id":"s","task_id":null,"turn_id":null,"type":t});
+        j["payload"] = p;
+        Box::new(serde_json::from_value(j).unwrap())
+    };
+    chat.update(v, |c, cx| {
+        c.live = Some(Live::for_test(h, exec));
+        c.on_msg(
+            UiMsg::Event(env(
+                "model.delta",
+                json!({"block_index": 0, "kind": "text", "text": "Hello from the orchestrator"}),
+            )),
+            cx,
+        );
+    });
+    v.run_until_parked();
+    let shown = chat.read_with(v, |c, _| {
+        c.convo
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Assistant { text, .. } if text.contains("Hello")))
+    });
+    assert!(shown);
+}
+
+#[test]
+fn start_with_the_setting_on_and_no_model_fails_with_a_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(
+        h.join("settings.json"),
+        r#"{"synt":{"orchestrator":{"enabled":true}}}"#,
+    )
+    .unwrap();
+    let env = Env::from_pairs([
+        ("HOME", h.to_str().unwrap()),
+        ("SYNT_HOME", h.to_str().unwrap()),
+    ]);
+    if model::gate(&env) != Gate::Ready {
+        return; // native Windows
+    }
+    let e = glue::start(&env, &h, Arc::new(glue::NoPort))
+        .err()
+        .expect("no model, no engine");
+    assert!(!model::explain(&e).is_empty(), "{e}");
+    assert!(e.contains("model"), "{e}");
+}

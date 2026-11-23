@@ -294,3 +294,19 @@ fn the_conversation_slot_is_at_the_bottom(cx: &mut TestAppContext) {
     let fin = v.debug_bounds("home-finished-sec").unwrap();
     assert!(slot.origin.y >= fin.origin.y + fin.size.height - px(1.));
 }
+
+#[gpui::test]
+fn the_conversation_slot_is_there_when_the_home_is_empty(cx: &mut TestAppContext) {
+    let (_h, o, v) = open(cx);
+    o.update(v, |o, cx| {
+        o.state.set_screen(Screen::Ready);
+        o.state.items.clear();
+        cx.notify();
+    });
+    v.run_until_parked();
+    assert!(v.debug_bounds("home-empty").is_some());
+    assert!(
+        v.debug_bounds("home-conversation").is_some(),
+        "the chat must not vanish on a fresh home"
+    );
+}

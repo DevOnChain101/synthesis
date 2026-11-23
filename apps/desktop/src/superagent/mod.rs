@@ -34,7 +34,7 @@ use crate::outcomes_view::OutcomesView;
 use crate::outcomes_view::popup::OpenSession;
 use crate::ui::{TITLEBAR_H, Tip, View};
 use crate::widgets::chrome::icon;
-use chat::{ConductorChat, OpenEnableGuide};
+use chat::{ConductorChat, OpenEnableGuide, OpenSettings};
 use frames::{Frame, Frames, GoalKind};
 use goal::{GoalEvent, GoalForm};
 use home::{HomeEvent, HomeView};
@@ -148,6 +148,9 @@ impl SuperAgentView {
                     v.enable_guide(cx)
                 }),
             );
+            subs.push(cx.subscribe(&chat, |_, _, _: &OpenSettings, cx| {
+                cx.emit(SwitchView(View::Settings))
+            }));
             chat
         });
         // the conductor's effects on sessions run here, on the UI thread
