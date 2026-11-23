@@ -319,7 +319,11 @@ impl SuperAgentView {
             .p(px(t::S3))
             .overflow_hidden()
             .rounded(px(t::R_PANEL))
-            .bg(hsla(if overlay { t::ELEVATED } else { t::SURFACE }))
+            .bg(if overlay {
+                hsla(t::ELEVATED)
+            } else {
+                t::surface_fill()
+            })
             .border_1()
             .border_color(t::stroke())
             .when(overlay, |d| d.shadow(kit::raised()))

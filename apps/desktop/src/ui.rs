@@ -20,6 +20,7 @@ use gpui::{
 use crate::outcomes_view::OutcomesView;
 use crate::outcomes_view::popup::OpenSession;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
+use crate::superagent::material;
 use crate::superagent::session::host::SessionHost;
 use crate::superagent::{SuperAgentView, SwitchView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
@@ -234,7 +235,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         theme::set_opacity(tui.opacity);
-        window.set_background_appearance(theme::background(&tui));
+        window.set_background_appearance(material::background(&tui, material::current()));
         self.tui.update(cx, |v, cx| v.apply_settings(tui, cx));
         cx.notify();
     }
@@ -542,6 +543,9 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
     let mac = cfg!(target_os = "macos");
     if let Some(c) = &live {
         theme::set_opacity(c.tui.opacity);
+        material::set(material::detect(
+            material::read_choice(&c.synthesis_home).as_deref(),
+        ));
     }
     let opts = gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
@@ -557,9 +561,9 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
             gpui::size(px(1280.), px(800.)),
             cx,
         ))),
-        window_background: live
-            .as_ref()
-            .map_or(Default::default(), |c| theme::background(&c.tui)),
+        window_background: live.as_ref().map_or(Default::default(), |c| {
+            material::background(&c.tui, material::current())
+        }),
         // the design's minimum app size (cli.html `#app`) plus the title bar
         window_min_size: Some(gpui::size(
             px(layout::MIN_W),

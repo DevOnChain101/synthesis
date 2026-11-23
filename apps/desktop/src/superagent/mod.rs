@@ -870,7 +870,7 @@ impl Render for SuperAgentView {
             .size_full()
             .flex()
             .relative()
-            .bg(hsla(t::SURFACE))
+            .bg(t::surface_fill())
             .text_color(hsla(t::TEXT_STRONG))
             .child(self.rail(collapsed, window, cx))
             .child(

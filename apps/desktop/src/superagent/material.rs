@@ -1,7 +1,11 @@
 //! Window material: opaque everywhere, glass only on macOS 27+ when the user setting allows it
-//! (super-agent-v3 DESIGN-NOTES section 4). Detection only; the native glass view is not built here.
+//! (super-agent-v3 DESIGN-NOTES section 4). Glass is GPUI's `Blurred` window background plus translucent Super Agent
+//! fills (`tokens::surface_fill`); the native `NSGlassEffectView` is not used.
 
-use synthesis_settings::UiSettings;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use gpui::WindowBackgroundAppearance;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -53,13 +57,90 @@ pub fn macos_version() -> Option<String> {
     (out.status.success() && !v.is_empty()).then_some(v)
 }
 
-/// Glass needs a supported system and the user's `synt.tui.blur` (the existing opt-in for what is behind the
-/// window; off by default, like the mock's "macOS 27 glass" switch). Anything else is opaque.
-pub fn material_for(settings: &UiSettings, os: Os, version: Option<&str>) -> Material {
-    if settings.blur && version.is_some_and(|v| glass_supported(os, v, None)) {
+/// The Super Agent fills read this; one window per process, so a global like `theme::OPACITY`.
+static GLASS: AtomicBool = AtomicBool::new(false);
+
+pub fn set(m: Material) {
+    GLASS.store(m == Material::Glass, Ordering::Relaxed);
+}
+
+pub fn current() -> Material {
+    if GLASS.load(Ordering::Relaxed) {
         Material::Glass
     } else {
         Material::Opaque
+    }
+}
+
+/// `defaults read com.apple.universalaccess reduceTransparency`: `Some(true)` when the system asks for reduced
+/// transparency; `None` when it cannot be read (the key is absent when never set).
+fn reduce_transparency() -> Option<bool> {
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "com.apple.universalaccess", "reduceTransparency"])
+        .output()
+        .ok()?;
+    parse_flag(&String::from_utf8(out.stdout).ok()?)
+}
+
+fn parse_flag(s: &str) -> Option<bool> {
+    match s.trim() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// `synt.desktop.material` (`opaque` default, `glass`) on this system. Only an explicit `glass` on a supporting
+/// system is glass; anything else is opaque (and nothing is spawned unless the choice is `glass`).
+pub fn material_for(
+    choice: Option<&str>,
+    os: Os,
+    version: Option<&str>,
+    reduce: Option<bool>,
+) -> Material {
+    if choice == Some("glass") && version.is_some_and(|v| glass_supported(os, v, reduce)) {
+        Material::Glass
+    } else {
+        Material::Opaque
+    }
+}
+
+/// [`material_for`] on this machine.
+pub fn detect(choice: Option<&str>) -> Material {
+    if choice != Some("glass") || !cfg!(target_os = "macos") {
+        return Material::Opaque;
+    }
+    material_for(
+        choice,
+        Os::current(),
+        macos_version().as_deref(),
+        reduce_transparency(),
+    )
+}
+
+/// Whether the Settings row may offer glass here (version only, read once).
+pub fn os_supports_glass() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| macos_version().is_some_and(|v| glass_supported(Os::current(), &v, None)))
+}
+
+/// `synt.desktop.material` of the user settings file; a missing or unreadable file is `None` (opaque).
+pub fn read_choice(home: &std::path::Path) -> Option<String> {
+    let doc =
+        synthesis_settings::read_json(&home.join("settings.json"), "user settings").ok()??;
+    doc.get("synt")?
+        .get("desktop")?
+        .get("material")?
+        .as_str()
+        .map(Into::into)
+}
+
+/// What the window asks the platform for: glass is `Blurred`, anything else is the TUI's own rule.
+pub fn background(tui: &synthesis_settings::UiSettings, m: Material) -> WindowBackgroundAppearance {
+    if m == Material::Glass {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        crate::theme::background(tui)
     }
 }
 
@@ -87,16 +168,62 @@ mod tests {
     }
 
     #[test]
-    fn material_follows_the_blur_setting_and_the_system() {
-        let mut s = UiSettings::default();
-        assert_eq!(material_for(&s, Os::Mac, Some("27.0")), Material::Opaque);
-        s.blur = true;
-        assert_eq!(material_for(&s, Os::Mac, Some("27.0")), Material::Glass);
-        assert_eq!(material_for(&s, Os::Mac, Some("26.4")), Material::Opaque);
-        assert_eq!(material_for(&s, Os::Mac, None), Material::Opaque);
-        for os in [Os::Windows, Os::Linux] {
-            assert_eq!(material_for(&s, os, Some("27.0")), Material::Opaque);
+    fn material_resolution() {
+        use Material::*;
+        let g = Some("glass");
+        for (choice, os, v, reduce, want) in [
+            (g, Os::Mac, Some("27.0"), None, Glass),
+            (g, Os::Mac, Some("27.1"), Some(false), Glass),
+            (g, Os::Mac, Some("26.9"), None, Opaque),
+            (g, Os::Mac, Some("garbage"), None, Opaque),
+            (g, Os::Mac, None, None, Opaque),
+            (g, Os::Mac, Some("27.0"), Some(true), Opaque),
+            (g, Os::Windows, Some("27.0"), None, Opaque),
+            (g, Os::Linux, Some("27.0"), None, Opaque),
+            (Some("opaque"), Os::Mac, Some("27.0"), None, Opaque),
+            (None, Os::Mac, Some("27.0"), None, Opaque),
+            (Some("Glass "), Os::Mac, Some("27.0"), None, Opaque),
+        ] {
+            assert_eq!(
+                material_for(choice, os, v, reduce),
+                want,
+                "{choice:?} {os:?} {v:?} {reduce:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_flag_and_the_background() {
+        assert_eq!(parse_flag("1\n"), Some(true));
+        assert_eq!(parse_flag("0"), Some(false));
+        assert_eq!(parse_flag("does not exist"), None);
+        let tui = synthesis_settings::UiSettings::default();
+        assert_eq!(
+            background(&tui, Material::Glass),
+            WindowBackgroundAppearance::Blurred
+        );
+        assert_eq!(
+            background(&tui, Material::Opaque),
+            WindowBackgroundAppearance::Opaque
+        );
+        assert_eq!(detect(None), Material::Opaque);
+        if !cfg!(target_os = "macos") {
+            assert_eq!(detect(Some("glass")), Material::Opaque);
+        }
+    }
+
+    #[test]
+    fn the_choice_is_read_from_the_user_file() {
+        let d = std::env::temp_dir().join(format!("synt-material-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(read_choice(&d), None);
+        std::fs::write(
+            d.join("settings.json"),
+            r#"{"synt":{"desktop":{"material":"glass"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_choice(&d).as_deref(), Some("glass"));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

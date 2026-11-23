@@ -664,6 +664,8 @@ impl Model {
     fn lock_reason(&self, key: &str) -> Option<String> {
         self.store.read_only_reason(key).or_else(|| match key {
             "synt.tui.blur" => blur_unsupported().map(Into::into),
+            "synt.desktop.material" => (!crate::superagent::material::os_supports_glass())
+                .then(|| "Liquid Glass needs macOS 27 or later".into()),
             "synt.desktop.wsl.enabled" => self.wsl_lock.clone(),
             "synt.desktop.wsl.distro" => (!cfg!(windows)).then(|| "Windows only".into()),
             ORCHESTRATOR => orchestrator_platform_lock(cfg!(windows)).or_else(|| {

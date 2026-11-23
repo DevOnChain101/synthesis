@@ -38,6 +38,13 @@ pub const SCRIM_A: f32 = 0.72;
 pub const GLASS_TINT_A: f32 = 0.86;
 pub const GLASS_TINT_POP_A: f32 = 0.88;
 
+/// A shell fill of the Super Agent view (rail, title row, sidebar): solid, or the glass tint over the blurred window.
+pub fn surface_fill() -> Hsla {
+    match super::material::current() {
+        super::material::Material::Glass => alpha(SURFACE, GLASS_TINT_A),
+        super::material::Material::Opaque => hsla(SURFACE),
+    }
+}
 /// 1 px hairlines and inset rims.
 pub fn stroke() -> Hsla {
     alpha(WHITE, STROKE_A)
@@ -144,6 +151,42 @@ mod tests {
                 .unwrap_or_else(|| panic!("--{name} missing in tokens.css"));
             let hex = line.trim().trim_end_matches(';').trim_start_matches('#');
             assert_eq!(u32::from_str_radix(hex, 16).unwrap(), v, "--{name}");
+        }
+    }
+
+    fn lum(c: u32) -> f32 {
+        let f = |v: u32| {
+            let v = v as f32 / 255.;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c >> 16 & 255) + 0.7152 * f(c >> 8 & 255) + 0.0722 * f(c & 255)
+    }
+
+    /// `c` at alpha `a` over a grey backdrop of `b` (0 or 255), as a 0xRRGGBB.
+    fn over(c: u32, a: f32, b: u32) -> u32 {
+        let ch = |sh: u32| (((c >> sh & 255) as f32) * a + b as f32 * (1. - a)).round() as u32;
+        ch(16) << 16 | ch(8) << 8 | ch(0)
+    }
+
+    #[test]
+    fn glass_fills_keep_aa_text_contrast_on_the_worst_backdrop() {
+        // GLASS_TINT_POP_A (elevated, 88 %) gives 3.98 for TEXT over white, so no text-carrying fill uses it
+        for (fill, a) in [(SURFACE, GLASS_TINT_A)] {
+            for backdrop in [0x00, 0xFF] {
+                let bg = lum(over(fill, a, backdrop));
+                for text in [TEXT, TEXT_STRONG] {
+                    let l = lum(text);
+                    let ratio = (l + 0.05) / (bg + 0.05);
+                    assert!(
+                        ratio >= 4.5,
+                        "{text:06X} on {fill:06X}@{a} over {backdrop:#X}: {ratio:.2}"
+                    );
+                }
+            }
         }
     }
 
