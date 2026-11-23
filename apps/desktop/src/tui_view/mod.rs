@@ -19,6 +19,7 @@ pub mod layout;
 pub mod panels;
 mod quote;
 mod rewind;
+mod run_block;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
@@ -202,7 +203,15 @@ pub struct TuiView {
     pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
     /// `Some` when the view is one chat frame of the Super Agent surface (see [`Embed`]); `None` is the TUI view.
     pub(crate) embed: Option<Embed>,
+    /// Run in terminal of the fenced command blocks: when each was first drawn whole, and the pending second click.
+    gate: std::cell::RefCell<synthesis_view::codeblock::Gate>,
+    /// Origin of the gate's clock.
+    epoch: std::time::Instant,
 }
+
+/// An embedded view asks its owner to show its Terminal pane (a Run click in the chat).
+pub(crate) struct WantTerminal;
+impl gpui::EventEmitter<WantTerminal> for TuiView {}
 
 /// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
 /// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
@@ -280,6 +289,8 @@ impl TuiView {
             window_active: None,
             term: None,
             embed: None,
+            gate: Default::default(),
+            epoch: std::time::Instant::now(),
         }
     }
 

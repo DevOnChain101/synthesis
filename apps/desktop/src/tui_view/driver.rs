@@ -2942,7 +2942,9 @@ fn item_sig(it: &Item) -> u64 {
     std::mem::discriminant(it).hash(&mut h);
     match it {
         Item::User(t) | Item::Thinking(t) | Item::Internal(t) => t.len().hash(&mut h),
-        Item::Assistant { text, streaming } => (text.len(), streaming).hash(&mut h),
+        Item::Assistant {
+            text, streaming, ..
+        } => (text.len(), streaming).hash(&mut h),
         Item::Tool {
             summary,
             state,
@@ -3852,11 +3854,13 @@ mod tests {
         items[39] = Item::Assistant {
             text: "a".into(),
             streaming: true,
+            tainted: false,
         };
         let before = sigs(&items);
         items[39] = Item::Assistant {
             text: "ab".into(),
             streaming: true,
+            tainted: false,
         };
         assert_eq!(stale_rows(&before, &sigs(&items)).collect::<Vec<_>>(), [39]);
         // the plan card and the working line are always measured again
