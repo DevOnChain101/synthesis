@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use synthesis_app::outcome_client::{InProc, OutcomeClient};
 use synthesis_app::outcome_service::Service;
 use synthesis_app::proto::FEATURES;
-use synthesis_app::sessions::{AckFn, SendFn, deliver_inbox};
+use synthesis_app::sessions::{AckFn, SendFn, deliver_inbox, start_cursor};
 use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::*;
 use synthesis_orchestrator::apply_queued;
@@ -429,4 +429,31 @@ fn only_the_orchestrator_endpoint_queues_and_the_stdio_engine_is_read_only() {
         .send_worker_message(&r.outcome, r.item.as_str(), "hi", false, None, "k")
         .unwrap_err();
     assert!(e.to_string().contains("read-only"), "{e}");
+}
+
+#[tokio::test]
+async fn the_start_cursor_is_the_newest_ack_and_an_unreadable_store_is_an_error_never_zero() {
+    let mut r = rig();
+    r.say("k1", "one", false);
+    let (log, ws) = (Arc::new(Mutex::new(vec![])), r.worker_session());
+    let c = deliver_inbox(&r.home, ATT, 0, &harness(&log, None), &ack_into(&ws))
+        .await
+        .unwrap();
+    assert_eq!(start_cursor(&r.home, ATT).unwrap(), c);
+    assert!(start_cursor(&r.home.join("no-such-home"), ATT).is_err());
+}
+
+#[test]
+fn msg_hidden_chars_union_of_both_lists() {
+    for c in [
+        '\u{fffc}',
+        '\u{2800}',
+        '\u{1d173}',
+        '\u{1d17a}',
+        '\u{a0}',
+        '\u{202e}',
+    ] {
+        assert!(check_message_text(&format!("a{c}b")).is_err(), "{c:?}");
+    }
+    assert!(check_message_text("plain\ttext\nok").is_ok());
 }

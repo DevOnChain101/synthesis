@@ -21,6 +21,14 @@ const QUEUED_PER_ITEM: usize = 10;
 /// Rows looked at per read (a flood of forged rows cannot make a poll unbounded).
 const SCAN: i64 = 100;
 
+/// The union of the two hidden-character lists, plus the object-replacement and musical-format
+/// characters neither names.
+fn hidden(c: char) -> bool {
+    synthesis_core::outcome::hidden_char(c)
+        || synthesis_config::is_invisible_or_blank(c)
+        || matches!(c, '\u{fffc}' | '\u{1d173}'..='\u{1d17a}')
+}
+
 /// Is `text` a message a person may send? Hidden, bidi and control characters (a newline and a tab
 /// are allowed) are refused, never stripped: what the person typed must be what the worker reads.
 pub fn check_message_text(text: &str) -> std::result::Result<(), &'static str> {
@@ -28,10 +36,7 @@ pub fn check_message_text(text: &str) -> std::result::Result<(), &'static str> {
         Err("the message is empty")
     } else if text.len() > MESSAGE_MAX_BYTES {
         Err("the message is longer than 4096 bytes")
-    } else if text
-        .chars()
-        .any(|c| !matches!(c, '\n' | '\t') && synthesis_core::outcome::hidden_char(c))
-    {
+    } else if text.chars().any(|c| !matches!(c, '\n' | '\t') && hidden(c)) {
         Err("the message holds hidden, bidi or control characters")
     } else {
         Ok(())
@@ -45,6 +50,7 @@ pub struct NewMessage<'a> {
     /// `user:<surface>`, from the command's principal (never from its params).
     pub from: &'a str,
     /// `person` (typed in the worker's frame) or `card` (a conductor proposal the person clicked).
+    /// Client-asserted, like `from`: a label for display only, and no decision may depend on it.
     pub via: &'a str,
     pub proposal_sha256: Option<&'a str>,
 }

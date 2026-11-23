@@ -296,6 +296,15 @@ pub async fn deliver_inbox(
     Ok(inbox.scanned.max(cursor))
 }
 
+/// The cursor a watcher starts from: the newest ack this session wrote (0 when it wrote none).
+/// A read that fails is an error, never 0.
+pub fn start_cursor(home: &std::path::Path, sid: &str) -> Result<u64, String> {
+    let acks = Reader::open(home)
+        .and_then(|r| r.owner_deliveries(sid))
+        .map_err(|e| e.to_string())?;
+    Ok(acks.into_iter().max().unwrap_or(0))
+}
+
 /// `synt run --attempt-session`: polls [`deliver_inbox`] every second beside [`watch_stop`] until
 /// `ended`. The cursor starts after the newest ack this session already wrote (a restart replays
 /// nothing that was acked). A failed read is said once and tried again.
@@ -307,11 +316,23 @@ pub fn watch_inbox(
     ended: tokio_util::sync::CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut cursor = Reader::open(&home)
-            .and_then(|r| r.owner_deliveries(&sid))
-            .ok()
-            .and_then(|d| d.into_iter().max())
-            .unwrap_or(0);
+        let mut said_start = false;
+        // never default to 0: that would replay every earlier message, acked ones too
+        let mut cursor = loop {
+            match start_cursor(&home, &sid) {
+                Ok(c) => break c,
+                Err(e) => {
+                    if !said_start {
+                        said_start = true;
+                        eprintln!("synt: warning: cannot read the owner inbox ({e}); trying again");
+                    }
+                    tokio::select! {
+                        () = ended.cancelled() => return,
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        };
         let mut said = false;
         loop {
             tokio::select! {
