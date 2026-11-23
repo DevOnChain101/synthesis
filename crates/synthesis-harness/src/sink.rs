@@ -24,6 +24,9 @@ struct Inner {
 /// Called with every persisted (already redacted) envelope, outside the writer lock. Must not block.
 pub type Observer = Arc<dyn Fn(&Envelope) + Send + Sync>;
 
+/// Most values registered from one secret file.
+const MAX_FILE_VALUES: usize = 256;
+
 #[derive(Clone)]
 pub struct EventSink(Arc<Inner>);
 
@@ -104,14 +107,22 @@ impl EventSink {
     pub fn add_secrets_from(&self, text: &str) {
         let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
         let r = w.redactor();
-        let (mut evicted, mut unprotected) = (false, 0usize);
+        let (mut evicted, mut unprotected, mut tried, mut over) = (false, 0usize, 0usize, 0usize);
         // a value of a secret-named key (DB_PASSWORD, API_TOKEN) is registered from 4 characters
-        let mut add = |v: &str, min: usize| match r.add_secret_min(v, min) {
-            Ok(e) => evicted |= e,
-            Err(rejected) => {
-                // a short value of an ordinary key (PORT=80) is just not a secret
-                if min < 8 || rejected == Rejected::MarkerLookalike {
-                    unprotected += 1;
+        let mut add = |v: &str, min: usize| {
+            // one file registers at most MAX_FILE_VALUES values (a long file cannot slow every request)
+            if tried >= MAX_FILE_VALUES {
+                over += 1;
+                return;
+            }
+            tried += 1;
+            match r.add_secret_min(v, min) {
+                Ok(e) => evicted |= e,
+                Err(rejected) => {
+                    // a short value of an ordinary key (PORT=80) is just not a secret
+                    if min < 8 || rejected != Rejected::TooShort {
+                        unprotected += 1;
+                    }
                 }
             }
         };
@@ -137,7 +148,12 @@ impl EventSink {
         }
         if unprotected > 0 {
             eprintln!(
-                "synt: warning: {unprotected} secret value(s) read from that file are too short (under 4 characters) or look like Synthesis's own markers, so they cannot be masked; treat them as exposed"
+                "synt: warning: {unprotected} secret value(s) read from that file are too short (under 4 characters), look like Synthesis's own markers or are words of the request format, so they cannot be masked; treat them as exposed"
+            );
+        }
+        if over > 0 {
+            eprintln!(
+                "synt: warning: that file holds more than {MAX_FILE_VALUES} values: {over} were not registered for masking; the secret patterns still apply"
             );
         }
     }

@@ -11,7 +11,7 @@ use crate::{Envelope, Event, RawEnvelope, SCHEMA_VERSION};
 /// Clones share the registered values: a value learned through one is masked by all.
 #[derive(Clone)]
 pub struct Redactor {
-    secrets: std::sync::Arc<std::sync::Mutex<Vec<Secret>>>,
+    secrets: std::sync::Arc<std::sync::Mutex<Secrets>>,
     patterns: std::sync::Arc<Vec<(&'static str, Regex)>>,
     credential: Regex,
 }
@@ -23,6 +23,100 @@ struct Secret {
     spellings: Vec<(String, bool)>,
 }
 
+/// The registered values and ONE automaton over all their spellings: a match is the leftmost-longest
+/// of every secret at once, so a value inside another value cannot leave the other's remainder.
+#[derive(Default)]
+struct Secrets {
+    list: Vec<Secret>,
+    /// Built from `list` whenever it changes: (automaton, token-bounded flag per pattern).
+    ac: Option<(aho_corasick::AhoCorasick, Vec<bool>)>,
+    /// `list` changed since `ac` was built (rebuilt at the next search, not at every add).
+    dirty: bool,
+}
+
+impl Secrets {
+    fn rebuild(&mut self) {
+        self.dirty = false;
+        let pats: Vec<&(String, bool)> = self.list.iter().flat_map(|s| &s.spellings).collect();
+        self.ac = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .build(pats.iter().map(|p| &p.0))
+            .ok()
+            .map(|a| (a, pats.iter().map(|p| p.1).collect()));
+    }
+
+    /// Byte ranges of the secrets in `s`, in order, not overlapping. A token-bounded match that
+    /// touches a word character is skipped and the search goes on one character later.
+    fn find(&mut self, s: &str) -> Vec<(usize, usize)> {
+        if self.dirty {
+            self.rebuild();
+        }
+        let Some((ac, bounded)) = &self.ac else {
+            return vec![];
+        };
+        let (mut out, mut at) = (vec![], 0);
+        while at <= s.len() {
+            let Some(m) = ac.find(aho_corasick::Input::new(s).span(at..s.len())) else {
+                break;
+            };
+            let (a, b) = (m.start(), m.end());
+            if bounded[m.pattern().as_usize()]
+                && (is_word(s[..a].chars().next_back()) || is_word(s[b..].chars().next()))
+            {
+                at = a + s[a..].chars().next().map_or(1, char::len_utf8);
+            } else {
+                out.push((a, b));
+                at = b.max(a + 1);
+            }
+        }
+        out
+    }
+}
+
+/// Words of the request's own structure and of JSON schemas: a registered value equal to one is
+/// refused (it is the name of something the model API needs, not a secret worth the damage).
+const RESERVED: &[&str] = &[
+    "user",
+    "assistant",
+    "system",
+    "text",
+    "type",
+    "name",
+    "role",
+    "content",
+    "tool_use",
+    "tool_result",
+    "image",
+    "thinking",
+    "input",
+    "model",
+    "source",
+    "base64",
+    "object",
+    "string",
+    "properties",
+    "required",
+    "description",
+    "items",
+    "array",
+    "number",
+    "integer",
+    "boolean",
+    "enum",
+    "redacted_thinking",
+    "data",
+    "media_type",
+    "tool_use_id",
+    "signature",
+    "messages",
+    "tools",
+    "id",
+    "error",
+    "true",
+    "false",
+    "null",
+];
+
 /// Why `Redactor::add_secret_min` did not register a value (never carries the value).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejected {
@@ -31,18 +125,12 @@ pub enum Rejected {
     /// It (or an encoding of it) occurs inside a `[REDACTED:...]` marker: registering it would
     /// make every request fail the gate's survivor check.
     MarkerLookalike,
+    /// It equals a word of the request structure (`user`, `text`, `tool_use`, ...).
+    Reserved,
 }
 
 fn is_word(c: Option<char>) -> bool {
     c.is_some_and(|c| c.is_alphanumeric() || c == '_')
-}
-
-/// Positions of `pat` in `s`; a token-bounded pattern must not touch a word character.
-fn hits<'a>(s: &'a str, pat: &'a str, bounded: bool) -> impl Iterator<Item = usize> + 'a {
-    s.match_indices(pat).map(|(i, _)| i).filter(move |&i| {
-        !bounded
-            || !(is_word(s[..i].chars().next_back()) || is_word(s[i + pat.len()..].chars().next()))
-    })
 }
 
 fn percent(value: &str, keep: &str, upper: bool) -> String {
@@ -210,6 +298,9 @@ impl Redactor {
         if s.chars().count() < min.max(MIN_SECRET) {
             return Err(Rejected::TooShort);
         }
+        if RESERVED.contains(&s.to_lowercase().as_str()) {
+            return Err(Rejected::Reserved);
+        }
         let spellings = spellings(s);
         let marker_text = self.markers().to_lowercase();
         if spellings
@@ -218,7 +309,8 @@ impl Redactor {
         {
             return Err(Rejected::MarkerLookalike);
         }
-        let mut v = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        let v = &mut g.list;
         if v.iter().any(|x| x.value == s) {
             return Ok(false);
         }
@@ -235,6 +327,7 @@ impl Redactor {
                 spellings,
             });
         }
+        g.dirty = true;
         Ok(evicted)
     }
 
@@ -254,22 +347,19 @@ impl Redactor {
             .secrets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .list
             .is_empty()
     }
 
     /// The class of a secret that survives in `s`: a registered value or a built-in pattern.
     /// Run on redacted text, it is the fail-closed check of the secret gate.
     pub fn leak_class(&self, s: &str) -> Option<&'static str> {
-        if self
+        if !self
             .secrets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|x| {
-                x.spellings
-                    .iter()
-                    .any(|(t, b)| hits(s, t, *b).next().is_some())
-            })
+            .find(s)
+            .is_empty()
         {
             return Some("secret");
         }
@@ -280,20 +370,19 @@ impl Redactor {
     }
 
     pub fn redact_str(&self, s: &str) -> String {
-        let mut out = s.to_string();
-        for secret in self
+        let found = self
             .secrets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            for (t, bounded) in &secret.spellings {
-                let at: Vec<usize> = hits(&out, t, *bounded).collect();
-                for i in at.into_iter().rev() {
-                    out.replace_range(i..i + t.len(), "[REDACTED:secret]");
-                }
-            }
+            .find(s);
+        let mut out = String::with_capacity(s.len());
+        let mut at = 0;
+        for (a, b) in found {
+            out.push_str(&s[at..a]);
+            out.push_str("[REDACTED:secret]");
+            at = b;
         }
+        out.push_str(&s[at..]);
         for (kind, re) in self.patterns.iter() {
             out = re
                 .replace_all(&out, format!("[REDACTED:{kind}]").as_str())
@@ -1286,6 +1375,33 @@ mod tests {
         // the ordinary entry point still ignores values under 8
         assert!(!r.add_secret("abcdefg"));
         assert_eq!(r.redact_str("abcdefg"), "abcdefg");
+    }
+
+    #[test]
+    fn a_value_inside_another_value_leaves_no_remainder_in_either_order() {
+        let (a, b) = ("abcd-1234".to_string(), "abcd-1234-tail-9876".to_string());
+        for order in [[&a, &b], [&b, &a]] {
+            let r = Redactor::new(order.map(String::clone));
+            let out = r.redact_str(&format!("x {b} y {a} z"));
+            assert_eq!(out, "x [REDACTED:secret] y [REDACTED:secret] z");
+            assert!(r.leak_class(&out).is_none());
+        }
+    }
+
+    #[test]
+    fn structural_words_cannot_be_registered() {
+        let r = Redactor::new([]);
+        for w in [
+            "user",
+            "Assistant",
+            "text",
+            "tool_use",
+            "tool_result",
+            "role",
+        ] {
+            assert_eq!(r.add_secret_min(w, 4), Err(Rejected::Reserved), "{w}");
+        }
+        assert!(!r.has_secrets());
     }
 
     #[test]
