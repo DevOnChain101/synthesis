@@ -1218,6 +1218,7 @@ mod tests {
         use crate::superagent::session::host::tests::fx;
         let _g = theme::opacity_guard();
         let (f, cfg) = fx(2);
+        cx.executor().allow_parking();
         let (shell, v) = live(cx, cfg);
         let sa = shell.read_with(v, |s, _| s.sa.clone());
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));

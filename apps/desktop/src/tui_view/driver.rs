@@ -4040,6 +4040,7 @@ mod switch_tests {
     type Win<'a> = (Entity<TuiView>, &'a mut gpui::VisualTestContext);
 
     fn open(cx: &mut TestAppContext, cfg: LiveCfg, l: Live, engine: bool) -> Win<'_> {
+        cx.executor().allow_parking();
         cx.update(gpui_component::init);
         let (view, vcx) =
             cx.add_window_view(|window, cx| TuiView::live(window, cx, cfg, Default::default(), 0.));

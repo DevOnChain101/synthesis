@@ -280,6 +280,7 @@ fn the_conductors_port_starts_reads_sends_and_closes_the_sessions_of_this_window
     use super::chat::glue::WindowPort as _;
     use synthesis_app::conductor::SessionStart;
     let (f, cfg) = super::session::host::tests::fx(2);
+    cx.executor().allow_parking();
     let (sa, v) = open_live(cx, cfg);
     let port = sa.read_with(v, |s, _| s.port.clone());
     assert!(port.sessions().is_empty());
