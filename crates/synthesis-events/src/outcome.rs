@@ -28,6 +28,13 @@ pub const GRANT_REVOKED: &str = "grant.revoked";
 pub const POLICY_DECISION: &str = "policy.decision";
 pub const EVIDENCE_RECORDED: &str = "evidence.recorded";
 pub const COMMAND_FINISHED: &str = "outcome.command_finished";
+/// The person's line to a running worker (S1 4.6); `queued` when no attempt runs, `consumed` when the
+/// next attempt's first prompt took the queued ones. All three are chained events of the control session.
+pub const ATTEMPT_MESSAGE: &str = "attempt.message";
+pub const ATTEMPT_MESSAGE_QUEUED: &str = "attempt.message.queued";
+pub const ATTEMPT_MESSAGE_CONSUMED: &str = "attempt.message.consumed";
+/// Written by the worker in its OWN session once the harness took the message `seq` (the ack).
+pub const OWNER_MESSAGE_DELIVERED: &str = "owner_message.delivered";
 
 /// The four mutable aggregates (each row carries a `revision`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

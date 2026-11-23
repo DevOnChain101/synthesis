@@ -35,6 +35,9 @@ use crate::store::{
     sha_hex, utf8, valid_id,
 };
 
+mod inbox;
+pub use inbox::*;
+
 /// Every list is bounded: a hostile or runaway writer cannot make a reader allocate without limit.
 pub const LIST_LIMIT: usize = 1000;
 /// A command's params, and how many commands may wait for an owner per outcome.
@@ -2016,6 +2019,7 @@ impl OutcomeWriter {
                 current_binding,
                 evidence,
                 action.clone(),
+                false,
             )
         })
     }
@@ -4114,6 +4118,7 @@ impl OutcomeTx<'_, '_> {
         current_binding: &Value,
         evidence: &Value,
         action: Option<Value>,
+        open: bool,
     ) -> Result<DecisionRecord> {
         let d = self.load_decision(id)?;
         self.conflict_or(
@@ -4128,7 +4133,14 @@ impl OutcomeTx<'_, '_> {
             params![id.as_str(), d.revision - 1],
             |r| r.get(0),
         )?;
-        if d.row_state != DecisionState::NeedsMoreInfo || !asked {
+        // `open`: a person's message changed what the pending card asks (S1 4.6 `brief_change`); the
+        // card is closed and re-asked the same way, without an earlier `request_evidence` answer
+        let waiting = if open {
+            d.row_state == DecisionState::Pending
+        } else {
+            d.row_state == DecisionState::NeedsMoreInfo && asked
+        };
+        if !waiting {
             return Err(Error::Stale(
                 "the decision is not waiting for evidence".into(),
             ));
