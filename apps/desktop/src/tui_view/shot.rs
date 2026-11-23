@@ -1175,6 +1175,7 @@ fn perf_run(
                 items.push(Item::Assistant {
                     text: format!("## Answer {i}\n\nThe cause is `x{i}`.\n\n- one\n- two\n\n```rust\nfn f() {{}}\n```\n"),
                     streaming: false,
+                    tainted: false,
                 });
                 items.push(Item::Tool {
                     id: format!("t{i}"),
