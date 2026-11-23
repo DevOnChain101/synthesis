@@ -120,6 +120,7 @@ fn main() {
             gpui_component::init(cx);
             synthesis_desktop::ui::register_fonts(cx);
             synthesis_desktop::theme::apply("JetBrains Mono", cx);
+            synthesis_desktop::app_menu::install(cx);
             synthesis_desktop::ui::open(cx, live);
             // CI smoke (no offscreen renderer on Windows): prove a real window drew, then exit
             #[cfg(feature = "shot")]

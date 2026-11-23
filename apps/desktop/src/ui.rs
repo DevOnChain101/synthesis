@@ -116,6 +116,21 @@ pub struct Shell {
 }
 
 impl Shell {
+    /// The app menu's Settings item: opens Settings, or closes it back to the view it came from.
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let to = if self.view == View::Settings {
+            self.back
+        } else {
+            View::Settings
+        };
+        self.go(to, window, cx);
+    }
+
+    /// The app menu's Quit item: the TUI view's own quit (engine shutdown, then the app exits).
+    pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {
+        self.tui.update(cx, |t, cx| t.quit(cx));
+    }
+
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
