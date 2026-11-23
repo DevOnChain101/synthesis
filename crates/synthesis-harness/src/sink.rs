@@ -25,7 +25,7 @@ struct Inner {
 pub type Observer = Arc<dyn Fn(&Envelope) + Send + Sync>;
 
 /// Most values registered from one secret file.
-const MAX_FILE_VALUES: usize = 256;
+const MAX_FILE_VALUES: usize = 4096;
 
 #[derive(Clone)]
 pub struct EventSink(Arc<Inner>);
@@ -103,22 +103,27 @@ impl EventSink {
     }
 
     /// Masks every value of a `KEY=value` / `key: value` file read from now on (a secret file the
-    /// user approved reading), wherever it appears in events and logs.
-    pub fn add_secrets_from(&self, text: &str) {
+    /// user approved reading), wherever it appears in events and logs. `false`: not every value
+    /// could be registered (too many, or no room); the caller must NOT hand the file to a model.
+    #[must_use]
+    pub fn add_secrets_from(&self, text: &str) -> bool {
         let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
         let r = w.redactor();
-        let (mut evicted, mut unprotected, mut tried, mut over) = (false, 0usize, 0usize, 0usize);
+        let (mut unprotected, mut tried, mut over) = (0usize, 0usize, 0usize);
         // a value of a secret-named key (DB_PASSWORD, API_TOKEN) is registered from 4 characters
         let mut add = |v: &str, min: usize| {
-            // one file registers at most MAX_FILE_VALUES values (a long file cannot slow every request)
+            // one file registers at most MAX_FILE_VALUES values
             if tried >= MAX_FILE_VALUES {
                 over += 1;
                 return;
             }
-            tried += 1;
             match r.add_secret_min(v, min) {
-                Ok(e) => evicted |= e,
+                Ok(()) => tried += usize::from(!v.is_empty()),
                 Err(rejected) => {
+                    if rejected == Rejected::Capacity {
+                        over += 1;
+                        return;
+                    }
                     // a short value of an ordinary key (PORT=80) is just not a secret
                     if min < 8 || rejected != Rejected::TooShort {
                         unprotected += 1;
@@ -128,7 +133,7 @@ impl EventSink {
         };
         // a PEM body: every base64 line is a secret by itself
         let mut in_pem = false;
-        for line in text.lines().take(2000) {
+        for line in text.lines() {
             let l = line.trim();
             if l.starts_with("-----BEGIN") {
                 in_pem = true;
@@ -141,11 +146,6 @@ impl EventSink {
                 add(v.trim(), if named { 4 } else { 8 });
             }
         }
-        if evicted {
-            eprintln!(
-                "synt: warning: the list of secret values to mask is full; the oldest were dropped"
-            );
-        }
         if unprotected > 0 {
             eprintln!(
                 "synt: warning: {unprotected} secret value(s) read from that file are too short (under 4 characters), look like Synthesis's own markers or are words of the request format, so they cannot be masked; treat them as exposed"
@@ -153,9 +153,10 @@ impl EventSink {
         }
         if over > 0 {
             eprintln!(
-                "synt: warning: that file holds more than {MAX_FILE_VALUES} values: {over} were not registered for masking; the secret patterns still apply"
+                "synt: warning: that file holds more secret values than can be protected ({over} not registered); it is not sent to the model"
             );
         }
+        over == 0
     }
 
     pub fn is_broken(&self) -> bool {
@@ -174,10 +175,27 @@ mod tests {
     #[test]
     fn a_secret_file_registers_short_values_of_secret_named_keys_only() {
         let sink = EventSink::new(Vec::new(), "s", []);
-        sink.add_secrets_from("DB_PASSWORD=zq7x\nPORT=8081\nAPI_TOKEN=ab\nNAME=longvalue-1234");
+        assert!(
+            sink.add_secrets_from("DB_PASSWORD=zq7x\nPORT=8081\nAPI_TOKEN=ab\nNAME=longvalue-1234")
+        );
         assert_eq!(
             sink.redact("a zq7x b 8081 c ab d zq7xy longvalue-1234"),
             "a [REDACTED:secret] b 8081 c ab d zq7xy [REDACTED:secret]"
         );
+    }
+
+    #[test]
+    fn a_file_with_more_values_than_can_be_protected_is_reported() {
+        let sink = EventSink::new(Vec::new(), "s", []);
+        let big: String = (0..MAX_FILE_VALUES + 10)
+            .map(|i| format!("K{i}=value-number-{i:06}\n"))
+            .collect();
+        assert!(!sink.add_secrets_from(&big));
+        // comments and short ordinary values do not count against the cap
+        let sink = EventSink::new(Vec::new(), "s", []);
+        let many: String = (0..MAX_FILE_VALUES * 2)
+            .map(|i| format!("PORT{i}=80\n"))
+            .collect();
+        assert!(sink.add_secrets_from(&many));
     }
 }

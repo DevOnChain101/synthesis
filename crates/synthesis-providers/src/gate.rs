@@ -89,6 +89,12 @@ impl SecretGate {
             class: "internal".into(),
         };
         let r = &self.redactor;
+        // values that could not be registered, or an automaton that did not build: not safe to send
+        if let Some(class @ ("capacity" | "internal")) = r.leak_class("") {
+            return Err(Blocked {
+                class: class.into(),
+            });
+        }
         // cloned only to strip images (which happens only when a value is registered)
         let stripped;
         let (src, images_dropped) = if r.has_secrets() {
@@ -112,6 +118,8 @@ impl SecretGate {
         visit_request(&mut v, &mut |s| found = found.or_else(|| r.leak_class(s)));
         // the survivor check also reads each message's text as one string (across a tool_use block
         // or between tool results): a value split over them must block the send
+        // names and ids are never rewritten, but they are checked: a secret there blocks the send
+        found = found.or_else(|| structural_strings(&v).iter().find_map(|t| r.leak_class(t)));
         found = found.or_else(|| message_texts(&v).iter().find_map(|t| r.leak_class(t)));
         if let Some(class) = found {
             return Err(Blocked {
@@ -304,6 +312,21 @@ fn merge_text_runs(r: &Redactor, v: &mut Value) {
             blocks(r, bs);
         }
     }
+}
+
+/// `model`, tool names and block ids/names: the strings the gate leaves alone.
+fn structural_strings(v: &Value) -> Vec<&str> {
+    let mut out: Vec<&str> = v["model"].as_str().into_iter().collect();
+    let keys = ["id", "name", "tool_use_id"];
+    for t in v["tools"].as_array().into_iter().flatten() {
+        out.extend(t["name"].as_str());
+    }
+    for m in v["messages"].as_array().into_iter().flatten() {
+        for b in m["content"].as_array().into_iter().flatten() {
+            out.extend(keys.iter().filter_map(|k| b[*k].as_str()));
+        }
+    }
+    out
 }
 
 /// Per message: all its text (text blocks and the text parts of tool results) in order, joined.
@@ -623,13 +646,24 @@ mod tests {
         for w in ["user", "text", "tool_use", "assistant", "type"] {
             assert!(r.add_secret_min(w, 4).is_err(), "{w}");
         }
-        // ... and the structure is never scrubbed even if one slipped in (a 5-char word that is
-        // not reserved but is a tool name and a role-like token)
+        // ... and names are never rewritten: a registered value that is a tool name blocks the
+        // send (checked, not scrubbed) instead of corrupting the request
         let r = Redactor::new(["Probe".to_string()]);
         let mut req = req_with("x".into());
         req.tools[0].name = "Probe".into();
-        let sealed = SecretGate::new(r).seal(&req).unwrap();
-        assert_eq!(sealed.tools[0].name, "Probe");
+        assert_eq!(SecretGate::new(r).seal(&req).unwrap_err().class, "secret");
+    }
+
+    #[test]
+    fn a_full_redactor_blocks_every_send() {
+        let r = Redactor::new([]);
+        let g = SecretGate::new(r.clone());
+        assert!(g.seal(&req_with("x".into())).is_ok());
+        let mut i = 0;
+        while !r.add_secret(&format!("filler-value-{i:07}")) {
+            i += 1;
+        }
+        assert_eq!(g.seal(&req_with("x".into())).unwrap_err().class, "capacity");
     }
 
     #[test]
