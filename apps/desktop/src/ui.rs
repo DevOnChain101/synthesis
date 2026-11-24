@@ -149,6 +149,19 @@ impl Shell {
         }
         let from_sa = self.view == View::SuperAgent
             || (self.view == View::Settings && self.back == View::SuperAgent);
+        let from_tui =
+            self.view == View::Tui || (self.view == View::Settings && self.back == View::Tui);
+        // the mode being left gives back the engine of each idle session (running ones keep theirs), so the mode
+        // entered can resume the same session; the lists are read again once the locks are free
+        let mut closing = Vec::new();
+        if v == View::Tui && from_sa && !self.legacy_ui {
+            closing = self.sa.update(cx, |s, cx| s.release_idle(cx));
+        } else if v == View::SuperAgent && from_tui && !self.legacy_ui {
+            let hosted = self.sa.read(cx).handoff(cx);
+            closing = self.tui.update(cx, |t, cx| {
+                t.release_if_hosted(&hosted, cx).into_iter().collect()
+            });
+        }
         let handoff =
             (v == View::Tui && from_sa && !self.legacy_ui).then(|| self.sa.read(cx).handoff(cx));
         let has_handoff = handoff.is_some();
@@ -187,6 +200,16 @@ impl Shell {
         });
         if let Some(h) = handoff {
             self.tui.update(cx, |t, cx| t.adopt_handoff(h, cx));
+        }
+        if !closing.is_empty() {
+            cx.spawn(async move |this, cx| {
+                for r in closing {
+                    let _ = r.await;
+                }
+                this.update(cx, |s, cx| s.tui.update(cx, |t, cx| t.refresh_store(cx)))
+                    .ok();
+            })
+            .detach();
         }
         cx.notify();
     }
