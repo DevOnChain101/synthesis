@@ -554,3 +554,15 @@ fn diff_lines_are_toned() {
         .collect();
     assert_eq!(t, [Del, Add, Text]);
 }
+
+#[test]
+fn a_fence_nested_under_a_list_item_is_still_a_block() {
+    let s = split("1. Run:\n   - desktop:\n      ```bash\n      npm run dev\n      ```\n");
+    let Some(Seg::Block(b)) = s.iter().find(|x| matches!(x, Seg::Block(_))) else {
+        panic!("no block")
+    };
+    assert_eq!(
+        (b.body.as_str(), b.kind, b.closed),
+        ("npm run dev", Kind::Command, true)
+    );
+}
