@@ -4515,7 +4515,11 @@ mod switch_tests {
             let l = &t.live.as_ref().unwrap().live;
             (
                 l.focus,
-                l.ws_key.rsplit(['/', '\\']).next().unwrap_or_default().to_string(),
+                l.ws_key
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
                 l.run_sel,
                 l.dialogs.len(),
             )
