@@ -16,7 +16,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, Stateful,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
 use gpui_component::text::TextView;
@@ -27,6 +27,7 @@ use super::panels::{OnClick, dim, icon, strong, text, with_alpha};
 use super::{ChatTab, TuiView};
 use crate::live::NoticeKind;
 use crate::theme::hsla;
+use crate::widgets::codeblock::icon_btn;
 use crate::widgets::panes::{self, note};
 
 /// Bytes of a file the preview reads at most, and the lines it draws.
@@ -121,6 +122,8 @@ pub struct TabState {
     pub tree_sel: Option<String>,
     /// A Markdown file shows as its source instead of formatted.
     pub md_raw: bool,
+    /// When Copy last copied the file (its icon is a check for 1.5 s).
+    pub copied_at: Option<std::time::Instant>,
     pub preview: Option<Preview>,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
@@ -569,8 +572,8 @@ impl TuiView {
         })
     }
 
-    /// The header of the tree column: the title and the Refresh button.
-    fn fx_header(&self, cx: &mut Context<Self>) -> Div {
+    /// The header of the tree column: the title (Refresh is in the viewer header).
+    fn fx_header(&self) -> Div {
         div()
             .flex()
             .items_center()
@@ -587,19 +590,6 @@ impl TuiView {
                     } else {
                         "FILES"
                     }),
-            )
-            .child(
-                div()
-                    .id("fx-refresh")
-                    .px(px(6.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(hsla(t::BORDER))
-                    .text_color(strong())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
-                    .child("refresh")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
             )
     }
 
@@ -835,7 +825,7 @@ impl TuiView {
         if let Some(n) = &d.note {
             return shell(
                 div()
-                    .child(self.fx_header(cx))
+                    .child(self.fx_header())
                     .child(div().p(px(14.)).child(note(n.clone()))),
             );
         }
@@ -972,7 +962,7 @@ impl TuiView {
             .flex_col()
             .border_r_1()
             .border_color(hsla(t::RULE))
-            .child(self.fx_header(cx))
+            .child(self.fx_header())
             .child(
                 div()
                     .id("fx-tree")
@@ -992,13 +982,37 @@ impl TuiView {
     }
 
     fn preview_view(&self, cx: &mut Context<Self>) -> Div {
+        let refresh = icon_btn(
+            "fx-refresh".into(),
+            "refresh",
+            "Refresh".into(),
+            dim(),
+            None,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx)));
+        // no file open: the same header slot, Refresh where it sits with a file (Copy's place stays empty)
+        let empty = |msg: &'static str, refresh: Stateful<Div>| {
+            div()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(hsla(t::RULE))
+                        .child(refresh)
+                        .child(div().flex_none().size(px(22.))),
+                )
+                .child(div().p(px(14.)).child(note(msg)))
+        };
         let Some(sel) = &self.ts.tree_sel else {
-            return div()
-                .p(px(14.))
-                .child(note("Select a file to preview it (read-only)."));
+            return empty("Select a file to preview it (read-only).", refresh);
         };
         let Some(p) = self.ts.preview.as_ref().filter(|p| &p.path == sel) else {
-            return div().p(px(14.)).child(note("reading..."));
+            return empty("reading...", refresh);
         };
         let head = |right: String| {
             div()
@@ -1020,23 +1034,32 @@ impl TuiView {
                 )
                 .child(div().flex_none().text_color(dim()).child(right))
         };
-        let copy = div()
-            .id("copy-file")
-            .flex_none()
-            .px(px(6.))
-            .rounded(px(4.))
-            .border_1()
-            .border_color(hsla(t::BORDER))
-            .text_color(strong())
-            .cursor_pointer()
-            .child("copy")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.ts.sel = None;
-                this.copy_selection(cx)
-            }));
+        let copied = self
+            .ts
+            .copied_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500));
+        let copy = icon_btn(
+            "copy-file".into(),
+            if copied { "check" } else { "copy" },
+            if copied { "Copied" } else { "Copy" }.into(),
+            if copied { hsla(t::SUCCESS) } else { dim() },
+            None,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.ts.sel = None;
+            this.copy_selection(cx);
+            this.ts.copied_at = Some(std::time::Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1550))
+                    .await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }));
         match &p.body {
             Err(why) => div()
-                .child(head(String::new()))
+                .child(head(String::new()).child(refresh))
                 .child(div().p(px(14.)).child(note(why.clone()))),
             Ok(b) => {
                 let n = b.lines.len();
@@ -1067,7 +1090,7 @@ impl TuiView {
                     return div()
                         .flex()
                         .flex_col()
-                        .child(head(info).child(toggle))
+                        .child(head(info).child(toggle).child(refresh))
                         .child(div().p(px(14.)).text_color(text()).child(
                             TextView::markdown(("fx-md", id), b.lines.join("\n")).selectable(true),
                         ));
@@ -1075,7 +1098,12 @@ impl TuiView {
                 div()
                     .flex()
                     .flex_col()
-                    .child(head(info).when(md, |h| h.child(toggle)).child(copy))
+                    .child(
+                        head(info)
+                            .when(md, |h| h.child(toggle))
+                            .child(refresh)
+                            .child(copy),
+                    )
                     .child({
                         let x = self.ts.lines_x.clone();
                         div()
