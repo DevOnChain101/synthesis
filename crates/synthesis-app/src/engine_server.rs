@@ -898,6 +898,26 @@ impl Srv<'_> {
                     &hide,
                 )?)
             }
+            Call::ProviderList
+            | Call::ProviderDraft { .. }
+            | Call::ProviderConfirm { .. }
+            | Call::ProviderSave { .. }
+            | Call::ProviderRemove { .. } => {
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                let ctx = self.ctx(&h);
+                Ok(match call {
+                    Call::ProviderList => engine_ops::provider_list(&ctx, &hide)?,
+                    Call::ProviderDraft { id } => engine_ops::provider_draft(&ctx, &id, &hide)?,
+                    Call::ProviderConfirm { form } => {
+                        engine_ops::provider_confirm(&ctx, form, &hide)?
+                    }
+                    Call::ProviderSave { form, editing } => {
+                        engine_ops::provider_save(&ctx, form, editing, &hide)?
+                    }
+                    Call::ProviderRemove { id } => engine_ops::provider_remove(&ctx, &id, &hide)?,
+                    _ => unreachable!("matched above"),
+                })
+            }
             Call::Clear => {
                 let l = self.session()?;
                 if l.running() || self.compacting.load(Ordering::SeqCst) {
