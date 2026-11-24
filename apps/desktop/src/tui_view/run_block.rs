@@ -6,7 +6,6 @@
 use std::hash::{Hash as _, Hasher as _};
 
 use gpui::{AnyElement, ClickEvent, Context, IntoElement as _};
-use gpui_component::text::TextView;
 use synthesis_view::codeblock::{self as cb, Need, Press};
 use synthesis_view::convo::Item;
 
@@ -76,9 +75,7 @@ impl TuiView {
         let blocked = self.run_blocked();
         let bracketed = self.term.as_ref().and_then(|p| p.read(cx).bracketed());
         let mut prose = |i: usize, s: String| {
-            TextView::markdown(gpui::SharedString::from(format!("assistant-{idx}-{i}")), s)
-                .style(chat::assistant_style())
-                .selectable(true)
+            chat::AssistantMd::new(gpui::SharedString::from(format!("assistant-{idx}-{i}")), s)
                 .into_any_element()
         };
         let mut run = |_: usize, b: &cb::Block, cmd: &str| {

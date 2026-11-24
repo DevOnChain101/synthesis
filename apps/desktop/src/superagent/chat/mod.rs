@@ -26,7 +26,6 @@ use gpui::{
     IntoElement, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
-use gpui_component::text::TextView;
 use synthesis_app::conductor::{Payload, PersonClick};
 use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
@@ -640,12 +639,8 @@ pub fn conversation(chat: &Entity<ConductorChat>) -> AnyElement {
 
 /// Model text as markdown, inert: a link is shown but never opened (the model's text is untrusted, and a link
 /// could pose as a card button), and no image is loaded from a path or a URL. Hidden characters are made visible.
-pub(crate) fn md(id: impl Into<gpui::ElementId>, text: &str) -> TextView {
-    TextView::markdown(id, clean_md(text))
-        .style(crate::tui_view::chat::assistant_style())
-        .selectable(true)
-        .on_link_click(|_, _, _, _| {})
-        .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
+pub(crate) fn md(id: impl Into<gpui::ElementId>, text: &str) -> crate::tui_view::chat::AssistantMd {
+    crate::tui_view::chat::AssistantMd::new(id, clean_md(text)).inert()
 }
 
 /// The reply with each fenced block as its own section (Copy only: this chat has no terminal); the prose stays

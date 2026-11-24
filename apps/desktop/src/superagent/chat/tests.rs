@@ -461,15 +461,17 @@ fn model_markdown_is_inert_and_hidden_characters_are_visible() {
     let src = include_str!("mod.rs");
     let body = &src[src.find("fn md(").unwrap()..];
     let body = &body[..body.find("fn clean_md").unwrap()];
+    assert!(body.contains(".inert()"), "model text must be inert");
+    let shared = include_str!("../../tui_view/chat.rs");
     assert!(
-        body.contains(".on_link_click(|_, _, _, _| {})"),
+        shared.contains(".on_link_click(|_, _, _, _| {})"),
         "links must be inert"
     );
-    assert!(body.contains(".image_source("), "no image may load");
+    assert!(shared.contains(".image_source("), "no image may load");
     assert_eq!(
         src.matches("TextView::markdown(").count(),
-        1,
-        "one markdown site"
+        0,
+        "the one markdown site is AssistantMd"
     );
     let c = clean_md("a\u{202e}b\u{200b}c\u{7}d\n**e**");
     assert_eq!(c, "a\\u{202e}b\\u{200b}c\\u{0007}d\n**e**");
