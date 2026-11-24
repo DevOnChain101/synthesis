@@ -158,6 +158,8 @@ pub struct TuiView {
     anim_tick: Option<gpui::Task<()>>,
     /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
     live: Option<driver::LiveUi>,
+    /// The Super Agent's sessions, waiting for the lists to be read (see `adopt_handoff`).
+    pending_handoff: Option<crate::handoff::Handoff>,
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
@@ -273,6 +275,7 @@ impl TuiView {
             topo_tick: None,
             anim_tick: None,
             live: None,
+            pending_handoff: None,
             hidden,
             inset,
             top: 0.,

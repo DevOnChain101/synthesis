@@ -2,7 +2,7 @@ use gpui::{
     Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, px, size,
 };
 
-use super::frames::{Frame, GoalKind, MAX_SESSIONS};
+use super::frames::{Frame, GoalKind};
 use super::session::host::SessionHost;
 use super::*;
 
@@ -190,35 +190,17 @@ fn the_rail_has_a_roving_cursor_and_enter_opens_the_row(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn at_most_six_session_tabs_and_the_plus_says_why(cx: &mut TestAppContext) {
+fn many_session_tabs_are_all_kept_and_the_focused_one_stays_reachable(cx: &mut TestAppContext) {
     let (sa, v) = open(cx);
-    for i in 0..MAX_SESSIONS {
+    for i in 0..12 {
         sa.update(v, |s, cx| session_tab(s, &format!("/w/p{i}"), cx));
     }
     v.run_until_parked();
-    assert_eq!(
-        sa.read_with(v, |s, _| s.frames.session_count()),
-        MAX_SESSIONS
-    );
-    // a seventh is refused with the reason, the rail still lists only what exists
-    sa.update(v, |s, cx| session_tab(s, "/w/extra", cx));
-    assert_eq!(
-        sa.read_with(v, |s, _| s.frames.session_count()),
-        MAX_SESSIONS
-    );
-    assert_eq!(
-        sa.read_with(v, |s, _| s.notice.clone()),
-        Some(CAP_NOTE.into())
-    );
-    // the picker's session row refuses too, before any folder is made
-    press(v, &sa, "n", none());
-    press(v, &sa, "1", none());
-    press(v, &sa, "enter", none());
-    assert_eq!(cursor(v, &sa), Some(Some(0)));
-    assert!(v.debug_bounds("sa-kind-notice").is_some());
-    // closing one frees a place
-    sa.update(v, |s, cx| s.close_tab(1, cx));
-    assert!(sa.read_with(v, |s, _| s.frames.session_count()) < MAX_SESSIONS);
+    assert_eq!(sa.read_with(v, |s, _| s.frames.session_count()), 12);
+    // the strip scrolls; the last opened is the focused one, and an earlier one can be focused again
+    sa.update(v, |s, cx| s.focus_tab(2, cx));
+    assert_eq!(sa.read_with(v, |s, _| s.frames.active_index()), 2);
+    assert_eq!(sa.read_with(v, |s, _| s.notice.clone()), None);
 }
 
 #[gpui::test]

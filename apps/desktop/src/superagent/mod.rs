@@ -49,7 +49,6 @@ use tokens::{self as t, hsla};
 pub const TITLE_ROW_H: f32 = 48.;
 /// Below this width the rail is icon-only unless the person toggled it.
 const MINI_BELOW: f32 = 900.;
-pub const CAP_NOTE: &str = "At most 6 session tabs can be open. Close one first.";
 
 /// The person asked for another view (the mode buttons, the gear): the shell switches.
 pub struct SwitchView(pub View);
@@ -299,11 +298,14 @@ impl SuperAgentView {
     }
 
     pub fn open(&mut self, f: Frame, cx: &mut Context<Self>) {
-        let r = self.frames.open(f);
+        self.frames.open(f);
         self.changed(cx);
-        if r.is_err() {
-            self.notice = Some(CAP_NOTE.into());
-        }
+    }
+
+    /// The sessions this view hosts, for the TUI when the person switches to it.
+    pub(crate) fn handoff(&self, cx: &gpui::App) -> crate::handoff::Handoff {
+        let last = self.frames.last_session();
+        self.host.read(cx).handoff(last, cx)
     }
 
     pub(crate) fn focus_tab(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -652,9 +654,6 @@ impl SuperAgentView {
             _ => GoalKind::Writes,
         };
         self.open(Frame::NewGoal(kind), cx);
-        if self.frames.active() != &Frame::NewGoal(kind) {
-            return Err(CAP_NOTE.into());
-        }
         let folder = synthesis_harness::sanitize_for_display(draft.folder.trim());
         let start = (kind == GoalKind::Writes && !folder.is_empty()).then_some(folder.as_str());
         let form = self.goal_form(kind, start, window, cx);
