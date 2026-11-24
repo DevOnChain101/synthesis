@@ -68,6 +68,8 @@ pub struct SuperAgentView {
     rail_cursor: usize,
     /// `Some`: the person toggled the rail (collapsed or not); `None`: it follows the window width.
     rail_user: Option<bool>,
+    /// Focus mode: the rail is left out and every session shows `/focus` rows only; `rail_user` is kept for the way back.
+    focus_mode: bool,
     /// Sessions opened in this window (id, title), oldest first; closing the tab keeps the rail row.
     pub(crate) sessions: Vec<(String, String)>,
     /// Why the last action did not go on; cleared by the next one.
@@ -195,6 +197,7 @@ impl SuperAgentView {
             rail_focus: cx.focus_handle().tab_stop(true),
             rail_cursor: 1,
             rail_user: None,
+            focus_mode: false,
             sessions: Vec::new(),
             notice: None,
             count_waiting,
@@ -674,6 +677,16 @@ impl SuperAgentView {
         })
     }
 
+    /// Focus mode on or off (Alt+Shift+F): applies to every hosted session.
+    pub(crate) fn toggle_focus(&mut self, cx: &mut Context<Self>) {
+        self.focus_mode = !self.focus_mode;
+        let on = self.focus_mode;
+        for v in self.host.read(cx).views() {
+            v.update(cx, |t, cx| t.set_focus(on, cx));
+        }
+        cx.notify();
+    }
+
     fn toggle_rail(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.rail_user = Some(!self.collapsed(window));
         cx.notify();
@@ -938,6 +951,7 @@ impl SuperAgentView {
 impl Render for SuperAgentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.collapsed(window);
+        let focus = self.focus_mode;
         if std::mem::take(&mut self.refocus) && self.visible {
             match self.frames.active() {
                 Frame::Home => self.home.update(cx, |h, cx| h.shown(window, cx)),
@@ -998,7 +1012,7 @@ impl Render for SuperAgentView {
             .relative()
             .bg(t::surface_fill())
             .text_color(hsla(t::TEXT_STRONG))
-            .child(self.rail(collapsed, window, cx))
+            .children((!focus).then(|| self.rail(collapsed, window, cx)))
             .child(self.nav_controls(cx))
             .child(
                 div()
@@ -1009,7 +1023,11 @@ impl Render for SuperAgentView {
                     .child(
                         div()
                             .flex_none()
-                            .pl(px(rail::title_inset(collapsed)))
+                            .pl(px(if focus {
+                                rail::focus_inset()
+                            } else {
+                                rail::title_inset(collapsed)
+                            }))
                             .child(self.title_row(window, cx)),
                     )
                     .child(

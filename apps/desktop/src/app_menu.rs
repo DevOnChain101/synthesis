@@ -18,6 +18,7 @@ actions!(
         Settings,
         ViewTui,
         ViewSuperAgent,
+        ToggleFocus,
         Quit,
         Hide,
         HideOthers,
@@ -66,6 +67,8 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("TUI", ViewTui),
             MenuItem::action("Super Agent", ViewSuperAgent),
             MenuItem::separator(),
+            MenuItem::action("Focus Mode", ToggleFocus),
+            MenuItem::separator(),
             MenuItem::action("Enter Full Screen", ToggleFullScreen),
         ]),
         // gpui marks the menu named "Window" as the system window menu
@@ -87,6 +90,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-,", Settings, None),
         KeyBinding::new("cmd-1", ViewTui, None),
         KeyBinding::new("cmd-2", ViewSuperAgent, None),
+        // Alt+F alone is the composer's word-forward (and types a letter on macOS)
+        KeyBinding::new("alt-shift-f", ToggleFocus, None),
     ]
 }
 
@@ -134,6 +139,7 @@ pub fn install(cx: &mut App) {
                 .detach();
         })
     });
+    cx.on_action(|_: &ToggleFocus, cx| with_shell(cx, |s, _, cx| s.toggle_focus(cx)));
     cx.on_action(|_: &Settings, cx| with_shell(cx, |s, window, cx| s.toggle_settings(window, cx)));
     cx.on_action(|_: &ViewTui, cx| with_shell(cx, |s, w, cx| s.go(View::Tui, w, cx)));
     cx.on_action(|_: &ViewSuperAgent, cx| with_shell(cx, |s, w, cx| s.go(View::SuperAgent, w, cx)));

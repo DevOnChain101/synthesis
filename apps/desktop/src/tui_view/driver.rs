@@ -2577,6 +2577,23 @@ impl TuiView {
         cx.notify();
     }
 
+    /// Focus mode (Alt+Shift+F): the side columns go (`hidden.focus`, the panel flags keep their state) and the chat
+    /// shows `/focus` rows only. Not saved to the settings; the scroll is not moved. Returns the new state.
+    pub(crate) fn toggle_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        let on = !self.hidden.focus;
+        self.set_focus(on, cx);
+        on
+    }
+
+    pub(crate) fn set_focus(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.hidden.focus = on;
+        if let Some(lu) = &mut self.live {
+            lu.live.focus_view = on;
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// `/panels`: lists, hides or shows panels at once and saves the choice to the user settings file.
     fn panels_command(&mut self, arg: &str, cx: &mut Context<Self>) {
         use super::layout::{ALWAYS, HIDEABLE, PanelsCmd, parse_panels};

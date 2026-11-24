@@ -126,6 +126,17 @@ impl Shell {
         self.go(to, window, cx);
     }
 
+    /// Focus mode on or off in the view on screen (Alt+Shift+F, View menu); Settings has none.
+    pub(crate) fn toggle_focus(&mut self, cx: &mut Context<Self>) {
+        match self.view {
+            View::Tui => {
+                self.tui.update(cx, |t, cx| t.toggle_focus(cx));
+            }
+            View::SuperAgent if !self.legacy_ui => self.sa.update(cx, |s, cx| s.toggle_focus(cx)),
+            _ => {}
+        }
+    }
+
     /// The app menu's Quit item: the TUI view's own quit (engine shutdown, then the app exits).
     pub(crate) fn quit(&mut self, cx: &mut Context<Self>) {
         self.tui.update(cx, |t, cx| t.quit(cx));
@@ -1126,6 +1137,33 @@ mod tests {
         v.simulate_click(badge, Default::default());
         v.run_until_parked();
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+    }
+
+    #[gpui::test]
+    fn focus_mode_hides_the_nav_and_restores_it_in_both_views(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 900.);
+        // TUI view: both side columns go, the panel flags are untouched, off brings them back
+        assert!(v.debug_bounds("col-left").is_some());
+        shell.update(v, |s, cx| s.toggle_focus(cx));
+        v.run_until_parked();
+        assert!(v.debug_bounds("col-left").is_none() && v.debug_bounds("col-right").is_none());
+        shell.update(v, |s, cx| s.toggle_focus(cx));
+        v.run_until_parked();
+        assert!(v.debug_bounds("col-left").is_some() && v.debug_bounds("col-right").is_some());
+        // Super Agent: the rail goes (the nav buttons stay), and comes back with its collapsed state
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        v.run_until_parked();
+        let c = v.debug_bounds("sa-rail-toggle").unwrap().center();
+        v.simulate_click(c, Default::default());
+        v.run_until_parked();
+        let before = v.debug_bounds("sa-rail").unwrap().size.width;
+        shell.update(v, |s, cx| s.toggle_focus(cx));
+        v.run_until_parked();
+        assert!(v.debug_bounds("sa-rail").is_none() && v.debug_bounds("sa-nav").is_some());
+        shell.update(v, |s, cx| s.toggle_focus(cx));
+        v.run_until_parked();
+        assert_eq!(v.debug_bounds("sa-rail").unwrap().size.width, before);
     }
 
     #[gpui::test]

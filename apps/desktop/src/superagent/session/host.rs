@@ -223,8 +223,7 @@ impl SessionHost {
             .sum()
     }
 
-    /// The hosted views (tests of the owner).
-    #[cfg(test)]
+    /// The hosted views.
     pub(crate) fn views(&self) -> Vec<Entity<TuiView>> {
         self.views.iter().map(|(_, v)| v.clone()).collect()
     }
