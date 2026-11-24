@@ -15,6 +15,7 @@ mod design_tests;
 pub mod dialog;
 pub mod driver;
 mod embed_chat;
+mod explorer_git;
 mod filesel;
 pub mod layout;
 pub mod panels;

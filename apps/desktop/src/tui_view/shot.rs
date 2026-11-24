@@ -1027,6 +1027,9 @@ fn prepare_tabs(
                 ws.join("src/main.rs"),
                 "fn main() {\n    println!(\"hello, world\");\n    let n = 3;\n}\n",
             )?;
+            // an untracked file in a folder of its own and a deleted one, for the explorer's badges
+            std::fs::write(ws.join("tests/extra.rs"), "#[test]\nfn extra() {}\n")?;
+            std::fs::remove_file(ws.join("README.md"))?;
             live.trusted = !untrusted;
         }
         super::ChatTab::Browser => {
