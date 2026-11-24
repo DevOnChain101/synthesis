@@ -205,8 +205,13 @@ strong; the diff tab's colours) and TEXT (Copy). Classification is pure (`synthe
 TUI view, the Super Agent session chats and the conductor chat, which has Copy only): a shell label, or an unlabelled block
 whose every line looks like a shell command; an agent's `/slash` command and prose stay text. Run in terminal types the
 command into the person's shell (TUI view: Terminal tab; Super Agent session: the sidebar Terminal segment) only from a
-real single mouse click, 400 ms after the block was drawn whole, never while the message streams; a multi-line command
-("Run N lines") or a risky one ("Run anyway") needs a second click at least 400 ms later; a block with invisible or bidi
+real single mouse click, 400 ms after the block was drawn whole, never while the message streams; Run
+always asks for approval (owner decision 2026-11-24, "Run asks for approval, and only then runs"): the first click only
+arms it and turns the button into the approval control ("Approve and run", "Approve and run N lines", "Approve: risky
+command, run anyway" or "Approve: untrusted content, run anyway", the last two in the danger colour), and nothing is sent
+until a second real click on it at least 400 ms later (same rules as the first: hover rest, quiet layout, not streaming,
+block unchanged). The approval lapses after 15 s, when the text changes, when another block is clicked, when the pointer
+leaves the control, or on any scroll or layout change; Esc cancels it and never approves (`Gate::cancel`). Copy stays one click. A block with invisible or bidi
 characters is shown escaped with no buttons. The terminal's output never goes back to the engine. Messages without a fence
 are unchanged; no design_tests/shot baseline contains a fenced assistant message.
 Run safety, after the security review: a block longer than what is drawn (400 lines or 16 KiB) or with a tab is Copy only;
@@ -221,11 +226,12 @@ the project, installs, destructive git, deploys, truncating redirects, quote tri
 not prove anything safe. Whether to invert it to an allowlist of programs is an owner decision, not taken.
 Scope of the taint: web, browser, MCP and sub-agent (Task/Agent) tools, from any agent, sticky for the session; it is derived
 from the stored events, so a resumed session replays it. What the model read from a file or a mention is NOT tracked
-(file-borne injection): there the risky list and its "Run anyway" are the only defence. The list also flags disguised command
+(file-borne injection): there the risky list and its "Approve: risky command, run anyway" label are the only defence. The list also flags disguised command
 words (quotes, backslashes, `$`, globs in the word that names the program), joins `\`, `^` and backtick line continuations
 before matching, and the Windows and macOS tools that change the system (registry, tasks, script hosts, launch agents).
-Accepted risk: single-click Run of model-authored commands under prompt injection: mitigated by risky/tainted confirmations,
-not eliminated; local automation can synthesize real clicks.
+Accepted risk: Run of model-authored commands under prompt injection: the approval click shows the exact command that will
+run (displayed == run) and risky/tainted ones are labelled and coloured, which mitigates but does not eliminate it (the
+person can still approve a bad command); local automation can synthesize two real clicks.
 Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
 selects the whole conversation. The list is virtual, so this is a flag: the rows built tint like a selection, a pill says
 so, and Cmd/Ctrl+C copies the transcript assembled from the same items and `toolview` cards the rows paint (same

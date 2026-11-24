@@ -1319,6 +1319,10 @@ impl TuiView {
         if self.embed.is_some() && !self.shown {
             return false;
         }
+        // Esc cancels a pending Run approval (it never approves); the key then goes on as before
+        if ks.key == "escape" {
+            self.gate.borrow_mut().cancel();
+        }
         // the Browser tab's page takes the keys while it holds the focus (a dialog still owns the keyboard first)
         if let Some(done) = self.browser_key(ks, window, cx) {
             return done;
