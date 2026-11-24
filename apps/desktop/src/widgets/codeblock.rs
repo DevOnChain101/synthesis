@@ -104,7 +104,7 @@ const COPIED_MS: u64 = 1500;
 /// Hover time before a button's tooltip (gpui's default is 500 ms).
 const TIP_MS: u64 = 350;
 
-fn icon_btn(
+pub(crate) fn icon_btn(
     id: SharedString,
     name: &str,
     tip: SharedString,

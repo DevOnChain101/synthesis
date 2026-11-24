@@ -50,6 +50,7 @@ pub fn body(name: &str) -> Option<&'static str> {
             r#"<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>"#
         }
         "check" => r#"<path d="M5 12.5l4.5 4.5L19 7"/>"#,
+        "refresh" => r#"<path d="M20 12A8 8 0 1 1 17.7 6.3M20 4V9H15"/>"#,
         "search" => r#"<circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5"/>"#,
         "cursor" => r#"<path d="M5 3l14 7-6 2.2L10.5 19z"/>"#,
         "pencil" => r#"<path d="M4 20l1-4L16 5l3 3L8 19z"/>"#,
@@ -126,6 +127,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "pencil-check" => "editok",
         "cpu" => "cpu",
         "clock" => "clock",
+        "refresh" => "refresh",
         "tui" | "super-agent" | "gear" | "rail" | "nav-back" | "nav-forward" | "win-min"
         | "win-max" | "win-close" => {
             return Some(match name {
