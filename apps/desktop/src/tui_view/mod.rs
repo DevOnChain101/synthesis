@@ -980,7 +980,16 @@ impl TuiView {
         // Mission shows only while the agent has a task list (and `status` is not switched off)
         let mission = !hid.status && !s.agent.steps.is_empty();
         if mission || !hid.tokens {
-            let card_min = if tight { 84. } else { 110. };
+            // a row whose cards are all folded is just their header, not the cards' minimum height
+            let all_folded = (!mission || self.is_folded("p-agent"))
+                && (hid.tokens || self.is_folded("p-context"));
+            let card_min = if all_folded {
+                0.
+            } else if tight {
+                84.
+            } else {
+                110.
+            };
             let mut row = div()
                 .debug_selector(|| "status-context".to_string())
                 .flex()
@@ -1787,6 +1796,32 @@ mod tests {
             vcx.run_until_parked();
             assert!(vcx.debug_bounds(body).is_some(), "{id}: not reopened");
         }
+    }
+
+    /// A folded Context card (alone in its row, Mission hidden) is only as tall as its header: the row does not
+    /// keep the minimum height of the open card.
+    #[gpui::test]
+    fn a_folded_context_row_is_only_its_header_tall(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut hidden = Hidden::default();
+        hidden.hide("status");
+        let (_view, vcx) = cx.add_window_view(|_, _| TuiView::new(0., hidden));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let head = vcx.debug_bounds("p-context-head").expect("context header");
+        vcx.simulate_click(
+            gpui::point(head.left() + px(40.), head.center().y),
+            gpui::Modifiers::default(),
+        );
+        vcx.run_until_parked();
+        let row = vcx.debug_bounds("status-context").expect("row");
+        let card = vcx.debug_bounds("p-context").expect("card");
+        assert!(vcx.debug_bounds("p-context-body").is_none(), "folded");
+        assert_eq!(
+            row.size.height, card.size.height,
+            "row hugs the folded card"
+        );
+        assert!(card.size.height < px(60.), "{:?}", card.size.height);
     }
 
     #[test]
