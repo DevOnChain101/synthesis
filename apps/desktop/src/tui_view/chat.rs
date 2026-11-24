@@ -654,7 +654,7 @@ impl TuiView {
                     match self.assistant_blocks(idx, s, *streaming, *tainted, cx) {
                         Some(blocks) => blocks,
                         None => TextView::markdown(("assistant", idx), s.clone())
-                            .style(table_head_style())
+                            .style(assistant_style())
                             .selectable(true)
                             .into_any_element(),
                     },
@@ -1734,20 +1734,34 @@ pub fn input_box(
         )
 }
 
-/// A table's header row stands out in the chat: bold, in the strong text colour on the elevated ground (the theme default
-/// is the muted grey of a body cell).
-pub(crate) fn table_head_style() -> TextViewStyle {
-    TextViewStyle::default().table_head(
-        gpui::StyleRefinement::default()
-            .font_weight(FontWeight::BOLD)
-            .text_color(strong())
-            .bg(hsla(t::ELEVATED)),
-    )
+/// The assistant's markdown: body text stays as it is, only key points stand out. A table's header row is bold in the
+/// strong text colour on the elevated ground, inline `code` is amber on the elevated ground. (gpui-component 0.8.1 has no
+/// hook for the colour of `**bold**` or of headings, so those keep the body colour.)
+pub(crate) fn assistant_style() -> TextViewStyle {
+    TextViewStyle::default()
+        .table_head(
+            gpui::StyleRefinement::default()
+                .font_weight(FontWeight::BOLD)
+                .text_color(strong())
+                .bg(hsla(t::ELEVATED)),
+        )
+        .inline_code(gpui::HighlightStyle {
+            color: Some(hsla(t::WARN)),
+            background_color: Some(hsla(t::ELEVATED)),
+            ..Default::default()
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_code_is_amber_on_the_elevated_ground() {
+        let c = assistant_style().inline_code;
+        assert_eq!(c.color, Some(hsla(t::WARN)));
+        assert_eq!(c.background_color, Some(hsla(t::ELEVATED)));
+    }
 
     #[test]
     fn the_caret_and_the_focus_border_follow_the_chat_focus() {
