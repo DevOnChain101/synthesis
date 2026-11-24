@@ -69,7 +69,8 @@ pub fn read_preview(root: &Path, rel: &str) -> Result<PreviewText, String> {
     if !real.starts_with(&real_root) {
         return Err("the file is outside the project folder".into());
     }
-    if synthesis_core::secrets::is_secret_path(&real) || synthesis_core::secrets::is_secret_path(p)
+    if synthesis_core::secrets::is_secret_shaped_in(&real, &real_root)
+        || synthesis_core::secrets::is_secret_shaped_in(p, root)
     {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }

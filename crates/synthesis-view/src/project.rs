@@ -937,17 +937,12 @@ pub fn scan_lazy(cwd: &Path, env: &Env, trusted: bool, open: Option<&[String]>) 
     };
     let git = Git::new(env);
     // a `.git` that leads out of the folder is not a repository to run git in
-    let gitdir = if trusted {
-        filediff::gitdir_ok(cwd)
+    let repo = if trusted {
+        filediff::gitdir_ok(cwd).and_then(|()| filediff::repo_ok(&git, cwd))
     } else {
-        Ok(())
+        Ok(false)
     };
-    if trusted
-        && gitdir.is_ok()
-        && git
-            .run(cwd, &["rev-parse", "--is-inside-work-tree"], 0)
-            .is_some()
-    {
+    if repo == Ok(true) {
         let guards = match git.filter_guards(cwd) {
             Ok(g) => g,
             Err(why) => {
@@ -977,7 +972,7 @@ pub fn scan_lazy(cwd: &Path, env: &Env, trusted: bool, open: Option<&[String]>) 
     }
     let listing = data.listing.clone();
     data.rows = children_rows(cwd, "", &listing, 0).unwrap_or_default();
-    if let Err(why) = gitdir {
+    if let Err(why) = repo {
         data.rows.insert(0, notice_row(0, &why));
     }
     let open: Vec<String> = match open {

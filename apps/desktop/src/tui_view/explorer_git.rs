@@ -108,7 +108,7 @@ impl TuiView {
             if letter == '?' {
                 // not in git yet: all of it is added; read as the preview reads (no links out, no secrets)
                 let b = read_preview(&root, &rel)?;
-                project::all_added(&rel, &b.lines)
+                project::all_added(&root, &rel, &b.lines)
             } else {
                 project::file_diff(&root, &env, trusted, &rel)
             }

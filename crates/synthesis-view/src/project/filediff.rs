@@ -23,15 +23,22 @@ pub struct FileDiff {
 }
 
 /// A project-relative path git output or a click may name: no absolute path or drive, no `..`/`.`/`.git`
-/// component, no NUL, backslash or control character.
+/// component (any case, or its 8.3 form), no component ending in a dot or space, no NUL, backslash, colon or
+/// control character.
 pub fn safe_rel(rel: &str) -> Result<(), String> {
     let bad = rel.is_empty()
         || rel.starts_with(['/', '\\'])
         || rel.as_bytes().get(1) == Some(&b':')
-        || rel.chars().any(|c| c.is_control() || c == '\\')
         || rel
-            .split('/')
-            .any(|c| matches!(c, "" | "." | ".." | ".git"));
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | ':'))
+        || rel.split('/').any(|c| {
+            // Windows drops a trailing dot or space, and `GIT~1` is `.git` in 8.3 form
+            c.is_empty()
+                || c.ends_with(['.', ' '])
+                || c.eq_ignore_ascii_case(".git")
+                || c.to_ascii_lowercase().starts_with("git~")
+        });
     if bad {
         return Err("not a path inside the project".into());
     }
@@ -52,7 +59,8 @@ pub fn gitdir_ok(cwd: &Path) -> Result<(), String> {
     let dot = base.join(".git");
     let meta = dot.symlink_metadata().map_err(|e| e.to_string())?;
     if meta.is_dir() {
-        return Ok(());
+        let root = std::fs::canonicalize(base).map_err(|e| e.to_string())?;
+        return borrowed_objects(&dot, &root);
     }
     if !meta.is_file() {
         return no(".git is a link");
@@ -74,10 +82,71 @@ pub fn gitdir_ok(cwd: &Path) -> Result<(), String> {
     let back = std::fs::read_to_string(target.join("gitdir"))
         .ok()
         .and_then(|b| std::fs::canonicalize(b.lines().next()?.trim()).ok());
-    if target.starts_with(&root) || back.as_deref() == Some(dot.as_path()) {
+    if target.starts_with(&root) {
+        return borrowed_objects(&target, &root);
+    }
+    // a linked work tree: its git directory is `<common>/worktrees/<name>`, and `commondir` says so
+    let linked = back.as_deref() == Some(dot.as_path())
+        && target.parent().and_then(|w| w.file_name()) == Some("worktrees".as_ref())
+        && std::fs::read_to_string(target.join("commondir"))
+            .ok()
+            .and_then(|c| std::fs::canonicalize(target.join(c.lines().next()?.trim())).ok())
+            .is_some_and(|c| target.parent().and_then(Path::parent) == Some(c.as_path()));
+    if linked {
         Ok(())
     } else {
         no(".git points outside this folder")
+    }
+}
+
+/// A git directory inside the project must not borrow another one: no `commondir`, and no object alternates
+/// that lead outside the folder.
+fn borrowed_objects(gitdir: &Path, root: &Path) -> Result<(), String> {
+    let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|p| p.starts_with(root));
+    if gitdir.join("commondir").exists() {
+        return Err("git was not run: the git directory names a common directory".into());
+    }
+    let objects = gitdir.join("objects");
+    let alt = std::fs::read_to_string(objects.join("info/alternates")).unwrap_or_default();
+    if alt
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .any(|l| !inside(&objects.join(l.trim())))
+    {
+        return Err(
+            "git was not run: the object store borrows objects from outside this folder".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Whether `cwd` is in a work tree git can be run in. `Err`: it is, but git's idea of the work tree is not the
+/// project (`core.worktree` in a hostile config sends status and diff to files elsewhere), so git is not run.
+/// `Ok(false)`: no repository.
+pub(super) fn repo_ok(git: &Git, cwd: &Path) -> Result<bool, String> {
+    let no = |why: &str| Err(format!("git was not run: {why}"));
+    if git
+        .run(cwd, &["config", "--get", "core.worktree"], 0)
+        .is_some_and(|(o, _)| !o.is_empty())
+    {
+        return no("the repository's config moves its work tree");
+    }
+    let out = |args: &[&str]| {
+        git.run(cwd, args, b'\n')
+            .map(|(o, _)| String::from_utf8_lossy(&o).trim().to_string())
+    };
+    if out(&["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        return Ok(false);
+    }
+    let (Some(top), Ok(here)) = (
+        out(&["rev-parse", "--show-toplevel"]),
+        std::fs::canonicalize(cwd),
+    ) else {
+        return no("the work tree could not be found");
+    };
+    match std::fs::canonicalize(top) {
+        Ok(t) if here.starts_with(&t) => Ok(true),
+        _ => no("the work tree is not this folder"),
     }
 }
 
@@ -90,9 +159,9 @@ fn unless_secret(lines: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 /// A new file shown as one added hunk (`lines` are the file's text, already read safely).
-pub fn all_added(rel: &str, lines: &[String]) -> Result<FileDiff, String> {
+pub fn all_added(root: &Path, rel: &str, lines: &[String]) -> Result<FileDiff, String> {
     safe_rel(rel)?;
-    if synthesis_core::secrets::is_secret_shaped(Path::new(rel)) {
+    if synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), root) {
         return Err(HIDDEN_SECRET.into());
     }
     let n = lines.len().min(DIFF_LINES);
@@ -112,7 +181,7 @@ pub fn all_added(rel: &str, lines: &[String]) -> Result<FileDiff, String> {
 /// secret file, and never a diff with secret-shaped text in it.
 pub fn file_diff(cwd: &Path, env: &Env, trusted: bool, rel: &str) -> Result<FileDiff, String> {
     safe_rel(rel)?;
-    if synthesis_core::secrets::is_secret_shaped(Path::new(rel)) {
+    if synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), cwd) {
         return Err(HIDDEN_SECRET.into());
     }
     if !trusted {
@@ -120,10 +189,7 @@ pub fn file_diff(cwd: &Path, env: &Env, trusted: bool, rel: &str) -> Result<File
     }
     gitdir_ok(cwd)?;
     let git = Git::new(env);
-    if git
-        .run(cwd, &["rev-parse", "--is-inside-work-tree"], 0)
-        .is_none()
-    {
+    if !repo_ok(&git, cwd)? {
         return Err("not a git repository".into());
     }
     let guards = git
@@ -238,7 +304,7 @@ mod tests {
             HIDDEN_SECRET
         );
         assert_eq!(
-            all_added(".env", &["A=2".into()]).unwrap_err(),
+            all_added(Path::new("."), ".env", &["A=2".into()]).unwrap_err(),
             HIDDEN_SECRET
         );
         std::fs::write(d.path().join("a.txt"), "API_KEY=abcdef123456\n").unwrap();
@@ -248,12 +314,13 @@ mod tests {
         );
         assert!(
             all_added(
+                Path::new("."),
                 "n.txt",
                 &["Authorization: Bearer abcdefghijklmnop1234".into()]
             )
             .is_err()
         );
-        let ok = all_added("n.txt", &["hello".into()]).unwrap();
+        let ok = all_added(Path::new("."), "n.txt", &["hello".into()]).unwrap();
         assert_eq!(ok.lines.last().unwrap(), "+hello");
     }
 
@@ -267,14 +334,19 @@ mod tests {
         let f = file_diff(d.path(), &env(), true, "a.txt").unwrap();
         assert!(f.cut);
         assert_eq!(f.lines.len(), DIFF_LINES);
-        let added = all_added("n.txt", &vec!["x".to_string(); DIFF_LINES + 5]).unwrap();
+        let added = all_added(
+            Path::new("."),
+            "n.txt",
+            &vec!["x".to_string(); DIFF_LINES + 5],
+        )
+        .unwrap();
         assert!(added.cut && added.lines.len() == DIFF_LINES + 3);
     }
 
     #[test]
     fn a_git_file_pointing_outside_is_refused_and_a_linked_worktree_is_not() {
         let t = tempfile::tempdir().unwrap();
-        let out = t.path().join("elsewhere");
+        let out = t.path().join("main/.git/worktrees/w1");
         std::fs::create_dir_all(&out).unwrap();
         let w = t.path().join("w");
         std::fs::create_dir_all(&w).unwrap();
@@ -289,10 +361,74 @@ mod tests {
             ),
         )
         .unwrap();
+        assert!(
+            gitdir_ok(&w).unwrap_err().contains("outside"),
+            "no commondir yet"
+        );
+        std::fs::write(out.join("commondir"), "../..\n").unwrap();
         assert!(gitdir_ok(&w).is_ok());
         std::fs::write(w.join(".git"), "garbage").unwrap();
         assert!(gitdir_ok(&w).is_err());
         assert!(file_diff(&w, &env(), true, "a.txt").is_err());
+    }
+
+    #[test]
+    fn a_config_that_moves_the_work_tree_shows_nothing_of_the_other_tree() {
+        let d = repo();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("a.txt"), "VICTIM\n").unwrap();
+        std::fs::write(d.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let cfg = d.path().join(".git/config");
+        let mut c = std::fs::read_to_string(&cfg).unwrap();
+        c.push_str(&format!(
+            "[core]\n\tworktree = {}\n",
+            other.path().display()
+        ));
+        std::fs::write(&cfg, c).unwrap();
+        let e = file_diff(d.path(), &env(), true, "a.txt").unwrap_err();
+        assert!(e.contains("git was not run"), "{e}");
+        let l = crate::project::scan_lazy(d.path(), &env(), true, None);
+        assert!(!l.listing.git && l.listing.status.is_empty());
+        assert!(
+            l.rows
+                .iter()
+                .any(|r| r.notice && r.name.contains("git was not run"))
+        );
+    }
+
+    #[test]
+    fn a_git_directory_that_borrows_another_is_refused() {
+        let d = repo();
+        let out = tempfile::tempdir().unwrap();
+        let alt = d.path().join(".git/objects/info");
+        std::fs::create_dir_all(&alt).unwrap();
+        std::fs::write(
+            alt.join("alternates"),
+            format!("{}\n", out.path().display()),
+        )
+        .unwrap();
+        assert!(gitdir_ok(d.path()).unwrap_err().contains("borrows"));
+        std::fs::write(alt.join("alternates"), "../objects\n").unwrap();
+        assert!(gitdir_ok(d.path()).is_ok());
+        std::fs::write(d.path().join(".git/commondir"), "../x\n").unwrap();
+        assert!(gitdir_ok(d.path()).unwrap_err().contains("common"));
+    }
+
+    #[test]
+    fn data_files_under_secret_directories_are_hidden() {
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("secrets")).unwrap();
+        std::fs::write(d.path().join("secrets/data.json"), "{}").unwrap();
+        for rel in ["secrets/data.json", ".kube/config", ".azure/x"] {
+            assert_eq!(
+                file_diff(d.path(), &env(), true, rel).unwrap_err(),
+                HIDDEN_SECRET
+            );
+            assert_eq!(
+                all_added(d.path(), rel, &["x".into()]).unwrap_err(),
+                HIDDEN_SECRET
+            );
+        }
     }
 
     /// A repository whose config and attributes name programs: none runs while listing or diffing.
