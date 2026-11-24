@@ -227,6 +227,9 @@ pub(crate) struct Embed {
     /// The Super Agent's `ChatHost` draws the chat: this view only drives the engine and owns the Terminal and
     /// Browser panes, and its key hook leaves everything but those panes and the dialogs alone.
     pub headless: bool,
+    /// Mode switch: the engine was given back while idle (its transcript is stored): the scope and session id to
+    /// resume on the next send. The session lock is free meanwhile; `None` while an engine holds it.
+    pub released: Option<(crate::handoff::Scope, String)>,
 }
 
 /// A side column of the view.

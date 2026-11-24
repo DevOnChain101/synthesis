@@ -244,6 +244,19 @@ impl SessionHost {
         h
     }
 
+    /// Mode switch: every idle hosted session gives its engine (and the session lock) back; a session that runs a
+    /// turn or waits for an approval keeps it. Each receiver fires when one lock is free.
+    pub fn release_idle(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<futures::channel::oneshot::Receiver<()>> {
+        let views: Vec<_> = self.views.iter().map(|(_, v)| v.clone()).collect();
+        views
+            .iter()
+            .filter_map(|v| v.update(cx, |t, cx| t.release_idle(cx)))
+            .collect()
+    }
+
     /// The ids of the hosted sessions, oldest first.
     pub fn ids(&self) -> Vec<String> {
         self.views.iter().map(|(i, _)| i.clone()).collect()
@@ -624,6 +637,93 @@ pub(crate) mod tests {
         );
         h.update(v, |h, cx| h.close(&id, cx));
         assert!(scratch.is_dir());
+        v.run_until_parked();
+        wait_free(&f.home);
+    }
+
+    /// Mode switch: an idle session with a stored message gives its engine and lock back and resumes on the next
+    /// send (same id, one writer); a running turn is never released; an id of another scope is never matched.
+    #[gpui::test]
+    fn an_idle_session_is_released_and_resumed_a_running_one_never_closed(cx: &mut TestAppContext) {
+        let (f, cfg) = fx(1);
+        cx.executor().allow_parking();
+        let a = f.base.join("f0");
+        let (h, v) = host(cx, Some(cfg));
+        assert!(open(&h, v, &a));
+        let view = h.read_with(v, |h, _| h.views[0].1.clone());
+        let wait = |v: &mut VisualTestContext, ok: &dyn Fn(&TuiView) -> bool, what: &str| {
+            for _ in 0..1200 {
+                v.executor()
+                    .advance_clock(std::time::Duration::from_millis(100));
+                v.run_until_parked();
+                if view.read_with(v, |t, _| ok(t)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("the engine did not get there: {what}");
+        };
+        let users = |t: &TuiView| {
+            t.embed_live().map_or(0, |l| {
+                l.convo()
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i, synthesis_view::convo::Item::User(_)))
+                    .count()
+            })
+        };
+        let say = |v: &mut VisualTestContext, text: &str| {
+            view.update_in(v, |t, w, cx| {
+                let p = t.embed_prompt().unwrap();
+                p.update(cx, |s, cx| s.set_value(text.to_string(), w, cx));
+                t.embed_submit(w, cx)
+            })
+        };
+        wait(v, &|t| t.embed_handoff().is_some(), "started");
+        say(v, "hello");
+        wait(v, &|t| users(t) == 1 && !t.embed_info().1, "first turn");
+        let before = view.read_with(v, |t, _| t.embed_handoff().unwrap());
+        // a running turn is never closed
+        view.update(v, |t, _| t.test_set_busy(true));
+        assert!(view.update(v, |t, cx| t.release_idle(cx)).is_none());
+        view.update(v, |t, _| t.test_set_busy(false));
+        assert!(view.read_with(v, |t, _| t.embed_live().unwrap().engine.is_some()));
+        // another scope's id is not this engine's session
+        let other = crate::handoff::Handoff {
+            sessions: vec![crate::handoff::Hosted {
+                scope: crate::handoff::Scope::Wsl("Ubuntu".into()),
+                ..before.clone()
+            }],
+            focused: None,
+        };
+        assert!(
+            view.update(v, |t, cx| t.release_if_hosted(&other, cx))
+                .is_none()
+        );
+        // idle: released, the lock is free, the session is still handed over with its scope
+        let rx = view.update(v, |t, cx| t.release_idle(cx)).expect("idle");
+        assert!(futures::executor::block_on(rx).is_ok());
+        assert!(locks_all_free(&f.home), "the store lock is free");
+        assert_eq!(
+            view.read_with(v, |t, _| t.embed_handoff()),
+            Some(before.clone())
+        );
+        // resumed on the next send: the same session id, the earlier message kept
+        say(v, "again");
+        wait(
+            v,
+            &|t| {
+                users(t) == 2
+                    && !t.embed_info().1
+                    && t.embed_live()
+                        .is_some_and(|l| l.engine.is_some() && l.sid == before.sid)
+            },
+            "resumed",
+        );
+        assert!(view.read_with(v, |t, _| t.embed.as_ref().unwrap().released.is_none()));
+        let id = a.to_string_lossy().into_owned();
+        h.update(v, |h, cx| h.close(&id, cx));
+        drop(view);
         v.run_until_parked();
         wait_free(&f.home);
     }

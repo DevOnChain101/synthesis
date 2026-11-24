@@ -309,6 +309,14 @@ impl SuperAgentView {
         self.host.read(cx).handoff(last, cx)
     }
 
+    /// Mode switch to the TUI: idle sessions give their engines back (see `TuiView::release_idle`).
+    pub(crate) fn release_idle(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<futures::channel::oneshot::Receiver<()>> {
+        self.host.update(cx, |h, cx| h.release_idle(cx))
+    }
+
     pub(crate) fn focus_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         self.frames.focus(i);
         self.changed(cx);

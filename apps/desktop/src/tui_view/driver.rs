@@ -445,16 +445,7 @@ impl TuiView {
         if let Some(lu) = &mut self.live
             && let Some(e) = lu.live.engine.take()
         {
-            let h = std::thread::spawn(move || {
-                if let Some(m) = engine::close_shared(e) {
-                    eprintln!("synthesis-desktop: {m}");
-                }
-            });
-            // quitting waits for it (`shutdown_engine`), so the engine's orderly stop is never skipped
-            if let Ok(mut v) = CLOSING.lock() {
-                v.retain(|h| !h.is_finished());
-                v.push(h);
-            }
+            drop(close_off_thread(e));
         }
         if let Some(p) = self.term.take() {
             p.update(cx, |p, _| p.shutdown());
@@ -490,6 +481,14 @@ impl TuiView {
             lu.live.busy || lu.live.starting,
             lu.live.dialogs.len(),
         )
+    }
+
+    /// A turn runs (or not) as far as the mode-switch rules can tell (tests).
+    #[cfg(test)]
+    pub(crate) fn test_set_busy(&mut self, busy: bool) {
+        if let Some(lu) = &mut self.live {
+            lu.live.busy = busy;
+        }
     }
 
     /// The person's shell shows `bytes` as if a program had printed them (tests of the sidebar's secret rules).
@@ -543,9 +542,15 @@ impl TuiView {
     /// folder, and the scope of its engine.
     pub(crate) fn embed_handoff(&self) -> Option<crate::handoff::Hosted> {
         let lu = self.live.as_ref()?;
-        let folder = self.embed.as_ref()?.folder.clone()?;
+        let em = self.embed.as_ref()?;
+        let folder = em.folder.clone()?;
+        // a released session keeps the scope its engine had (there is no engine to ask)
+        let scope = match (&lu.live.engine, &em.released) {
+            (None, Some((s, _))) => s.clone(),
+            (e, _) => Self::scope_of(e.as_ref()),
+        };
         (!lu.live.sid.is_empty()).then(|| crate::handoff::Hosted {
-            scope: Self::scope_of(lu.live.engine.as_ref()),
+            scope,
             sid: lu.live.sid.clone(),
             folder,
         })
@@ -555,6 +560,67 @@ impl TuiView {
         use crate::handoff::Scope;
         e.and_then(|e| e.remote_distro.clone())
             .map_or(Scope::Local, Scope::Wsl)
+    }
+
+    /// Mode switch: an IDLE session gives its engine, and so the store's write lock, back, so the other mode can
+    /// resume the same session (one writer at a time; the transcript is already stored). Never a turn that runs,
+    /// an approval or ask, a queued line, a call to the engine in flight, or a session with nothing stored.
+    /// The receiver fires when the engine is closed and the lock is free. An embedded view resumes on its next
+    /// send (`Embed::released`); the standalone view shows the stored session as a preview (Enter resumes).
+    pub(crate) fn release_idle(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<futures::channel::oneshot::Receiver<()>> {
+        let lu = self.live.as_mut()?;
+        let e = lu.live.engine.as_ref()?;
+        let stored = lu
+            .live
+            .convo()
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::User(_)));
+        if restart_blocker_of(&lu.live).is_some()
+            || engine::in_use(e)
+            || lu.after_start.is_some()
+            || lu.live.sid.is_empty()
+            || !stored
+        {
+            return None;
+        }
+        let (scope, sid) = (Self::scope_of(Some(e)), lu.live.sid.clone());
+        let convo = Arc::new(lu.live.convo().clone());
+        let e = lu.live.engine.take()?;
+        lu.dirty = true;
+        match &mut self.embed {
+            Some(em) => em.released = Some((scope, sid)),
+            None => self.show_preview(sid, Some(convo), cx),
+        }
+        cx.notify();
+        Some(close_off_thread(e))
+    }
+
+    /// The TUI's open session is one the Super Agent hosts (same scope, same id): it is released when idle, so the
+    /// Super Agent tab can resume it.
+    pub(crate) fn release_if_hosted(
+        &mut self,
+        h: &crate::handoff::Handoff,
+        cx: &mut Context<Self>,
+    ) -> Option<futures::channel::oneshot::Receiver<()>> {
+        let lu = self.live.as_ref()?;
+        let own = Self::scope_of(lu.live.engine.as_ref());
+        h.sessions
+            .iter()
+            .any(|x| x.scope == own && x.sid == lu.live.sid)
+            .then(|| self.release_idle(cx))
+            .flatten()
+    }
+
+    /// Why a session cannot be resumed here now: another process (a running tab of the other mode) holds it.
+    fn note_held(&mut self, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        lu.live.note(locked_hint(self.embed.is_some()), true);
+        lu.dirty = true;
+        cx.notify();
     }
 
     /// The Super Agent's sessions came over with the mode switch: the lists are read again, then the focused
@@ -878,6 +944,9 @@ impl TuiView {
         lu.dirty = true;
         match r {
             Err(e) => {
+                let hint = e
+                    .contains(LOCKED)
+                    .then(|| locked_hint(self.embed.is_some()));
                 lu.live.returned_prompt = lu.after_start.take().or(lu.live.returned_prompt.take());
                 lu.session_trust = None;
                 if !lu.pending_remember.is_empty() {
@@ -892,13 +961,17 @@ impl TuiView {
                     lu.live
                         .note("trust was not remembered: the trusted restart failed", true);
                 }
-                lu.live.note(startup_failure(&e), true);
+                lu.live
+                    .note(hint.unwrap_or_else(|| startup_failure(&e)), true);
                 if e.starts_with("no model configured") {
                     lu.live.open_setup(&e, now_ms());
                 }
             }
             Ok(l) => {
                 let _t = crate::trace::span(&lu.cfg.env, "engine_ready: attach (UI thread)");
+                if let Some(em) = &mut self.embed {
+                    em.released = None;
+                }
                 // a restart that fell back to untrusted keeps no trust to carry
                 if !l.engine.trusted {
                     lu.session_trust = None;
@@ -1257,6 +1330,8 @@ impl TuiView {
                 .preview
                 .as_ref()
                 .is_some_and(|p| !p.sid.is_empty() || !lu.live.ws_new)
+            || (lu.live.engine.is_none()
+                && self.embed.as_ref().is_some_and(|e| e.released.is_some()))
         {
             return self.hold_for_engine(text, window, cx);
         }
@@ -1324,6 +1399,7 @@ impl TuiView {
                 .preview
                 .as_ref()
                 .map(|p| p.sid.clone())
+                .or_else(|| self.embed.as_ref()?.released.as_ref().map(|r| r.1.clone()))
                 .unwrap_or_default();
             lu.after_start = line.then(|| text.clone());
             if id.is_empty() {
@@ -2037,6 +2113,8 @@ impl TuiView {
             .is_some_and(|r| r.peer);
         if lu.live.preview.is_some() && !held && !lu.live.starting {
             self.hold_for_engine(String::new(), window, cx);
+        } else if held {
+            self.note_held(cx);
         }
     }
 
@@ -2309,8 +2387,11 @@ impl TuiView {
         let Some(row) = self.snap.running.get(i).cloned() else {
             return;
         };
+        if row.peer {
+            return self.note_held(cx);
+        }
         let Some(lu) = &mut self.live else { return };
-        if row.peer || row.id.is_empty() || row.id == lu.live.sid {
+        if row.id.is_empty() || row.id == lu.live.sid {
             lu.dirty = true;
             cx.notify();
             return;
@@ -2351,7 +2432,11 @@ impl TuiView {
         let project = self.switch_project(&target);
         let Some(lu) = &mut self.live else { return };
         // an embedded frame is one session in one folder (its tab is named by it): no other one is opened here
+        // (its own released session is the exception: the resume after a mode switch)
+        let own_release = matches!(&target, Target::Resume(id)
+            if self.embed.as_ref().and_then(|e| e.released.as_ref()).is_some_and(|r| r.1 == *id));
         if self.embed.is_some()
+            && !own_release
             && matches!(
                 target,
                 Target::Resume(_) | Target::New(_) | Target::CloseWorkspace(_)
@@ -3845,6 +3930,39 @@ async fn pump(
 }
 
 /// Why the engine did not start, for the chat. A missing model gets the setup card of `synt`.
+/// The store's refusal of a second writer (`synthesis_session::Error::Locked`).
+const LOCKED: &str = "open for writing in another process";
+
+/// The refusal made actionable: which mode holds the session and how to move it.
+fn locked_hint(embedded: bool) -> String {
+    if embedded {
+        "this session is open in the TUI (or another synt process): let its turn finish or stop it there, \
+         then switch back to Super Agent (an idle session is handed over on the switch) and send again"
+    } else {
+        "this session is running in a Super Agent tab (or another synt process): let its turn finish or \
+         stop it there, then switch to the TUI (an idle session is handed over on the switch)"
+    }
+    .into()
+}
+
+/// Closes `e` on its own thread (the close waits for the engine's last users, up to 5 s: never on the UI
+/// thread). Quitting waits for it (`shutdown_engine`), so the engine's orderly stop is never skipped; the
+/// receiver fires once the session lock is free.
+fn close_off_thread(e: Arc<Engine>) -> futures::channel::oneshot::Receiver<()> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let h = std::thread::spawn(move || {
+        if let Some(m) = engine::close_shared(e) {
+            eprintln!("synthesis-desktop: {m}");
+        }
+        let _ = tx.send(());
+    });
+    if let Ok(mut v) = CLOSING.lock() {
+        v.retain(|h| !h.is_finished());
+        v.push(h);
+    }
+    rx
+}
+
 pub fn startup_failure(e: &str) -> String {
     if e.starts_with("no model configured") {
         [
@@ -4754,6 +4872,66 @@ mod switch_tests {
             "a click on the highlighted row opens it"
         );
         forget_engine(&mut w);
+    }
+
+    /// The standalone view's engine is released when idle (lock free, the stored session shown as a preview that
+    /// Enter resumes), never while a turn runs; the store's refusal text is the one `locked_hint` matches.
+    #[gpui::test]
+    fn an_idle_tui_session_is_released_and_a_running_one_is_not(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let c = Arc::new(cfg.clone());
+        let w = open(cx, cfg, l, true);
+        let first = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        let sid = first.engine.sid.clone();
+        w.0.update(w.1, |t, cx| t.engine_ready(Ok(first), cx));
+        w.1.run_until_parked();
+        w.0.update(w.1, |t, cx| {
+            let lu = t.live.as_mut().unwrap();
+            lu.live.view.convo.items.push(Item::User("hi".into()));
+            lu.live.busy = true;
+            assert!(
+                t.release_idle(cx).is_none(),
+                "a running turn keeps its engine"
+            );
+            let lu = t.live.as_mut().unwrap();
+            assert!(lu.live.engine.is_some());
+            lu.live.busy = false;
+        });
+        assert!(!synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        let rx = w.0.update(w.1, |t, cx| t.release_idle(cx)).expect("idle");
+        assert!(futures::executor::block_on(rx).is_ok());
+        assert!(synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            assert!(lu.live.engine.is_none());
+            assert_eq!(
+                lu.live.preview.as_ref().map(|p| p.sid.as_str()),
+                Some(sid.as_str())
+            );
+        });
+        let held = synthesis_session::Error::Locked("x".into()).to_string();
+        assert!(held.contains(LOCKED));
+        assert!(locked_hint(false).contains("Super Agent") && locked_hint(true).contains("TUI"));
+    }
+
+    /// WSL mode has no engine to ask until it is ready: the handoff waits and is applied when it is.
+    #[gpui::test]
+    fn a_pending_handoff_is_applied_when_the_engine_becomes_ready(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let c = Arc::new(cfg.clone());
+        let w = open(cx, cfg, l, true);
+        w.0.update(w.1, |t, _| t.pending_handoff = Some(Default::default()));
+        let first = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        w.0.update(w.1, |t, cx| t.engine_ready(Ok(first), cx));
+        w.1.run_until_parked();
+        w.0.read_with(w.1, |t, _| assert!(t.pending_handoff.is_none()));
+        forget_engine(&mut { w });
     }
 
     /// Super Agent -> TUI with nothing to select (a hosted session without a message has no row): the composer
