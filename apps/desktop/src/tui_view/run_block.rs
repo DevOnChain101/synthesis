@@ -77,7 +77,7 @@ impl TuiView {
         let bracketed = self.term.as_ref().and_then(|p| p.read(cx).bracketed());
         let mut prose = |i: usize, s: String| {
             TextView::markdown(gpui::SharedString::from(format!("assistant-{idx}-{i}")), s)
-                .style(chat::table_head_style())
+                .style(chat::assistant_style())
                 .selectable(true)
                 .into_any_element()
         };

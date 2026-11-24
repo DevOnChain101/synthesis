@@ -642,6 +642,7 @@ pub fn conversation(chat: &Entity<ConductorChat>) -> AnyElement {
 /// could pose as a card button), and no image is loaded from a path or a URL. Hidden characters are made visible.
 pub(crate) fn md(id: impl Into<gpui::ElementId>, text: &str) -> TextView {
     TextView::markdown(id, clean_md(text))
+        .style(crate::tui_view::chat::assistant_style())
         .selectable(true)
         .on_link_click(|_, _, _, _| {})
         .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
