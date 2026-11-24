@@ -1092,6 +1092,54 @@ mod tests {
         );
     }
 
+    /// Rows keep a fixed place: a session going running <-> idle, or its last activity changing, never moves a row.
+    #[test]
+    fn running_or_activity_never_reorders_the_session_rows() {
+        use synthesis_core::SessionStatus::*;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.ws_key = fold_dir("/w/proj");
+        let rows = |st: [(synthesis_core::SessionStatus, bool, i64); 3]| {
+            ["a", "b", "c"]
+                .iter()
+                .zip(st)
+                .map(|(id, (status, is_live, mtime))| SessionRow {
+                    id: (*id).into(),
+                    title: (*id).into(),
+                    status,
+                    updated_at: String::new(),
+                    mtime,
+                    is_live,
+                })
+                .collect::<Vec<_>>()
+        };
+        let ids = |l: &Live| -> Vec<String> {
+            build(l, 1_000_000, 0, None)
+                .running
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: rows([(Idle, false, 10), (Idle, false, 20), (Idle, false, 30)]),
+            available: true,
+            changes: None,
+        });
+        let before = ids(&l);
+        assert_eq!(before, ["a", "b", "c"]);
+        l.view.workspaces.workspaces[0].sessions = rows([
+            (Idle, false, 900),
+            (Running, true, 50),
+            (Completed, false, 5),
+        ]);
+        assert_eq!(ids(&l), before);
+    }
+
     #[test]
     fn a_stored_running_status_counts_only_while_a_process_holds_the_session() {
         use synthesis_core::SessionStatus::*;

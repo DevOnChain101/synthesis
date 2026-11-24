@@ -7,6 +7,16 @@ use std::path::{Path, PathBuf};
 const FILE: &str = "desktop-state.json";
 pub const LOCAL: &str = "local";
 
+/// The scope of an engine: local, or `wsl:<distro>` (the distro name is only a JSON key, never a path);
+/// `None`: a remote engine that is not a WSL distro.
+pub fn scope(remote: bool, distro: Option<&str>) -> Option<String> {
+    match (remote, distro) {
+        (false, _) => Some(LOCAL.into()),
+        (true, Some(d)) if !d.is_empty() => Some(format!("wsl:{d}")),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Last {
     pub sid: String,
@@ -199,6 +209,17 @@ mod tests {
         assert_eq!(load_active(d.path(), LOCAL), m);
         assert_eq!(load(d.path(), LOCAL), Some(last()));
         assert!(load_active(d.path(), "wsl:x").is_empty());
+        // a WSL scope persists like the local one, and the two never mix
+        let (w, sc) = (
+            std::collections::HashMap::from([("k".to_string(), "s9".to_string())]),
+            scope(true, Some("Ubuntu")).unwrap(),
+        );
+        assert_eq!(sc, "wsl:Ubuntu");
+        save_active(d.path(), &sc, &w).unwrap();
+        assert_eq!(load_active(d.path(), &sc), w);
+        assert_eq!(load_active(d.path(), LOCAL), m);
+        assert_eq!(scope(false, None).as_deref(), Some(LOCAL));
+        assert_eq!(scope(true, None), None);
     }
 
     #[test]

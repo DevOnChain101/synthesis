@@ -217,6 +217,9 @@ pub struct LiveUi {
     nav_seq: u64,
     /// The last active sessions changed and are not written yet.
     active_dirty: bool,
+    /// The `desktop-state.json` scope `live.active` belongs to (`None`: a remote engine that is not a WSL
+    /// distro, nothing is kept).
+    active_scope: Option<String>,
     /// A new workspace was opened: its session gets the keys (the composer) once it is live and no dialog
     /// (the trust decision) waits.
     pub(super) focus_new: bool,
@@ -359,6 +362,7 @@ impl TuiView {
             want: None,
             nav_seq: 0,
             active_dirty: false,
+            active_scope: Some(crate::last_session::LOCAL.into()),
             focus_new: false,
             after_start: None,
             busy_hint: false,
@@ -831,6 +835,20 @@ impl TuiView {
                             root: l.engine.cwd.clone(),
                         },
                     );
+                }
+                // each scope (local, one WSL distro) keeps its own last active sessions
+                let scope = crate::last_session::scope(
+                    l.engine.is_remote(),
+                    l.engine.remote_distro.as_deref(),
+                );
+                if scope != lu.active_scope {
+                    lu.live.active = select::LastActive(
+                        scope
+                            .as_deref()
+                            .map(|s| crate::last_session::load_active(&lu.cfg.synthesis_home, s))
+                            .unwrap_or_default(),
+                    );
+                    (lu.active_scope, lu.active_dirty) = (scope, false);
                 }
                 lu.live.attach(Arc::new(l.engine), l.replay);
                 lu.live.session_grant = lu
@@ -1857,16 +1875,16 @@ impl TuiView {
     /// Writes the last active sessions when they changed (best effort, off the UI thread, local store only).
     fn save_active(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        let Some(scope) = lu.active_scope.clone() else {
+            return;
+        };
         if !lu.active_dirty || lu.fixture || self.embed.is_some() {
             return;
         }
         lu.active_dirty = false;
         let (home, map) = (lu.cfg.synthesis_home.clone(), lu.live.active.0.clone());
-        if lu.live.engine.as_ref().is_some_and(|e| e.is_remote()) {
-            return;
-        }
         cx.background_spawn(async move {
-            let _ = crate::last_session::save_active(&home, crate::last_session::LOCAL, &map);
+            let _ = crate::last_session::save_active(&home, &scope, &map);
         })
         .detach();
     }
@@ -4497,7 +4515,7 @@ mod switch_tests {
             let l = &t.live.as_ref().unwrap().live;
             (
                 l.focus,
-                l.ws_key.rsplit('/').next().unwrap_or_default().to_string(),
+                l.ws_key.rsplit(['/', '\\']).next().unwrap_or_default().to_string(),
                 l.run_sel,
                 l.dialogs.len(),
             )
