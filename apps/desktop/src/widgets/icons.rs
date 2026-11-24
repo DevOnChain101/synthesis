@@ -38,6 +38,7 @@ pub fn body(name: &str) -> Option<&'static str> {
             r#"<path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/>"#
         }
         "play" => r#"<circle cx="12" cy="12" r="9"/><path d="M10 8l6 4-6 4z"/>"#,
+        "play-tri" => r#"<path d="M7 4.5v15l12-7.5z"/>"#,
         "db" => {
             r#"<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>"#
         }
@@ -115,6 +116,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "chevron-down" => "chev",
         "chevrons-right" => "fast",
         "send" => "send",
+        "play-triangle" => "play-tri",
         "plus" => "plus",
         "user" => "user",
         "shield" => "shield",
