@@ -340,7 +340,18 @@ impl ChatHost {
         for turn in model::turns(items, skip, live.show_thinking, live.verbose) {
             out.push(match turn {
                 Turn::User { at, text } => user_bubble(at, &text),
-                Turn::Assistant { blocks } => self.blocks(&blocks, items, cx),
+                Turn::Assistant { mut blocks } => {
+                    // `/focus`: no tool, thinking or approval rows
+                    if live.focus_view {
+                        blocks.retain(|b| {
+                            !matches!(
+                                b,
+                                Block::Tool { .. } | Block::Thinking { .. } | Block::Ask { .. }
+                            )
+                        });
+                    }
+                    self.blocks(&blocks, items, cx)
+                }
             });
         }
         out

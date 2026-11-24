@@ -37,6 +37,11 @@ pub fn title_inset(collapsed: bool) -> f32 {
     }
 }
 
+/// Space the title row's tabs leave for the nav controls when the rail is hidden (focus mode).
+pub fn focus_inset() -> f32 {
+    nav_left() + NAV_W + t::S2
+}
+
 /// What a rail row opens.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RailKey {
