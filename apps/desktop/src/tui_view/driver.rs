@@ -223,6 +223,8 @@ pub struct LiveUi {
     /// A new workspace was opened: its session gets the keys (the composer) once it is live and no dialog
     /// (the trust decision) waits.
     pub(super) focus_new: bool,
+    /// The composer takes the keys at the next frame (a mode switch with nothing to select).
+    pub(super) focus_next: bool,
     /// A line typed while the engine was not there yet (a previewed session starts, or a relaunch runs): it is
     /// handled as soon as the engine is attached.
     after_start: Option<String>,
@@ -364,6 +366,7 @@ impl TuiView {
             active_dirty: false,
             active_scope: Some(crate::last_session::LOCAL.into()),
             focus_new: false,
+            focus_next: false,
             after_start: None,
             busy_hint: false,
             blink: Default::default(),
@@ -615,6 +618,10 @@ impl TuiView {
             lu.live.focus = Focus::Running;
             self.follow_workspace(cx);
             self.save_active(cx);
+        } else {
+            // nothing to select (a hosted session without a message has no row): `go` skipped the prompt focus
+            lu.live.focus = Focus::Chat;
+            lu.focus_next = true;
         }
         cx.notify();
     }
@@ -1916,6 +1923,7 @@ impl TuiView {
                 Focus::Workspace => {
                     lu.live.back_to = Some(Focus::Workspace);
                     lu.live.focus = Focus::Chat;
+                    self.commit_preview(window, cx);
                 }
                 _ => {
                     // opening a session hands the keys to its chat
@@ -2015,6 +2023,21 @@ impl TuiView {
         panels::reveal_row(&lu.run_scroll, l.run_sel, panels::RUN_ROW_H);
         let i = l.run_sel;
         self.preview_row(i, cx);
+    }
+
+    /// Enter on a workspace, or a click on the highlighted session: the previewed session (or the draft of the
+    /// workspace) becomes the open one, so the tabs (diff, files, terminal) have a folder to work in. Not for a row
+    /// another process holds (only its chat is shown, nothing to resume).
+    fn commit_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lu) = &self.live else { return };
+        let held = self
+            .snap
+            .running
+            .get(lu.live.run_sel)
+            .is_some_and(|r| r.peer);
+        if lu.live.preview.is_some() && !held && !lu.live.starting {
+            self.hold_for_engine(String::new(), window, cx);
+        }
     }
 
     /// A click in the chat pane: while a list holds the keys, the composer takes them.
@@ -2275,7 +2298,8 @@ impl TuiView {
         // and loaded, and the keys stay in the list
         if self.snap.running.get(i).is_some_and(|r| r.selected) {
             lu.live.run_sel = i;
-            return self.focus_composer(Focus::Running, window, cx);
+            self.focus_composer(Focus::Running, window, cx);
+            return self.commit_preview(window, cx);
         }
         lu.live.focus = Focus::Running;
         self.select_row(i, cx);
@@ -4697,6 +4721,56 @@ mod switch_tests {
         assert_eq!(state(&mut w), (Some(String::new()), vec![], false, false));
         w.0.update_in(w.1, |t, window, cx| t.click_chat_pane(window, cx));
         assert_eq!(sel(&mut w).0, Focus::Chat);
+    }
+
+    /// The tabs (diff, files, ...) have nothing of a session that is only previewed (`previewing`): Enter on a
+    /// workspace and a click on the highlighted session row must open it, not only give the composer the keys.
+    #[gpui::test]
+    fn enter_on_a_workspace_and_a_click_on_the_highlighted_row_open_the_previewed_session(
+        cx: &mut TestAppContext,
+    ) {
+        let (t, cfg, mut l) = setup();
+        three_workspaces(&mut l, t.path());
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        assert_eq!(state(&mut w).0.as_deref(), Some("session-c"));
+        press_now(&mut w, "enter");
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(
+            starting && launched,
+            "Enter opens the session of the workspace"
+        );
+        forget_engine(&mut w);
+
+        let (t, cfg, mut l) = setup();
+        three_workspaces(&mut l, t.path());
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        press(&mut w, "tab");
+        w.0.update_in(w.1, |t, window, cx| t.click_running(0, window, cx));
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(
+            starting && launched,
+            "a click on the highlighted row opens it"
+        );
+        forget_engine(&mut w);
+    }
+
+    /// Super Agent -> TUI with nothing to select (a hosted session without a message has no row): the composer
+    /// still gets the keys (`Shell::go` skips its own prompt focus when a handoff came).
+    #[gpui::test]
+    fn a_handoff_without_a_selectable_session_leaves_the_composer_focused(cx: &mut TestAppContext) {
+        use gpui::Focusable;
+        let (_t, cfg, l) = setup();
+        let w = open(cx, cfg, l, true);
+        w.1.update(|window, cx| window.blur(cx));
+        w.0.update(w.1, |t, cx| t.adopt_handoff(Default::default(), cx));
+        w.1.run_until_parked();
+        let focused = w.0.update_in(w.1, |t, window, cx| {
+            let lu = t.live.as_ref().unwrap();
+            (lu.live.focus, lu.prompt.focus_handle(cx).is_focused(window))
+        });
+        assert_eq!(focused, (Focus::Chat, true));
     }
 
     #[gpui::test]
