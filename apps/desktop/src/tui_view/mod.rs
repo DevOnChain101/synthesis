@@ -1599,6 +1599,10 @@ mod tests {
         view.update(vcx, |t, cx| t.refresh_tree(cx));
         draw(vcx);
         assert!(top(&view, vcx).contains(&"new.txt".to_string()));
+        // no file open: Refresh is still there (same selector), no Copy
+        assert!(
+            vcx.debug_bounds("fx-refresh").is_some() && vcx.debug_bounds("copy-file").is_none()
+        );
         // Markdown: formatted by default, the toggle shows the source
         view.update(vcx, |t, cx| t.select_file("README.md", cx));
         draw(vcx);

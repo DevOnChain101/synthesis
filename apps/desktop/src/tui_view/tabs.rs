@@ -16,7 +16,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, Stateful,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
 use gpui_component::text::TextView;
@@ -982,13 +982,37 @@ impl TuiView {
     }
 
     fn preview_view(&self, cx: &mut Context<Self>) -> Div {
+        let refresh = icon_btn(
+            "fx-refresh".into(),
+            "refresh",
+            "Refresh".into(),
+            dim(),
+            None,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx)));
+        // no file open: the same header slot, Refresh where it sits with a file (Copy's place stays empty)
+        let empty = |msg: &'static str, refresh: Stateful<Div>| {
+            div()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .py(px(7.))
+                        .border_b_1()
+                        .border_color(hsla(t::RULE))
+                        .child(refresh)
+                        .child(div().flex_none().size(px(22.))),
+                )
+                .child(div().p(px(14.)).child(note(msg)))
+        };
         let Some(sel) = &self.ts.tree_sel else {
-            return div()
-                .p(px(14.))
-                .child(note("Select a file to preview it (read-only)."));
+            return empty("Select a file to preview it (read-only).", refresh);
         };
         let Some(p) = self.ts.preview.as_ref().filter(|p| &p.path == sel) else {
-            return div().p(px(14.)).child(note("reading..."));
+            return empty("reading...", refresh);
         };
         let head = |right: String| {
             div()
@@ -1014,14 +1038,6 @@ impl TuiView {
             .ts
             .copied_at
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500));
-        let refresh = icon_btn(
-            "fx-refresh".into(),
-            "refresh",
-            "Refresh".into(),
-            dim(),
-            None,
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx)));
         let copy = icon_btn(
             "copy-file".into(),
             if copied { "check" } else { "copy" },
