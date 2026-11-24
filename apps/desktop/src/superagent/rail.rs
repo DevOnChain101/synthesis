@@ -1,5 +1,5 @@
-//! The rail: a full-height column. Its first row (the title row's height) holds the traffic-light space, the logo,
-//! back, forward and the sidebar toggle; then New, the Super-Agent item with the Needs you count, the Outcomes and the
+//! The rail: a full-height column. Its first row (the title row's height) is the traffic-light space; back, forward
+//! and the sidebar toggle are drawn over the title row (no logo); then New, the Super-Agent item with the Needs you count, the Outcomes and the
 //! Sessions. One tab stop with a roving cursor (Up, Down, Home, End, Enter); Cmd+B collapses it to icons.
 
 use gpui::{
@@ -15,8 +15,27 @@ use super::{SuperAgentView, TITLE_ROW_H, ib};
 use crate::widgets::chrome::icon;
 
 pub const WIDE: f32 = 248.;
-pub const MINI: f32 = 72.;
+pub const MINI: f32 = 52.;
 const TRAFFIC_LIGHTS_W: f32 = 78.;
+const NAV_W: f32 = 32. * 3. + t::S1 * 2.;
+
+/// Left edge of the nav controls: after the traffic lights on macOS, none elsewhere.
+fn nav_left() -> f32 {
+    if cfg!(target_os = "macos") {
+        TRAFFIC_LIGHTS_W
+    } else {
+        t::S2
+    }
+}
+
+/// Space the title row's tabs leave for the nav controls when the rail is too narrow to hold them.
+pub fn title_inset(collapsed: bool) -> f32 {
+    if collapsed {
+        (nav_left() + NAV_W + t::S2 - MINI).max(0.)
+    } else {
+        0.
+    }
+}
 
 /// What a rail row opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -282,83 +301,58 @@ impl SuperAgentView {
             }))
     }
 
-    pub(super) fn rail(
-        &mut self,
-        collapsed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// Back, forward and the sidebar toggle: one place in both rail states, in the title row after the traffic lights.
+    pub(super) fn nav_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
-        let rows = self.rail_rows(cx);
         let (back, fwd) = (self.can_nav(true, cx), self.can_nav(false, cx));
-        let controls = [
-            ib(
+        div()
+            .debug_selector(|| "sa-nav".to_string())
+            .absolute()
+            .top(px(0.))
+            .left(px(nav_left()))
+            .h(px(TITLE_ROW_H))
+            .flex()
+            .items_center()
+            .gap(px(t::S1))
+            .child(ib(
                 "sa-back",
                 "nav-back",
                 "Back  (Alt+Left)".into(),
                 (32., 32.),
                 (back, false),
                 cx.listener(|v, _, _, cx| v.nav(true, cx)),
-            ),
-            ib(
+            ))
+            .child(ib(
                 "sa-forward",
                 "nav-forward",
                 "Forward  (Alt+Right)".into(),
                 (32., 32.),
                 (fwd, false),
                 cx.listener(|v, _, _, cx| v.nav(false, cx)),
-            ),
-            ib(
+            ))
+            .child(ib(
                 "sa-rail-toggle",
                 "rail",
                 format!("Sidebar  ({}B)", if mac { "\u{2318}" } else { "Ctrl+" }),
                 (32., 32.),
                 (true, false),
                 cx.listener(|v, _, w, cx| v.toggle_rail(w, cx)),
-            ),
-        ];
-        let logo = crate::brand::mark_img(24.).size(px(24.)).flex_none();
-        let lights = div()
+            ))
+    }
+
+    pub(super) fn rail(
+        &mut self,
+        collapsed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rows = self.rail_rows(cx);
+        // the title row's height: the traffic lights and the nav controls (drawn over it, see `nav_controls`) sit here
+        let top = div()
             .flex_none()
-            .w(px(if mac && !collapsed {
-                TRAFFIC_LIGHTS_W
-            } else {
-                0.
-            }))
-            .h(px(TITLE_ROW_H));
-        let top = if collapsed {
-            // icon rail: one column, the lights' row first
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(t::S1))
-                .child(
-                    div()
-                        .h(px(TITLE_ROW_H))
-                        .w_full()
-                        .window_control_area(gpui::WindowControlArea::Drag),
-                )
-                .child(logo)
-                .children(controls)
-        } else {
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(t::S1))
-                .h(px(TITLE_ROW_H))
-                .child(lights)
-                .child(logo)
-                .child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .window_control_area(gpui::WindowControlArea::Drag),
-                )
-                .children(controls)
-        };
+            .h(px(TITLE_ROW_H))
+            .w_full()
+            .window_control_area(gpui::WindowControlArea::Drag);
         let items = |section: Section, this: &Self, window: &Window, cx: &mut Context<Self>| {
             rows.iter()
                 .enumerate()

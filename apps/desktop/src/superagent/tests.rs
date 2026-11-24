@@ -148,9 +148,19 @@ fn the_key_map_of_the_mock(cx: &mut TestAppContext) {
         "home stays"
     );
     // Cmd+B collapses the rail and expands it
+    let nav = |v: &mut VisualTestContext| {
+        let b = v.debug_bounds("sa-nav").unwrap();
+        let tabs = v.debug_bounds("sa-dock").unwrap();
+        // in the title row in both states, left of the tabs' row content, not in the rail body
+        assert_eq!(f32::from(b.origin.y), 0.);
+        assert_eq!(f32::from(b.size.height), TITLE_ROW_H);
+        assert!(b.right() <= tabs.left());
+    };
     assert_eq!(width(v), 248.);
+    nav(v);
     press(v, &sa, "b", c);
-    assert_eq!(width(v), 72.);
+    assert_eq!(width(v), 52.);
+    nav(v);
     press(v, &sa, "b", c);
     assert_eq!(width(v), 248.);
     // an unrelated chord is not ours

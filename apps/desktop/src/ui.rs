@@ -1150,7 +1150,7 @@ mod tests {
         // the toggle collapses the rail to icons and expands it again
         assert_eq!(b(v, "sa-rail").2, 248.);
         click(v, "sa-rail-toggle");
-        assert_eq!(b(v, "sa-rail").2, 72.);
+        assert_eq!(b(v, "sa-rail").2, 52.);
         click(v, "sa-rail-toggle");
         assert_eq!(b(v, "sa-rail").2, 248.);
     }
