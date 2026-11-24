@@ -555,6 +555,8 @@ pub(crate) mod tests {
         let why = try_open(&h, v, &f.base.join("missing")).unwrap_err();
         assert!(why.starts_with("no such folder"), "{why}");
         assert_eq!(h.read_with(v, |h, _| h.len()), 0);
+        // one good session, so there is an engine whose lock must be released
+        assert!(open(&h, v, &f.base.join("f0")));
         h.update(v, |h, cx| h.sync(&Frames::default(), true, cx));
         v.run_until_parked();
         wait_free(&f.home);

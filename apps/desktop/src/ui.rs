@@ -151,6 +151,7 @@ impl Shell {
             || (self.view == View::Settings && self.back == View::SuperAgent);
         let handoff =
             (v == View::Tui && from_sa && !self.legacy_ui).then(|| self.sa.read(cx).handoff(cx));
+        let has_handoff = handoff.is_some();
         self.view = v;
         // the card's keys never outlive the view: a hidden view must not take the window's focus back later
         let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
@@ -180,7 +181,7 @@ impl Shell {
             let was = t.active;
             t.active = tui_on;
             t.shown = v == View::Tui;
-            if tui_on && !was {
+            if tui_on && !was && !has_handoff {
                 t.focus_prompt(window, cx);
             }
         });

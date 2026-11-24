@@ -578,34 +578,41 @@ impl TuiView {
                 false,
             );
         }
-        let Some(sel) = plan.select.map(|s| s.sid.clone()) else {
-            lu.dirty = true;
-            return cx.notify();
-        };
-        let Some(ws) = lu
-            .live
-            .view
-            .workspaces
-            .workspaces
-            .iter()
-            .find(|w| w.sessions.iter().any(|s| s.id == sel))
-        else {
-            // not stored yet (no message): nothing to show
-            lu.dirty = true;
-            return cx.notify();
-        };
-        lu.live.ws_key = ws.key.clone();
-        let snap = crate::tui_view::snapshot::build(
-            &lu.live,
-            crate::live::now_ms(),
-            lu.cfg.tz_min,
-            lu.cfg.home.as_deref(),
-        );
-        let Some(i) = snap.running.iter().position(|r| !r.peer && r.id == sel) else {
-            return;
-        };
-        self.snap = snap;
-        self.select_row(i, cx);
+        // each listed session is its workspace's last active one (the focused one is recorded last), so the
+        // Workspace focus rule (`follow_workspace`) shows it; stored sessions only (no message: no row)
+        let sel = plan.select.map(|s| s.sid.as_str());
+        let mut order: Vec<&str> = plan.listed.iter().map(|h| h.sid.as_str()).collect();
+        order.sort_by_key(|id| Some(*id) == sel);
+        let mut focus_ws = None;
+        for id in order {
+            let ws = lu
+                .live
+                .view
+                .workspaces
+                .workspaces
+                .iter()
+                .find(|w| w.sessions.iter().any(|s| s.id == id))
+                .map(|w| w.key.clone());
+            if let Some(ws) = ws {
+                if lu.live.active.set(&ws, id) {
+                    lu.active_dirty = true;
+                }
+                if Some(id) == sel {
+                    focus_ws = Some(ws);
+                }
+            }
+        }
+        lu.dirty = true;
+        // highlight + load the chat; the keys stay where they are (no composer focus), arrows keep working
+        if let Some(ws) = focus_ws {
+            lu.live.ws_key = ws;
+            lu.live.ws_new = false;
+            // the Running list holds the keys: arrows move the selection, the composer is not focused
+            lu.live.focus = Focus::Running;
+            self.follow_workspace(cx);
+            self.save_active(cx);
+        }
+        cx.notify();
     }
 
     /// What the conductor may read of this embedded session (conductor.md 3.6): its id, the last reply, the last
