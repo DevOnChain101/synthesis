@@ -1389,6 +1389,93 @@ impl Remote {
             .collect())
     }
 
+    /// Custom providers of the engine's own user `synt.json` (references only, never a key).
+    pub fn provider_list(&self) -> Result<Vec<synthesis_app::provider_cfg::Entry>, String> {
+        let v = self.store_call(Call::ProviderList)?;
+        Ok(rows_of(&v, "providers", 100)?
+            .iter()
+            .map(|e| synthesis_app::provider_cfg::Entry {
+                id: text(&e["id"]),
+                protocol: if e["protocol"] == "openai" {
+                    "openai"
+                } else {
+                    "anthropic"
+                },
+                base_url: text(&e["base_url"]),
+                key: text(&e["key"]),
+                models: e["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(100)
+                    .map(text)
+                    .collect(),
+            })
+            .collect())
+    }
+
+    pub fn provider_draft(&self, id: &str) -> Result<synthesis_app::provider_cfg::Draft, String> {
+        let v = self.store_call(Call::ProviderDraft { id: id.into() })?;
+        let f = &v["form"];
+        Ok(synthesis_app::provider_cfg::Draft {
+            id: text(&f["id"]),
+            protocol: if f["protocol"] == "openai" {
+                synthesis_config::Protocol::OpenAi
+            } else {
+                synthesis_config::Protocol::Anthropic
+            },
+            base_url: text(&f["base_url"]),
+            api_key: text(&f["api_key"]),
+            headers: text(&f["headers"]),
+            models: text(&f["models"]),
+            confirmed: String::new(),
+        })
+    }
+
+    fn provider_form(d: &synthesis_app::provider_cfg::Draft) -> synthesis_app::proto::ProviderForm {
+        synthesis_app::proto::ProviderForm {
+            id: d.id.clone(),
+            protocol: d.protocol.as_str().into(),
+            base_url: d.base_url.clone(),
+            api_key: d.api_key.clone(),
+            headers: d.headers.clone(),
+            models: d.models.clone(),
+            confirmed: d.confirmed.clone(),
+        }
+    }
+
+    pub fn provider_confirm(
+        &self,
+        d: &synthesis_app::provider_cfg::Draft,
+    ) -> Result<Option<synthesis_app::provider_cfg::Confirm>, String> {
+        let v = self.store_call(Call::ProviderConfirm {
+            form: Self::provider_form(d),
+        })?;
+        Ok(v["confirm"]
+            .is_object()
+            .then(|| synthesis_app::provider_cfg::Confirm {
+                token: text(&v["confirm"]["token"]),
+                text: text(&v["confirm"]["text"]),
+            }))
+    }
+
+    pub fn provider_save(
+        &self,
+        d: &synthesis_app::provider_cfg::Draft,
+        editing: bool,
+    ) -> Result<(), String> {
+        self.store_call(Call::ProviderSave {
+            form: Self::provider_form(d),
+            editing,
+        })
+        .map(|_| ())
+    }
+
+    pub fn provider_remove(&self, id: &str) -> Result<(), String> {
+        self.store_call(Call::ProviderRemove { id: id.into() })
+            .map(|_| ())
+    }
+
     /// `/mcp`: the report lines, as the local one prints them.
     pub fn mcp_report(&self) -> Result<Vec<String>, String> {
         let v = self.store_call(Call::McpList)?;

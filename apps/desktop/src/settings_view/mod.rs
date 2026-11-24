@@ -217,6 +217,8 @@ pub struct SettingsView {
     model: Option<Model>,
     /// A loop is already polling the WSL check (one at a time, however often the view is focused).
     wsl_polling: bool,
+    /// Same for the first list of the engine's providers (WSL mode).
+    prov_polling: bool,
     /// Why there is no model (no home directory).
     err: Option<String>,
     search: Entity<InputState>,
@@ -435,9 +437,39 @@ impl SettingsView {
             restart_block: None,
             sliders,
             wsl_polling: false,
+            prov_polling: false,
             inset,
             _subs: subs,
         }
+    }
+
+    /// Looks every 250 ms for the engine's provider list (WSL mode, first call) until it is in, then redraws.
+    fn poll_prov_list(&mut self, cx: &mut Context<Self>) {
+        if self.prov_polling || !self.model.as_ref().is_some_and(|m| m.prov_loading) {
+            return;
+        }
+        self.prov_polling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let Ok(done) = this.update(cx, |v, cx| {
+                    let done = v.model.as_mut().is_none_or(|m| m.poll_provider_list());
+                    if done {
+                        v.prov_polling = false;
+                        cx.notify();
+                    }
+                    done
+                }) else {
+                    break;
+                };
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn model(&self) -> Option<&Model> {
@@ -449,6 +481,7 @@ impl SettingsView {
         if let Some(m) = &mut self.model {
             m.recheck_wsl();
         }
+        self.poll_prov_list(cx);
         // the check runs on its own thread: look every 250 ms until it is in, then redraw
         if !self.wsl_polling && self.model.as_ref().is_some_and(|m| !m.wsl_idle()) {
             self.wsl_polling = true;
@@ -1463,13 +1496,31 @@ impl SettingsView {
     }
 
     fn providers_block(&self, m: &Model, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let in_wsl = m.providers_in_wsl();
         let mut out: Vec<AnyElement> = vec![
-            small("Custom providers (saved in your user synt.json)", t::TEXT)
-                .mt(px(8.))
-                .into_any_element(),
+            small(
+                if in_wsl {
+                    "Custom provider (saved in the engine's synt.json, inside WSL)"
+                } else {
+                    "Custom providers (saved in your user synt.json)"
+                },
+                t::TEXT,
+            )
+            .mt(px(8.))
+            .into_any_element(),
         ];
+        if m.prov_loading {
+            out.push(
+                small(
+                    "Connecting to the engine in WSL (the first time can take a minute)...",
+                    t::MUTED,
+                )
+                .into_any_element(),
+            );
+            return out;
+        }
         if let Some(e) = &m.prov_error {
-            let wsl = e == super::settings_view::model::PROVIDERS_IN_ENGINE;
+            let wsl = e == super::settings_view::model::PROVIDERS_IN_ENGINE && !in_wsl;
             out.push(
                 small(
                     if wsl {
@@ -1519,7 +1570,7 @@ impl SettingsView {
                         .overflow_hidden()
                         .child(e.base_url.clone()),
                 )
-                .child(
+                .children((!in_wsl).then(|| {
                     btn(
                         format!("prov-test-{id}"),
                         if testing {
@@ -1531,8 +1582,8 @@ impl SettingsView {
                     )
                     .on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.prov_test(&id, cx)),
-                    ),
-                )
+                    )
+                }))
                 .child(btn(format!("prov-edit-{id2}"), "Edit", false).on_click(
                     cx.listener(move |this, _: &ClickEvent, w, cx| this.prov_edit(&id2, w, cx)),
                 ))
@@ -1682,6 +1733,13 @@ impl SettingsView {
             "Models, one per line: id | display name | context window | max output | effort levels (all but the id optional)",
             Textarea::new(&self.prov_models).into_any_element(),
         ));
+        if in_wsl {
+            out.push(
+                small("This provider is saved inside the WSL distro and read by the engine there. The key is a reference, never a value: {env:NAME} is read from the engine's environment (wsl.exe does not load your shell profile, so an export in .bashrc does not apply) and {file:path} is a path inside the distro (for example ~/.synt/keys/name), which is the safer choice. Create the key file there yourself; this app never writes a key.", t::WARN)
+                    .mt(px(6.))
+                    .into_any_element(),
+            );
+        }
         out.push(
             small("Keys are never typed here: give the name of an environment variable (SYNT_... is free; any other name asks you to confirm the variable and the host) or a file path (absolute, ~/ or ./, always confirmed); it is saved as {env:NAME} / {file:path} and read when a session starts, and its value is sent to the base URL host. Variables of other tools (AWS_, GITHUB_, ...) and text that looks like a key are refused. Plain http is accepted for localhost only. Test connection shows what it sends, then asks the provider for its model list.", t::MUTED)
                 .mt(px(6.))
@@ -2035,6 +2093,7 @@ impl SettingsView {
 
     fn set_tab(&mut self, t: Section, cx: &mut Context<Self>) {
         self.tab = t;
+        self.poll_prov_list(cx);
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         if let Some(i) = TABS.iter().position(|x| *x == t) {
             self.tab_scroll.scroll_to_item(i);
