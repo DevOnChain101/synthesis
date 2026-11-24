@@ -843,6 +843,7 @@ impl TuiView {
                                 if !e.remove(&key) {
                                     e.insert(key.clone());
                                 }
+                                lu.dirty = true;
                             }
                             cx.notify();
                         })),
@@ -962,6 +963,7 @@ impl TuiView {
             if !e.remove(key) {
                 e.insert(key.to_string());
             }
+            lu.dirty = true;
         }
         cx.notify();
     }

@@ -2220,10 +2220,18 @@ impl TuiView {
             (Some(p), Some(c)) => p.sid == sid && (sid.is_empty() || Arc::ptr_eq(&p.convo, c)),
             _ => false,
         };
+        // the open session shown as its own preview (an idle release): same rows, so keep the scroll position
+        let continues = lu.live.preview.is_none()
+            && !sid.is_empty()
+            && sid == lu.live.sid
+            && c.as_ref()
+                .is_some_and(|c| c.items.len() == lu.live.convo().items.len());
         if !same {
             lu.live.preview = c.map(|convo| Preview { sid, convo });
-            lu.list_reset = true;
-            lu.stick();
+            if !continues {
+                lu.list_reset = true;
+                lu.stick();
+            }
         }
         lu.dirty = true;
         cx.notify();
@@ -3262,18 +3270,22 @@ impl LiveUi {
     /// (a streaming answer, a tool that finished, even a slow parallel one far above the end) measured again.
     pub fn sync_rows(&mut self) {
         let rows = self.rows_now();
-        let (old, new) = (self.list.item_count(), rows.len());
+        let new = rows.len();
         let sigs: Vec<u64> = rows.iter().map(|r| self.row_sig(*r)).collect();
         if std::mem::take(&mut self.list_reset) {
             self.list.reset(new);
             self.list.set_follow_mode(FollowMode::Tail);
         } else {
-            if new > old {
-                self.list.splice(old..old, new - old);
-            } else if new < old {
-                self.list.splice(new..old, 0);
+            // rows can vanish or appear mid-list (`visible()`), so splice only the changed middle span
+            let (at, gone, added) = changed_span(&self.rows, &rows);
+            if gone > 0 || added > 0 {
+                self.list.splice(at..at + gone, added);
             }
-            for ix in stale_rows(&self.row_sigs, &sigs) {
+            let mut aligned = self.row_sigs.clone();
+            if aligned.len() == self.rows.len() {
+                aligned.splice(at..at + gone, sigs[at..at + added].iter().copied());
+            }
+            for ix in stale_rows(&aligned, &sigs) {
                 self.list.remeasure_items(ix..ix + 1);
             }
         }
@@ -3285,7 +3297,21 @@ impl LiveUi {
     /// What decides the height of a row; the plan card and the working line always count as changed.
     fn row_sig(&self, r: Row) -> u64 {
         match r {
-            Row::Item(i) => self.live.convo().items.get(i).map_or(0, item_sig),
+            Row::Item(i) => self.live.convo().items.get(i).map_or(0, |it| {
+                // the "Show more" keys chat.rs uses: the tool id, `sub-{id}-n`, `row-{i}`, `row-{i}-n`
+                let (a, b) = (format!("row-{i}"), format!("row-{i}-"));
+                let id = match it {
+                    Item::Tool { id, .. } => id.as_str(),
+                    _ => "\0",
+                };
+                let sub = format!("sub-{id}-");
+                let open =
+                    self.live.expand_all
+                        || self.live.expanded.iter().any(|k| {
+                            *k == a || *k == id || k.starts_with(&b) || k.starts_with(&sub)
+                        });
+                item_sig(it) ^ u64::from(open)
+            }),
             Row::Plan | Row::Activity => u64::MAX,
         }
     }
@@ -3352,6 +3378,18 @@ fn item_sig(it: &Item) -> u64 {
         Item::Notice { warning, text } => (warning, text.len()).hash(&mut h),
     }
     h.finish()
+}
+
+/// The span that differs between two row lists, by identity: (start, rows removed from `old`, rows added from `new`).
+fn changed_span(old: &[Row], new: &[Row]) -> (usize, usize, usize) {
+    let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suf = old[pre..]
+        .iter()
+        .rev()
+        .zip(new[pre..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (pre, old.len() - pre - suf, new.len() - pre - suf)
 }
 
 /// Indexes of the rows that were there before and whose signature moved (new rows are measured by the list).
@@ -5303,5 +5341,19 @@ mod switch_tests {
             &c.synthesis_home,
             &sid
         ));
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn changed_span_is_the_middle() {
+        let r = |v: &[usize]| v.iter().map(|i| Row::Item(*i)).collect::<Vec<_>>();
+        assert_eq!(changed_span(&r(&[0, 1, 2]), &r(&[0, 1, 2])), (3, 0, 0));
+        assert_eq!(changed_span(&r(&[0, 1, 2, 3]), &r(&[0, 3])), (1, 2, 0));
+        assert_eq!(changed_span(&r(&[0, 3]), &r(&[0, 1, 2, 3])), (1, 0, 2));
+        assert_eq!(changed_span(&r(&[0, 1]), &r(&[0, 1, 2])), (2, 0, 1));
     }
 }
