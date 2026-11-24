@@ -13,7 +13,7 @@ use gpui::{
 use synthesis_app::conductor::SessionReport;
 use synthesis_harness::PersonApproved;
 
-use crate::superagent::frames::{Frame, Frames, MAX_SESSIONS};
+use crate::superagent::frames::{Frame, Frames};
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{ChatTab, TuiView};
 
@@ -79,7 +79,7 @@ impl SessionHost {
     }
 
     /// Starts the session of frame `id` in `folder` (once: an open frame is kept). `Err(why)`: nothing is hosted
-    /// (the sample, the cap of open sessions, a refused folder), the owner keeps its placeholder and says why.
+    /// (the sample, a refused folder), the owner keeps its placeholder and says why.
     pub fn open(
         &mut self,
         id: &str,
@@ -93,9 +93,6 @@ impl SessionHost {
         let Some(cfg) = self.cfg.clone() else {
             return Err("sessions need a live app".into());
         };
-        if self.views.len() >= MAX_SESSIONS {
-            return Err(crate::superagent::CAP_NOTE.into());
-        }
         let view = cx.new(|cx| TuiView::live(window, cx, cfg, Default::default(), 0.));
         let r = view.update(cx, |t, cx| {
             // keys only after `sync` says this frame is on screen
@@ -222,6 +219,21 @@ impl SessionHost {
     #[cfg(test)]
     pub(crate) fn views(&self) -> Vec<Entity<TuiView>> {
         self.views.iter().map(|(_, v)| v.clone()).collect()
+    }
+
+    /// Every hosted session that has a store id, with `last` (a frame id) as the focused one. Engines that
+    /// have not reported a session yet are left out (nothing stored to list).
+    pub fn handoff(&self, last: Option<&str>, cx: &App) -> crate::handoff::Handoff {
+        let mut h = crate::handoff::Handoff::default();
+        for (id, v) in &self.views {
+            if let Some(s) = v.read(cx).embed_handoff() {
+                if last == Some(id.as_str()) {
+                    h.focused = Some((s.scope.clone(), s.sid.clone()));
+                }
+                h.sessions.push(s);
+            }
+        }
+        h
     }
 
     /// The ids of the hosted sessions, oldest first.
@@ -392,7 +404,7 @@ pub(crate) mod tests {
     fn frames(ids: &[&Path], front: Option<&Path>) -> Frames {
         let mut f = Frames::default();
         for p in ids.iter().chain(front.iter()) {
-            let _ = f.open(Frame::Session(p.to_string_lossy().into_owned()));
+            f.open(Frame::Session(p.to_string_lossy().into_owned()));
         }
         f
     }
@@ -517,15 +529,14 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn at_most_six_sessions_are_hosted(cx: &mut TestAppContext) {
-        let (f, cfg) = fx(7);
+    fn more_than_six_sessions_are_hosted(cx: &mut TestAppContext) {
+        let (f, cfg) = fx(12);
         cx.executor().allow_parking();
         let (h, v) = host(cx, Some(cfg));
-        for i in 0..MAX_SESSIONS {
+        for i in 0..12 {
             assert!(open(&h, v, &f.base.join(format!("f{i}"))));
         }
-        assert!(!open(&h, v, &f.base.join("f6")), "the seventh is refused");
-        assert_eq!(h.read_with(v, |h, _| h.len()), MAX_SESSIONS);
+        assert_eq!(h.read_with(v, |h, _| h.len()), 12);
         h.update(v, |h, cx| h.sync(&Frames::default(), true, cx));
         v.run_until_parked();
         wait_free(&f.home);
@@ -540,13 +551,10 @@ pub(crate) mod tests {
         let (f, cfg) = fx(7);
         cx.executor().allow_parking();
         let (h, v) = host(cx, Some(cfg));
-        // a refused folder is no tab: it is not hosted and does not count against the cap
+        // a refused folder is no tab: it is not hosted
         let why = try_open(&h, v, &f.base.join("missing")).unwrap_err();
         assert!(why.starts_with("no such folder"), "{why}");
         assert_eq!(h.read_with(v, |h, _| h.len()), 0);
-        for i in 0..MAX_SESSIONS {
-            assert!(open(&h, v, &f.base.join(format!("f{i}"))));
-        }
         h.update(v, |h, cx| h.sync(&Frames::default(), true, cx));
         v.run_until_parked();
         wait_free(&f.home);

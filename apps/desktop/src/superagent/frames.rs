@@ -23,13 +23,8 @@ pub enum Frame {
     Picker,
 }
 
-/// At most this many session frames are open at once (owner decision 2026-11-21).
-pub const MAX_SESSIONS: usize = 6;
 /// The most places the history keeps: the oldest go first.
 const MAX_HISTORY: usize = 100;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct CapReached;
 
 pub struct Frames {
     /// `tabs[0]` is always `Home`: pinned, not closable, not movable.
@@ -65,15 +60,20 @@ impl Frames {
         &self.tabs[self.active]
     }
 
+    /// The session frame in front, else the latest one the history shows that still has a tab.
+    pub fn last_session(&self) -> Option<&str> {
+        let mut ids = std::iter::once(self.active()).chain(self.hist.iter().rev());
+        ids.find_map(|f| match f {
+            Frame::Session(id) if self.tabs.contains(f) => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
     pub fn session_count(&self) -> usize {
         self.tabs
             .iter()
             .filter(|f| matches!(f, Frame::Session(_)))
             .count()
-    }
-
-    fn at_cap(&self, f: &Frame) -> bool {
-        matches!(f, Frame::Session(_)) && self.session_count() >= MAX_SESSIONS
     }
 
     /// `f` was shown: the history gets it (the same place twice is one; what was ahead is dropped).
@@ -90,26 +90,23 @@ impl Frames {
     }
 
     /// Makes `f` the active tab, opening it right after the active one when it has none.
-    fn show(&mut self, f: Frame) -> Result<(), CapReached> {
+    fn show(&mut self, f: Frame) {
         match self.tabs.iter().position(|t| *t == f) {
             Some(i) => self.active = i,
-            None if self.at_cap(&f) => return Err(CapReached),
             None => {
                 self.active += 1;
                 self.tabs.insert(self.active, f);
             }
         }
-        Ok(())
     }
 
     /// Opens or focuses `f` and records it. `Picker` is not a frame of the strip: nothing happens.
-    pub fn open(&mut self, f: Frame) -> Result<(), CapReached> {
+    pub fn open(&mut self, f: Frame) {
         if f == Frame::Picker {
-            return Ok(());
+            return;
         }
-        self.show(f.clone())?;
+        self.show(f.clone());
         self.visit(f);
-        Ok(())
     }
 
     /// Focuses tab `i`.
@@ -155,9 +152,9 @@ impl Frames {
         true
     }
 
-    /// Can history step to `f`: it is alive, and it has a tab or one may be opened.
+    /// Can history step to `f`: it is alive (a closed tab is reopened).
     fn reachable(&self, f: &Frame, alive: &impl Fn(&Frame) -> bool) -> bool {
-        alive(f) && (self.tabs.contains(f) || !self.at_cap(f))
+        alive(f)
     }
 
     fn before(&self, alive: &impl Fn(&Frame) -> bool) -> Option<usize> {
@@ -180,12 +177,10 @@ impl Frames {
 
     fn go(&mut self, to: Option<usize>) -> bool {
         let Some(i) = to else { return false };
-        // a closed tab is reopened after the active one; `reachable` checked the cap
-        let shown = self.show(self.hist[i].clone());
-        if shown.is_ok() {
-            self.at = i;
-        }
-        shown.is_ok()
+        // a closed tab is reopened after the active one
+        self.show(self.hist[i].clone());
+        self.at = i;
+        true
     }
 
     /// Back to the nearest place `alive` accepts, without recording a visit. False when there is none.
@@ -230,9 +225,9 @@ mod tests {
     fn it_starts_on_the_pinned_home_and_opening_twice_focuses() {
         let mut f = Frames::default();
         assert_eq!((f.tabs(), f.active_index()), (&[Frame::Home][..], 0));
-        f.open(o("a")).unwrap();
-        f.open(s("1")).unwrap();
-        f.open(o("a")).unwrap();
+        f.open(o("a"));
+        f.open(s("1"));
+        f.open(o("a"));
         assert_eq!(
             f.tabs(),
             &[Frame::Home, o("a"), s("1")][..],
@@ -240,7 +235,7 @@ mod tests {
         );
         assert_eq!(f.active(), &o("a"));
         assert_eq!(f.tabs().iter().filter(|t| **t == o("a")).count(), 1);
-        f.open(Frame::Picker).unwrap();
+        f.open(Frame::Picker);
         assert_eq!(f.tabs().len(), 3, "the picker is no tab");
     }
 
@@ -248,7 +243,7 @@ mod tests {
     fn closing_shows_the_right_neighbour_else_the_left_and_never_the_home() {
         let mut f = Frames::default();
         for id in ["a", "b", "c"] {
-            f.open(o(id)).unwrap();
+            f.open(o(id));
         }
         // tabs: home, a, b, c ; active c
         assert!(!f.close(0), "home is pinned");
@@ -262,7 +257,7 @@ mod tests {
         assert!(!f.close(5));
         // closing a tab before the active one keeps the active frame
         for id in ["x", "y"] {
-            f.open(o(id)).unwrap();
+            f.open(o(id));
         }
         assert!(f.close(1));
         assert_eq!(f.active(), &o("y"));
@@ -272,7 +267,7 @@ mod tests {
     fn reorder_keeps_home_first_and_the_active_frame() {
         let mut f = Frames::default();
         for id in ["a", "b", "c"] {
-            f.open(o(id)).unwrap();
+            f.open(o(id));
         }
         assert!(
             !f.reorder(0, 2) && !f.reorder(2, 0),
@@ -285,24 +280,25 @@ mod tests {
     }
 
     #[test]
-    fn at_most_six_session_frames() {
+    fn session_frames_are_not_capped_and_the_focused_one_stays_active() {
         let mut f = Frames::default();
-        for i in 0..MAX_SESSIONS {
-            f.open(s(&i.to_string())).unwrap();
+        for i in 0..12 {
+            f.open(s(&i.to_string()));
         }
-        assert_eq!(f.open(s("7")), Err(CapReached));
-        assert_eq!(f.session_count(), MAX_SESSIONS);
-        f.open(o("a")).unwrap();
-        f.open(s("3")).unwrap();
-        assert_eq!(f.active(), &s("3"), "an open one still focuses at the cap");
-        f.close(1);
-        f.open(s("7")).unwrap();
+        assert_eq!(f.session_count(), 12);
+        f.open(o("a"));
+        f.open(s("3"));
+        assert_eq!(f.active(), &s("3"));
+        assert_eq!(
+            f.active_index(),
+            f.tabs().iter().position(|t| *t == s("3")).unwrap()
+        );
     }
 
     #[test]
     fn it_cycles_tabs_with_wraparound() {
         let mut f = Frames::default();
-        f.open(o("a")).unwrap();
+        f.open(o("a"));
         f.cycle(1);
         assert_eq!(f.active(), &Frame::Home);
         f.cycle(-1);
@@ -313,16 +309,16 @@ mod tests {
     fn it_walks_back_and_forward_and_a_new_visit_drops_what_was_ahead() {
         let mut f = Frames::default();
         assert!(!f.can_back(any) && !f.can_forward(any));
-        f.open(o("a")).unwrap();
-        f.open(o("b")).unwrap();
-        f.open(o("b")).unwrap();
+        f.open(o("a"));
+        f.open(o("b"));
+        f.open(o("b"));
         assert!(f.back(any));
         assert_eq!(f.active(), &o("a"));
         assert!(f.back(any));
         assert_eq!(f.active(), &Frame::Home);
         assert!(!f.back(any) && f.can_forward(any));
         assert!(f.forward(any));
-        f.open(s("1")).unwrap();
+        f.open(s("1"));
         assert!(!f.can_forward(any), "ahead was dropped");
         assert!(f.back(any));
         assert_eq!(f.active(), &o("a"));
@@ -334,7 +330,7 @@ mod tests {
     fn history_skips_what_is_gone_and_reopens_a_closed_tab() {
         let mut f = Frames::default();
         for id in ["a", "gone", "b"] {
-            f.open(o(id)).unwrap();
+            f.open(o(id));
         }
         let alive = |x: &Frame| *x != o("gone");
         assert!(f.back(alive));
@@ -351,26 +347,23 @@ mod tests {
     }
 
     #[test]
-    fn history_does_not_reopen_a_session_past_the_cap() {
+    fn last_session_is_the_front_one_or_the_latest_still_open() {
         let mut f = Frames::default();
-        f.open(s("old")).unwrap();
-        f.close(1);
-        for i in 0..MAX_SESSIONS {
-            f.open(s(&i.to_string())).unwrap();
-        }
-        f.open(o("a")).unwrap();
-        // back goes to the nearest reachable place: the session that is open, never the closed `old` past the cap
-        while f.back(any) {
-            assert_ne!(f.active(), &s("old"));
-        }
-        assert_eq!(f.session_count(), MAX_SESSIONS);
+        assert_eq!(f.last_session(), None);
+        f.open(s("a"));
+        f.open(s("b"));
+        f.open(o("x"));
+        assert_eq!(f.last_session(), Some("b"));
+        let i = f.tabs().iter().position(|t| *t == s("b")).unwrap();
+        f.close(i);
+        assert_eq!(f.last_session(), Some("a"));
     }
 
     #[test]
     fn it_keeps_at_most_max_places() {
         let mut f = Frames::default();
         for i in 0..MAX_HISTORY + 20 {
-            f.open(o(&i.to_string())).unwrap();
+            f.open(o(&i.to_string()));
         }
         assert_eq!(f.hist.len(), MAX_HISTORY);
         assert_eq!(f.hist.last(), Some(&o(&(MAX_HISTORY + 19).to_string())));

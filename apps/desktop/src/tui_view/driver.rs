@@ -532,6 +532,82 @@ impl TuiView {
         cx.notify();
     }
 
+    /// This embedded session as a handoff entry: the store's id (empty until its engine reported one), its
+    /// folder, and the scope of its engine.
+    pub(crate) fn embed_handoff(&self) -> Option<crate::handoff::Hosted> {
+        let lu = self.live.as_ref()?;
+        let folder = self.embed.as_ref()?.folder.clone()?;
+        (!lu.live.sid.is_empty()).then(|| crate::handoff::Hosted {
+            scope: Self::scope_of(lu.live.engine.as_ref()),
+            sid: lu.live.sid.clone(),
+            folder,
+        })
+    }
+
+    fn scope_of(e: Option<&Arc<Engine>>) -> crate::handoff::Scope {
+        use crate::handoff::Scope;
+        e.and_then(|e| e.remote_distro.clone())
+            .map_or(Scope::Local, Scope::Wsl)
+    }
+
+    /// The Super Agent's sessions came over with the mode switch: the lists are read again, then the focused
+    /// session (when it is of this scope) is the highlighted row and its stored chat is shown. Nothing starts
+    /// an engine: a stored session stays lazy, and a session a Super Agent engine still holds is shown
+    /// read-only (the session lock lets only one process write it; resuming it here is refused until it ends).
+    pub fn adopt_handoff(&mut self, h: crate::handoff::Handoff, cx: &mut Context<Self>) {
+        if self.embed.is_some() || self.live.is_none() {
+            return;
+        }
+        self.pending_handoff = Some(h);
+        self.refresh_store(cx);
+    }
+
+    fn apply_handoff(&mut self, cx: &mut Context<Self>) {
+        let Some(h) = self.pending_handoff.take() else {
+            return;
+        };
+        let Some(lu) = &mut self.live else { return };
+        let own = Self::scope_of(lu.live.engine.as_ref());
+        let plan = h.plan(&own);
+        if !plan.skipped.is_empty() {
+            lu.live.note(
+                format!(
+                    "{} Super Agent session(s) belong to another scope than {own} and are not listed here",
+                    plan.skipped.len()
+                ),
+                false,
+            );
+        }
+        let Some(sel) = plan.select.map(|s| s.sid.clone()) else {
+            lu.dirty = true;
+            return cx.notify();
+        };
+        let Some(ws) = lu
+            .live
+            .view
+            .workspaces
+            .workspaces
+            .iter()
+            .find(|w| w.sessions.iter().any(|s| s.id == sel))
+        else {
+            // not stored yet (no message): nothing to show
+            lu.dirty = true;
+            return cx.notify();
+        };
+        lu.live.ws_key = ws.key.clone();
+        let snap = crate::tui_view::snapshot::build(
+            &lu.live,
+            crate::live::now_ms(),
+            lu.cfg.tz_min,
+            lu.cfg.home.as_deref(),
+        );
+        let Some(i) = snap.running.iter().position(|r| !r.peer && r.id == sel) else {
+            return;
+        };
+        self.snap = snap;
+        self.select_row(i, cx);
+    }
+
     /// What the conductor may read of this embedded session (conductor.md 3.6): its id, the last reply, the last
     /// tool names, and the kind and tool of a pending ask (never its input).
     pub(crate) fn embed_read(&self) -> (String, synthesis_app::conductor::SessionReport) {
@@ -1010,6 +1086,7 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        let mut handoff = false;
         match r {
             Ok((ws, days)) => {
                 let l = &mut lu.live;
@@ -1017,6 +1094,7 @@ impl TuiView {
                 l.view.usage = synthesis_view::usage::UsageHistory { days };
                 let rows = l.peer_rows.clone();
                 l.view.set_peers(&rows);
+                handoff = true;
                 // the selection follows the open session's folder until the person picks another
                 if l.view
                     .workspaces
@@ -1033,6 +1111,9 @@ impl TuiView {
         }
         lu.dirty = true;
         cx.notify();
+        if handoff {
+            self.apply_handoff(cx);
+        }
         self.refresh_branches(cx);
     }
 

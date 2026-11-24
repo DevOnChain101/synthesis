@@ -147,6 +147,10 @@ impl Shell {
                 p.focus(window, cx)
             });
         }
+        let from_sa = self.view == View::SuperAgent
+            || (self.view == View::Settings && self.back == View::SuperAgent);
+        let handoff =
+            (v == View::Tui && from_sa && !self.legacy_ui).then(|| self.sa.read(cx).handoff(cx));
         self.view = v;
         // the card's keys never outlive the view: a hidden view must not take the window's focus back later
         let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
@@ -180,6 +184,9 @@ impl Shell {
                 t.focus_prompt(window, cx);
             }
         });
+        if let Some(h) = handoff {
+            self.tui.update(cx, |t, cx| t.adopt_handoff(h, cx));
+        }
         cx.notify();
     }
 

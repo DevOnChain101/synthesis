@@ -6,7 +6,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, prelude::*, px,
 };
 
-use super::frames::{Frame, MAX_SESSIONS};
+use super::frames::Frame;
 use super::kit::{self, Status};
 use super::rail::outcome_status;
 use super::sidebar::{Segment, why_not};
@@ -194,17 +194,12 @@ impl SuperAgentView {
             .enumerate()
             .map(|(i, f)| self.tab(i, f, cx).into_any_element())
             .collect();
-        let capped = self.frames.session_count() >= MAX_SESSIONS;
         let plus = ib(
             "sa-newtab",
             "plus",
-            if capped {
-                super::CAP_NOTE.into()
-            } else {
-                format!("New  ({mod_key}T)")
-            },
+            format!("New  ({mod_key}T)"),
             (32., 32.),
-            (!capped, false),
+            (true, false),
             cx.listener(|v, _, w, cx| v.new_picker(w, cx)),
         );
         let a = self.side_avail(cx);

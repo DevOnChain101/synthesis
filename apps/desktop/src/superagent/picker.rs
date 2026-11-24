@@ -7,9 +7,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
 
-use super::frames::{Frame, GoalKind, MAX_SESSIONS};
+use super::frames::{Frame, GoalKind};
 use super::tokens::{self as t, hsla};
-use super::{CAP_NOTE, SuperAgentView, kit};
+use super::{SuperAgentView, kit};
 use crate::outcomes_view::kind_picker::{Kind, ROWS, refusal};
 
 impl SuperAgentView {
@@ -52,9 +52,6 @@ impl SuperAgentView {
             return self.picker_notice(why, cx);
         }
         match ROWS[i] {
-            Kind::Session if self.frames.session_count() >= MAX_SESSIONS => {
-                self.picker_notice(CAP_NOTE, cx)
-            }
             Kind::Session => {
                 self.close_picker(cx);
                 // a scratch folder (or the folder dialog for a remote engine); `OpenFolder` comes back to the shell
@@ -73,9 +70,6 @@ impl SuperAgentView {
     }
 
     fn session_in_folder(&mut self, cx: &mut Context<Self>) {
-        if self.frames.session_count() >= MAX_SESSIONS {
-            return self.picker_notice(CAP_NOTE, cx);
-        }
         self.outcomes.update(cx, |o, cx| o.session_in_folder(cx));
     }
 
