@@ -3,11 +3,13 @@
 //! popups, and the "jump to latest" button.
 
 use gpui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, list, prelude::*, px,
+    AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, list,
+    prelude::*, px,
 };
+use gpui_component::ActiveTheme;
 use gpui_component::input::Textarea;
-use gpui_component::text::{TextView, TextViewStyle};
+use std::sync::Arc;
 use synthesis_cli_ui_render::theme as t;
 use synthesis_view::convo::{ApprovalState, CheckRow, CheckState, Item, StepState};
 use synthesis_view::toolview::{self, Glyph, Tone};
@@ -653,10 +655,7 @@ impl TuiView {
                 div().min_w(px(0.)).text_color(strong()).child(
                     match self.assistant_blocks(idx, s, *streaming, *tainted, cx) {
                         Some(blocks) => blocks,
-                        None => TextView::markdown(("assistant", idx), s.clone())
-                            .style(assistant_style())
-                            .selectable(true)
-                            .into_any_element(),
+                        None => AssistantMd::new(("assistant", idx), s.clone()).into_any_element(),
                     },
                 ),
             )
@@ -1736,22 +1735,82 @@ pub fn input_box(
         )
 }
 
-/// The assistant's markdown: body text stays as it is, only key points stand out. A table's header row is bold in the
-/// strong text colour on the elevated ground, inline `code` is amber on the elevated ground. (gpui-component 0.8.1 has no
-/// hook for the colour of `**bold**` or of headings, so those keep the body colour.)
-pub(crate) fn assistant_style() -> TextViewStyle {
-    TextViewStyle::default()
-        .table_head(
+/// The assistant's markdown: body text stays as it is, only key points stand out. Headings are in the light accent, a
+/// table's header row is bold in the strong text colour on the elevated ground, inline `code` is amber on the elevated
+/// ground. (gpui-component 0.8.1 has no hook for the colour of `**bold**` or of headings, so this renders through
+/// `gpui_base::TextView` with the style the component would have derived; `**bold**` keeps the body colour.)
+pub(crate) fn assistant_style(theme: &gpui_component::Theme) -> gpui_base::TextViewStyle {
+    // the component's own base style (gpui-component `base_text_view_style` is crate-private)
+    let radius = theme.semantic_tokens().radius.md;
+    let mut table = gpui::StyleRefinement::default();
+    table.corner_radii.top_left = Some(radius.into());
+    table.corner_radii.top_right = Some(radius.into());
+    table.corner_radii.bottom_left = Some(radius.into());
+    table.corner_radii.bottom_right = Some(radius.into());
+    let code_block = gpui::StyleRefinement {
+        corner_radii: table.corner_radii.clone(),
+        ..Default::default()
+    };
+    gpui_base::TextViewStyle::default()
+        .with_foreground(theme.foreground)
+        .with_muted_foreground(theme.muted_foreground)
+        .with_link(theme.link)
+        .with_selection(theme.selection)
+        .with_code_background(theme.muted)
+        .with_border(theme.border)
+        .with_code_block(code_block)
+        .with_table(table)
+        .with_table_head(
             gpui::StyleRefinement::default()
                 .font_weight(FontWeight::BOLD)
                 .text_color(strong())
                 .bg(hsla(t::ELEVATED)),
         )
-        .inline_code(gpui::HighlightStyle {
+        .with_inline_code(gpui::HighlightStyle {
             color: Some(hsla(t::WARN)),
             background_color: Some(hsla(t::ELEVATED)),
             ..Default::default()
         })
+        .with_heading(|_| gpui::StyleRefinement::default().text_color(hsla(t::ACCENT_LIGHT)))
+        .with_dark(theme.is_dark())
+}
+
+/// Assistant prose as selectable markdown in [`assistant_style`]. `inert` is for untrusted model text (Super Agent): a
+/// link is shown but never opened and no image is loaded.
+#[derive(IntoElement)]
+pub(crate) struct AssistantMd {
+    id: gpui::ElementId,
+    text: gpui::SharedString,
+    inert: bool,
+}
+
+impl AssistantMd {
+    pub(crate) fn new(id: impl Into<gpui::ElementId>, text: impl Into<gpui::SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            inert: false,
+        }
+    }
+
+    pub(crate) fn inert(mut self) -> Self {
+        self.inert = true;
+        self
+    }
+}
+
+impl RenderOnce for AssistantMd {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let v = gpui_base::TextView::markdown(self.id, self.text)
+            .style(assistant_style(cx.theme()))
+            .selectable(true);
+        if self.inert {
+            v.on_link_click(|_, _, _, _| {})
+                .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
+        } else {
+            v
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1760,9 +1819,22 @@ mod tests {
 
     #[test]
     fn inline_code_is_amber_on_the_elevated_ground() {
-        let c = assistant_style().inline_code;
+        let c = assistant_style(&gpui_component::Theme::default()).inline_code();
         assert_eq!(c.color, Some(hsla(t::WARN)));
         assert_eq!(c.background_color, Some(hsla(t::ELEVATED)));
+    }
+
+    #[test]
+    fn headings_are_light_accent_at_every_level_and_keep_their_size() {
+        let st = assistant_style(&gpui_component::Theme::default());
+        for lvl in 1..=6 {
+            let h = st.heading(lvl);
+            assert_eq!(h.text.color, Some(hsla(t::ACCENT_LIGHT)), "h{lvl}");
+            assert_eq!(
+                h.text.font_size, None,
+                "h{lvl}: the size stays the Base default"
+            );
+        }
     }
 
     #[test]
