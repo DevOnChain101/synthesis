@@ -248,6 +248,28 @@ pub enum Call {
     McpRemove {
         name: String,
     },
+    /// Custom providers of the engine's own user `synt.json` (the Settings view with the engine in WSL).
+    /// References only (`{env:NAME}` / `{file:path}`, ADR-011): no message carries or returns a key value.
+    #[serde(rename = "provider.list")]
+    ProviderList,
+    #[serde(rename = "provider.draft")]
+    ProviderDraft {
+        id: String,
+    },
+    /// The click-through the form needs before it is saved (`null`: every reference is a `SYNT_*` variable).
+    #[serde(rename = "provider.confirm")]
+    ProviderConfirm {
+        form: ProviderForm,
+    },
+    #[serde(rename = "provider.save")]
+    ProviderSave {
+        form: ProviderForm,
+        editing: bool,
+    },
+    #[serde(rename = "provider.remove")]
+    ProviderRemove {
+        id: String,
+    },
     /// `{enabled, protocol, schema}`: the one outcome method that answers while the feature is off.
     #[serde(rename = "orchestrator.status")]
     OrchestratorStatus,
@@ -573,6 +595,11 @@ impl Call {
             | Call::McpList
             | Call::McpAdd { .. }
             | Call::McpRemove { .. }
+            | Call::ProviderList
+            | Call::ProviderDraft { .. }
+            | Call::ProviderConfirm { .. }
+            | Call::ProviderSave { .. }
+            | Call::ProviderRemove { .. }
             | Call::Compact { .. }
             | Call::Clear
             | Call::Cancel
@@ -593,6 +620,18 @@ impl Call {
                 | Call::WorkspaceClose { .. }
         )
     }
+}
+
+/// The provider form as typed: the fields of `provider_cfg::Draft` (`protocol`: `anthropic` or `openai`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderForm {
+    pub id: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub headers: String,
+    pub models: String,
+    pub confirmed: String,
 }
 
 /// The answer to a plan or question dialog.

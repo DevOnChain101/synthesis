@@ -71,8 +71,76 @@ fn guarded(key: &str) -> bool {
 /// Shown instead of the Windows trust store in WSL mode.
 pub const TRUST_IN_ENGINE: &str = "Remembered trust is managed in the engine (WSL): use /trust in the TUI tab. The Windows store is not used for those folders.";
 
-/// Shown instead of the provider editor in WSL mode.
-pub const PROVIDERS_IN_ENGINE: &str = "The engine runs in WSL and reads the providers of its own ~/.synt/synt.json (and its own keys). Edit that file inside the distro; the Windows file is not used by the engine.";
+/// Shown where the Windows file cannot be used because the engine runs in WSL (the native editor, Test connection).
+pub const PROVIDERS_IN_ENGINE: &str = "The engine runs in WSL and reads the providers of its own ~/.synt/synt.json (and its own keys), not the Windows file. Providers are edited in the engine's file; Test connection is not available here.";
+
+/// Where the custom providers live when the engine runs in WSL: the engine's own `~/.synt/synt.json`, reached
+/// through the engine's `provider.*` protocol calls (a fake in tests). References only (ADR-011).
+pub trait ProviderSink: Send + Sync {
+    fn list(&self) -> Result<Vec<ProviderEntry>, String>;
+    fn draft(&self, id: &str) -> Result<ProviderDraft, String>;
+    fn confirm(&self, d: &ProviderDraft) -> Result<Option<Confirm>, String>;
+    fn save(&self, d: &ProviderDraft, editing: bool) -> Result<(), String>;
+    fn remove(&self, id: &str) -> Result<(), String>;
+}
+
+type ProviderList = Result<Vec<ProviderEntry>, String>;
+
+/// Lists the engine's providers on a worker thread (the first call may boot the distro);
+/// [`Model::poll_provider_list`] collects them.
+fn list_in_background(s: Arc<dyn ProviderSink>, slot: Arc<Mutex<Option<ProviderList>>>) {
+    std::thread::spawn(move || {
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(s.list());
+    });
+}
+
+/// The real sink: one engine process in the distro, started on first use (a cold distro can take a minute,
+/// so the first call is made on a worker thread) and kept while the Settings view is open.
+struct WslSink {
+    env: Env,
+    home: PathBuf,
+    cwd: PathBuf,
+    conn: Mutex<Option<(crate::engine::Engine, Box<dyn Send>)>>,
+}
+
+impl WslSink {
+    fn with<T>(
+        &self,
+        f: impl FnOnce(&crate::remote::Remote) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut g = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if g.as_ref()
+            .is_none_or(|(e, _)| e.remote().is_none_or(|r| r.is_dead()))
+        {
+            let spec = crate::remote::StartSpec::default();
+            let (e, rx) = crate::wsl::start(&self.env, &self.home, &self.cwd, &spec)?;
+            *g = Some((e, Box::new(rx)));
+        }
+        let r = g
+            .as_ref()
+            .and_then(|(e, _)| e.remote())
+            .ok_or("no engine")?;
+        f(r)
+    }
+}
+
+impl ProviderSink for WslSink {
+    fn list(&self) -> ProviderList {
+        self.with(|r| r.provider_list())
+    }
+    fn draft(&self, id: &str) -> Result<ProviderDraft, String> {
+        self.with(|r| r.provider_draft(id))
+    }
+    fn confirm(&self, d: &ProviderDraft) -> Result<Option<Confirm>, String> {
+        self.with(|r| r.provider_confirm(d))
+    }
+    fn save(&self, d: &ProviderDraft, editing: bool) -> Result<(), String> {
+        self.with(|r| r.provider_save(d, editing))
+    }
+    fn remove(&self, id: &str) -> Result<(), String> {
+        self.with(|r| r.provider_remove(id))
+    }
+}
 
 /// WSL mode is on, or its setting cannot be read (then nothing of the host's store is touched either).
 fn wsl_mode(home: &std::path::Path) -> bool {
@@ -272,6 +340,13 @@ pub struct Model {
     pub prov_testing: Option<String>,
     pub prov_result: Option<(String, String)>,
     prov_slot: Arc<Mutex<Option<String>>>,
+    /// WSL mode: the providers are the engine's (see [`ProviderSink`]); `None` is the native file.
+    prov_sink: Option<Arc<dyn ProviderSink>>,
+    /// The sink was given (tests): it is not replaced when the WSL setting is read again.
+    prov_sink_fixed: bool,
+    /// The first list of the engine's providers is on its way ([`Model::poll_provider_list`]).
+    pub prov_loading: bool,
+    prov_list_slot: Arc<Mutex<Option<ProviderList>>>,
     pub agents_md: Vec<(PathBuf, bool)>,
     /// The checks of `/doctor`, read-only; `None` while they run (or after they timed out: `doctor_error`).
     pub doctor: Option<Vec<synthesis_app::doctor::Row>>,
@@ -375,6 +450,10 @@ impl Model {
             prov_testing: None,
             prov_result: None,
             prov_slot: Arc::default(),
+            prov_sink: None,
+            prov_sink_fixed: false,
+            prov_loading: false,
+            prov_list_slot: Arc::default(),
             agents_md: vec![],
             doctor: None,
             doctor_error: None,
@@ -537,8 +616,23 @@ impl Model {
         self.mcp.clear();
         self.providers.clear();
         self.mcp_error = None;
-        (self.prov_entries, self.prov_error) = if wsl_mode(&c.home) {
-            (vec![], Some(PROVIDERS_IN_ENGINE.into()))
+        if !self.prov_sink_fixed {
+            let wsl = wsl_mode(&c.home);
+            if !wsl {
+                self.prov_sink = None;
+            } else if self.prov_sink.is_none() {
+                self.prov_sink = Some(Arc::new(WslSink {
+                    env: c.env.clone(),
+                    home: c.home.clone(),
+                    cwd: c.cwd.clone(),
+                    conn: Mutex::new(None),
+                }));
+            }
+        }
+        (self.prov_entries, self.prov_error) = if let Some(s) = self.prov_sink.clone() {
+            self.prov_loading = true;
+            list_in_background(s, self.prov_list_slot.clone());
+            (vec![], None)
         } else {
             match provider_cfg::entries(&c.home) {
                 Ok(e) => (e, None),
@@ -905,12 +999,50 @@ impl Model {
         Ok(())
     }
 
-    /// The editable providers need the engine's file to be this machine's (not WSL) and a readable file.
+    /// The native file is edited here only when the engine is on this machine (not WSL).
     fn providers_writable(&self) -> Result<(), String> {
-        if wsl_mode(&self.cfg.home) {
+        if self.prov_sink.is_some() || wsl_mode(&self.cfg.home) {
             return Err(PROVIDERS_IN_ENGINE.into());
         }
         Ok(())
+    }
+
+    /// Routes the providers to `sink` (tests; the app builds its own in WSL mode).
+    pub fn use_provider_sink(&mut self, sink: Arc<dyn ProviderSink>) {
+        self.prov_sink = Some(sink);
+        self.prov_sink_fixed = true;
+        self.refresh_info();
+    }
+
+    /// The providers are the engine's, inside WSL (the Custom provider section of WSL mode).
+    pub fn providers_in_wsl(&self) -> bool {
+        self.prov_sink.is_some()
+    }
+
+    /// True once the list is in (the entries or the reason are set).
+    pub fn poll_provider_list(&mut self) -> bool {
+        let done = self
+            .prov_list_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match done {
+            Some(Ok(e)) => (self.prov_entries, self.prov_error) = (e, None),
+            Some(Err(e)) => (self.prov_entries, self.prov_error) = (vec![], Some(e)),
+            None => return false,
+        }
+        self.prov_loading = false;
+        true
+    }
+
+    /// After a save or remove the engine is warm: list again, bounded by its call timeout.
+    fn relist_provider(&mut self) {
+        if let Some(s) = &self.prov_sink {
+            (self.prov_entries, self.prov_error) = match s.list() {
+                Ok(e) => (e, None),
+                Err(e) => (vec![], Some(e)),
+            };
+        }
     }
 
     fn provider_ctx(&self) -> Ctx<'_> {
@@ -923,6 +1055,9 @@ impl Model {
 
     /// The click-through the form needs before it may be saved (`None`: every reference is a `SYNT_*` variable).
     pub fn provider_confirmation(&self, d: &ProviderDraft) -> Result<Option<Confirm>, String> {
+        if let Some(s) = &self.prov_sink {
+            return s.confirm(d);
+        }
         self.providers_writable()?;
         provider_cfg::confirmation(d, &self.provider_ctx())
     }
@@ -937,6 +1072,11 @@ impl Model {
     /// the loader would refuse is kept as it is and the reason returned. A reference that is not a `SYNT_*`
     /// variable is saved only with the draft's `confirmed` token.
     pub fn save_provider(&mut self, d: &ProviderDraft, editing: bool) -> Result<(), String> {
+        if let Some(s) = self.prov_sink.clone() {
+            s.save(d, editing)?;
+            self.relist_provider();
+            return Ok(());
+        }
         self.providers_writable()?;
         provider_cfg::save(&self.provider_ctx(), d, editing)?;
         self.prov_result = None;
@@ -945,6 +1085,11 @@ impl Model {
     }
 
     pub fn remove_provider(&mut self, id: &str) -> Result<(), String> {
+        if let Some(s) = self.prov_sink.clone() {
+            s.remove(id)?;
+            self.relist_provider();
+            return Ok(());
+        }
         self.providers_writable()?;
         provider_cfg::remove(&self.cfg.home, id)?;
         self.prov_result = None;
@@ -954,6 +1099,9 @@ impl Model {
 
     /// The form for editing `id` (references only, never a key).
     pub fn provider_draft(&self, id: &str) -> Result<ProviderDraft, String> {
+        if let Some(s) = &self.prov_sink {
+            return s.draft(id);
+        }
         self.providers_writable()?;
         provider_cfg::draft_of(&self.cfg.home, id)
     }
@@ -1568,6 +1716,125 @@ mod tests {
         );
         m.remove_provider("acme").unwrap();
         assert!(m.prov_entries.is_empty() && m.remove_provider("acme").is_err());
+    }
+
+    /// The engine inside the distro, as far as Settings can tell: its own home, reached only through the sink.
+    struct FakeEngine {
+        home: PathBuf,
+        user_home: PathBuf,
+        env: Env,
+    }
+
+    impl FakeEngine {
+        fn ctx(&self) -> Ctx<'_> {
+            Ctx {
+                home: &self.home,
+                user_home: &self.user_home,
+                env: &self.env,
+            }
+        }
+    }
+
+    impl ProviderSink for FakeEngine {
+        fn list(&self) -> ProviderList {
+            provider_cfg::entries(&self.home)
+        }
+        fn draft(&self, id: &str) -> Result<ProviderDraft, String> {
+            provider_cfg::draft_of(&self.home, id)
+        }
+        fn confirm(&self, d: &ProviderDraft) -> Result<Option<Confirm>, String> {
+            provider_cfg::confirmation(d, &self.ctx())
+        }
+        fn save(&self, d: &ProviderDraft, editing: bool) -> Result<(), String> {
+            provider_cfg::save(&self.ctx(), d, editing)
+        }
+        fn remove(&self, id: &str) -> Result<(), String> {
+            provider_cfg::remove(&self.home, id)
+        }
+    }
+
+    #[test]
+    fn in_wsl_mode_providers_go_to_the_engine_and_never_to_the_windows_file() {
+        let (t, mut m) = model();
+        let distro = std::fs::canonicalize(t.path()).unwrap().join("distro");
+        let synt = distro.join(".synt");
+        std::fs::create_dir_all(&synt).unwrap();
+        m.use_provider_sink(Arc::new(FakeEngine {
+            home: synt.clone(),
+            user_home: distro.clone(),
+            env: m.cfg.env.clone(),
+        }));
+        // the first list is on a worker thread
+        assert!(m.providers_in_wsl() && m.prov_loading);
+        let t0 = std::time::Instant::now();
+        while !m.poll_provider_list() {
+            assert!(t0.elapsed().as_secs() < 60);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!m.prov_loading && m.prov_entries.is_empty() && m.prov_error.is_none());
+        // add, list, edit, validate and remove: all in the distro's file
+        m.save_provider(&draft("acme"), false).unwrap();
+        assert_eq!(m.prov_entries[0].key, "{env:SYNT_ACME_KEY}");
+        assert!(synt.join("synt.json").is_file());
+        assert!(
+            !m.cfg.home.join("synt.json").exists(),
+            "the Windows file is not touched"
+        );
+        assert_eq!(m.provider_draft("acme").unwrap().api_key, "SYNT_ACME_KEY");
+        let mut file = draft("acme");
+        file.api_key = "~/.synt/keys/acme".into();
+        let c = m.provider_confirmation(&file).unwrap().unwrap();
+        assert!(
+            m.save_provider(&file, true).is_err(),
+            "a file reference needs the click-through"
+        );
+        file.confirmed = c.token;
+        m.save_provider(&file, true).unwrap();
+        assert_eq!(m.prov_entries[0].key, "{file:~/.synt/keys/acme}");
+        // the existing validation answers, and a key value is refused without being echoed
+        let mut bad = draft("evil");
+        bad.api_key = "sk-ant-api03-abcdefghijklmnop".into();
+        let e = m.save_provider(&bad, false).unwrap_err();
+        assert!(
+            e.contains("looks like an API key") && !e.contains("abcdefghij"),
+            "{e}"
+        );
+        let mut http = draft("plain");
+        http.base_url = "http://llm.example.com/v1".into();
+        assert!(m.save_provider(&http, false).is_err());
+        m.remove_provider("acme").unwrap();
+        assert!(m.prov_entries.is_empty());
+        // Test connection stays native-only
+        assert!(m.provider_preflight("acme").is_err());
+        assert!(!m.cfg.home.join("synt.json").exists());
+    }
+
+    #[test]
+    fn a_failing_engine_is_shown_as_the_list_error() {
+        struct Down;
+        impl ProviderSink for Down {
+            fn list(&self) -> ProviderList {
+                Err("distro did not start".into())
+            }
+            fn draft(&self, _: &str) -> Result<ProviderDraft, String> {
+                Err("x".into())
+            }
+            fn confirm(&self, _: &ProviderDraft) -> Result<Option<Confirm>, String> {
+                Err("x".into())
+            }
+            fn save(&self, _: &ProviderDraft, _: bool) -> Result<(), String> {
+                Err("x".into())
+            }
+            fn remove(&self, _: &str) -> Result<(), String> {
+                Err("x".into())
+            }
+        }
+        let (_t, mut m) = model();
+        m.use_provider_sink(Arc::new(Down));
+        while !m.poll_provider_list() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(m.prov_error.as_deref(), Some("distro did not start"));
     }
 
     #[test]

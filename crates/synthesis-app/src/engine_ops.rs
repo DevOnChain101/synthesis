@@ -592,6 +592,89 @@ pub fn mcp_remove(
     Ok(json!({"removed": clean(name)}))
 }
 
+// ---- custom providers of the engine's own user file (ADR-011: references only, never a key)
+
+fn provider_ctx<'a>(ctx: &'a Ctx) -> Result<crate::provider_cfg::Ctx<'a>, String> {
+    Ok(crate::provider_cfg::Ctx {
+        home: ctx.home,
+        user_home: ctx.user_home.ok_or("the engine has no home folder")?,
+        env: ctx.env,
+    })
+}
+
+fn draft_of_form(f: crate::proto::ProviderForm) -> Result<crate::provider_cfg::Draft, String> {
+    let protocol = match f.protocol.as_str() {
+        "anthropic" => synthesis_config::Protocol::Anthropic,
+        "openai" => synthesis_config::Protocol::OpenAi,
+        _ => return Err("the protocol is anthropic or openai".into()),
+    };
+    Ok(crate::provider_cfg::Draft {
+        id: f.id,
+        protocol,
+        base_url: f.base_url,
+        api_key: f.api_key,
+        headers: f.headers,
+        models: f.models,
+        confirmed: f.confirmed,
+    })
+}
+
+fn form_of_draft(d: crate::provider_cfg::Draft) -> crate::proto::ProviderForm {
+    crate::proto::ProviderForm {
+        id: clean(&d.id),
+        protocol: d.protocol.as_str().into(),
+        base_url: clean(&d.base_url),
+        api_key: clean(&d.api_key),
+        headers: clean(&d.headers),
+        models: clean(&d.models),
+        confirmed: String::new(),
+    }
+}
+
+pub fn provider_list(ctx: &Ctx, hide: &[&Path]) -> Result<Value, String> {
+    let rows = crate::provider_cfg::entries(ctx.home).map_err(|e| scrub(&e, hide))?;
+    Ok(
+        json!({"providers": rows.into_iter().take(MAX_ROWS).map(|e| json!({
+        "id": clean(&e.id), "protocol": e.protocol, "base_url": clean(&e.base_url),
+        "key": clean(&e.key), "models": e.models.iter().take(MAX_ROWS).map(|m| clean(m)).collect::<Vec<_>>()
+    })).collect::<Vec<_>>()}),
+    )
+}
+
+pub fn provider_draft(ctx: &Ctx, id: &str, hide: &[&Path]) -> Result<Value, String> {
+    let d = crate::provider_cfg::draft_of(ctx.home, id).map_err(|e| scrub(&e, hide))?;
+    Ok(json!({"form": form_of_draft(d)}))
+}
+
+pub fn provider_confirm(
+    ctx: &Ctx,
+    form: crate::proto::ProviderForm,
+    hide: &[&Path],
+) -> Result<Value, String> {
+    let d = draft_of_form(form)?;
+    let c =
+        crate::provider_cfg::confirmation(&d, &provider_ctx(ctx)?).map_err(|e| scrub(&e, hide))?;
+    Ok(json!({"confirm": c.map(|c| json!({"token": c.token, "text": clean(&c.text)}))}))
+}
+
+pub fn provider_save(
+    ctx: &Ctx,
+    form: crate::proto::ProviderForm,
+    editing: bool,
+    hide: &[&Path],
+) -> Result<Value, String> {
+    let d = draft_of_form(form)?;
+    let _lock = edit_lock(ctx)?;
+    crate::provider_cfg::save(&provider_ctx(ctx)?, &d, editing).map_err(|e| scrub(&e, hide))?;
+    Ok(json!({"saved": clean(d.id.trim())}))
+}
+
+pub fn provider_remove(ctx: &Ctx, id: &str, hide: &[&Path]) -> Result<Value, String> {
+    let _lock = edit_lock(ctx)?;
+    crate::provider_cfg::remove(ctx.home, id).map_err(|e| scrub(&e, hide))?;
+    Ok(json!({"removed": clean(id)}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,6 +931,56 @@ mod tests {
         }
         let full = mcp_add(&ctx, add("one-more", ok), &[]).unwrap_err();
         assert!(full.contains("at most"), "{full}");
+    }
+
+    #[test]
+    fn providers_over_the_protocol_are_references_only_and_hide_the_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(d.path()).unwrap();
+        let e = env();
+        let ctx = Ctx {
+            home: &home,
+            user_home: Some(&home),
+            env: &e,
+            enforcing: false,
+        };
+        let form = |id: &str, key: &str| crate::proto::ProviderForm {
+            id: id.into(),
+            protocol: "openai".into(),
+            base_url: "https://llm.example.com/v1".into(),
+            api_key: key.into(),
+            models: "m1".into(),
+            ..Default::default()
+        };
+        assert!(
+            provider_list(&ctx, &[]).unwrap()["providers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        provider_save(&ctx, form("acme", "SYNT_ACME_KEY"), false, &[]).unwrap();
+        let l = provider_list(&ctx, &[]).unwrap();
+        assert_eq!(l["providers"][0]["key"], "{env:SYNT_ACME_KEY}");
+        assert_eq!(
+            provider_draft(&ctx, "acme", &[]).unwrap()["form"]["api_key"],
+            "SYNT_ACME_KEY"
+        );
+        // a key value, a bad protocol and a non-SYNT variable without the click are refused
+        let k = provider_save(&ctx, form("x", "sk-ant-api03-abcdefghijklmnop"), false, &[])
+            .unwrap_err();
+        assert!(
+            k.contains("looks like an API key") && !k.contains("abcdefghij"),
+            "{k}"
+        );
+        let mut f = form("x", "SYNT_K");
+        f.protocol = "gemini".into();
+        assert!(provider_save(&ctx, f, false, &[]).is_err());
+        let c = provider_confirm(&ctx, form("x", "MY_KEY"), &[]).unwrap();
+        assert!(c["confirm"]["token"].is_string());
+        assert!(provider_confirm(&ctx, form("x", "SYNT_K"), &[]).unwrap()["confirm"].is_null());
+        assert!(provider_save(&ctx, form("x", "MY_KEY"), false, &[]).is_err());
+        provider_remove(&ctx, "acme", &[]).unwrap();
+        assert!(provider_remove(&ctx, "acme", &[]).is_err());
     }
 
     #[test]
