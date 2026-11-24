@@ -13,6 +13,7 @@ use gpui::{
 use synthesis_app::conductor::SessionReport;
 use synthesis_harness::PersonApproved;
 
+use crate::superagent::chathost::ChatHost;
 use crate::superagent::frames::{Frame, Frames};
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{ChatTab, TuiView};
@@ -34,6 +35,8 @@ impl gpui::EventEmitter<WantTerminal> for SessionHost {}
 pub struct SessionHost {
     cfg: Option<LiveCfg>,
     views: Vec<(String, Entity<TuiView>)>,
+    /// The chat each frame draws: the embedded view only drives the engine and owns the panes (`Embed::headless`).
+    chats: Vec<(String, Entity<ChatHost>)>,
     /// The session frame that is on screen (`None`: another frame, or another view of the window).
     front: Option<String>,
     window_active: bool,
@@ -59,6 +62,7 @@ impl SessionHost {
         Self {
             cfg,
             views: Vec::new(),
+            chats: Vec::new(),
             front: None,
             window_active: window.is_window_active(),
             focus_pending: false,
@@ -97,7 +101,7 @@ impl SessionHost {
         let r = view.update(cx, |t, cx| {
             // keys only after `sync` says this frame is on screen
             (t.active, t.shown) = (false, false);
-            t.start_in(folder.to_path_buf(), window, cx)
+            t.start_in(folder.to_path_buf(), true, window, cx)
         });
         if r.is_err() {
             // a refused folder is no tab: it counts nowhere and nothing was started
@@ -111,6 +115,8 @@ impl SessionHost {
             cx.emit(WantTerminal(fid.clone()))
         })
         .detach();
+        let chat = cx.new(|cx| ChatHost::new(view.clone(), window, cx));
+        self.chats.push((id.to_string(), chat));
         self.views.push((id.to_string(), view));
         Ok(())
     }
@@ -156,6 +162,7 @@ impl SessionHost {
     pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.views.iter().position(|(v, _)| v == id) {
             let (_, view) = self.views.remove(i);
+            self.chats.retain(|(c, _)| c != id);
             // the closed view takes no key while it waits to be released
             view.update(cx, |t, cx| {
                 (t.shown, t.active) = (false, false);
@@ -176,14 +183,15 @@ impl SessionHost {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.view(id)?.clone();
+        let chat = self.chats.iter().find(|(c, _)| c == id)?.1.clone();
         if self.focus_pending && self.front.as_deref() == Some(id) {
             self.focus_pending = false;
-            let v = view.clone();
+            // the prompt box is the chat's composer
             window.defer(cx, move |window, cx| {
-                v.update(cx, |t, cx| t.focus_prompt(window, cx))
+                view.update(cx, |t, cx| t.focus_prompt(window, cx))
             });
         }
-        Some(div().size_full().child(view).into_any_element())
+        Some(div().size_full().child(chat).into_any_element())
     }
 
     /// Title and state of the tab: the first thing the person asked, else the folder's name.
@@ -508,7 +516,7 @@ pub(crate) mod tests {
         assert!(open(&h, v, &a) && open(&h, v, &b));
         v.run_until_parked();
         assert!(
-            v.debug_bounds("view").is_none(),
+            v.debug_bounds("sa-chat-host").is_none(),
             "no session is in front yet"
         );
         h.update(v, |h, _| h.window_active = true);
@@ -516,8 +524,12 @@ pub(crate) mod tests {
         h.update(v, |h, cx| h.sync(&fr, true, cx));
         v.run_until_parked();
         assert!(
-            v.debug_bounds("view").is_some(),
-            "the embedded chat is drawn"
+            v.debug_bounds("sa-chat-host").is_some(),
+            "the session's own chat is drawn"
+        );
+        assert!(
+            v.debug_bounds("view").is_none(),
+            "not the TUI view (it only drives the engine)"
         );
         assert!(
             !h.read_with(v, |h, _| h.focus_pending),

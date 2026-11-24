@@ -14,12 +14,13 @@ mod clean;
 mod design_tests;
 pub mod dialog;
 pub mod driver;
+mod embed_chat;
 mod filesel;
 pub mod layout;
 pub mod panels;
 mod quote;
 mod rewind;
-mod run_block;
+pub(crate) mod run_block;
 pub mod sample;
 pub mod select;
 #[cfg(feature = "shot")]
@@ -223,6 +224,9 @@ pub(crate) struct Embed {
     pub side: Option<ChatTab>,
     /// The frame's folder (canonical): every start of this view, a recheck included, is a new session here.
     pub folder: Option<std::path::PathBuf>,
+    /// The Super Agent's `ChatHost` draws the chat: this view only drives the engine and owns the Terminal and
+    /// Browser panes, and its key hook leaves everything but those panes and the dialogs alone.
+    pub headless: bool,
 }
 
 /// A side column of the view.

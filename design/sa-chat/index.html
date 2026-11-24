@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Super Agent session chat (mock)</title>
+<!-- Own minimal layout for the Super Agent session chat. Colours are the brand tokens of design/02-design-tokens/tokens.css. -->
+<style>
+:root{--bg:#0B0C0F;--surface:#15171B;--elevated:#242830;--border:#3A3F4A;--text:#9CA3AF;--strong:#E5E7EB;--accent:#D9D9E0;
+--ok:#4ade80;--err:#f87171;--warn:#fbbf24;--stroke:rgba(255,255,255,.08);--hover:rgba(255,255,255,.06)}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:13px/20px -apple-system,"SF Pro Text","Inter",system-ui,sans-serif;height:100vh;display:flex;justify-content:center}
+.col{width:100%;max-width:760px;display:flex;flex-direction:column;height:100vh;padding:0 16px}
+.scroll{flex:1;overflow:auto;padding:24px 0 8px;display:flex;flex-direction:column;gap:20px}
+.user{align-self:flex-end;max-width:80%;background:var(--surface);border:1px solid var(--stroke);border-radius:12px;padding:8px 14px;color:var(--strong)}
+.asst{color:var(--strong);display:flex;flex-direction:column;gap:10px}
+.asst p{max-width:68ch}
+.tool{border:1px solid var(--stroke);border-radius:8px;background:var(--surface);overflow:hidden}
+.tool .h{display:flex;gap:10px;align-items:center;padding:6px 10px;cursor:pointer;font-size:12px}
+.tool .h:hover{background:var(--hover)}
+.tool .k{color:var(--strong);font-weight:500}
+.tool .s{flex:1;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool .g{color:var(--ok)}.tool .g.run{color:var(--warn)}
+.tool .b{border-top:1px solid var(--stroke);padding:6px 10px;font:12px/18px ui-monospace,Menlo,monospace;background:rgba(11,12,15,.45)}
+.add{color:var(--ok);background:rgba(74,222,128,.10)}.del{color:var(--err);background:rgba(248,113,113,.10)}
+.code{border:1px solid var(--stroke);border-radius:8px;background:rgba(11,12,15,.45)}
+.code .h{display:flex;justify-content:space-between;padding:4px 10px;font-size:11px;color:var(--text);border-bottom:1px solid var(--stroke)}
+.code .h span+span{display:flex;gap:6px}
+.btn{border:1px solid var(--stroke);border-radius:4px;padding:0 8px;font-size:11px}
+.code pre{padding:8px 10px;font:12px/18px ui-monospace,Menlo,monospace;color:var(--strong)}
+.ask{border:1px solid var(--border);border-radius:12px;background:var(--elevated);padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.ask .t{color:var(--strong);font-weight:600;font-size:13px}
+.ask .in{font:12px/18px ui-monospace,Menlo,monospace;background:rgba(11,12,15,.45);border-radius:8px;padding:6px 10px;color:var(--strong)}
+.ask .row{display:flex;gap:8px}
+.pri{background:#2d3038;border:1px solid rgba(217,217,224,.38);color:var(--strong);border-radius:8px;padding:4px 12px}
+.sec{border:1px solid var(--stroke);border-radius:8px;padding:4px 12px;color:var(--text)}
+.status{color:var(--text);font-size:12px;display:flex;gap:8px;align-items:center}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--warn)}
+.composer{margin:8px 0 16px;background:var(--elevated);border:1px solid var(--stroke);border-radius:16px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.composer .ta{color:var(--text);min-height:40px}
+.composer .bar{display:flex;justify-content:space-between;align-items:center}
+.pill{border:1px solid var(--stroke);border-radius:999px;padding:1px 10px;font-size:12px;color:var(--text);margin-right:6px}
+.stop{background:var(--strong);color:var(--bg);border-radius:8px;padding:2px 12px;font-weight:500}
+</style>
+</head>
+<body>
+<div class="col">
+ <div class="scroll">
+  <div class="user">Add a --json flag to the status command and show the diff before you run the tests.</div>
+  <div class="asst">
+   <p>I will read the command first, then make the change.</p>
+   <div class="tool"><div class="h"><span class="k">Read</span><span class="s">crates/cli/src/status.rs</span><span class="g">&#10003;</span><span>&#8250;</span></div></div>
+   <div class="tool"><div class="h"><span class="k">Edit</span><span class="s">crates/cli/src/status.rs  +6 -1</span><span class="g">&#10003;</span><span>&#8964;</span></div>
+    <div class="b"><div>@@ fn run(args: &Args)</div><div class="del">- println!("{}", report);</div><div class="add">+ if args.json {</div><div class="add">+     println!("{}", serde_json::to_string(&report)?);</div><div class="add">+ } else {</div><div class="add">+     println!("{}", report);</div><div class="add">+ }</div></div></div>
+   <p>The flag is in. Run the tests with:</p>
+   <div class="code"><div class="h"><span>command &middot; bash</span><span><span class="btn">Copy</span><span class="btn">Run in terminal</span></span></div><pre>cargo test -p cli status</pre></div>
+  </div>
+  <div class="asst">
+   <div class="tool"><div class="h"><span class="k">Bash</span><span class="s">cargo test -p cli status</span><span class="g run">&#9679;</span><span>&#8250;</span></div></div>
+   <div class="ask"><div class="t">Bash needs your permission</div><div class="in">cargo test -p cli status</div><div class="row"><span class="pri">Allow once</span><span class="sec">Always allow in this folder</span><span class="sec">Deny</span></div></div>
+   <div class="status"><span class="dot"></span>Waiting for your answer</div>
+  </div>
+ </div>
+ <div class="composer">
+  <div class="ta">Message Synthesis. Enter sends, Shift+Enter adds a line.</div>
+  <div class="bar"><span><span class="pill">anthropic/claude-sonnet-5-5</span><span class="pill">Default mode</span></span><span class="stop">Stop</span></div>
+ </div>
+</div>
+</body>
+</html>

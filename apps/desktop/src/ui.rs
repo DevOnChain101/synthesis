@@ -1271,7 +1271,11 @@ mod tests {
             Frame::Session(id)
         );
         assert_eq!(sa.read_with(v, |s, cx| s.host.read(cx).len()), 1);
-        assert!(v.debug_bounds("sa-session").is_some() && v.debug_bounds("view").is_some());
+        assert!(v.debug_bounds("sa-session").is_some() && v.debug_bounds("sa-chat-host").is_some());
+        assert!(
+            v.debug_bounds("view").is_none(),
+            "the chat is not the TUI view"
+        );
         assert_eq!(
             keys(&shell, v),
             ((false, false), vec![(true, false)]),
