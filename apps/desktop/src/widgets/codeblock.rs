@@ -193,7 +193,7 @@ fn run_button(id: SharedString, r: RunUi) -> (Option<AnyElement>, Stateful<Div>)
     });
     let btn = icon_btn(
         id,
-        "term",
+        "play-triangle",
         r.label,
         if look.armed { c } else { dim() },
         look.armed.then_some(c),
@@ -261,7 +261,20 @@ fn section(
             .map(|l| (synthesis_view::toolview::Tone::Text, *l))
             .collect()
     };
-    let mut body = div().flex().flex_col().py(px(5.)).text_size(px(12.5));
+    // a lone command is one row: the command left, the buttons right, no header (the reference design)
+    let inline = b.kind == Kind::Command
+        && !b.hidden
+        && refusal.is_none()
+        && !tainted
+        && as_written.is_none()
+        && lines.len() == 1;
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.))
+        .py(px(if inline { 9. } else { 5. }))
+        .text_size(px(12.5));
     for (i, (tone, l)) in tones.into_iter().take(MAX_LINES).enumerate() {
         let mut row = div()
             .px(px(10.))
@@ -321,19 +334,28 @@ fn section(
         );
     }
     let sel = id.to_string();
-    div()
+    let outer = div()
         .debug_selector(move || sel.clone())
         .flex()
-        .flex_col()
         .min_w(px(0.))
-        // hugs the longest line (a long one wraps at the chat width)
-        .self_start()
-        .max_w_full()
         .rounded(px(8.))
         .border_1()
         .border_color(hsla(t::BORDER))
         .bg(hsla(t::SURFACE))
-        .overflow_hidden()
+        .overflow_hidden();
+    if inline {
+        return outer
+            .items_center()
+            .gap(px(12.))
+            .pr(px(8.))
+            .child(body)
+            .child(buttons);
+    }
+    // hugs the longest line (a long one wraps at the chat width)
+    outer
+        .flex_col()
+        .self_start()
+        .max_w_full()
         .child(
             div()
                 .flex()
@@ -427,12 +449,28 @@ mod tests {
         assert!(l(&cb::Need::Lines(3).label()).armed);
     }
 
+    #[test]
+    fn every_icon_the_buttons_draw_resolves() {
+        use gpui::AssetSource as _;
+        for n in ["copy", "check", "play-triangle"] {
+            let design = crate::widgets::icons::for_lucide(n).and_then(crate::widgets::icons::body);
+            let asset = crate::brand::Assets
+                .load(&format!("icons/{n}.svg"))
+                .ok()
+                .flatten();
+            assert!(
+                design.is_some() || asset.is_some(),
+                "{n} would draw nothing"
+            );
+        }
+    }
+
     #[gpui::test]
     fn the_box_hugs_its_longest_line_up_to_the_chat_width(cx: &mut TestAppContext) {
         let w = |v: &mut gpui::VisualTestContext, sel: &'static str| {
             v.debug_bounds(sel).expect(sel).size.width
         };
-        let (v, _) = open(cx, "```sh\nls\n```");
+        let (v, _) = open(cx, "```rust\nls\n```");
         let short = w(v, "p-b0");
         let (v, _) = open(
             cx,
