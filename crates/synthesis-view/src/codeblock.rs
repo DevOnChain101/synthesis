@@ -78,6 +78,10 @@ pub fn escape_invisible(s: &str) -> String {
         .collect()
 }
 
+/// Deepest indent of a fence: models nest fences under list items (CommonMark's 3 would leave them to the plain
+/// markdown renderer, a Copy-only box without Run).
+const FENCE_INDENT: usize = 12;
+
 /// A fence line: `(indent, marker char, marker length, info string)`.
 fn fence_open(line: &str) -> Option<(usize, char, usize, &str)> {
     let t = line.trim_start_matches(' ');
@@ -85,12 +89,13 @@ fn fence_open(line: &str) -> Option<(usize, char, usize, &str)> {
     let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let n = t.chars().take_while(|&x| x == c).count();
     let info = t[n..].trim();
-    (indent <= 3 && n >= 3 && !(c == '`' && info.contains('`'))).then_some((indent, c, n, info))
+    (indent <= FENCE_INDENT && n >= 3 && !(c == '`' && info.contains('`')))
+        .then_some((indent, c, n, info))
 }
 
 fn fence_close(line: &str, c: char, n: usize) -> bool {
     let t = line.trim_start_matches(' ');
-    line.len() - t.len() <= 3
+    line.len() - t.len() <= FENCE_INDENT
         && t.chars().take_while(|&x| x == c).count() >= n
         && t.trim_end().chars().all(|x| x == c)
 }
