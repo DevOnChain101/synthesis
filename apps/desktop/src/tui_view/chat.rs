@@ -1735,10 +1735,11 @@ pub fn input_box(
         )
 }
 
-/// The assistant's markdown: body text stays as it is, only key points stand out. Headings are in the light accent, a
-/// table's header row is bold in the strong text colour on the elevated ground, inline `code` is amber on the elevated
-/// ground. (gpui-component 0.8.1 has no hook for the colour of `**bold**` or of headings, so this renders through
-/// `gpui_base::TextView` with the style the component would have derived; `**bold**` keeps the body colour.)
+/// The assistant's markdown: body text stays as it is, only key points stand out. Headings and `**bold**` are in the
+/// light accent (`with_strong`, the vendored gpui-base patch), a
+/// table's header row is centred, bold in the strong text colour on the elevated ground, inline `code` is amber on the elevated
+/// ground. (gpui-component 0.8.1 has no hook for the colour of headings, so this renders through
+/// `gpui_base::TextView` with the style the component would have derived.)
 pub(crate) fn assistant_style(theme: &gpui_component::Theme) -> gpui_base::TextViewStyle {
     // the component's own base style (gpui-component `base_text_view_style` is crate-private)
     let radius = theme.semantic_tokens().radius.md;
@@ -1772,6 +1773,8 @@ pub(crate) fn assistant_style(theme: &gpui_component::Theme) -> gpui_base::TextV
             ..Default::default()
         })
         .with_heading(|_| gpui::StyleRefinement::default().text_color(hsla(t::ACCENT_LIGHT)))
+        .with_strong(hsla(t::ACCENT_LIGHT))
+        .with_centered_table_head()
         .with_dark(theme.is_dark())
 }
 
@@ -1822,6 +1825,15 @@ mod tests {
         let c = assistant_style(&gpui_component::Theme::default()).inline_code();
         assert_eq!(c.color, Some(hsla(t::WARN)));
         assert_eq!(c.background_color, Some(hsla(t::ELEVATED)));
+    }
+
+    #[test]
+    fn bold_is_light_accent_and_the_default_keeps_the_body_colour() {
+        let st = assistant_style(&gpui_component::Theme::default());
+        assert_eq!(st.strong(), Some(hsla(t::ACCENT_LIGHT)));
+        assert_eq!(gpui_base::TextViewStyle::default().strong(), None);
+        assert!(st.centers_table_head());
+        assert!(!gpui_base::TextViewStyle::default().centers_table_head());
     }
 
     #[test]

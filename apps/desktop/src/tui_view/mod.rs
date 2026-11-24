@@ -1600,6 +1600,10 @@ mod tests {
         view.update(vcx, |t, cx| t.refresh_tree(cx));
         draw(vcx);
         assert!(top(&view, vcx).contains(&"new.txt".to_string()));
+        // no file open: Refresh is still there (same selector), no Copy
+        assert!(
+            vcx.debug_bounds("fx-refresh").is_some() && vcx.debug_bounds("copy-file").is_none()
+        );
         // Markdown: formatted by default, the toggle shows the source
         view.update(vcx, |t, cx| t.select_file("README.md", cx));
         draw(vcx);
@@ -1607,6 +1611,15 @@ mod tests {
             assert!(tabs::is_markdown("a/README.MD") && !tabs::is_markdown("a.rs") && !t.ts.md_raw);
             assert!(t.ts.preview.as_ref().is_some_and(|p| p.path == "README.md"));
         });
+        // the viewer header has the Refresh and Copy icon buttons, side by side (Refresh left of Copy); no text buttons
+        view.update(vcx, |t, cx| t.select_file("new.txt", cx));
+        draw(vcx);
+        let (r, c) = (
+            vcx.debug_bounds("fx-refresh"),
+            vcx.debug_bounds("copy-file"),
+        );
+        let (r, c) = (r.expect("refresh icon"), c.expect("copy icon"));
+        assert!(r.right() <= c.left() && (r.origin.y - c.origin.y).abs() < gpui::px(1.));
     }
 
     /// A trusted folder that is not a git repository (and one with a huge dot directory) lists its files on the

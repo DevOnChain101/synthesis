@@ -91,8 +91,8 @@ pub fn highlights(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
     out
 }
 
-/// The coloured byte ranges of one shell line: command names (first word, and after `| & ; ( `), flags, strings,
-/// operators, `$vars`, paths and `#` comments. shortcut: no heredocs, `case` or `$(...)` nesting across lines;
+/// The coloured byte ranges of one shell line: command names (blue; first word, and after `| & ; ( `), arguments,
+/// flags and strings (green), operators, `$vars`, paths and `#` comments. shortcut: no heredocs, `case` or `$(...)` nesting across lines;
 /// upgrade to a real grammar only if blocks outgrow one-liners.
 pub fn shell_highlights(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
     let (mut i, mut out, mut cmd) = (0, Vec::new(), true);
@@ -138,15 +138,15 @@ pub fn shell_highlights(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
                 let colour = if w.starts_with('$') {
                     Some(hsla(t::WARN))
                 } else if w.starts_with('-') && w.len() > 1 {
-                    Some(hsla(t::INFO))
+                    Some(hsla(t::DIFF_ADD))
                 } else if w.contains('=') && cmd {
                     None // VAR=value stays plain and keeps the command position
                 } else if cmd {
-                    Some(hsla(t::ACCENT_LIGHT))
+                    Some(hsla(t::INFO))
                 } else if w.contains('/') || w.starts_with('~') || w.starts_with('.') {
                     Some(hsla(t::CYAN))
                 } else {
-                    None
+                    Some(hsla(t::DIFF_ADD)) // arguments are green, the command name blue
                 };
                 if let Some(col) = colour {
                     push(start..i, col);
@@ -196,12 +196,46 @@ mod tests {
         assert_eq!(
             r,
             [
-                "git", "-m", "\"a b\"", "./x", "|", "grep", "-q", "$HOME", "&&", "ls", "~/d",
-                "# done"
+                "git", "commit", "-m", "\"a b\"", "./x", "|", "grep", "-q", "$HOME", "&&", "ls",
+                "~/d", "# done"
             ]
         );
         // a quote that never closes colours to the end of the line without panicking
         assert_eq!(shell_highlights("echo 'a \u{e9}").len(), 2);
+    }
+
+    #[test]
+    fn the_command_is_blue_and_its_arguments_and_flags_are_green() {
+        let col = |l: &str| -> Vec<(String, Hsla)> {
+            shell_highlights(l)
+                .into_iter()
+                .map(|(r, s)| (l[r].to_owned(), s.color.unwrap()))
+                .collect()
+        };
+        let (blue, green) = (hsla(t::INFO), hsla(t::DIFF_ADD));
+        let want = |l: &str, cmds: &[&str]| {
+            for (w, c) in col(l) {
+                if w.chars().all(|c| "|&;".contains(c)) {
+                    continue;
+                }
+                assert_eq!(
+                    c,
+                    if cmds.contains(&w.as_str()) {
+                        blue
+                    } else {
+                        green
+                    },
+                    "{w}"
+                );
+            }
+        };
+        let l = "cargo build --release -p synthesis-desktop";
+        assert_eq!(col(l).len(), 5);
+        want(l, &["cargo"]);
+        want(
+            "make all && ls -la | grep x; echo hi",
+            &["make", "ls", "grep", "echo"],
+        );
     }
 
     #[test]

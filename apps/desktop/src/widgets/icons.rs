@@ -38,6 +38,7 @@ pub fn body(name: &str) -> Option<&'static str> {
             r#"<path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/>"#
         }
         "play" => r#"<circle cx="12" cy="12" r="9"/><path d="M10 8l6 4-6 4z"/>"#,
+        "play-tri" => r#"<path d="M7 4.5v15l12-7.5z"/>"#,
         "db" => {
             r#"<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>"#
         }
@@ -50,6 +51,7 @@ pub fn body(name: &str) -> Option<&'static str> {
             r#"<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>"#
         }
         "check" => r#"<path d="M5 12.5l4.5 4.5L19 7"/>"#,
+        "refresh" => r#"<path d="M20 12A8 8 0 1 1 17.7 6.3M20 4V9H15"/>"#,
         "search" => r#"<circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5"/>"#,
         "cursor" => r#"<path d="M5 3l14 7-6 2.2L10.5 19z"/>"#,
         "pencil" => r#"<path d="M4 20l1-4L16 5l3 3L8 19z"/>"#,
@@ -115,6 +117,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "chevron-down" => "chev",
         "chevrons-right" => "fast",
         "send" => "send",
+        "play-triangle" => "play-tri",
         "plus" => "plus",
         "user" => "user",
         "shield" => "shield",
@@ -126,6 +129,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "pencil-check" => "editok",
         "cpu" => "cpu",
         "clock" => "clock",
+        "refresh" => "refresh",
         "tui" | "super-agent" | "gear" | "rail" | "nav-back" | "nav-forward" | "win-min"
         | "win-max" | "win-close" => {
             return Some(match name {

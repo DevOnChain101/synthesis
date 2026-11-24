@@ -18,6 +18,7 @@ use super::TuiView;
 use super::panels::{dim, strong, with_alpha};
 use super::tabs::read_preview;
 use crate::theme::hsla;
+use crate::widgets::codeblock::icon_btn;
 use crate::widgets::panes::{git_line, note};
 
 /// What the viewer keeps of the git side of the explorer (in `TabState`).
@@ -165,7 +166,20 @@ impl TuiView {
                     .ml_auto()
                     .text_color(hsla(badge_colour(letter)))
                     .child(letter.to_string()),
-            );
+            )
+            // the file view's header carries Refresh itself; the diff has none, so the strip does
+            .when(diff_mode, |d| {
+                d.child(
+                    icon_btn(
+                        "fx-refresh".into(),
+                        "refresh",
+                        "Refresh".into(),
+                        dim(),
+                        None,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
+                )
+            });
         let body = if !diff_mode {
             self.preview_view(cx)
         } else {

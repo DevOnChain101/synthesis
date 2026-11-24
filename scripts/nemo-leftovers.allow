@@ -31,3 +31,6 @@ in crates/synthesis-cli-ui-render/tests/golden.rs (Nemo -> Synthesis|"nemo")
 # History: past entries describe what was true then.
 file CHANGELOG.md
 file .github/release-maintainers.txt     # owner file, unchanged on purpose
+
+# gpui-base (vendored) names a trait MultiLineMode: "LiNEMOde" contains the old name by chance
+token MultiLineMode
