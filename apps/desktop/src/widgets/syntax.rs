@@ -91,6 +91,86 @@ pub fn highlights(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
     out
 }
 
+/// The coloured byte ranges of one shell line: command names (first word, and after `| & ; ( `), flags, strings,
+/// operators, `$vars`, paths and `#` comments. shortcut: no heredocs, `case` or `$(...)` nesting across lines;
+/// upgrade to a real grammar only if blocks outgrow one-liners.
+pub fn shell_highlights(line: &str) -> Vec<(Range<usize>, HighlightStyle)> {
+    let (mut i, mut out, mut cmd) = (0, Vec::new(), true);
+    let mut push = |r: Range<usize>, c: Hsla| out.push((r, HighlightStyle::color(c)));
+    while i < line.len() {
+        let c = line[i..].chars().next().unwrap_or(' ');
+        let start = i;
+        i += c.len_utf8();
+        match c {
+            c if c.is_whitespace() => {}
+            '#' => {
+                i = line.len();
+                push(start..i, hsla(t::MUTED));
+            }
+            '\'' | '"' => {
+                while i < line.len() {
+                    let d = line[i..].chars().next().unwrap_or(' ');
+                    i += d.len_utf8();
+                    if d == '\\' && c == '"' {
+                        i += line[i..].chars().next().map_or(0, char::len_utf8);
+                    } else if d == c {
+                        break;
+                    }
+                }
+                push(start..i.min(line.len()), hsla(t::DIFF_ADD));
+                cmd = false;
+            }
+            '|' | '&' | ';' | '<' | '>' | '(' | ')' => {
+                while i < line.len() && matches!(line.as_bytes()[i], b'|' | b'&' | b'>') {
+                    i += 1;
+                }
+                push(start..i, hsla(t::ACCENT));
+                cmd = matches!(c, '|' | '&' | ';' | '(');
+            }
+            _ => {
+                while let Some(d) = line[i..].chars().next() {
+                    if d.is_whitespace() || "|&;<>()'\"".contains(d) {
+                        break;
+                    }
+                    i += d.len_utf8();
+                }
+                let w = &line[start..i];
+                let colour = if w.starts_with('$') {
+                    Some(hsla(t::WARN))
+                } else if w.starts_with('-') && w.len() > 1 {
+                    Some(hsla(t::INFO))
+                } else if w.contains('=') && cmd {
+                    None // VAR=value stays plain and keeps the command position
+                } else if cmd {
+                    Some(hsla(t::ACCENT_LIGHT))
+                } else if w.contains('/') || w.starts_with('~') || w.starts_with('.') {
+                    Some(hsla(t::CYAN))
+                } else {
+                    None
+                };
+                if let Some(col) = colour {
+                    push(start..i, col);
+                }
+                cmd = cmd && w.contains('=') && !w.starts_with('-');
+            }
+        }
+    }
+    out
+}
+
+/// The colouring of a block line: shell for commands and shell-like languages, the generic scanner for code.
+pub fn block_highlights(
+    command: bool,
+    lang: &str,
+    line: &str,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if command || matches!(lang, "sh" | "bash" | "zsh" | "shell" | "console") {
+        shell_highlights(line)
+    } else {
+        highlights(line)
+    }
+}
+
 pub fn styled(line: &str) -> StyledText {
     StyledText::new(line.to_owned()).with_highlights(highlights(line))
 }
@@ -104,6 +184,24 @@ mod tests {
         let l = "const x = f('a', 12) // note";
         let r: Vec<_> = highlights(l).into_iter().map(|(r, _)| &l[r]).collect();
         assert_eq!(r, ["const", "f", "'a'", "12", "// note"]);
+    }
+
+    #[test]
+    fn a_shell_line_colours_command_flags_strings_operators_paths_and_comments() {
+        let l = "FOO=1 git commit -m \"a b\" ./x | grep -q $HOME && ls ~/d # done";
+        let r: Vec<_> = shell_highlights(l)
+            .into_iter()
+            .map(|(r, _)| &l[r])
+            .collect();
+        assert_eq!(
+            r,
+            [
+                "git", "-m", "\"a b\"", "./x", "|", "grep", "-q", "$HOME", "&&", "ls", "~/d",
+                "# done"
+            ]
+        );
+        // a quote that never closes colours to the end of the line without panicking
+        assert_eq!(shell_highlights("echo 'a \u{e9}").len(), 2);
     }
 
     #[test]
