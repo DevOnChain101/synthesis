@@ -1157,12 +1157,26 @@ impl TuiView {
         let job = if let Some(e) = lu.live.engine.clone().filter(|e| e.is_remote()) {
             // WSL mode: the lists come from the engine; the host's store is never opened
             let tz = cfg.tz_min;
-            cx.background_spawn(async move { read_store_remote(&e, tz) })
+            let scope = lu.active_scope.clone().filter(|_| !lu.fixture);
+            cx.background_spawn(async move {
+                let mut r = read_store_remote(&e, tz);
+                if let (Ok((ws, _)), Some(s)) = (&mut r, scope) {
+                    crate::last_session::settle(&cfg.synthesis_home, &s, ws);
+                }
+                r
+            })
         } else if crate::wsl::enabled(&cfg.synthesis_home).unwrap_or(true) {
             // WSL mode (or its setting unreadable) and no engine yet: nothing to read
             return;
         } else {
-            cx.background_spawn(async move { read_store(&cfg, root.as_deref()) })
+            let scope = lu.active_scope.clone().filter(|_| !lu.fixture);
+            cx.background_spawn(async move {
+                let mut r = read_store(&cfg, root.as_deref());
+                if let (Ok((ws, _)), Some(s)) = (&mut r, scope) {
+                    crate::last_session::settle(&cfg.synthesis_home, &s, ws);
+                }
+                r
+            })
         };
         let t = cx.spawn(async move |this, cx| {
             let r = job.await;

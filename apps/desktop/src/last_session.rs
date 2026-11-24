@@ -99,6 +99,99 @@ pub fn save_active(
     write(home, &doc)
 }
 
+/// The remembered display order of one scope: workspace keys, and per workspace key its session ids.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Order {
+    pub workspaces: Vec<String>,
+    pub sessions: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// `scopes.<scope>.order` (`{"workspaces": [key], "sessions": {key: [id]}}`); missing or damaged: empty.
+pub fn load_order(home: &Path, scope: &str) -> Order {
+    let doc: Option<serde_json::Value> = std::fs::read(home.join(FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let strs = |v: Option<&serde_json::Value>| -> Vec<String> {
+        v.and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let Some(o) = doc
+        .as_ref()
+        .and_then(|d| d.get("scopes")?.get(scope)?.get("order"))
+    else {
+        return Order::default();
+    };
+    Order {
+        workspaces: strs(o.get("workspaces")),
+        sessions: o
+            .get("sessions")
+            .and_then(|m| m.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), strs(Some(v)))).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn save_order(home: &Path, scope: &str, order: &Order) -> std::io::Result<()> {
+    let mut doc: serde_json::Value = std::fs::read(home.join(FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    doc["version"] = 1.into();
+    let mut e = entry(&doc, scope);
+    e["order"] = serde_json::json!({"workspaces": order.workspaces, "sessions": order.sessions});
+    doc["scopes"][scope] = e;
+    write(home, &doc)
+}
+
+/// Sorts `items` by their place in `old`; an item not there yet keeps the computed place before the known ones
+/// (`last`: after them), so a new folder or session joins where the load rule puts it and nothing known moves.
+fn place<T>(items: &mut [T], old: &[String], key: impl Fn(&T) -> &str, last: impl Fn(&T) -> bool) {
+    items.sort_by_key(|t| match old.iter().position(|k| k == key(t)) {
+        Some(i) => i + 1,
+        None if last(t) => usize::MAX,
+        None => 0,
+    });
+}
+
+/// Puts the loaded list into the remembered order, then remembers the result (entries of deleted folders and
+/// sessions drop out). Best effort: an unreadable or unwritable file leaves the computed order.
+pub fn settle(home: &Path, scope: &str, ws: &mut synthesis_view::workspaces::WorkspaceList) {
+    let old = load_order(home, scope);
+    place(
+        &mut ws.workspaces,
+        &old.workspaces,
+        |w| &w.key,
+        |w| w.sessions.is_empty(),
+    );
+    for w in &mut ws.workspaces {
+        let ids = old.sessions.get(&w.key).map_or(&[][..], Vec::as_slice);
+        place(&mut w.sessions, ids, |s| &s.id, |_| false);
+    }
+    let now = Order {
+        workspaces: ws.workspaces.iter().map(|w| w.key.clone()).collect(),
+        sessions: ws
+            .workspaces
+            .iter()
+            .filter(|w| !w.sessions.is_empty())
+            .map(|w| {
+                (
+                    w.key.clone(),
+                    w.sessions.iter().map(|s| s.id.clone()).collect(),
+                )
+            })
+            .collect(),
+    };
+    if now != old {
+        let _ = save_order(home, scope, &now);
+    }
+}
+
 /// Where a launch without flags starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Start {
@@ -220,6 +313,72 @@ mod tests {
         assert_eq!(load_active(d.path(), LOCAL), m);
         assert_eq!(scope(false, None).as_deref(), Some(LOCAL));
         assert_eq!(scope(true, None), None);
+    }
+
+    #[test]
+    fn the_display_order_survives_a_reload_and_a_new_item_joins_without_moving_the_rest() {
+        use synthesis_core::SessionStatus::Idle;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceList, WorkspaceRow};
+        let sess = |id: &str| SessionRow {
+            id: id.into(),
+            title: id.into(),
+            status: Idle,
+            updated_at: String::new(),
+            mtime: 0,
+            is_live: false,
+        };
+        let w = |k: &str, ids: &[&str]| WorkspaceRow {
+            root: format!("/{k}"),
+            key: k.into(),
+            label: k.into(),
+            sessions: ids.iter().map(|i| sess(i)).collect(),
+            available: true,
+            changes: None,
+        };
+        let list = |v: Vec<WorkspaceRow>| WorkspaceList { workspaces: v };
+        let shape = |l: &WorkspaceList| -> Vec<(String, Vec<String>)> {
+            l.workspaces
+                .iter()
+                .map(|w| {
+                    (
+                        w.key.clone(),
+                        w.sessions.iter().map(|s| s.id.clone()).collect(),
+                    )
+                })
+                .collect()
+        };
+        let d = tempfile::tempdir().unwrap();
+        let mut first = list(vec![w("a", &["a2", "a1"]), w("b", &["b1"])]);
+        settle(d.path(), LOCAL, &mut first);
+        // a later load computes another order (activity moved things); the remembered one wins
+        let mut again = list(vec![w("b", &["b1"]), w("a", &["a1", "a2"])]);
+        settle(d.path(), LOCAL, &mut again);
+        assert_eq!(shape(&again), shape(&first));
+        // new folder and session join before the known ones; a deleted folder drops out of the file
+        let mut more = list(vec![
+            w("a", &["a1", "a3", "a2"]),
+            w("c", &["c1"]),
+            w("b", &["b1"]),
+        ]);
+        settle(d.path(), LOCAL, &mut more);
+        let keys: Vec<_> = more.workspaces.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, ["c", "a", "b"]);
+        assert_eq!(more.workspaces[1].sessions[0].id, "a3");
+        let mut gone = list(vec![w("c", &["c1"])]);
+        settle(d.path(), LOCAL, &mut gone);
+        assert_eq!(load_order(d.path(), LOCAL).workspaces, ["c"]);
+        // a damaged file is ignored; other scope keys survive
+        save_active(
+            d.path(),
+            LOCAL,
+            &[("k".to_string(), "s".to_string())].into(),
+        )
+        .unwrap();
+        assert_eq!(load_active(d.path(), LOCAL).len(), 1);
+        std::fs::write(d.path().join(FILE), b"{oops").unwrap();
+        let mut x = list(vec![w("b", &[]), w("a", &[])]);
+        settle(d.path(), LOCAL, &mut x);
+        assert_eq!(x.workspaces[0].key, "b");
     }
 
     #[test]

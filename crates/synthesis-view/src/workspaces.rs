@@ -167,6 +167,16 @@ impl WorkspaceList {
                 .sort_by_cached_key(|s| (std::cmp::Reverse(created(&s.id)), s.id.clone()));
             w.changes = changes(&w.root, opts);
         }
+        // Folders keep a place too: by their oldest session's creation (newest folder first; a new folder joins
+        // at the top, a new session in a folder never moves it), the empty current folder last, then the key.
+        ws.sort_by_cached_key(|w| {
+            let oldest = w.sessions.iter().filter_map(|s| created(&s.id)).min();
+            (
+                w.sessions.is_empty(),
+                std::cmp::Reverse(oldest),
+                w.key.clone(),
+            )
+        });
         Ok(Self { workspaces: ws })
     }
 
@@ -295,6 +305,32 @@ mod tests {
             ["s4", "s3", "s2", "s1"],
             "a new one joins at the top"
         );
+    }
+
+    #[test]
+    fn folders_keep_their_order_when_a_session_is_touched_or_added() {
+        let t = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(t.path()).unwrap();
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let store = Store::open(&base.join("home"), StoreOptions::default()).unwrap();
+        let labels = |store: &Store| -> Vec<String> {
+            let l = WorkspaceList::load(&store.reader().unwrap(), None, &LoadOpts::default());
+            l.unwrap().workspaces.into_iter().map(|w| w.label).collect()
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        session(&store, "sa", &a, Some("hi"));
+        pause();
+        session(&store, "sb", &b, Some("hi"));
+        pause();
+        assert_eq!(labels(&store), ["b", "a"], "newest folder first");
+        // activity in the older folder, then another session there: no move
+        let mut w = store.resume_session("sa", true).unwrap();
+        w.set_title("renamed").unwrap();
+        pause();
+        session(&store, "sa2", &a, Some("more"));
+        assert_eq!(labels(&store), ["b", "a"]);
     }
 
     #[test]
