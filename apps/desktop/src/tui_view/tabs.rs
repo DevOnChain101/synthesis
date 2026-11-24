@@ -70,7 +70,8 @@ pub fn read_preview(root: &Path, rel: &str) -> Result<PreviewText, String> {
     if !real.starts_with(&real_root) {
         return Err("the file is outside the project folder".into());
     }
-    if synthesis_core::secrets::is_secret_path(&real) || synthesis_core::secrets::is_secret_path(p)
+    if synthesis_core::secrets::is_secret_shaped_in(&real, &real_root)
+        || synthesis_core::secrets::is_secret_shaped_in(p, root)
     {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }
@@ -125,6 +126,8 @@ pub struct TabState {
     /// When Copy last copied the file (its icon is a check for 1.5 s).
     pub copied_at: Option<std::time::Instant>,
     pub preview: Option<Preview>,
+    /// Git side of the explorer: file/diff switch and the diff of the selected file.
+    pub egit: super::explorer_git::State,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
     /// Text (anchor and head, line and char) selected in the preview; a drag is in progress; the right-click menu's spot.
@@ -522,7 +525,7 @@ impl TuiView {
         self.ts.tree_sel = Some(path.clone());
         self.ts.preview = None;
         (self.ts.sel, self.ts.menu) = (None, None);
-        let rel = path.clone();
+        let (rel, for_diff) = (path.clone(), path.clone());
         let epoch = self.tree.epoch;
         let remote = lu.live.engine.clone().filter(|e| e.is_remote());
         let job = cx.background_spawn(async move {
@@ -547,6 +550,7 @@ impl TuiView {
             .ok();
         })
         .detach();
+        self.request_file_diff(for_diff, cx);
         cx.notify();
     }
 
@@ -831,22 +835,29 @@ impl TuiView {
         }
         let paths = row_paths(d);
         let vis = visible_rows(d, &self.ts.tree_open);
+        let marks = super::explorer_git::folder_marks(d);
         let mut rows = div().flex().flex_col().py(px(4.)).px(px(8.));
         for i in vis {
             let r = &d.rows[i];
             let path = paths[i].clone();
             let sel = self.ts.tree_sel.as_deref() == Some(path.as_str());
             let open = self.ts.tree_open.contains(&path);
-            let st = r.status.map(|c| {
-                (
-                    c.to_string(),
-                    hsla(match c {
-                        'A' | '?' => t::SUCCESS,
-                        'D' => t::ERROR,
-                        _ => t::WARN,
-                    }),
-                )
-            });
+            let ignored = r.status == Some('!') || d.listing.ignored.contains(&path);
+            let st = r
+                .status
+                .filter(|c| *c != '!')
+                .or_else(|| marks.get(&path).copied().filter(|_| r.dir))
+                .map(|c| {
+                    let own = r.status == Some(c);
+                    (
+                        if own {
+                            c.to_string()
+                        } else {
+                            "\u{25CF}".into()
+                        },
+                        hsla(super::explorer_git::badge_colour(c)),
+                    )
+                });
             let click_path = path.clone();
             let (dir, more, notice) = (r.dir, r.more > 0, r.notice);
             let tag = if r.link {
@@ -912,7 +923,7 @@ impl TuiView {
                             .flex_1()
                             .min_w(px(0.))
                             .truncate()
-                            .text_color(if more || notice {
+                            .text_color(if more || notice || ignored {
                                 dim()
                             } else if dir {
                                 hsla(t::INFO)
@@ -977,11 +988,11 @@ impl TuiView {
             .min_w(px(0.))
             .h_full()
             .overflow_scroll()
-            .child(self.preview_view(cx));
+            .child(self.viewer(cx));
         shell(div().size_full().flex().child(tree).child(body))
     }
 
-    fn preview_view(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn preview_view(&self, cx: &mut Context<Self>) -> Div {
         let refresh = icon_btn(
             "fx-refresh".into(),
             "refresh",

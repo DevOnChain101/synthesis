@@ -26,7 +26,7 @@ pub struct TreeRow {
     pub depth: u16,
     pub name: String,
     pub dir: bool,
-    /// `git status --porcelain` letter: `M`, `A`, `D`, `R`, `?`.
+    /// `git status --porcelain` letter: `M`, `A`, `D`, `R`, `?`, `U` (conflicted).
     pub status: Option<char>,
     /// A symbolic link: shown, never entered and never followed.
     pub link: bool,
@@ -152,6 +152,9 @@ pub fn diff_lines(p: &ProjectData, which: &str) -> Vec<String> {
     }
     v
 }
+
+mod filediff;
+pub use filediff::{DIFF_LINES, FileDiff, all_added, file_diff, safe_rel};
 
 const MAX_ROWS: usize = 400;
 /// Rows of the project tree (every directory and file, collapsed in the window until opened).
@@ -933,11 +936,13 @@ pub fn scan_lazy(cwd: &Path, env: &Env, trusted: bool, open: Option<&[String]>) 
         ..Default::default()
     };
     let git = Git::new(env);
-    if trusted
-        && git
-            .run(cwd, &["rev-parse", "--is-inside-work-tree"], 0)
-            .is_some()
-    {
+    // a `.git` that leads out of the folder is not a repository to run git in
+    let repo = if trusted {
+        filediff::gitdir_ok(cwd).and_then(|()| filediff::repo_ok(&git, cwd))
+    } else {
+        Ok(false)
+    };
+    if repo == Ok(true) {
         let guards = match git.filter_guards(cwd) {
             Ok(g) => g,
             Err(why) => {
@@ -967,6 +972,9 @@ pub fn scan_lazy(cwd: &Path, env: &Env, trusted: bool, open: Option<&[String]>) 
     }
     let listing = data.listing.clone();
     data.rows = children_rows(cwd, "", &listing, 0).unwrap_or_default();
+    if let Err(why) = repo {
+        data.rows.insert(0, notice_row(0, &why));
+    }
     let open: Vec<String> = match open {
         Some(o) => o.to_vec(),
         None => {
@@ -996,6 +1004,8 @@ fn parse_status(st: &[u8]) -> HashMap<String, char> {
         }
         let letter = if x == '!' {
             '!' // ignored (only with `--ignored`)
+        } else if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+            'U' // unmerged (conflicted)
         } else if x == '?' {
             '?'
         } else if x == 'A' || y == 'A' || x == 'C' || y == 'C' {
