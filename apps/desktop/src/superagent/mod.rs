@@ -4,6 +4,7 @@
 //! `OutcomesView` stays the data and link owner; the old outcomes UI is not mounted (phase E deletes it).
 
 pub mod chat;
+pub mod chathost;
 pub mod frames;
 pub mod goal;
 pub mod home;

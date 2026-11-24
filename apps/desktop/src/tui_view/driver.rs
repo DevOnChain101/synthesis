@@ -415,10 +415,14 @@ impl TuiView {
     pub(crate) fn start_in(
         &mut self,
         folder: PathBuf,
+        headless: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        self.embed = Some(Embed::default());
+        self.embed = Some(Embed {
+            headless,
+            ..Embed::default()
+        });
         // the same folder checks as `open_folder`: no network path, symlinks and `..` resolved
         let folder = checked_folder(&folder)?;
         if let Some(e) = &mut self.embed {
@@ -1466,6 +1470,12 @@ impl TuiView {
             && let Some(done) = self.term_key(ks, window, cx)
         {
             return done;
+        }
+        // the chat is the host's: only a dialog (answered here, same arming rules) and the panes above take keys
+        if self.embed.as_ref().is_some_and(|e| e.headless)
+            && self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
+        {
+            return false;
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {

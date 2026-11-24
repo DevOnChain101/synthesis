@@ -173,6 +173,84 @@ impl TuiView {
         }
         pane.update(cx, |p, cx| p.run(cmd, cx));
     }
+
+    /// The host's transcript was drawn with this scroll offset, height, row count and width (see `Gate::layout`).
+    pub(crate) fn embed_note_shape(&self, at: f32, max: f32, rows: usize, width: f32) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            at.round() as i64,
+            max.round() as i64,
+            rows,
+            width.round() as i64,
+        )
+            .hash(&mut h);
+        self.gate.borrow_mut().layout(h.finish(), self.gate_ms());
+    }
+}
+
+/// An assistant message of the Super Agent's own chat: the same fenced sections and the same gate as
+/// [`TuiView::assistant_blocks`], with the click handlers bound to the embedded view `this` (which owns the shell
+/// and the gate). `prose` draws a stretch of prose. `None` when the text has no fenced block.
+pub(crate) fn embed_blocks(
+    this: &gpui::Entity<TuiView>,
+    id: &str,
+    text: &str,
+    (streaming, tainted): (bool, bool),
+    prose: &mut dyn FnMut(usize, String) -> AnyElement,
+    cx: &gpui::App,
+) -> Option<AnyElement> {
+    let segs = cb::split(text);
+    if !ui::has_blocks(&segs) {
+        return None;
+    }
+    let (now, blocked, bracketed) = {
+        let t = this.read(cx);
+        (
+            t.gate_ms(),
+            t.run_blocked(),
+            t.term.as_ref().and_then(|p| p.read(cx).bracketed()),
+        )
+    };
+    let mut run = |_: usize, b: &cb::Block, cmd: &str| {
+        let k = cb::key(cmd);
+        let t = this.read(cx);
+        t.gate.borrow_mut().drawn(k, now, b.closed && !streaming);
+        let off = |why: &str| RunUi {
+            label: format!("Run unavailable: {why}").into(),
+            warn: false,
+            on_click: Box::new(|_, _, _| {}),
+            on_hover: None,
+        };
+        if let Some(why) = blocked {
+            return Some(off(why));
+        }
+        if cmd.contains('\n') && bracketed == Some(false) {
+            return Some(off("this shell has no bracketed paste"));
+        }
+        let need = t
+            .gate
+            .borrow()
+            .confirming(k, now)
+            .then_some(Need::of(cmd, tainted));
+        let (cmd, block) = (cmd.to_string(), b.clone());
+        let (click, hover) = (this.clone(), this.clone());
+        Some(RunUi {
+            label: need.map_or("Run in terminal".into(), |n| n.label().into()),
+            warn: need.is_some_and(Need::warn),
+            on_click: Box::new(move |ev, _, cx| {
+                click.update(cx, |t, cx| {
+                    t.run_command(&block, &cmd, streaming, tainted, ev, cx)
+                })
+            }),
+            on_hover: Some(Box::new(move |on, _, cx| {
+                hover.update(cx, |t, _| {
+                    let now = t.gate_ms();
+                    t.gate.borrow_mut().hovered(k, *on, now)
+                })
+            })),
+        })
+    };
+    Some(ui::message(id, &segs, tainted, prose, &mut run).into_any_element())
 }
 
 #[cfg(test)]

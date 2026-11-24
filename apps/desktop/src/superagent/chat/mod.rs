@@ -36,6 +36,7 @@ use synthesis_view::convo::{Convo, Item};
 use self::cards::Acts;
 use self::glue::{Live, NoPort, WindowPort};
 use self::model::{Gate, Shown};
+use super::chathost;
 use super::kit::{self, ButtonKind, text};
 use super::tokens::{self as t, hsla};
 use crate::engine::{Choice, UiMsg};
@@ -452,17 +453,18 @@ impl ConductorChat {
             match it {
                 Item::User(_) => {
                     if let Some(l) = people.next() {
-                        out.push(message("You", user_bubble(l)));
+                        out.push(chathost::user_bubble(idx, l));
                     }
                 }
-                Item::Assistant { text: s, .. } => out.push(message(
-                    "Super-Agent",
+                Item::Assistant { text: s, .. } => out.push(
                     div()
+                        .min_w(px(0.))
                         .text_size(px(t::T3.0))
                         .line_height(px(t::T3.1))
                         .text_color(hsla(t::TEXT_STRONG))
-                        .child(md_blocks(idx, s)),
-                )),
+                        .child(md_blocks(idx, s))
+                        .into_any_element(),
+                ),
                 Item::Tool { name, summary, .. } => out.push(tool_row(name, summary)),
                 Item::TaskEnd {
                     ok: false, text: s, ..
@@ -503,51 +505,41 @@ impl ConductorChat {
             Phase::Failed(e) => Some(format!("Could not start: {e}")),
             _ => self.notice.clone(),
         };
+        let action = if running {
+            kit::button(
+                "sa-chat-stop",
+                "Stop",
+                ButtonKind::Secondary,
+                false,
+                Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
+            )
+        } else {
+            kit::button(
+                "sa-chat-send",
+                "Send",
+                if starting {
+                    ButtonKind::Disabled
+                } else {
+                    ButtonKind::Primary
+                },
+                false,
+                Some(Box::new(
+                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                )),
+            )
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(t::S2))
-            .child(
-                div()
-                    .debug_selector(|| "sa-chat-composer".to_string())
-                    .flex()
-                    .items_center()
-                    .gap(px(t::S2))
-                    .p(px(t::S2))
-                    .rounded(px(t::R_FLOAT))
-                    .bg(hsla(t::ELEVATED))
-                    .child(kit::composer_chip("sa-chat-chip", "Super-Agent"))
-                    .child(
-                        div().flex_1().min_w(px(0.)).child(
-                            Textarea::new(&self.composer)
-                                .appearance(false)
-                                .bordered(false),
-                        ),
-                    )
-                    .child(if running {
-                        kit::button(
-                            "sa-chat-stop",
-                            "Stop",
-                            ButtonKind::Secondary,
-                            false,
-                            Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
-                        )
-                    } else {
-                        kit::button(
-                            "sa-chat-send",
-                            "Send",
-                            if starting {
-                                ButtonKind::Disabled
-                            } else {
-                                ButtonKind::Primary
-                            },
-                            false,
-                            Some(Box::new(
-                                cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                            )),
-                        )
-                    }),
-            )
+            .child(chathost::composer_card(
+                Textarea::new(&self.composer)
+                    .appearance(false)
+                    .bordered(false)
+                    .into_any_element(),
+                vec![chathost::pill("sa-chat-chip", "Super-Agent").into_any_element()],
+                action.into_any_element(),
+            ))
             .children(matches!(self.phase, Phase::Failed(_)).then(|| {
                 kit::button(
                     "sa-chat-settings",
@@ -648,8 +640,8 @@ pub fn conversation(chat: &Entity<ConductorChat>) -> AnyElement {
 
 /// Model text as markdown, inert: a link is shown but never opened (the model's text is untrusted, and a link
 /// could pose as a card button), and no image is loaded from a path or a URL. Hidden characters are made visible.
-fn md(idx: usize, text: &str) -> TextView {
-    TextView::markdown(("sa-chat-md", idx), clean_md(text))
+pub(crate) fn md(id: impl Into<gpui::ElementId>, text: &str) -> TextView {
+    TextView::markdown(id, clean_md(text))
         .selectable(true)
         .on_link_click(|_, _, _, _| {})
         .image_source(|_| gpui::ImageSource::Custom(Arc::new(|_, _| None)))
@@ -660,13 +652,13 @@ fn md(idx: usize, text: &str) -> TextView {
 fn md_blocks(idx: usize, text: &str) -> AnyElement {
     let segs = synthesis_view::codeblock::split(text);
     if !crate::widgets::codeblock::has_blocks(&segs) {
-        return md(idx, text).into_any_element();
+        return md(("sa-chat-md", idx), text).into_any_element();
     }
     crate::widgets::codeblock::message(
         &format!("sa-chat-{idx}"),
         &segs,
         false,
-        &mut |i, p| md(idx * 1024 + i, &p).into_any_element(),
+        &mut |i, p| md(("sa-chat-md", idx * 1024 + i), &p).into_any_element(),
         &mut |_, _, _| None,
     )
     .into_any_element()
@@ -693,30 +685,6 @@ fn clip(s: &str) -> String {
     } else {
         format!("{}...", s.chars().take(ROW_MAX).collect::<String>())
     }
-}
-
-fn message(who: &'static str, body: impl IntoElement) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(t::S1))
-        .min_w(px(0.))
-        .child(text(t::T2, t::W_MEDIUM, t::TEXT).child(who))
-        .child(body)
-        .into_any_element()
-}
-
-fn user_bubble(line: &str) -> impl IntoElement {
-    div()
-        .self_start()
-        .px(px(t::S4))
-        .py(px(t::S2))
-        .rounded(px(t::R_CONTROL))
-        .bg(hsla(t::SURFACE))
-        .text_size(px(t::T3.0))
-        .line_height(px(t::T3.1))
-        .text_color(hsla(t::TEXT_STRONG))
-        .child(line.to_string())
 }
 
 /// Tool activity as a quiet row: plain, no button, and nothing that looks like a card. The model wrote part of
