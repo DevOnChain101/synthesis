@@ -8,6 +8,7 @@ use std::io::Read as _;
 use std::path::Path;
 
 use super::{Git, MAX_BYTES, clean_line};
+use synthesis_cli_ui_base::imgclip::Output;
 use synthesis_config::Env;
 
 /// Lines of one diff the explorer keeps.
@@ -120,17 +121,29 @@ fn borrowed_objects(gitdir: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Exit 1 with no output is "`core.worktree` is not set"; a value, a timeout, a git that could not be started
+/// or any other status refuses (fail closed, like `filter_guards_from`).
+fn worktree_unset(o: Option<Output>) -> Result<(), String> {
+    match o {
+        Some(o) if !o.timed_out && !o.truncated && o.code == Some(1) && o.stdout.is_empty() => {
+            Ok(())
+        }
+        Some(o) if o.code == Some(0) && !o.timed_out => {
+            Err("git was not run: the repository's config moves its work tree".into())
+        }
+        _ => Err("git was not run: the work tree setting could not be checked".into()),
+    }
+}
+
 /// Whether `cwd` is in a work tree git can be run in. `Err`: it is, but git's idea of the work tree is not the
 /// project (`core.worktree` in a hostile config sends status and diff to files elsewhere), so git is not run.
 /// `Ok(false)`: no repository.
 pub(super) fn repo_ok(git: &Git, cwd: &Path) -> Result<bool, String> {
     let no = |why: &str| Err(format!("git was not run: {why}"));
-    if git
-        .run(cwd, &["config", "--get", "core.worktree"], 0)
-        .is_some_and(|(o, _)| !o.is_empty())
-    {
-        return no("the repository's config moves its work tree");
+    if git.exe.is_none() {
+        return Ok(false); // no git installed
     }
+    worktree_unset(git.raw(cwd, &[], &["config", "--get", "core.worktree"]))?;
     let out = |args: &[&str]| {
         git.run(cwd, args, b'\n')
             .map(|(o, _)| String::from_utf8_lossy(&o).trim().to_string())
@@ -412,6 +425,37 @@ mod tests {
         assert!(gitdir_ok(d.path()).is_ok());
         std::fs::write(d.path().join(".git/commondir"), "../x\n").unwrap();
         assert!(gitdir_ok(d.path()).unwrap_err().contains("common"));
+    }
+
+    #[test]
+    fn the_worktree_setting_fails_closed() {
+        let o = |code, stdout: &[u8], timed_out| {
+            Some(Output {
+                code,
+                stdout: stdout.to_vec(),
+                truncated: false,
+                timed_out,
+            })
+        };
+        assert!(worktree_unset(o(Some(1), b"", false)).is_ok());
+        assert!(
+            worktree_unset(o(Some(0), b"/x\n", false))
+                .unwrap_err()
+                .contains("moves")
+        );
+        for bad in [
+            None,
+            o(Some(1), b"", true),
+            o(None, b"", false),
+            o(Some(128), b"", false),
+            o(Some(1), b"x", false),
+        ] {
+            assert!(
+                worktree_unset(bad)
+                    .unwrap_err()
+                    .contains("could not be checked")
+            );
+        }
     }
 
     #[test]
