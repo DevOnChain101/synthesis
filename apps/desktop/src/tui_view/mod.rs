@@ -1120,6 +1120,11 @@ impl Render for TuiView {
                 lu.prompt.update(cx, |s, cx| s.focus(window, cx));
             }
         }
+        if let Some(lu) = &mut self.live
+            && std::mem::take(&mut lu.focus_next)
+        {
+            lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+        }
         // the refresh spinner of the model picker turns every frame
         if let Some(lu) = &mut self.live
             && lu.cfg.tui.motion
