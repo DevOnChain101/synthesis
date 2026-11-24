@@ -1,22 +1,25 @@
 //! A model message drawn as prose and fenced sections (the chat of the TUI view, the Super Agent session chats
 //! and the conductor's chat). Each fenced block is its own box: a header with the kind (command, code, diff,
-//! text) and the language, buttons on the right (Copy; Run in terminal for a command, when the owner offers
-//! it), then the lines (a diff coloured by line). The classification and the rules for running are pure
-//! (`synthesis_view::codeblock`); this file only draws, and the owner decides what a Run click does.
+//! text) and the language, icon buttons on the right (Copy; Run in terminal for a command, when the owner offers
+//! it; a tooltip names each, an armed Run also shows its approval text), then the lines (a diff coloured by
+//! line). The classification and the rules for running are pure (`synthesis_view::codeblock`); this file only draws, and the owner decides what a Run click does.
+
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClipboardItem, Div, ElementId, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::*, px,
+    AnyElement, AnyView, ClipboardItem, Div, ElementId, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, div, prelude::*, px,
 };
 use synthesis_cli_ui_render::theme as t;
 use synthesis_view::codeblock::{self as cb, Block, Kind, Seg};
 
-use super::chrome::{OnClick, dim, strong, text, with_alpha};
+use super::chrome::{OnClick, dim, icon, strong, text, with_alpha};
 use super::seltext::SelText;
 use super::syntax;
 use crate::theme::hsla;
 use crate::tui_view::chat::{tone_bg, tone_fg};
+use crate::ui::Tip;
 
 use cb::MAX_LINES;
 
@@ -75,31 +78,130 @@ pub fn message(
     col
 }
 
-fn button(
+/// What the Run button shows for the label the owner gave it (the gate's `Need::label` when armed).
+#[derive(Debug, PartialEq, Eq)]
+struct RunLook {
+    /// The approval text, shown as a chip beside the button and as its tooltip.
+    chip: Option<SharedString>,
+    armed: bool,
+    off: bool,
+}
+
+const RUN_LABEL: &str = "Run in terminal";
+
+fn run_look(label: &SharedString) -> RunLook {
+    let off = label.starts_with("Run unavailable");
+    let armed = !off && label.as_ref() != RUN_LABEL;
+    RunLook {
+        chip: armed.then(|| label.clone()),
+        armed,
+        off,
+    }
+}
+
+/// How long the Copy icon stays a check.
+const COPIED_MS: u64 = 1500;
+/// Hover time before a button's tooltip (gpui's default is 500 ms).
+const TIP_MS: u64 = 350;
+
+fn icon_btn(
     id: SharedString,
-    label: SharedString,
-    warn: bool,
-    on_click: OnClick,
-    on_hover: Option<OnHover>,
-) -> impl IntoElement {
-    let c = if warn { hsla(t::WARN) } else { dim() };
+    name: &str,
+    tip: SharedString,
+    colour: gpui::Hsla,
+    armed: Option<gpui::Hsla>,
+) -> Stateful<Div> {
     let sel = id.to_string();
     div()
         .id(ElementId::from(id))
         .debug_selector(move || sel.clone())
         .flex_none()
-        .px(px(8.))
-        .py(px(1.))
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if warn { c } else { hsla(t::RULE) })
-        .text_color(c)
-        .text_size(px(11.5))
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
         .cursor_pointer()
+        .text_color(colour)
+        .when_some(armed, |d, a| {
+            d.bg(with_alpha(a, 0.22)).border_1().border_color(a)
+        })
         .hover(|d| d.bg(hsla(t::ELEVATED)).text_color(strong()))
-        .on_click(on_click)
-        .when_some(on_hover, |d, f| d.on_hover(f))
-        .child(label)
+        .tooltip_show_delay(Duration::from_millis(TIP_MS))
+        .tooltip(move |_, cx| -> AnyView { cx.new(|_| Tip(tip.to_string())).into() })
+        .child(icon(name, 14., colour))
+}
+
+/// The Copy icon button: a check for [`COPIED_MS`] after a click.
+#[derive(IntoElement)]
+struct CopyBtn {
+    id: SharedString,
+    text: String,
+}
+
+impl RenderOnce for CopyBtn {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+        let at = window.use_keyed_state(
+            ElementId::from(SharedString::from(format!("{}-at", self.id))),
+            cx,
+            |_, _| None::<Instant>,
+        );
+        let copied = at
+            .read(cx)
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(COPIED_MS));
+        let text = self.text;
+        icon_btn(
+            self.id,
+            if copied { "check" } else { "copy" },
+            if copied { "Copied" } else { "Copy" }.into(),
+            if copied { hsla(t::SUCCESS) } else { dim() },
+            None,
+        )
+        .on_click(move |_, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            at.update(cx, |a, cx| {
+                *a = Some(Instant::now());
+                cx.notify();
+            });
+            let at = at.clone();
+            window
+                .spawn(cx, async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(COPIED_MS + 50))
+                        .await;
+                    at.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+        })
+    }
+}
+
+fn run_button(id: SharedString, r: RunUi) -> (Option<AnyElement>, Stateful<Div>) {
+    let look = run_look(&r.label);
+    let c = if r.warn {
+        hsla(t::WARN)
+    } else {
+        hsla(t::ACCENT_LIGHT)
+    };
+    let chip = look.chip.map(|l| {
+        div()
+            .text_size(px(11.5))
+            .text_color(c)
+            .whitespace_nowrap()
+            .child(l)
+            .into_any_element()
+    });
+    let btn = icon_btn(
+        id,
+        "term",
+        r.label,
+        if look.armed { c } else { dim() },
+        look.armed.then_some(c),
+    )
+    .when(look.off, |d| d.opacity(0.5))
+    .on_click(r.on_click)
+    .when_some(r.on_hover, |d, f| d.on_hover(f));
+    (chip, btn)
 }
 
 fn section(
@@ -110,11 +212,12 @@ fn section(
     refusal: Option<&str>,
     tainted: bool,
 ) -> Div {
-    let head = if b.lang.is_empty() || b.lang == b.kind.label() {
-        b.kind.label().to_string()
+    let head = if b.lang.is_empty() {
+        b.kind.label()
     } else {
-        format!("{} \u{b7} {}", b.kind.label(), b.lang)
-    };
+        &b.lang
+    }
+    .to_string();
     let head = match (refusal, tainted && b.kind == Kind::Command) {
         (Some(why), _) => format!("{head} \u{b7} Run off: {why}"),
         (None, true) => format!("{head} \u{b7} based on web/untrusted content"),
@@ -129,25 +232,14 @@ fn section(
                 .child("hidden characters: shown escaped, not copied or run"),
         );
     } else if b.closed {
-        let copy = cmd.clone().unwrap_or_else(|| b.body.clone());
-        buttons = buttons.child(button(
-            format!("{id}-copy").into(),
-            "Copy".into(),
-            false,
-            Box::new(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-            }),
-            None,
-        ));
         if let Some(r) = run {
-            buttons = buttons.child(button(
-                format!("{id}-run").into(),
-                r.label,
-                r.warn,
-                r.on_click,
-                r.on_hover,
-            ));
+            let (chip, btn) = run_button(format!("{id}-run").into(), r);
+            buttons = buttons.children(chip).child(btn);
         }
+        buttons = buttons.child(CopyBtn {
+            id: format!("{id}-copy").into(),
+            text: cmd.clone().unwrap_or_else(|| b.body.clone()),
+        });
     }
     // a command shows exactly what Copy and Run take (prompts stripped); the text as written follows, dimmed
     let shown = if b.hidden {
@@ -189,8 +281,12 @@ fn section(
             SharedString::from(format!("{id}-l{i}")),
             if l.is_empty() { " " } else { l }.to_string(),
         );
-        if b.kind == Kind::Code {
-            st = st.highlights(syntax::highlights(l));
+        if matches!(b.kind, Kind::Code | Kind::Command) && !b.hidden {
+            st = st.highlights(syntax::block_highlights(
+                b.kind == Kind::Command,
+                &b.lang,
+                l,
+            ));
         }
         body = body.child(row.child(st));
     }
@@ -224,25 +320,29 @@ fn section(
                 .child(format!("{more} more lines (Copy takes them all)")),
         );
     }
+    let sel = id.to_string();
     div()
+        .debug_selector(move || sel.clone())
         .flex()
         .flex_col()
         .min_w(px(0.))
-        .rounded(px(6.))
+        // hugs the longest line (a long one wraps at the chat width)
+        .self_start()
+        .max_w_full()
+        .rounded(px(8.))
         .border_1()
         .border_color(hsla(t::BORDER))
+        .bg(hsla(t::SURFACE))
         .overflow_hidden()
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap(px(8.))
-                .px(px(10.))
-                .py(px(3.))
-                .bg(with_alpha(gpui::black(), 0.16))
-                .border_b_1()
-                .border_color(hsla(t::RULE))
+                .gap(px(12.))
+                .pl(px(10.))
+                .pr(px(4.))
+                .pt(px(3.))
                 .child(div().text_color(dim()).text_size(px(11.5)).child(head))
                 .child(buttons),
         )
@@ -303,6 +403,48 @@ mod tests {
         };
         v.simulate_click(b.center(), Modifiers::none());
         true
+    }
+
+    #[test]
+    fn the_run_button_is_armed_only_with_an_approval_label() {
+        let l = |s: &str| run_look(&SharedString::from(s.to_string()));
+        assert_eq!(
+            l("Run in terminal"),
+            RunLook {
+                chip: None,
+                armed: false,
+                off: false
+            }
+        );
+        let a = l("Approve: risky command, run anyway");
+        assert!(a.armed && !a.off);
+        assert_eq!(
+            a.chip.as_deref(),
+            Some("Approve: risky command, run anyway")
+        );
+        let o = l("Run unavailable: session starting");
+        assert!(o.off && !o.armed && o.chip.is_none());
+        assert!(l(&cb::Need::Lines(3).label()).armed);
+    }
+
+    #[gpui::test]
+    fn the_box_hugs_its_longest_line_up_to_the_chat_width(cx: &mut TestAppContext) {
+        let w = |v: &mut gpui::VisualTestContext, sel: &'static str| {
+            v.debug_bounds(sel).expect(sel).size.width
+        };
+        let (v, _) = open(cx, "```sh\nls\n```");
+        let short = w(v, "p-b0");
+        let (v, _) = open(
+            cx,
+            "```sh\nls\necho a-considerably-longer-second-line-here\n```",
+        );
+        let two = w(v, "p-b0");
+        let long: &'static str =
+            Box::leak(format!("```sh\necho {}\n```", "x".repeat(900)).into_boxed_str());
+        let (v, _) = open(cx, long);
+        let (full, win) = (w(v, "p-b0"), v.update(|w, _| w.viewport_size().width));
+        assert!(short < two && two < win / 2., "{short:?} {two:?}");
+        assert!(full <= win && full > win / 2., "{full:?} {win:?}");
     }
 
     #[gpui::test]
