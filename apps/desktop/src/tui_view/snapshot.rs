@@ -278,13 +278,15 @@ fn run_row_selected(
     }
 }
 
-fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
+/// The sessions the Running list shows for the selected workspace, in list order (the open one always, even
+/// before it has a message). `None`: the selected key names no listed workspace.
+pub(super) fn ws_sessions(
+    l: &Live,
+    now: i64,
+) -> Option<(&synthesis_view::workspaces::WorkspaceRow, Vec<SessionRow>)> {
     let v = &l.view;
-    let Some(ws) = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key) else {
-        return vec![];
-    };
+    let ws = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key)?;
     let mut rows: Vec<SessionRow> = ws.sessions.clone();
-    // the open session always shows, even before it has a message
     let current = l.key_of(&v.session.cwd) == ws.key || l.cwd_key() == ws.key;
     if current && !l.sid.is_empty() && !rows.iter().any(|r| r.id == l.sid) {
         rows.insert(
@@ -299,6 +301,14 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
             },
         );
     }
+    Some((ws, rows))
+}
+
+pub(super) fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
+    let v = &l.view;
+    let Some((ws, rows)) = ws_sessions(l, now) else {
+        return vec![];
+    };
     let last_event = v.convo.times.iter().flatten().copied().max().unwrap_or(0);
     let mut out: Vec<Running> = rows
         .iter()
@@ -653,7 +663,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         .sum();
     let _ = n_sessions;
 
-    Snapshot {
+    let mut snap = Snapshot {
         top: Top {
             live: live_n as u32,
             workspace: cur_ws.clone(),
@@ -814,7 +824,66 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             c
         },
         pulses: v.session.pulses.clone(),
+    };
+    follow_selection(&mut snap, l, now, home);
+    snap
+}
+
+/// While the chat shows a stored session or the draft of a workspace (not the open engine's session) the top bar
+/// and the SESSION and CONTEXT panels describe that selection: its folder, "not started", nothing of the engine.
+fn follow_selection(s: &mut Snapshot, l: &Live, now: i64, home: Option<&str>) {
+    let Some(sid) = l
+        .awaiting
+        .as_deref()
+        .or(l.preview.as_ref().map(|p| p.sid.as_str()))
+    else {
+        return;
+    };
+    let none = || "-".to_string();
+    let (label, root, title) = match ws_sessions(l, now) {
+        Some((ws, rows)) if !(l.ws_new && l.focus == Focus::Workspace) => (
+            ws.label.clone(),
+            tilde(&ws.root, home),
+            rows.iter()
+                .find(|r| r.id == sid)
+                .map_or_else(|| "(new session)".into(), |r| r.title.clone()),
+        ),
+        _ => ("new workspace".into(), none(), "(new session)".into()),
+    };
+    s.top.workspace.clone_from(&label);
+    s.top.session = title;
+    s.top.model = none();
+    s.top.ctx = none();
+    if let Some(c) = s.status.first_mut() {
+        c.text = label;
     }
+    s.head.path = short_path(&root, 2, 20);
+    s.head.status = if l.awaiting.is_some() {
+        "loading"
+    } else {
+        "not started"
+    }
+    .into();
+    s.session = SessionInfo {
+        status: "not started".into(),
+        rows: ["mode", "model", "context", "tools"]
+            .map(|k| (k.to_string(), none()))
+            .into_iter()
+            .chain([("cwd".into(), root), ("uptime".into(), none())])
+            .collect(),
+    };
+    s.context = ContextInfo {
+        used: none(),
+        max: none(),
+        pct: 0.,
+        model: none(),
+        turns: none(),
+        input: none(),
+        files: none(),
+        output: none(),
+        cache: none(),
+        hit: none(),
+    };
 }
 
 /// `Sat Nov 07  07:54:38`, the top bar's clock.
@@ -1021,6 +1090,54 @@ mod tests {
             ("old-proj", ""),
             "no git: no branch"
         );
+    }
+
+    /// Rows keep a fixed place: a session going running <-> idle, or its last activity changing, never moves a row.
+    #[test]
+    fn running_or_activity_never_reorders_the_session_rows() {
+        use synthesis_core::SessionStatus::*;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.ws_key = fold_dir("/w/proj");
+        let rows = |st: [(synthesis_core::SessionStatus, bool, i64); 3]| {
+            ["a", "b", "c"]
+                .iter()
+                .zip(st)
+                .map(|(id, (status, is_live, mtime))| SessionRow {
+                    id: (*id).into(),
+                    title: (*id).into(),
+                    status,
+                    updated_at: String::new(),
+                    mtime,
+                    is_live,
+                })
+                .collect::<Vec<_>>()
+        };
+        let ids = |l: &Live| -> Vec<String> {
+            build(l, 1_000_000, 0, None)
+                .running
+                .into_iter()
+                .map(|r| r.id)
+                .collect()
+        };
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: rows([(Idle, false, 10), (Idle, false, 20), (Idle, false, 30)]),
+            available: true,
+            changes: None,
+        });
+        let before = ids(&l);
+        assert_eq!(before, ["a", "b", "c"]);
+        l.view.workspaces.workspaces[0].sessions = rows([
+            (Idle, false, 900),
+            (Running, true, 50),
+            (Completed, false, 5),
+        ]);
+        assert_eq!(ids(&l), before);
     }
 
     #[test]
