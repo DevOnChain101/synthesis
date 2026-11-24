@@ -1296,6 +1296,73 @@ mod tests {
         }
     }
 
+    /// The composer after a paste: the box grows around the text and the caret, which never leaves it.
+    #[gpui::test]
+    fn the_composer_holds_pasted_text_and_the_caret(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        view.update(vcx, |t, _| {
+            let mut l = crate::live::Live::new();
+            l.starting = false;
+            t.set_live(l);
+        });
+        // (name, pasted text, rows the box shows)
+        let cases = [
+            ("one", "a".to_string(), 1),
+            ("eight+nl", "line\n".repeat(8), 8),
+            ("eight", ["x"; 8].join("\n"), 8),
+            ("three", ["x"; 3].join("\n"), 3),
+            ("thirty", ["x"; 30].join("\n"), 8),
+            ("twohundred", ["x"; 200].join("\n"), 8),
+            ("crlf", "a\r\nb\r\n".to_string(), 3),
+            ("wrap", "word ".repeat(300), 8),
+        ];
+        for (name, text, rows) in cases {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+            vcx.update(|window, app| {
+                app.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                let p = view.read(app).live.as_ref().unwrap().prompt.clone();
+                p.update(app, |s, cx| s.set_value("", window, cx));
+                p.update(app, |s, cx| s.focus(window, cx));
+            });
+            vcx.run_until_parked();
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.dispatch_action(gpui_component::input::Paste);
+            for _ in 0..4 {
+                vcx.simulate_resize(size(px(1400.), px(900.)));
+                vcx.run_until_parked();
+            }
+            let bx = vcx.debug_bounds("prompt").unwrap();
+            let (cb, tb, vp) = view.read_with(vcx, |t, cx| {
+                let s = t.live.as_ref().unwrap().prompt.read(cx);
+                (
+                    s.cursor_layout().unwrap().0,
+                    s.text_bounds().unwrap(),
+                    s.input_bounds(),
+                )
+            });
+            // the caret's line box, with the scroll the layout leaves out
+            let top = f32::from(cb.top() + tb.top() - vp.top()) - 1.5;
+            let (bt, bb) = (f32::from(bx.top()), f32::from(bx.bottom()));
+            let h = (rows as f32 * 20. + 18.).max(46.);
+            assert_eq!(f32::from(bx.size.height), h, "{name}: box height");
+            assert!(
+                top >= bt + 9. - 0.5,
+                "{name}: caret above the padding {top} < {}",
+                bt + 9.
+            );
+            assert!(
+                top + 20. <= bb - 9. + 0.5,
+                "{name}: caret under the padding {} > {}",
+                top + 20.,
+                bb - 9.
+            );
+        }
+    }
+
     #[gpui::test]
     fn the_tabs_belong_to_the_session(cx: &mut TestAppContext) {
         use crate::live::Live;

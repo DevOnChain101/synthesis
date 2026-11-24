@@ -1586,6 +1586,22 @@ fn show_caret(chat_focused: bool, input_focused: bool, window_active: bool) -> b
     chat_focused && input_focused && window_active
 }
 
+/// How far the text must move (positive: down) for a caret at `top` with `height` to lie inside `view`.
+fn caret_shift(
+    top: gpui::Pixels,
+    height: gpui::Pixels,
+    view: gpui::Bounds<gpui::Pixels>,
+) -> Option<gpui::Pixels> {
+    let (up, down) = (view.top() - top, view.bottom() - (top + height));
+    if up > px(0.5) {
+        Some(up)
+    } else if down < px(-0.5) {
+        Some(down)
+    } else {
+        None
+    }
+}
+
 /// The prompt's caret: a block as high as the text's line box, one cell wide, blinking while the
 /// prompt has the keys. The input's own thin bar is hidden by [`NativeCaret`].
 fn block_cursor(
@@ -1597,10 +1613,31 @@ fn block_cursor(
     gpui::canvas(
         |_, _, _| (),
         move |_, (), window, cx| {
+            // `cursor_layout` is the caret before the vertical scroll (the text rect carries it): add it. A paste
+            // scrolls to its caret against the viewport of the frame before the box grew (about one row), so the
+            // caret can still sit below the box: scroll it in, the next frame converges
+            let fix = {
+                let st = prompt.read(cx);
+                st.cursor_layout()
+                    .zip(st.text_bounds())
+                    .and_then(|((cb, lh), tb)| {
+                        let dy = tb.top() - st.input_bounds().top();
+                        // the whole line box, not the 17px caret in it
+                        let top = cb.top() + dy - (lh - cb.size.height) / 2.;
+                        caret_shift(top, lh, st.input_bounds())
+                            .map(|d| (st.scroll_offset().x, dy + d))
+                    })
+            };
+            if let Some((x, y)) = fix {
+                prompt.update(cx, |s, cx| s.set_scroll_offset(gpui::point(x, y), cx));
+            }
             let st = prompt.read(cx);
-            let Some((cb, _)) = st.cursor_layout() else {
+            let Some((mut cb, _)) = st.cursor_layout() else {
                 return;
             };
+            if let Some(tb) = st.text_bounds() {
+                cb.origin.y += tb.top() - st.input_bounds().top();
+            }
             // no block while the chat pane is not the focused one or the window is in the background
             if !show_caret(
                 chat_focused,
@@ -1720,6 +1757,17 @@ mod tests {
         assert!(!show_caret(true, true, false), "window in the background");
         assert_eq!(input_border(true), hsla(t::ACCENT));
         assert_eq!(input_border(false), hsla(t::BORDER));
+    }
+
+    #[test]
+    fn a_caret_outside_the_text_area_is_moved_in() {
+        let view = gpui::Bounds::new(gpui::point(px(0.), px(100.)), gpui::size(px(50.), px(160.)));
+        let at = |y: f32| caret_shift(px(y), px(20.), view).map(f32::from);
+        assert_eq!(at(100.), None);
+        assert_eq!(at(240.), None, "the last row");
+        assert_eq!(at(260.), Some(-20.), "a trailing empty line under the box");
+        assert_eq!(at(1200.), Some(-960.));
+        assert_eq!(at(80.), Some(20.));
     }
 
     #[test]
