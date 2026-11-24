@@ -991,13 +991,19 @@ impl Render for SuperAgentView {
             .bg(t::surface_fill())
             .text_color(hsla(t::TEXT_STRONG))
             .child(self.rail(collapsed, window, cx))
+            .child(self.nav_controls(cx))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .child(self.title_row(window, cx))
+                    .child(
+                        div()
+                            .flex_none()
+                            .pl(px(rail::title_inset(collapsed)))
+                            .child(self.title_row(window, cx)),
+                    )
                     .child(
                         div()
                             .flex_1()
