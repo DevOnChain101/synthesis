@@ -393,7 +393,7 @@ pub fn split_secret_deny(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // POSIX sample paths
 mod secret_deny_tests {
     use super::*;
 

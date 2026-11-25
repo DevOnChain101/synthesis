@@ -1060,6 +1060,6 @@ mod tests {
 mod windows_tests {
     #[test]
     fn an_engine_without_the_race_free_open_serves_no_previews() {
-        assert!(super::read(std::path::Path::new("."), "a.txt").is_err());
+        assert!(super::read(std::path::Path::new("."), "a.txt", &Default::default()).is_err());
     }
 }

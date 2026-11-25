@@ -945,13 +945,13 @@ async fn a_user_deny_pattern_blocks_read_grep_and_glob_and_the_defaults_still_ho
     let w = f.root.clone();
     std::fs::create_dir_all(w.join("vault")).unwrap();
     std::fs::write(w.join("vault/k.txt"), "needle-vault").unwrap();
-    std::fs::write(w.join("cert.PFX"), "needle-pfx").unwrap();
+    std::fs::write(w.join("cert.DAT"), "needle-dat").unwrap();
     std::fs::write(w.join("ok.txt"), "needle-ok").unwrap();
     std::fs::write(w.join(".env"), "needle-env").unwrap();
     // a project cannot say "allow": the negation is dropped, the built-in `.env` rule stays
     let pats = [
         "vault/**".to_string(),
-        "*.pfx".to_string(),
+        "*.dat".to_string(),
         "!.env".to_string(),
     ];
     let (dl, diag) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
@@ -980,8 +980,9 @@ async fn a_user_deny_pattern_blocks_read_grep_and_glob_and_the_defaults_still_ho
         assert!(!t.contains(leaked), "{leaked} leaked: {t}");
     }
     // macOS and Windows fold case, Linux does not
+    // (`*.pfx` would not do: the built-in rule folds case on every OS, so it hides cert.PFX on Linux too)
     assert_eq!(
-        t.contains("needle-pfx"),
+        t.contains("needle-dat"),
         !PathPolicy::NATIVE.case_insensitive,
         "{t}"
     );
