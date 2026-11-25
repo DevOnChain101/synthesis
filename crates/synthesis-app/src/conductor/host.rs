@@ -430,18 +430,19 @@ impl ConductorHost {
             return Err(format!("stale: {e}"));
         }
         let target = match &payload {
-            Payload::SendMessage { sid, .. } => Some(sid),
-            Payload::MessageWorker { work_item, .. } => Some(work_item),
+            Payload::SendMessage { sid, .. } => Some(sid.clone()),
+            // prefixed so a work item id never shares a budget with a session id
+            Payload::MessageWorker { work_item, .. } => Some(format!("w:{work_item}")),
             _ => None,
         };
         if let Some(sid) = target {
             let now = (self.clock)();
-            if !st.sends.allows(sid, now) {
+            if !st.sends.allows(&sid, now) {
                 return Err(format!(
                     "limit: {MAX_SENDS_PER_TARGET} sends to one session in 10 minutes"
                 ));
             }
-            st.sends.record(sid, now);
+            st.sends.record(&sid, now);
         }
         let p = &mut st.proposals[i];
         p.payload = payload;
@@ -914,6 +915,15 @@ mod tests {
             WORKER_OFF
         );
         assert!(h.proposals().is_empty());
+    }
+
+    #[test]
+    fn worker_and_session_send_budgets_are_separate() {
+        let mut log = SendLog::default();
+        for _ in 0..MAX_SENDS_PER_TARGET {
+            log.record("w:abc", 1);
+        }
+        assert!(!log.allows("w:abc", 1) && log.allows("abc", 1));
     }
 
     #[test]

@@ -1119,6 +1119,7 @@ mod tests {
                 .join("\n");
             let n = code.matches("send_message(").count()
                 + code.matches("send_worker_message(").count()
+                + code.matches("send_worker_card_message(").count()
                 + code.matches("Req::Message").count();
             if n > 0 {
                 callers.push(
@@ -1137,10 +1138,15 @@ mod tests {
                 "src/outcomes_view/link.rs",
                 "src/outcomes_view/link/tests.rs",
                 "src/outcomes_view/mod.rs",
+                "src/superagent/chat/glue.rs",
                 "src/superagent/session/worker.rs",
             ]
         );
         let w = std::fs::read_to_string(root.join("src/superagent/session/worker.rs")).unwrap();
         assert!(w.contains("v.send_message(&o, &i, text, key, cx)"));
+        // the conductor card path: one call, inside the clicked-card effects
+        let g = std::fs::read_to_string(root.join("src/superagent/chat/glue.rs")).unwrap();
+        assert_eq!(g.matches("send_worker_card_message(").count(), 1);
+        assert!(g.find("send_worker_card_message(") > g.find("impl Effects for DesktopEffects"));
     }
 }

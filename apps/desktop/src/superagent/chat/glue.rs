@@ -280,6 +280,7 @@ impl Effects for DesktopEffects {
             format!("msg-{}", via.proposal_id),
         );
         let r = self.outcomes.effect(move |c| {
+            // shortcut: revision read at click time, bind it at propose time when the card is enabled (P2c/C3)
             let rev = c.outcome(&o)?.revision;
             Ok(
                 c.send_worker_card_message(&o, &w, &t, Some(rev), &sha, &key)?
