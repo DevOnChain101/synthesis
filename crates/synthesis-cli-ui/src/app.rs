@@ -124,6 +124,8 @@ pub(crate) struct AppConfig {
     pub plain_logo: bool,
     /// Agent definitions `@agent:<name>` can start.
     pub agent_defs: Vec<String>,
+    /// Secret-path rule (built-ins plus `synt.secrets.deny`) for the `@file` picker.
+    pub secrets: synthesis_core::secret_policy::SecretPolicy,
 }
 
 /// Effects for the runtime.
@@ -754,8 +756,13 @@ impl App {
             } else {
                 clean_input(&req.input)
             },
-            diff: crate::preview::change_diff(Path::new(&self.cfg.cwd), &req.tool, &req.input)
-                .map_or(Value::Null, |d| crate::chat::clean_diff(&d)),
+            diff: crate::preview::change_diff(
+                Path::new(&self.cfg.cwd),
+                &req.tool,
+                &req.input,
+                &self.cfg.secrets,
+            )
+            .map_or(Value::Null, |d| crate::chat::clean_diff(&d)),
             suggestions,
             status: "pending".into(),
             // work done for another session (peers) says so in the dialog
@@ -2618,6 +2625,7 @@ impl App {
         let mut opts = complete::Options::new(&cwd);
         opts.commands = &self.commands;
         opts.limit = 50;
+        opts.secrets = self.cfg.secrets.clone();
         // agents are offered at the start of the message only (the picker checks the position)
         let mut refs = vec![complete::AgentRef {
             id: "main".into(),

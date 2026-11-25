@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -355,5 +355,64 @@ pub fn standard_policy_git(
         p.readable_roots.push(common.to_path_buf());
         p.protect([ws.root.join(".git")]);
     }
+    // `synt.secrets.deny` patterns that name concrete places: hidden from commands too (Bash indirect reads)
+    let (apply, _) = split_secret_deny(
+        &p,
+        ws.secrets.sandbox_deny_paths(&ws.root),
+        landlock_first(),
+    );
+    p.deny_paths.extend(apply);
     Ok(p)
+}
+
+/// The first sandbox backend on this host is Landlock. Cached for the life of the process (detection probes the
+/// system); a backend that appears or disappears later (bubblewrap installed mid-session) is picked up on restart.
+pub fn landlock_first() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| synthesis_sandbox::detect().name() == "landlock")
+}
+
+/// Splits user deny paths into those the backend can apply and those it cannot. Landlock is an allow-list: a
+/// deny that overlaps an allowed root makes it refuse the WHOLE policy (`Unsupported`), which under best-effort
+/// would run every command unconfined and under enforce would refuse every command. A user pattern must never
+/// do that (a repository can add one), so such paths are not passed on; the permission layer still enforces them
+/// and `synt doctor` says so.
+pub fn split_secret_deny(
+    p: &SandboxPolicy,
+    paths: Vec<PathBuf>,
+    landlock: bool,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    if !landlock {
+        return (paths, vec![]);
+    }
+    paths.into_iter().partition(|d| {
+        !p.readable_roots
+            .iter()
+            .chain(&p.writable_roots)
+            .any(|r| d.starts_with(r) || r.starts_with(d))
+    })
+}
+
+#[cfg(all(test, unix))] // POSIX sample paths
+mod secret_deny_tests {
+    use super::*;
+
+    #[test]
+    fn a_user_deny_inside_the_workspace_never_reaches_landlock() {
+        let root = PathBuf::from("/w/p");
+        let mut p = SandboxPolicy::standard(&root, Path::new("/w/tmp"));
+        p.readonly_paths.clear(); // the standard read-only paths are a separate, existing Landlock refusal
+        let inside = root.join("secrets");
+        let outside = PathBuf::from("/opt/vault-xyz");
+        let (apply, kept) = split_secret_deny(&p, vec![inside.clone(), outside.clone()], true);
+        assert_eq!(
+            (apply.clone(), kept),
+            (vec![outside.clone()], vec![inside.clone()])
+        );
+        // not Landlock: everything is passed on
+        assert_eq!(
+            split_secret_deny(&p, vec![inside.clone()], false).0,
+            vec![inside]
+        );
+    }
 }

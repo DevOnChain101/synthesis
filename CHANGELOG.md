@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Added (user secret deny list)
+- `synt.secrets.deny` (user, managed and project settings; a project can only add): gitignore-like path patterns that count as secret wherever the built-in secret-name rule applies (model-bound reads, `@file` picker, diffs, peer snapshots, memory digest, explorer preview), plus the OS-sandbox read-deny list for patterns that name concrete places. Detection stays by path name, not content; `synt doctor` lists the patterns the OS sandbox cannot enforce. docs/SECURITY.md.
+
 ### Security (hardening batch 1)
 - `synt rewind` writes through a handle of the parent folder (no link followed) and now refuses hard-linked files (pnpm stores, `cp -l` trees): the dry run lists them as skipped. `{file:}` credentials are read from the checked path with a 4 KB cap; `secretfile` handles homes with a trailing slash and DOS device names. A shell run that changed no file is no longer reported as unverified when a change tracker is active.
 

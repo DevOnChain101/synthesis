@@ -1461,6 +1461,44 @@ fn managed_planner_settings_win_and_an_unusable_one_fails_closed_to_the_stub() {
 }
 
 #[test]
+fn secrets_deny_is_the_union_of_all_scopes_even_for_an_untrusted_project() {
+    let f = fx();
+    f.user(json!({"synt":{"secrets":{"deny":["a.pfx", "shared"]}}}));
+    f.project(json!({"synt":{"secrets":{"deny":["shared", "secrets/**", 5]}}}));
+    for t in [ProjectTrust::Trusted, ProjectTrust::Untrusted] {
+        let s = f.load(t);
+        assert_eq!(s.synthesis.secrets_deny, ["a.pfx", "shared", "secrets/**"]);
+        assert!(
+            s.diagnostics
+                .iter()
+                .any(|d| d.contains("entry is not a string"))
+        );
+        // the project's additions are announced with the patterns; the user's are not
+        assert!(
+            s.diagnostics.iter().any(|d| d
+                .starts_with("project settings: synt.secrets.deny adds 1 pattern(s)")
+                && d.contains("secrets/**")),
+            "{:?}",
+            s.diagnostics
+        );
+        assert!(
+            !s.diagnostics
+                .iter()
+                .any(|d| d.starts_with("user settings: synt.secrets.deny adds"))
+        );
+    }
+    let f = fx();
+    f.user(json!({"synt":{"secrets":{"deny":"nope"}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.synthesis.secrets_deny.is_empty());
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("synt.secrets.deny must be a list"))
+    );
+}
+
+#[test]
 fn orchestrator_turn_and_token_limits_have_defaults_bounds_and_managed_wins() {
     let f = fx();
     let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;

@@ -1540,6 +1540,12 @@ pub fn prepare(
             None,
         ),
     };
+    let (secret_policy, secret_diag) =
+        crate::ctx::secret_policy(&settings.synthesis.secrets_deny, &h.user, Some(&ws.root));
+    for d in &secret_diag {
+        eprintln!("synt: warning: {}", sanitize_for_display(d));
+    }
+    let ws = ws.with_secrets(secret_policy);
     let mut session = AgentSession {
         id: sid.clone(),
         task_id: None,
@@ -1946,6 +1952,7 @@ pub fn prepare(
     // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
     // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
     // A read-only attempt always has it: key files and token files in the folder stay unread.
+    perms.env.secrets = ws.secrets.clone();
     perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis) || c.read_only_session;
     // Only the user's own allow rules (user/managed settings and flags, never the project's) can
     // lift the read-only-path refusal and the irreversible-action table.
@@ -2077,6 +2084,7 @@ pub fn prepare(
     let small = crate::memcmd::small_model(&cfg, &res.label, &res.model);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
+            secret_paths: ws.secrets.clone(),
             enabled: !c.no_memory && !c.bare && !conductor,
             home: &h,
             repo: &repo,

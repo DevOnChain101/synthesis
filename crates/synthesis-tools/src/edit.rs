@@ -133,6 +133,6 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
 
     ToolOutput::text(format!("Edited {}:\n{snippet}", abs.display())).with_meta(json!({
         "replacements": count,
-        "diff": crate::diff::for_file(file_path, "update", &hay, &replaced),
+        "diff": crate::diff::for_file(&ctx.workspace.secrets, &ctx.workspace.root, file_path, "update", &hay, &replaced),
     }))
 }

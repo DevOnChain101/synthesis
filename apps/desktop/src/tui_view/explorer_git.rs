@@ -108,13 +108,19 @@ impl TuiView {
         );
         let epoch = self.tree.epoch;
         let rel = path.clone();
+        let secrets = lu
+            .live
+            .engine
+            .as_ref()
+            .map(|e| e.secrets())
+            .unwrap_or_default();
         let job = cx.background_spawn(async move {
             if letter == '?' {
                 // not in git yet: all of it is added; read as the preview reads (no links out, no secrets)
-                let b = read_preview(&root, &rel)?;
-                project::all_added(&root, &rel, &b.lines)
+                let b = read_preview(&root, &rel, &secrets)?;
+                project::all_added(&root, &rel, &b.lines, &secrets)
             } else {
-                project::file_diff(&root, &env, trusted, &rel)
+                project::file_diff(&root, &env, trusted, &rel, &secrets)
             }
         });
         cx.spawn(async move |this, cx| {

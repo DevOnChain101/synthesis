@@ -36,7 +36,10 @@ pub use browser::{
     BrowserConfig, BrowserHost, BrowserTap, LoginRequest, PaymentRequest, is_control_chord,
     redact_input,
 };
-pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
+pub use registry::{
+    Registry, landlock_first, split_secret_deny, standard_policy, standard_policy_git,
+    standard_policy_with,
+};
 pub use skill::{
     LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_session_skills,
     discover_skills, set_learned_skills,

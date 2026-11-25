@@ -91,9 +91,16 @@ pub(crate) fn build(path: &str, kind: &str, old: &str, new: &str, hide: bool) ->
 }
 
 /// `build` for a file path: secret files get counts only.
-pub fn for_file(path: &str, kind: &str, old: &str, new: &str) -> Value {
-    let hide = // no root here: the whole path counts (a diff hidden too often is safe)
-    synthesis_core::secrets::is_secret_shaped_in(std::path::Path::new(path), std::path::Path::new(""));
+pub fn for_file(
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
+    root: &std::path::Path,
+    path: &str,
+    kind: &str,
+    old: &str,
+    new: &str,
+) -> Value {
+    // a path outside `root` counts whole (a diff hidden too often is safe)
+    let hide = secrets.is_secret_shaped_in(std::path::Path::new(path), root);
     build(path, kind, old, new, hide)
 }
 
@@ -197,14 +204,28 @@ mod tests {
         assert_eq!(v["added"], 5000);
         assert_eq!(v["truncated"], true);
         assert_eq!(v["hunks"][0]["lines"].as_array().unwrap().len(), MAX_LINES);
-        let v = for_file("dir/.env", "overwrite", "A=1\n", "A=2\nB=3\n");
+        let v = for_file(
+            &Default::default(),
+            std::path::Path::new(""),
+            "dir/.env",
+            "overwrite",
+            "A=1\n",
+            "A=2\nB=3\n",
+        );
         assert_eq!(v["hidden"], true);
         assert_eq!(counts(&v), (json!(2), json!(1)));
         assert!(v["hunks"].as_array().unwrap().is_empty());
         assert!(!v.to_string().contains("A=2"));
         let key =
             "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETBODY\n-----END OPENSSH PRIVATE KEY-----\n";
-        let v = for_file("notes.txt", "create", "", key);
+        let v = for_file(
+            &Default::default(),
+            std::path::Path::new(""),
+            "notes.txt",
+            "create",
+            "",
+            key,
+        );
         assert_eq!(v["hidden"], true);
         assert!(!v.to_string().contains("SECRETBODY"));
     }

@@ -708,7 +708,11 @@ impl Srv<'_> {
                     )?)
                 }
             }
-            Call::FsRead { path } => Ok(engine_fs::read(&self.files_root()?, &path)?),
+            Call::FsRead { path } => Ok(engine_fs::read(
+                &self.files_root()?,
+                &path,
+                &self.session()?.host.workspace.secrets,
+            )?),
             Call::FsGitStatus => {
                 if self.trusted {
                     self.heavy()?;

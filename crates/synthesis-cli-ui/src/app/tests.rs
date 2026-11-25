@@ -34,6 +34,7 @@ fn cfg(cwd: &str) -> AppConfig {
         project_trusted: true,
         plain_logo: false,
         agent_defs: vec!["reviewer".into()],
+        secrets: Default::default(),
     }
 }
 

@@ -13,6 +13,7 @@ use crate::editor::LineEditor;
 use crate::text::is_js_space;
 use std::cmp::Ordering;
 use std::path::{Component, Path, PathBuf};
+use synthesis_core::secret_policy::SecretPolicy;
 
 pub const MAX_CHILDREN: usize = 2000;
 pub const MAX_ITEMS: usize = 200;
@@ -118,6 +119,8 @@ pub struct Options<'a> {
     /// Additional directories, offered at the top level.
     pub dirs: &'a [PathBuf],
     pub limit: usize,
+    /// Built-in secret names plus `synt.secrets.deny`: matching files are never offered.
+    pub secrets: synthesis_core::secret_policy::SecretPolicy,
 }
 
 impl<'a> Options<'a> {
@@ -128,6 +131,7 @@ impl<'a> Options<'a> {
             agents: &[],
             dirs: &[],
             limit: MAX_ITEMS,
+            secrets: Default::default(),
         }
     }
 }
@@ -286,16 +290,16 @@ fn path_item(rel: String, abs: PathBuf, is_dir: bool, order: usize) -> Item {
 
 /// A link whose real path is secret-shaped (names only; the target is never read). A link that
 /// does not resolve (dangling, loop, unreadable part) counts as secret: fail closed.
-fn secret_link_target(link: &Path, root: &Path, fs: &dyn CompletionFs) -> bool {
+fn secret_link_target(link: &Path, root: &Path, fs: &dyn CompletionFs, sp: &SecretPolicy) -> bool {
     fs.realpath(link).is_none_or(|t| {
         let r = fs.realpath(root).unwrap_or_else(|| root.to_path_buf());
-        synthesis_core::secrets::is_secret_shaped_in(&t, &r)
+        sp.is_secret_shaped_in(&t, &r)
     })
 }
 
 /// An extra context root that is itself secret-shaped, or resolves to such a path.
-fn secret_dir(dir: &Path, root: &Path, fs: &dyn CompletionFs) -> bool {
-    synthesis_core::secrets::is_secret_shaped_in(dir, root) || secret_link_target(dir, root, fs)
+fn secret_dir(dir: &Path, root: &Path, fs: &dyn CompletionFs, sp: &SecretPolicy) -> bool {
+    sp.is_secret_shaped_in(dir, root) || secret_link_target(dir, root, fs, sp)
 }
 
 /// `@` suggestions: the query is split at its last `/` into a folder and a name part; the
@@ -305,6 +309,7 @@ fn file_items(
     roots: &[PathBuf],
     agents: &[AgentRef],
     fs: &dyn CompletionFs,
+    sp: &SecretPolicy,
 ) -> (Vec<Item>, bool) {
     let q = query.replace('\\', "/");
     let cut = q.rfind('/').map_or(0, |i| i + 1);
@@ -365,11 +370,11 @@ fn file_items(
                 continue;
             }
             // names only are listed, but a secret-shaped one is not offered at all
-            if synthesis_core::secrets::is_secret_shaped_in(&abs.join(&k.name), &roots[0])
-                || real.as_ref().is_some_and(|r| {
-                    synthesis_core::secrets::is_secret_shaped_in(&r.join(&k.name), &real_root)
-                })
-                || (k.is_link && secret_link_target(&abs.join(&k.name), &roots[0], fs))
+            if sp.is_secret_shaped_in(&abs.join(&k.name), &roots[0])
+                || real
+                    .as_ref()
+                    .is_some_and(|r| sp.is_secret_shaped_in(&r.join(&k.name), &real_root))
+                || (k.is_link && secret_link_target(&abs.join(&k.name), &roots[0], fs, sp))
             {
                 continue;
             }
@@ -394,8 +399,8 @@ fn file_items(
                 .unwrap_or_default();
             // `a/link/..` was collapsed by `resolve`: the uncollapsed path is judged too
             if starts(&base)
-                && !secret_dir(&dir, &roots[0], fs)
-                && !secret_link_target(&roots[0].join(d), &roots[0], fs)
+                && !secret_dir(&dir, &roots[0], fs, sp)
+                && !secret_link_target(&roots[0].join(d), &roots[0], fs, sp)
             {
                 items.push(path_item(
                     format!("{}/", shown.trim_end_matches('/')),
@@ -516,7 +521,7 @@ pub fn suggest(editor: &LineEditor, opts: &Options, fs: &dyn CompletionFs) -> Op
             .collect();
         // Agents only at the start of the message: a mention further in is always a file.
         let agents = if token.start == 0 { opts.agents } else { &[] };
-        (items, capped) = file_items(&token.query, &roots, agents, fs);
+        (items, capped) = file_items(&token.query, &roots, agents, fs, &opts.secrets);
     }
     items.sort_by(|a, b| {
         b.score
@@ -877,10 +882,42 @@ mod tests {
             "{l:?}"
         );
         let roots = [cwd.clone(), cwd.join("x/.ssh"), cwd.join("x")];
-        let (items, _) = file_items("", &roots, &[], &StdFs);
+        let (items, _) = file_items("", &roots, &[], &StdFs, &Default::default());
         let l: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
         assert!(l.iter().all(|x| !x.contains(".ssh")), "{l:?}");
         assert!(l.iter().any(|x| x.ends_with("/x/")), "{l:?}");
+    }
+
+    #[test]
+    fn a_user_deny_pattern_hides_files_and_folders_from_the_picker() {
+        use synthesis_core::{PathPolicy, secret_policy::DenyList};
+        let d = tree(&["ok.txt", "a.pfx", "vault/k", ".env", "vault.txt"]);
+        let cwd = real(&d);
+        let pats = [
+            "*.pfx".to_string(),
+            "vault".to_string(),
+            "!.env".to_string(),
+        ];
+        let (dl, diag) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
+        assert_eq!(diag.len(), 1);
+        let sp = SecretPolicy::new(dl);
+        let l = |q: &str| -> Vec<String> {
+            let (items, _) = file_items(q, std::slice::from_ref(&cwd), &[], &StdFs, &sp);
+            items.iter().map(|i| i.label.clone()).collect()
+        };
+        let top = l("");
+        assert!(
+            top.contains(&"@ok.txt".to_string()) && top.contains(&"@vault.txt".to_string()),
+            "{top:?}"
+        );
+        assert!(
+            top.iter()
+                .all(|x| !x.contains(".pfx") && x != "@vault/" && x != "@.env"),
+            "{top:?}"
+        );
+        assert!(l("vault/").is_empty());
+        // a project's pattern list cannot lift the built-in `.env` rule
+        assert!(l(".").iter().all(|x| x != "@.env"));
     }
 
     #[cfg(unix)]
@@ -898,7 +935,7 @@ mod tests {
         // `lnk/..` is collapsed lexically to the root but really is `x/.ssh`
         std::os::unix::fs::symlink(cwd.join("x/.ssh/sub"), cwd.join("lnk")).unwrap();
         let roots = [cwd.clone(), cwd.join("lnk/..")];
-        let (items, _) = file_items("", &roots, &[], &StdFs);
+        let (items, _) = file_items("", &roots, &[], &StdFs, &Default::default());
         let l: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
         assert!(l.iter().all(|x| !x.starts_with("@/")), "{l:?}");
     }

@@ -730,6 +730,7 @@ impl<'a> Owner<'a> {
         )
         .map_err(s)?;
         verifier.redactor = self.redactor.clone();
+        verifier.secrets_for = Some(secrets_for());
         let b = &contract.envelope.budgets;
         let mut cfg = SchedConfig::new(
             b.max_parallel_workers.min(pol.max_parallel_workers),
@@ -755,6 +756,7 @@ impl<'a> Owner<'a> {
         let sb = synthesis_sandbox::detect();
         use synthesis_sandbox::Guarantee;
         runner.redactor = self.redactor.clone();
+        runner.secrets_for = Some(secrets_for());
         runner.sandbox = Some((
             sb.name().to_string(),
             match sb.capabilities().filesystem {
@@ -1421,6 +1423,17 @@ async fn wait_for_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// The user's secret-path rule for a repository folder, for the report citations the owner checks. No home
+/// folder means no settings to read: the built-in names alone (the citation is shown to the person, not a model).
+fn secrets_for() -> synthesis_orchestrator::SecretsFor {
+    Arc::new(|repo: &Path| {
+        let env = Env::from_process();
+        crate::homes(&env)
+            .map(|h| crate::ctx::secret_policy_for(&env, &h, repo).0)
+            .unwrap_or_default()
+    })
 }
 
 #[cfg(test)]

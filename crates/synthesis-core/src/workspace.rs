@@ -38,6 +38,9 @@ pub struct WorkspaceContext {
     pub browser_context_id: Option<String>,
     pub process_group_id: String,
     pub path_policy: PathPolicy,
+    /// Built-in secret names plus `synt.secrets.deny`; not persisted (rebuilt from settings).
+    #[serde(skip)]
+    pub secrets: crate::secret_policy::SecretPolicy,
 }
 
 #[derive(Debug)]
@@ -103,7 +106,13 @@ impl WorkspaceContext {
             browser_context_id: None,
             process_group_id: process_group_id.into(),
             path_policy,
+            secrets: Default::default(),
         })
+    }
+
+    pub fn with_secrets(mut self, secrets: crate::secret_policy::SecretPolicy) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     /// Resolves a tool path (spec §4.2) to a lexically normalised absolute path that is

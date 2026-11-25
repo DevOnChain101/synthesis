@@ -71,6 +71,7 @@ mod automode_defaults;
 pub mod bash;
 pub mod irreversible;
 pub mod paths;
+mod secretglob;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -378,6 +379,8 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+    /// Built-in secret names plus `synt.secrets.deny`; the default is the built-ins alone.
+    pub secrets: synthesis_core::secret_policy::SecretPolicy,
     /// Allow rules written in USER-level settings (`$SYNT_HOME`), never a project's. Only these
     /// can lift the read-only-path refusal of the edit tools and the irreversible-action table.
     pub user_allow: Vec<String>,
@@ -600,6 +603,7 @@ impl Env {
             protected_hard: false,
             project_root: None,
             memory_notes: None,
+            secrets: Default::default(),
             user_allow: vec![],
             sandbox_enforcing: false,
             worktree: false,
@@ -1038,7 +1042,7 @@ impl Permissions {
     /// Secret-shaped, with the secret directory names counted only below the project root.
     fn secret_shaped(&self, p: &Path) -> bool {
         let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
-        synthesis_core::secrets::is_secret_shaped_in(p, root)
+        self.env.secrets.is_secret_shaped_in(p, root)
     }
 
     /// Engine-enforced read ban (`Env::deny_read`, `Env::deny_secret_reads`); no rule or mode lifts it.
@@ -1113,7 +1117,8 @@ impl Permissions {
     /// Read/Grep/Glob aimed at a secret file (`.env`, keys, ...): the `path`, a Grep `glob` or a Glob
     /// `pattern` that names one or could match one (`.env*`, `*.pem`), by name or through a link.
     fn names_secret_file(&self, tool: &str, input: &Value) -> bool {
-        use synthesis_core::secrets::{is_secret_path, names_secret};
+        use synthesis_core::secrets::names_secret;
+        let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
         if !OUTSIDE_READ_TOOLS.contains(&tool) {
             return false;
         }
@@ -1123,14 +1128,19 @@ impl Permissions {
             "Glob" => non_empty(input, "pattern"),
             _ => None,
         };
-        by_pattern.is_some_and(names_secret)
-            || non_empty(input, field).is_some_and(|t| {
-                let abs = paths::resolve(&self.env.cwd, t);
-                [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
-                    .into_iter()
-                    .flatten()
-                    .any(|c| is_secret_path(&c))
-            })
+        by_pattern.is_some_and(|g| {
+            names_secret(g) || {
+                // a search glob read conservatively as a path: `vault/**/*.json` against `vault/**`
+                let g = Path::new(g);
+                self.env.secrets.deny_list().matches(g, root)
+            }
+        }) || non_empty(input, field).is_some_and(|t| {
+            let abs = paths::resolve(&self.env.cwd, t);
+            [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
+                .into_iter()
+                .flatten()
+                .any(|c| self.env.secrets.is_secret_path(&c, root))
+        })
     }
 
     /// A read-only (or auto-safe) command, or a known reader, with an operand that names a secret file or could match
@@ -1143,6 +1153,7 @@ impl Permissions {
             return false;
         };
         let mut bases = vec![self.env.cwd.clone()];
+        let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
         for seg in segs {
             let w = bash::unwrap_words(&seg, true);
             let prog = paths::basename(w.first().map_or("", String::as_str), self.policy());
@@ -1156,8 +1167,18 @@ impl Permissions {
                 let bare = word.rsplit(['<', '>']).next().unwrap_or(word);
                 let val = bare.rsplit_once('=').map(|(_, v)| v);
                 for t in [word.as_str(), bare].into_iter().chain(val) {
-                    if synthesis_core::secrets::names_secret(t) {
+                    if synthesis_core::secrets::names_secret(t)
+                        || (t.contains('\\')
+                            && synthesis_core::secrets::names_secret(&t.replace('\\', "")))
+                    {
                         return true;
+                    }
+                    // the user's `synt.secrets.deny`: a wildcard is expanded here (no shell), a word that
+                    // cannot be expanded is a question (never a silent pass) unless a hard check is asked
+                    match secretglob::judge(&self.env.secrets, t, &bases, root) {
+                        secretglob::Verdict::Hit => return true,
+                        secretglob::Verdict::Unknown if !readers_only => return true,
+                        _ => {}
                     }
                     if !t.contains(['$', '`', '*', '?', '[']) {
                         for b in &bases {

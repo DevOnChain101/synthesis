@@ -184,6 +184,8 @@ pub struct Runner<'a> {
     pub sandbox: Option<(String, String)>,
     /// Masks session secrets (and secret patterns) in a report opened for review.
     pub redactor: synthesis_events::Redactor,
+    /// The user's secret-path rule per repository (report citations); `None` = built-in names only.
+    pub secrets_for: Option<crate::report::SecretsFor>,
     /// Replaces the store call of the heartbeat (tests inject transient errors, feature
     /// `test-seam`). Always `None` in use.
     beat: Option<&'a BeatFn<'a>>,
@@ -207,6 +209,7 @@ impl<'a> Runner<'a> {
             grace,
             sandbox: None,
             redactor: synthesis_events::Redactor::new([]),
+            secrets_for: None,
             beat: None,
         }
     }
@@ -658,6 +661,7 @@ impl Runner<'_> {
                     r,
                     time::OffsetDateTime::now_utc(),
                     &self.redactor,
+                    self.secrets_for.as_ref(),
                 )?;
             }
             finish_in_place(w, attempt, end.task_status(), subject.as_deref())?;

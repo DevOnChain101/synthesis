@@ -7,7 +7,12 @@
 
 use sha2::{Digest, Sha256};
 use synthesis_core::outcome::{ContractKind, DecisionState, TrustClass, hidden_char};
+use synthesis_core::secret_policy::SecretPolicy;
 use synthesis_core::secrets::is_secret_shaped_in;
+
+/// The user's secret-path rule for a repository folder (its project settings can add patterns), asked per call
+/// because the owner serves many repositories.
+pub type SecretsFor = std::sync::Arc<dyn Fn(&std::path::Path) -> SecretPolicy + Send + Sync>;
 use synthesis_session::outcome::{
     AttemptRecord, Effects, NewDecision, NewEvidence, OutcomeWriter, WorkItemRecord,
 };
@@ -162,6 +167,7 @@ pub fn check_citation(
     root: &std::path::Path,
     c: &Citation,
     gate: &synthesis_events::Redactor,
+    secrets: &SecretPolicy,
 ) -> Checked {
     use std::io::Read;
     use std::path::Component;
@@ -188,7 +194,10 @@ pub fn check_citation(
             )
         })
     };
-    if rel.components().any(state) || is_secret_shaped_in(rel, std::path::Path::new("")) {
+    if rel.components().any(state)
+        || is_secret_shaped_in(rel, std::path::Path::new(""))
+        || secrets.denies(rel, root)
+    {
         return no("a secret or state path is never cited");
     }
     // the path is echoed on the review card, so it must not carry a secret either
@@ -323,6 +332,7 @@ fn issue(
     p: &Prepared,
     rebrief: u64,
     redactor: &synthesis_events::Redactor,
+    secrets_for: Option<&SecretsFor>,
 ) -> Result<()> {
     let now = w.now();
     let o = w.get_outcome(w.id())?;
@@ -333,7 +343,14 @@ fn issue(
         .map(|c| {
             (
                 c,
-                check_citation(std::path::Path::new(&o.repo_root), c, redactor),
+                check_citation(
+                    std::path::Path::new(&o.repo_root),
+                    c,
+                    redactor,
+                    &secrets_for
+                        .map(|f| f(std::path::Path::new(&o.repo_root)))
+                        .unwrap_or_default(),
+                ),
             )
         })
         .collect();
@@ -455,6 +472,7 @@ pub fn open_review(
     report: &AttemptReport,
     _now: OffsetDateTime,
     redactor: &synthesis_events::Redactor,
+    secrets_for: Option<&SecretsFor>,
 ) -> Result<()> {
     // the caller's record may predate the end of the attempt (its subject is set then)
     let mut a = w
@@ -480,7 +498,7 @@ pub fn open_review(
         cites,
         too_many,
     };
-    issue(w, item, &a, &p, 0, redactor)
+    issue(w, item, &a, &p, 0, redactor, secrets_for)
 }
 
 /// `preparing` -> `pending` (a replay after a crash between the two steps).
@@ -506,6 +524,7 @@ fn reissue(
     old: &synthesis_session::outcome::DecisionRecord,
     rebrief: u64,
     redactor: &synthesis_events::Redactor,
+    secrets_for: Option<&SecretsFor>,
 ) -> Result<()> {
     let action = w
         .decision_action(&old.id)?
@@ -534,7 +553,7 @@ fn reissue(
         cites,
         too_many: action["too_many"].as_bool().unwrap_or(true),
     };
-    issue(w, item, a, &p, rebrief, redactor)
+    issue(w, item, a, &p, rebrief, redactor, secrets_for)
 }
 
 /// What the verifier says about a read-only goal's item (replaces the independent check, which
@@ -548,6 +567,7 @@ pub(crate) fn review_verdict(
     item: &WorkItemRecord,
     attempt: &AttemptRecord,
     redactor: &synthesis_events::Redactor,
+    secrets_for: Option<&SecretsFor>,
 ) -> std::result::Result<Verdict, SchedError> {
     let Some(subject) = attempt.subject_commit.clone() else {
         return Ok(Verdict::Failed("the attempt left no report".into()));
@@ -600,7 +620,7 @@ pub(crate) fn review_verdict(
     match w.decision_state(&last.id)? {
         DecisionState::Preparing => open(w, &last)?,
         DecisionState::Expired | DecisionState::Invalidated => {
-            reissue(w, item, attempt, &last, rebriefs, redactor)?
+            reissue(w, item, attempt, &last, rebriefs, redactor, secrets_for)?
         }
         DecisionState::NeedsMoreInfo
             if w.verified_resolution(&last.id)?
@@ -616,7 +636,7 @@ pub(crate) fn review_verdict(
                 &serde_json::json!({"rebriefed": last.id}),
                 &Effects::default(),
             )?;
-            reissue(w, item, attempt, &last, rebriefs + 1, redactor)?;
+            reissue(w, item, attempt, &last, rebriefs + 1, redactor, secrets_for)?;
         }
         _ => {}
     }

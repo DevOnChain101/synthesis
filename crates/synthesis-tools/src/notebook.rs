@@ -236,5 +236,5 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         new_source.unwrap_or_default()
     };
     ToolOutput::text(format!("{message} ({n} cells)"))
-        .with_meta(json!({"cells": n, "diff": crate::diff::for_file(path, kind, before, after)}))
+        .with_meta(json!({"cells": n, "diff": crate::diff::for_file(&ctx.workspace.secrets, &ctx.workspace.root, path, kind, before, after)}))
 }

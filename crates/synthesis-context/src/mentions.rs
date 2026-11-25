@@ -153,9 +153,7 @@ pub fn expand_mentions(text: &str, ws: &WorkspaceContext, opts: &MentionOptions)
         {
             continue; // images keep their attach path
         }
-        if synthesis_core::secrets::is_secret_shaped_in(&abs, &ws.root)
-            || opts.deny.is_some_and(|d| d(&abs))
-        {
+        if ws.secrets.is_secret_shaped_in(&abs, &ws.root) || opts.deny.is_some_and(|d| d(&abs)) {
             blocks.push(format!(
                 "<file path=\"{}\">[not included: blocked by permissions]</file>",
                 attr(&rel)

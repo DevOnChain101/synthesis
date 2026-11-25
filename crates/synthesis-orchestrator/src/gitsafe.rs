@@ -603,6 +603,7 @@ pub fn commit_diff(
     base: &str,
     commit: &str,
     stop: &AtomicBool,
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
 ) -> Result<DiffReport, VerifyError> {
     let scratch = Scratch::new(repo, scratch_dir, stop)?;
     let ents = entries(&scratch, base, commit, stop)?;
@@ -628,8 +629,10 @@ pub fn commit_diff(
     let mut budget = DIFF_MAX_PATCH;
     for (i, e) in ents.iter().take(DIFF_MAX_FILES).enumerate() {
         let (added, removed) = counts.get(i).copied().unwrap_or((None, None));
-        let secret = // repo-relative: the empty root makes every component count
-        synthesis_core::secrets::is_secret_shaped_in(Path::new(&e.path), Path::new(""));
+        // repo-relative: the empty root makes every component count; a user pattern is matched against `repo`
+        let secret =
+            synthesis_core::secrets::is_secret_shaped_in(Path::new(&e.path), Path::new(""))
+                || secrets.is_secret_shaped_in(Path::new(&e.path), repo);
         // a binary file counts `-`; a listing cut short by its cap says nothing either way
         let binary = !secret && counts.get(i).is_some_and(|c| *c == (None, None));
         let mut f = DiffFile {

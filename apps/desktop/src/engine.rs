@@ -746,6 +746,16 @@ impl Engine {
         self.remote.is_some()
     }
 
+    /// The session's secret-path rule (built-ins plus `synt.secrets.deny`); a local engine always has a session.
+    /// A remote (WSL) engine applies its own policy to what it serves; the window's own checks on its folder use
+    /// the built-in names only (listed in docs/SECURITY.md).
+    pub fn secrets(&self) -> synthesis_core::secret_policy::SecretPolicy {
+        self.live
+            .as_ref()
+            .map(|l| l.host.workspace.secrets.clone())
+            .unwrap_or_default()
+    }
+
     /// The permission mode in force: the engine's own, as it reported it for a remote engine.
     pub fn mode(&self) -> Mode {
         match (&self.live, &self.remote) {
@@ -977,9 +987,8 @@ impl Engine {
                 "outside the workspace: only files inside it can be attached".to_string()
             })?;
         let real = synthesis_core::canonicalize(&real).map_err(|e| e.to_string())?;
-        if synthesis_core::secrets::is_secret_path(p)
-            || synthesis_core::secrets::is_secret_path(&real)
-        {
+        let (sp, root) = (&live.host.workspace.secrets, &live.host.workspace.root);
+        if sp.is_secret_path(p, root) || sp.is_secret_path(&real, root) {
             return Err("a secret file is never attached".into());
         }
         let denied = lock(&live.harness.permissions())

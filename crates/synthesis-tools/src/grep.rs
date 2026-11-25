@@ -80,7 +80,11 @@ fn glob_hits(re: &Regex, rel: &str, win: bool) -> bool {
 /// finds goes to the model.
 fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf> {
     if !is_dir {
-        return if synthesis_core::secrets::is_secret_target_in(search, &ctx.workspace.root) {
+        return if ctx
+            .workspace
+            .secrets
+            .is_secret_target_in(search, &ctx.workspace.root)
+        {
             vec![]
         } else {
             vec![search.to_path_buf()]
@@ -106,7 +110,11 @@ fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf>
         // symlinks are not followed (`is_file` is false for them), so a link to a secret is skipped too
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(ignore::DirEntry::into_path)
-        .filter(|p| !synthesis_core::secrets::is_secret_target_in(p, &ctx.workspace.root))
+        .filter(|p| {
+            !ctx.workspace
+                .secrets
+                .is_secret_target_in(p, &ctx.workspace.root)
+        })
         .collect()
 }
 

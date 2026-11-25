@@ -53,7 +53,11 @@ pub struct PreviewText {
 /// Reads `rel` (a path of the project tree) under `root` for the preview. Refuses what must not be shown: a
 /// path that leaves the folder (`..`, an absolute path, a link out of it), a secret file, a file that is not
 /// regular, binary content; reads at most [`PREVIEW_BYTES`] and shows at most [`PREVIEW_LINES`] lines.
-pub fn read_preview(root: &Path, rel: &str) -> Result<PreviewText, String> {
+pub fn read_preview(
+    root: &Path,
+    rel: &str,
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
+) -> Result<PreviewText, String> {
     let p = Path::new(rel);
     if p.is_absolute()
         || p.components()
@@ -70,9 +74,7 @@ pub fn read_preview(root: &Path, rel: &str) -> Result<PreviewText, String> {
     if !real.starts_with(&real_root) {
         return Err("the file is outside the project folder".into());
     }
-    if synthesis_core::secrets::is_secret_shaped_in(&real, &real_root)
-        || synthesis_core::secrets::is_secret_shaped_in(p, root)
-    {
+    if secrets.is_secret_shaped_in(&real, &real_root) || secrets.is_secret_shaped_in(p, root) {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }
     let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
@@ -535,6 +537,12 @@ impl TuiView {
         let (rel, for_diff) = (path.clone(), path.clone());
         let epoch = self.tree.epoch;
         let remote = lu.live.engine.clone().filter(|e| e.is_remote());
+        let secrets = lu
+            .live
+            .engine
+            .as_ref()
+            .map(|e| e.secrets())
+            .unwrap_or_default();
         let job = cx.background_spawn(async move {
             match remote {
                 Some(e) => e
@@ -542,7 +550,7 @@ impl TuiView {
                     .ok_or_else(|| "not a WSL engine".to_string())
                     .and_then(|r| r.fs_read(&rel))
                     .map(|(lines, size, cut)| PreviewText { lines, size, cut }),
-                None => read_preview(&root, &rel),
+                None => read_preview(&root, &rel, &secrets),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -1598,17 +1606,21 @@ mod tests {
         std::fs::write(root.join(".env"), "KEY=1\n").unwrap();
         std::fs::write(root.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
         std::fs::write(root.join("big.txt"), "x\n".repeat(PREVIEW_LINES + 10)).unwrap();
-        let ok = read_preview(root, "a.txt").unwrap();
+        let ok = read_preview(root, "a.txt", &Default::default()).unwrap();
         assert_eq!((ok.lines.len(), ok.cut), (2, false));
-        assert!(read_preview(root, ".env").unwrap_err().contains("secret"));
         assert!(
-            read_preview(root, "bin.dat")
+            read_preview(root, ".env", &Default::default())
+                .unwrap_err()
+                .contains("secret")
+        );
+        assert!(
+            read_preview(root, "bin.dat", &Default::default())
                 .unwrap_err()
                 .contains("binary")
         );
-        assert!(read_preview(root, "../a.txt").is_err());
-        assert!(read_preview(root, "/etc/hosts").is_err());
-        let big = read_preview(root, "big.txt").unwrap();
+        assert!(read_preview(root, "../a.txt", &Default::default()).is_err());
+        assert!(read_preview(root, "/etc/hosts", &Default::default()).is_err());
+        let big = read_preview(root, "big.txt", &Default::default()).unwrap();
         assert_eq!((big.lines.len(), big.cut), (PREVIEW_LINES, true));
         #[cfg(unix)]
         {
@@ -1616,7 +1628,7 @@ mod tests {
             std::fs::write(out.path().join("o.txt"), "outside").unwrap();
             std::os::unix::fs::symlink(out.path().join("o.txt"), root.join("link.txt")).unwrap();
             assert!(
-                read_preview(root, "link.txt")
+                read_preview(root, "link.txt", &Default::default())
                     .unwrap_err()
                     .contains("outside")
             );

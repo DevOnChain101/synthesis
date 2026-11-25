@@ -24,6 +24,7 @@ fn diff(r: &Rig, base: &str, commit: &str) -> DiffReport {
         base,
         commit,
         &AtomicBool::new(false),
+        &Default::default(),
     )
     .unwrap()
 }

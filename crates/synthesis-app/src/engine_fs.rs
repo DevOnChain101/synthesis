@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use synthesis_config::Env;
+use synthesis_core::secret_policy::SecretPolicy;
 use synthesis_harness::{ImageAttachment, sanitize_for_display as clean};
 use synthesis_view::project::{self, ProjectData};
 
@@ -166,13 +167,13 @@ fn git_scan(root: &Path, trusted: bool, env: &Env) -> Result<ProjectData, String
 /// descriptor is checked once more. Reads at most [`PREVIEW_BYTES`], shows at most [`PREVIEW_LINES`] lines,
 /// made printable.
 #[cfg(not(unix))]
-pub fn read(_root: &Path, _rel: &str) -> Result<Value, String> {
+pub fn read(_root: &Path, _rel: &str, _secrets: &SecretPolicy) -> Result<Value, String> {
     // the race-free open is not available: an engine on Windows serves no previews
     Err("file previews are served by an engine on Linux or macOS only".into())
 }
 
 #[cfg(unix)]
-pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
+pub fn read(root: &Path, rel: &str, secrets: &SecretPolicy) -> Result<Value, String> {
     use std::io::Read as _;
     use std::os::unix::fs::MetadataExt as _;
     use synthesis_core::{PathPolicy, contains};
@@ -193,7 +194,7 @@ pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
     name_checks(inner)?;
     if [&real, p]
         .into_iter()
-        .any(synthesis_core::secrets::is_secret_path)
+        .any(|x| secrets.is_secret_path(x, &real_root))
     {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }
@@ -231,7 +232,7 @@ pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
             .strip_prefix(&real_root)
             .map_err(|_| "the file changed while it was opened".to_string())?;
         name_checks(now)?;
-        if synthesis_core::secrets::is_secret_path(now) {
+        if secrets.is_secret_path(now, &real_root) {
             return Err("a secret file (keys, .env, credentials) is not shown".into());
         }
     }
@@ -732,7 +733,7 @@ mod tests {
         std::fs::write(w.join("bin"), [0u8, 1, 2]).unwrap();
         std::fs::write(w.join("big.txt"), "x\n".repeat(PREVIEW_BYTES)).unwrap();
         std::fs::write(d.path().join("secret.txt"), "outside").unwrap();
-        let ok = read(&w, "a.txt").unwrap();
+        let ok = read(&w, "a.txt", &Default::default()).unwrap();
         assert_eq!(ok["lines"][0], "hello");
         assert!(
             !ok["lines"].to_string().contains('\u{1b}'),
@@ -747,15 +748,15 @@ mod tests {
             "sub",
             "missing",
         ] {
-            assert!(read(&w, bad).is_err(), "{bad}");
+            assert!(read(&w, bad, &Default::default()).is_err(), "{bad}");
         }
-        let big = read(&w, "big.txt").unwrap();
+        let big = read(&w, "big.txt", &Default::default()).unwrap();
         assert_eq!(
             (big["cut"].clone(), big["lines"].as_array().unwrap().len()),
             (true.into(), PREVIEW_LINES)
         );
         // no error carries a path of this machine
-        let e = read(&w, "missing").unwrap_err();
+        let e = read(&w, "missing", &Default::default()).unwrap_err();
         assert!(!e.contains(&*d.path().to_string_lossy()), "{e}");
     }
 
@@ -770,7 +771,7 @@ mod tests {
         std::os::unix::fs::symlink(d.path().join("outside.txt"), w.join("out.txt")).unwrap();
         std::os::unix::fs::symlink("/etc", w.join("etc")).unwrap();
         std::fs::hard_link(d.path().join("outside.txt"), w.join("hard.txt")).unwrap();
-        assert!(read(&w, "real.txt").is_ok());
+        assert!(read(&w, "real.txt", &Default::default()).is_ok());
         // a link INSIDE the project to `.git` internals or a secret file is refused by where it really points
         std::fs::create_dir_all(w.join(".git")).unwrap();
         std::fs::write(w.join(".git/config"), "[remote]").unwrap();
@@ -778,15 +779,35 @@ mod tests {
         std::os::unix::fs::symlink(".git/config", w.join("cfg.txt")).unwrap();
         std::os::unix::fs::symlink(".env", w.join("e.txt")).unwrap();
         std::os::unix::fs::symlink("real.txt", w.join("ok.txt")).unwrap();
-        assert!(read(&w, "cfg.txt").unwrap_err().contains(".git"));
-        assert!(read(&w, "e.txt").unwrap_err().contains("secret"));
         assert!(
-            read(&w, "ok.txt").is_ok(),
+            read(&w, "cfg.txt", &Default::default())
+                .unwrap_err()
+                .contains(".git")
+        );
+        assert!(
+            read(&w, "e.txt", &Default::default())
+                .unwrap_err()
+                .contains("secret")
+        );
+        assert!(
+            read(&w, "ok.txt", &Default::default()).is_ok(),
             "a harmless link inside the folder reads"
         );
-        assert!(read(&w, "out.txt").unwrap_err().contains("outside"));
-        assert!(read(&w, "etc/hosts").unwrap_err().contains("outside"));
-        assert!(read(&w, "hard.txt").unwrap_err().contains("hard links"));
+        assert!(
+            read(&w, "out.txt", &Default::default())
+                .unwrap_err()
+                .contains("outside")
+        );
+        assert!(
+            read(&w, "etc/hosts", &Default::default())
+                .unwrap_err()
+                .contains("outside")
+        );
+        assert!(
+            read(&w, "hard.txt", &Default::default())
+                .unwrap_err()
+                .contains("hard links")
+        );
         // a pipe in the tree does not block the engine
         // (no unsafe code in this crate: the shell makes the pipe)
         let ok = std::process::Command::new("mkfifo")
@@ -794,7 +815,11 @@ mod tests {
             .status()
             .is_ok_and(|s| s.success());
         assert!(ok);
-        assert!(read(&w, "pipe").unwrap_err().contains("regular"));
+        assert!(
+            read(&w, "pipe", &Default::default())
+                .unwrap_err()
+                .contains("regular")
+        );
     }
 
     #[cfg(unix)]
@@ -834,12 +859,12 @@ mod tests {
         let (mut ok, mut refused, mut stable) = (0, 0, 0);
         while t0.elapsed() < Duration::from_millis(1500) {
             // a file nobody touches must always read: a reader that refuses everything must not pass
-            let v = read(&w, "quiet/stable.txt")
+            let v = read(&w, "quiet/stable.txt", &Default::default())
                 .unwrap_or_else(|e| panic!("an untouched file was refused: {e}"));
             assert_eq!(v["lines"][0], "stable");
             stable += 1;
             for rel in ["ok.txt", "d/config"] {
-                match read(&w, rel) {
+                match read(&w, rel, &Default::default()) {
                     Ok(v) => {
                         assert!(!v.to_string().contains("SECRET"), "{rel}: {v}");
                         ok += 1;
@@ -860,8 +885,14 @@ mod tests {
         if !w.join("d").exists() && w.join("d.real").exists() {
             std::fs::rename(w.join("d.real"), w.join("d")).unwrap();
         }
-        assert_eq!(read(&w, "ok.txt").unwrap()["lines"][0], "fine");
-        assert_eq!(read(&w, "d/config").unwrap()["lines"][0], "fine-d");
+        assert_eq!(
+            read(&w, "ok.txt", &Default::default()).unwrap()["lines"][0],
+            "fine"
+        );
+        assert_eq!(
+            read(&w, "d/config", &Default::default()).unwrap()["lines"][0],
+            "fine-d"
+        );
     }
 
     #[cfg(unix)]
@@ -1029,6 +1060,6 @@ mod tests {
 mod windows_tests {
     #[test]
     fn an_engine_without_the_race_free_open_serves_no_previews() {
-        assert!(super::read(std::path::Path::new("."), "a.txt").is_err());
+        assert!(super::read(std::path::Path::new("."), "a.txt", &Default::default()).is_err());
     }
 }
