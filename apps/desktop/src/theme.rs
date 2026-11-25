@@ -41,6 +41,11 @@ pub fn ground_stops() -> (t::Rgb, t::Rgb) {
     (mix(t::BG, t::INFO, 0.05), mix(t::BG, t::ACCENT_DEEP, 0.14))
 }
 
+/// The title bar's background: the top colour of [`ground`] at the window opacity, so the bar joins the view under it.
+pub fn bar_ground() -> Hsla {
+    fill(ground_stops().0)
+}
+
 /// The window ground at the window opacity (see [`ground_stops`]); `fill(t::BG)` with a soft drift.
 pub fn ground() -> gpui::Background {
     let (top, bottom) = ground_stops();
@@ -218,6 +223,17 @@ mod tests {
                 assert!(x.0 != y.0 && x.1 != y.1 && x.2 != y.2, "{x:?} {y:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_bar_ground_is_the_top_of_the_window_ground_in_both_modes() {
+        let _g = opacity_guard();
+        for o in [100, 55] {
+            set_opacity(o);
+            assert_eq!(bar_ground(), fill(ground_stops().0));
+            assert_eq!(bar_ground().a, f32::from(o) / 100.);
+        }
+        set_opacity(100);
     }
 
     #[test]
