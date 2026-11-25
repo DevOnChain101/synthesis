@@ -51,7 +51,14 @@ impl CompletionFs for StdFs {
         for e in std::fs::read_dir(abs).ok()?.flatten() {
             let ft = e.file_type().ok();
             let mut is_dir = ft.is_some_and(|t| t.is_dir());
-            let is_link = ft.is_some_and(|t| t.is_symlink());
+            #[allow(unused_mut)]
+            let mut is_link = ft.is_some_and(|t| t.is_symlink());
+            // a junction or other reparse point is not a symlink to std but still leads elsewhere
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                is_link |= e.metadata().is_ok_and(|m| m.file_attributes() & 0x400 != 0);
+            }
             if !is_dir && is_link {
                 is_dir = std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()); // dangling link: a file
             }
@@ -277,9 +284,10 @@ fn path_item(rel: String, abs: PathBuf, is_dir: bool, order: usize) -> Item {
     }
 }
 
-/// A link whose real path is secret-shaped (names only; the target is never read).
+/// A link whose real path is secret-shaped (names only; the target is never read). A link that
+/// does not resolve (dangling, loop, unreadable part) counts as secret: fail closed.
 fn secret_link_target(link: &Path, root: &Path, fs: &dyn CompletionFs) -> bool {
-    fs.realpath(link).is_some_and(|t| {
+    fs.realpath(link).is_none_or(|t| {
         let r = fs.realpath(root).unwrap_or_else(|| root.to_path_buf());
         synthesis_core::secrets::is_secret_shaped_in(&t, &r)
     })
@@ -347,6 +355,9 @@ fn file_items(
                 .cmp(&a.is_dir)
                 .then_with(|| collate(&a.name, &b.name))
         });
+        // children of a link inside the context are judged by their real path too
+        let real = fs.realpath(&abs).filter(|r| *r != abs);
+        let real_root = fs.realpath(&roots[0]).unwrap_or_else(|| roots[0].clone());
         capped = kids.len() > MAX_CHILDREN;
         kids.truncate(MAX_CHILDREN);
         for k in kids {
@@ -355,6 +366,9 @@ fn file_items(
             }
             // names only are listed, but a secret-shaped one is not offered at all
             if synthesis_core::secrets::is_secret_shaped_in(&abs.join(&k.name), &roots[0])
+                || real.as_ref().is_some_and(|r| {
+                    synthesis_core::secrets::is_secret_shaped_in(&r.join(&k.name), &real_root)
+                })
                 || (k.is_link && secret_link_target(&abs.join(&k.name), &roots[0], fs))
             {
                 continue;
@@ -378,7 +392,11 @@ fn file_items(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if starts(&base) && !secret_dir(&dir, &roots[0], fs) {
+            // `a/link/..` was collapsed by `resolve`: the uncollapsed path is judged too
+            if starts(&base)
+                && !secret_dir(&dir, &roots[0], fs)
+                && !secret_link_target(&roots[0].join(d), &roots[0], fs)
+            {
                 items.push(path_item(
                     format!("{}/", shown.trim_end_matches('/')),
                     dir,
@@ -863,6 +881,26 @@ mod tests {
         let l: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
         assert!(l.iter().all(|x| !x.contains(".ssh")), "{l:?}");
         assert!(l.iter().any(|x| x.ends_with("/x/")), "{l:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn children_of_a_link_to_a_secret_dir_and_unresolved_links_are_not_offered() {
+        let d = tree(&["ok.txt", ".kube/config", "x/.ssh/sub/k"]);
+        let cwd = real(&d);
+        std::os::unix::fs::symlink(cwd.join(".kube"), cwd.join("innocent")).unwrap();
+        assert!(labels("innocent/", &cwd).is_empty());
+        // dangling: the target text is secret-shaped, but nothing resolves
+        std::os::unix::fs::symlink(cwd.join("gone/id_rsa"), cwd.join("dangling")).unwrap();
+        let l = labels("", &cwd);
+        assert!(l.contains(&"@ok.txt".to_string()), "{l:?}");
+        assert!(l.iter().all(|x| !x.contains("dangling")), "{l:?}");
+        // `lnk/..` is collapsed lexically to the root but really is `x/.ssh`
+        std::os::unix::fs::symlink(cwd.join("x/.ssh/sub"), cwd.join("lnk")).unwrap();
+        let roots = [cwd.clone(), cwd.join("lnk/..")];
+        let (items, _) = file_items("", &roots, &[], &StdFs);
+        let l: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(l.iter().all(|x| !x.starts_with("@/")), "{l:?}");
     }
 
     #[test]

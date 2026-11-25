@@ -150,9 +150,7 @@ impl Queue {
             }
         }
         self.q.remove(i);
-        if i == 0 {
-            self.front_since = None;
-        }
+        self.forget(id, i);
         Some(choice)
     }
 
@@ -160,15 +158,24 @@ impl Queue {
     pub fn withdraw(&mut self, id: &str) {
         if let Some(i) = self.q.iter().position(|a| a.id == id) {
             self.q.remove(i);
-            if i == 0 {
-                self.front_since = None;
-            }
+            self.forget(id, i);
+        }
+    }
+
+    /// Ask `id` left from position `i`: a later ask reusing the id opens its modal again.
+    fn forget(&mut self, id: &str, i: usize) {
+        if i == 0 {
+            self.front_since = None;
+        }
+        if self.dismissed.as_deref() == Some(id) {
+            self.dismissed = None;
         }
     }
 
     /// Everything still waiting leaves, to be denied (the chat is closing).
     pub fn drain(&mut self) -> Vec<String> {
         self.front_since = None;
+        self.dismissed = None;
         self.q.drain(..).map(|a| a.id).collect()
     }
 
