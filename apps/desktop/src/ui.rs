@@ -227,6 +227,10 @@ impl Shell {
 
     /// A session that waits for a tool permission is answered in the TUI view, in that session.
     fn open_waiting_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // an ask of the orchestrator chat is answered in Super Agent (its modal), not in the TUI view
+        if id.starts_with(crate::superagent::chat::asks::KEY) {
+            return self.go(View::SuperAgent, window, cx);
+        }
         self.go(View::Tui, window, cx);
         if !id.starts_with('#') {
             self.tui.update(cx, |t, cx| t.open_session(id, cx));

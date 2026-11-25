@@ -6,6 +6,7 @@
 //! and nowhere else. Cards are drawn from the host's `Proposal` structs ([`cards`]), never from model text, so a
 //! forged "card" in a reply is just words in a message.
 
+pub mod asks;
 pub mod cards;
 pub mod glue;
 pub mod model;
@@ -40,6 +41,7 @@ use super::kit::{self, ButtonKind, text};
 use super::tokens::{self as t, hsla};
 use crate::engine::{Choice, UiMsg};
 use crate::outcomes_view::model::OFF_LINES;
+use crate::tui_view::TuiView;
 
 /// How often open cards are checked for expiry.
 const TICK: Duration = Duration::from_secs(5);
@@ -78,6 +80,15 @@ enum Phase {
     Failed(String),
 }
 
+/// Where Run in this chat goes: the terminal of a hosted session (the one the title bar's Terminal icon opens when
+/// that session is in front), and the folder it runs in, which the chat names before the click.
+#[derive(Clone)]
+pub struct RunTarget {
+    pub view: Entity<TuiView>,
+    pub title: String,
+    pub cwd: String,
+}
+
 pub struct ConductorChat {
     env: Env,
     workspace: PathBuf,
@@ -100,6 +111,20 @@ pub struct ConductorChat {
     /// Why the last send did not go (a turn is running, a command, the engine failed).
     notice: Option<String>,
     notes: Vec<String>,
+    /// The permission asks of this chat, in arrival order (the modal, the cards and the Needs-you rows read it).
+    asks: asks::Queue,
+    run: Option<RunTarget>,
+}
+
+impl Drop for ConductorChat {
+    /// Fail closed: whatever still waits is denied when the chat goes away.
+    fn drop(&mut self) {
+        for id in self.asks.drain() {
+            if let Some(e) = self.live.as_ref().and_then(Live::engine) {
+                e.answer(&id, Choice::Deny);
+            }
+        }
+    }
 }
 
 impl ConductorChat {
@@ -154,7 +179,19 @@ impl ConductorChat {
             composer,
             notice: None,
             notes: vec![],
+            asks: asks::Queue::default(),
+            run: None,
         }
+    }
+
+    /// The terminal Run goes to (`None`: no session is hosted, Run is not offered).
+    pub fn set_run_target(&mut self, t: Option<RunTarget>) {
+        self.run = t;
+    }
+
+    /// `(Needs-you key, title)` of the asks waiting in this chat.
+    pub fn waiting_asks(&self) -> Vec<(String, String)> {
+        self.asks.waiting()
     }
 
     /// News for the conductor's next turn (a session finished, needs the person, ...): never starts a turn.
@@ -266,13 +303,9 @@ impl ConductorChat {
         match m {
             UiMsg::Event(e) => self.convo.apply(&e),
             UiMsg::TaskDone(Err(e)) => self.notice = Some(sanitize_for_display(&e)),
-            // the conductor has no tool that asks; a hook that does is refused, never left waiting
-            UiMsg::Approval(a) => {
-                if let Some(e) = self.live.as_ref().and_then(Live::engine) {
-                    e.answer(&a.id, Choice::Deny);
-                }
-                self.notice = Some("A permission request in this chat was denied.".into());
-            }
+            // queued: the modal, a card and a Needs-you row show it until the person answers (or the chat closes)
+            UiMsg::Approval(a) => self.asks.push(&a, Instant::now()),
+            UiMsg::Withdraw(id) => self.asks.withdraw(&id, Instant::now()),
             UiMsg::Input(a) => {
                 if let Some(e) = self.live.as_ref().and_then(Live::engine) {
                     e.answer_input(&a.id, None);
@@ -282,6 +315,52 @@ impl ConductorChat {
         }
         self.refresh_cards();
         cx.notify();
+    }
+
+    /// A button of an ask, on any surface. The queue hands the ask out once; only then is the engine answered.
+    /// An Allow needs a real click on the front, armed ask; Deny always goes through.
+    fn ask_clicked(&mut self, id: &str, choice: Choice, ev: &ClickEvent, cx: &mut Context<Self>) {
+        if choice != Choice::Deny && !asks::real(ev) {
+            return;
+        }
+        if let Some(c) = self.asks.take(id, choice, Instant::now()) {
+            if let Some(e) = self.live.as_ref().and_then(Live::engine) {
+                e.answer(id, c);
+            }
+            cx.notify();
+        }
+    }
+
+    fn ask_on(
+        &self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl FnMut(Choice) -> crate::widgets::chrome::OnClick + use<> {
+        let me = cx.entity();
+        let id = id.to_string();
+        move |c| {
+            let (me, id) = (me.clone(), id.clone());
+            Box::new(move |ev, _, cx| me.update(cx, |t, cx| t.ask_clicked(&id, c, ev, cx)))
+        }
+    }
+
+    /// The modal of the front ask (drawn over the window by the Super Agent view); the next one appears when this
+    /// one is answered.
+    pub(crate) fn modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (queued, allow) = (
+            self.asks.all().len().checked_sub(1)?,
+            self.asks.armed(Instant::now()),
+        );
+        let on = self.ask_on(&self.asks.front()?.id.clone(), cx);
+        if !allow {
+            // the buttons wake up once the delay has passed
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(asks::ARM).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+        Some(asks::modal(self.asks.front()?, queued, allow, on))
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
@@ -455,13 +534,15 @@ impl ConductorChat {
                         out.push(chathost::user_bubble(idx, l));
                     }
                 }
-                Item::Assistant { text: s, .. } => out.push(
+                Item::Assistant {
+                    text: s, streaming, ..
+                } => out.push(
                     div()
                         .min_w(px(0.))
                         .text_size(px(t::T3.0))
                         .line_height(px(t::T3.1))
                         .text_color(hsla(t::TEXT_STRONG))
-                        .child(md_blocks(idx, s))
+                        .child(self.md_blocks(idx, s, *streaming, cx))
                         .into_any_element(),
                 ),
                 Item::Tool { name, summary, .. } => out.push(tool_row(name, summary)),
@@ -471,7 +552,62 @@ impl ConductorChat {
                 _ => {}
             }
         }
+        let allow = self.asks.armed(Instant::now());
+        for (i, a) in self.asks.all().iter().enumerate() {
+            let on = self.ask_on(&a.id, cx);
+            out.push(asks::card(a, allow && i == 0, on));
+        }
         out
+    }
+
+    /// The reply with each fenced block as its own section. Run is the gated Run of the TUI view, bound to the
+    /// terminal of [`RunTarget`], and the text is always `tainted` (model output, which may carry web, session or
+    /// file text): every command asks twice. Without a target, or while streaming, the blocks are Copy only.
+    /// Tool rows never come through here.
+    fn md_blocks(
+        &self,
+        idx: usize,
+        text: &str,
+        streaming: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let segs = synthesis_view::codeblock::split(text);
+        if !crate::widgets::codeblock::has_blocks(&segs) {
+            return md(("sa-chat-md", idx), text).into_any_element();
+        }
+        let mut prose =
+            |i: usize, p: String| md(("sa-chat-md", idx * 1024 + i), &p).into_any_element();
+        let id = format!("sa-chat-{idx}");
+        let Some(r) = &self.run else {
+            return crate::widgets::codeblock::message(
+                &id,
+                &segs,
+                true,
+                &mut prose,
+                &mut |_, _, _| None,
+            )
+            .into_any_element();
+        };
+        let blocks = crate::tui_view::run_block::embed_blocks(
+            &r.view,
+            &id,
+            text,
+            (streaming, true),
+            &mut prose,
+            cx,
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(t::S2))
+            .child(
+                text_note(format!(
+                    "Run types into the terminal of {}, in {}. This text is untrusted: every Run asks twice.",
+                    r.title, r.cwd
+                )),
+            )
+            .children(blocks)
+            .into_any_element()
     }
 
     fn card_el(&self, s: &Shown, cx: &mut Context<Self>) -> AnyElement {
@@ -643,23 +779,6 @@ pub(crate) fn md(id: impl Into<gpui::ElementId>, text: &str) -> crate::tui_view:
     crate::tui_view::chat::AssistantMd::new(id, clean_md(text)).inert()
 }
 
-/// The reply with each fenced block as its own section (Copy only: this chat has no terminal); the prose stays
-/// the inert `md`. A reply without a fence is the plain `md`.
-fn md_blocks(idx: usize, text: &str) -> AnyElement {
-    let segs = synthesis_view::codeblock::split(text);
-    if !crate::widgets::codeblock::has_blocks(&segs) {
-        return md(("sa-chat-md", idx), text).into_any_element();
-    }
-    crate::widgets::codeblock::message(
-        &format!("sa-chat-{idx}"),
-        &segs,
-        false,
-        &mut |i, p| md(("sa-chat-md", idx * 1024 + i), &p).into_any_element(),
-        &mut |_, _, _| None,
-    )
-    .into_any_element()
-}
-
 /// Bidi, zero-width and control characters (but not newline or tab) become visible `\u{..}` escapes.
 fn clean_md(s: &str) -> String {
     s.chars()
@@ -692,6 +811,13 @@ fn tool_row(name: &str, summary: &str) -> AnyElement {
         .debug_selector(|| "sa-chat-tool".to_string())
         .whitespace_normal()
         .child(line)
+        .into_any_element()
+}
+
+fn text_note(s: String) -> AnyElement {
+    text(t::T1, t::W_REGULAR, t::TEXT)
+        .whitespace_normal()
+        .child(s)
         .into_any_element()
 }
 

@@ -409,7 +409,7 @@ fn revoke_message(root: &str, done: Result<bool, String>) -> String {
 }
 
 /// The suggestion in the shape `permission_options` reads (the CLI's `suggestion_view`).
-fn suggestion_view(s: &Suggestion) -> Value {
+pub(crate) fn suggestion_view(s: &Suggestion) -> Value {
     use serde_json::json;
     match s {
         Suggestion::AddRules { rules, behavior } => json!({

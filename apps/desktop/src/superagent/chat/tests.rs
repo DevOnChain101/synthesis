@@ -629,3 +629,198 @@ fn start_with_the_setting_on_and_no_model_fails_with_a_reason() {
     assert!(!model::explain(&e).is_empty(), "{e}");
     assert!(e.contains("model"), "{e}");
 }
+
+// ------------------------------------------------------------------------------------------ permission asks
+
+fn ask(id: &str) -> crate::engine::AskApproval {
+    crate::engine::AskApproval {
+        id: id.into(),
+        agent_id: None,
+        tool: "Bash".into(),
+        input: json!({"command": "ls"}),
+        dialog: "permission",
+        prompt: String::new(),
+        reason: "needs a look".into(),
+        origin: None,
+        suggestions: vec![],
+    }
+}
+
+fn queue(ids: &[&str], t0: Instant) -> asks::Queue {
+    let mut q = asks::Queue::default();
+    for id in ids {
+        q.push(&ask(id), t0);
+    }
+    q
+}
+
+#[test]
+fn asks_come_one_at_a_time_in_arrival_order() {
+    let t0 = Instant::now();
+    let late = t0 + asks::ARM;
+    let mut q = queue(&["a", "b", "c"], t0);
+    assert_eq!(q.front().map(|a| a.id.as_str()), Some("a"));
+    // an Allow needs the front ask and the arming delay; nothing else is answered by it
+    assert_eq!(q.take("a", Choice::Once, t0), None, "not armed yet");
+    assert_eq!(
+        q.take("b", Choice::Once, late),
+        None,
+        "b is not the front ask"
+    );
+    assert_eq!(q.take("a", Choice::Once, late), Some(Choice::Once));
+    assert_eq!(q.front().map(|a| a.id.as_str()), Some("b"));
+    // the next one waits out its own delay
+    assert_eq!(q.take("b", Choice::Once, late), None);
+    assert_eq!(
+        q.take("b", Choice::Always, late + asks::ARM),
+        None,
+        "no rule was offered"
+    );
+    assert_eq!(
+        q.take("b", Choice::Once, late + asks::ARM),
+        Some(Choice::Once)
+    );
+    assert_eq!(q.front().map(|a| a.id.as_str()), Some("c"));
+}
+
+#[test]
+fn an_ask_is_answered_once_whatever_surface_answers() {
+    let t0 = Instant::now();
+    let mut q = queue(&["a"], t0);
+    // the modal, the card and the Needs-you row all read this queue
+    assert_eq!(
+        q.waiting(),
+        vec![(
+            "ask:a".to_string(),
+            "Super-Agent: Bash needs permission".to_string()
+        )]
+    );
+    assert_eq!(q.take("a", Choice::Deny, t0), Some(Choice::Deny));
+    assert_eq!(q.take("a", Choice::Deny, t0), None);
+    assert_eq!(q.take("a", Choice::Once, t0 + asks::ARM), None);
+    assert!(q.waiting().is_empty() && q.front().is_none());
+    // a repeated delivery of the same ask is one ask
+    let q = queue(&["a", "a"], t0);
+    assert_eq!(q.all().len(), 1);
+}
+
+#[test]
+fn deny_works_on_any_ask_at_once_and_closing_denies_all() {
+    let t0 = Instant::now();
+    let mut q = queue(&["a", "b", "c"], t0);
+    assert_eq!(q.take("c", Choice::Deny, t0), Some(Choice::Deny));
+    assert_eq!(q.drain(), vec!["a".to_string(), "b".to_string()]);
+    assert!(q.front().is_none() && !q.armed(t0 + asks::ARM));
+    // the chat's Drop sends Deny for what drain returns, and nothing else answers an ask
+    let src = include_str!("mod.rs");
+    let code = src;
+    assert!(
+        code.contains("for id in self.asks.drain()")
+            && code.contains("e.answer(&id, Choice::Deny)")
+    );
+    assert_eq!(
+        code.matches(".answer(").count(),
+        2,
+        "Drop, and the click through the queue"
+    );
+    assert!(
+        !code.contains("Choice::Once") && !code.contains("Choice::Always"),
+        "no auto-allow"
+    );
+}
+
+#[gpui::test]
+fn an_ask_shows_as_modal_card_and_needs_you_row_and_leaves_all_together(cx: &mut TestAppContext) {
+    let (chat, v) = open_window(cx);
+    chat.update(v, |c, cx| c.on_msg(UiMsg::Approval(Box::new(ask("a"))), cx));
+    chat.update(v, |c, cx| c.on_msg(UiMsg::Approval(Box::new(ask("b"))), cx));
+    v.run_until_parked();
+    assert_eq!(chat.read_with(v, |c, _| c.waiting_asks().len()), 2);
+    assert!(
+        v.debug_bounds("sa-ask-card").is_some(),
+        "a card in the response area"
+    );
+    let modal = chat.update(v, |c, cx| c.modal(cx));
+    assert!(modal.is_some(), "the modal of the front ask");
+    // Deny from the card of the second: it leaves the queue for every surface; the front one stays
+    chat.update(v, |c, cx| {
+        c.ask_clicked("b", Choice::Deny, &ClickEvent::default(), cx)
+    });
+    assert_eq!(
+        chat.read_with(v, |c, _| c.waiting_asks()),
+        vec![(
+            "ask:a".to_string(),
+            "Super-Agent: Bash needs permission".to_string()
+        )]
+    );
+    // a key press is not a click: it never allows
+    chat.update(v, |c, cx| {
+        c.ask_clicked("a", Choice::Once, &ClickEvent::default(), cx)
+    });
+    assert_eq!(chat.read_with(v, |c, _| c.waiting_asks().len()), 1);
+    chat.update(v, |c, cx| {
+        c.ask_clicked("a", Choice::Deny, &ClickEvent::default(), cx)
+    });
+    assert!(chat.read_with(v, |c, _| c.waiting_asks().is_empty()));
+    assert!(chat.update(v, |c, cx| c.modal(cx)).is_none());
+}
+
+#[test]
+fn every_orchestrator_command_asks_twice_and_tool_results_and_oversize_blocks_have_no_run() {
+    use synthesis_view::codeblock::{self as cb, Need};
+    // tainted: Untrusted unless risky; a plain `ls` would be `Always` if the text were trusted
+    assert_eq!(Need::of("ls", true), Need::Untrusted);
+    assert_eq!(Need::of("ls", false), Need::Always);
+    assert!(Need::of("ls", true).warn());
+    // md_blocks marks every message tainted and only an assistant message goes through it
+    let src = include_str!("mod.rs");
+    let code = src;
+    assert!(code.contains("(streaming, true)") && code.contains("&segs,\n                true,"));
+    assert_eq!(code.matches("self.md_blocks(").count(), 1);
+    let at = code.find("self.md_blocks(").unwrap();
+    assert!(
+        code[..at].rfind("Item::Assistant").unwrap() > code[..at].rfind("Item::Tool").unwrap_or(0)
+    );
+    assert!(!code[code.find("fn tool_row").unwrap()..].contains("codeblock"));
+    // too long to run from here: Copy only
+    let body = "echo x\n".repeat(cb::MAX_LINES + 1);
+    let segs = cb::split(&format!("```bash\n{body}```"));
+    let Some(cb::Seg::Block(b)) = segs.iter().find(|s| matches!(s, cb::Seg::Block(_))) else {
+        panic!("a block")
+    };
+    assert!(cb::run_refusal(b, &cb::command_text(&b.lang, &b.body)).is_some());
+    // the first click only arms; a key press never runs
+    let mut g = cb::Gate::default();
+    let ctx = cb::Ctx {
+        mouse: true,
+        streaming: false,
+        quiet: true,
+        tainted: true,
+        runnable: true,
+    };
+    let segs = cb::split("```bash\nls\n```");
+    let Some(cb::Seg::Block(b)) = segs.first() else {
+        panic!("a block")
+    };
+    let k = cb::key("ls");
+    g.drawn(k, 0, true);
+    g.hovered(k, true, 0);
+    g.layout(1, 0);
+    assert_eq!(
+        g.press(b, "ls", ctx, 2_000),
+        cb::Press::Confirm(Need::Untrusted)
+    );
+    assert_eq!(
+        g.press(
+            b,
+            "ls",
+            cb::Ctx {
+                mouse: false,
+                ..ctx
+            },
+            3_000
+        ),
+        cb::Press::Ignored
+    );
+    assert_eq!(g.press(b, "ls", ctx, 3_000), cb::Press::Run);
+}
