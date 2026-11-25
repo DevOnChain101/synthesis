@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 synthesis-config = { path = "../synthesis-config" }
+synthesis-core = { path = "../synthesis-core" }
 synthesis-platform = { path = "../synthesis-platform" }
 dunce = "1.0.5"
 # Raw mode and terminal size only: our own parser reads the bytes (see terminal.rs).

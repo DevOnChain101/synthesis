@@ -336,6 +336,10 @@ fn file_items(
             if k.name.starts_with('.') && !lower.starts_with('.') {
                 continue;
             }
+            // names only are listed, but a secret-shaped one is not offered at all
+            if synthesis_core::secrets::is_secret_shaped_in(&abs.join(&k.name), &roots[0]) {
+                continue;
+            }
             if starts(&k.name) {
                 let rel = format!("{dir_part}{}{}", k.name, if k.is_dir { "/" } else { "" });
                 items.push(path_item(rel, abs.join(&k.name), k.is_dir, o));
@@ -790,6 +794,36 @@ mod tests {
                 .ends_with("… more")
         );
         assert!(!all.items[0].detail(&StdFs, i64::MAX / 4).contains("more"));
+    }
+
+    #[test]
+    fn secret_shaped_names_are_not_offered() {
+        let d = tree(&[
+            ".env",
+            "id_rsa",
+            "server.pem",
+            "credentials.json",
+            "main.rs",
+            ".ssh/config",
+            "src/.env",
+            "src/lib.rs",
+        ]);
+        let cwd = real(&d);
+        let l = labels("", &cwd);
+        assert!(l.contains(&"@main.rs".to_string()), "{l:?}");
+        for hidden in ["@id_rsa", "@server.pem", "@credentials.json", "@.ssh/"] {
+            assert!(!l.contains(&hidden.to_string()), "{hidden}: {l:?}");
+        }
+        // dotfiles are listed only after a dot, and then the secret ones still are not
+        let l = labels(".", &cwd);
+        assert!(l.iter().all(|x| x != "@.env" && x != "@.ssh/"), "{l:?}");
+        assert!(labels(".env", &cwd).is_empty());
+        assert!(labels("id_rsa", &cwd).is_empty());
+        assert_eq!(labels("src/", &cwd), ["@src/lib.rs"]);
+        assert!(labels(".ssh/", &cwd).is_empty());
+        if cfg!(any(target_os = "macos", windows)) {
+            assert!(labels("ID_RSA", &cwd).is_empty());
+        }
     }
 
     #[test]
