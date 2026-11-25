@@ -85,6 +85,11 @@ impl SessionHost {
         self.views.iter().find(|(i, _)| i == id).map(|(_, v)| v)
     }
 
+    /// The embedded view of session `id`, for the chat's Run.
+    pub(crate) fn view_of(&self, id: &str) -> Option<Entity<TuiView>> {
+        self.view(id).cloned()
+    }
+
     pub fn len(&self) -> usize {
         self.views.len()
     }

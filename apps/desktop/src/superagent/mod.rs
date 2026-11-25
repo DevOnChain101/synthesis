@@ -159,6 +159,8 @@ impl SuperAgentView {
         let home = cx.new(|cx| HomeView::new(outcomes.clone(), cx));
         subs.push(cx.subscribe(&home, |v, _, e: &HomeEvent, cx| match e {
             HomeEvent::OpenOutcome(id) => v.open(Frame::Outcome(id.clone()), cx),
+            // an ask of the orchestrator chat is answered in its modal or card, not in a session
+            HomeEvent::OpenSession(id) if id.starts_with(chat::asks::KEY) => {}
             HomeEvent::OpenSession(id) => cx.emit(OpenSession(id.clone())),
         }));
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -177,6 +179,12 @@ impl SuperAgentView {
                     v.enable_guide(cx)
                 }),
             );
+            // what the chat asks of the person is listed in Needs you
+            let outcomes = outcomes.clone();
+            subs.push(cx.observe(&chat, move |_, chat, cx| {
+                let asks = chat.read(cx).waiting_asks();
+                outcomes.update(cx, |o, cx| o.set_chat_asks(asks, cx));
+            }));
             subs.push(cx.subscribe(&chat, |_, _, _: &OpenSettings, cx| {
                 cx.emit(SwitchView(View::Settings))
             }));
@@ -283,6 +291,23 @@ impl SuperAgentView {
                 Some("Turn Super Agent on in Settings (synt.orchestrator.enabled).".into());
         }
         cx.notify();
+    }
+
+    /// Run in the orchestrator chat goes to the terminal of the session the title bar's Terminal icon would open:
+    /// the one in front, else the last one that was.
+    fn run_target(&self, cx: &App) -> Option<chat::RunTarget> {
+        let id = self.frames.last_session()?;
+        let view = self.host.read(cx).view_of(id)?;
+        let cwd = self
+            .folders
+            .iter()
+            .find(|(i, _)| i == id)?
+            .1
+            .display()
+            .to_string();
+        let cwd = synthesis_harness::sanitize_for_display(&cwd);
+        let title = self.host.read(cx).info(id, cx)?.title;
+        Some(chat::RunTarget { view, title, cwd })
     }
 
     fn collapsed(&self, window: &Window) -> bool {
@@ -1061,6 +1086,13 @@ impl Render for SuperAgentView {
             }
         }
         self.close_side_if_empty(cx);
+        let target = self.run_target(cx);
+        let ask_modal = self.chat.clone().and_then(|c| {
+            c.update(cx, |c, cx| {
+                c.set_run_target(target);
+                c.modal(cx)
+            })
+        });
         let modals = self.outcomes.update(cx, |o, cx| o.modals(window, cx));
         let picker = self.picker_overlay(cx);
         let side = self.sidebar(window, cx);
@@ -1121,6 +1153,7 @@ impl Render for SuperAgentView {
             .children(side_over)
             .children(modals)
             .children(picker)
+            .children(ask_modal)
     }
 }
 
