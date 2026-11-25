@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["apps/*", "crates/*"]
-# vendor/ is third-party source (see vendor/gpui-base/VENDORED.md): not a member, so fmt/clippy/test skip it
-exclude = ["vendor"]
+# vendor/ and crates/gpui-base are third-party source (see crates/gpui-base/VENDORED.md): not members, so fmt/clippy/test skip it
+exclude = ["vendor", "crates/gpui-base"]
 # apps/desktop (GPUI) needs platform system libraries on Linux; build it explicitly:
 #   cargo build -p synthesis-desktop
 default-members = [
@@ -53,5 +53,5 @@ all = { level = "warn", priority = -1 }
 # were lock entries that no target compiles; see vendor/README.md.
 [patch.crates-io]
 notify-rust = { path = "vendor/notify-rust" }
-# gpui-base 0.8.1 plus one hook for the colour of **bold** text (vendor/gpui-base/VENDORED.md)
-gpui-base = { path = "vendor/gpui-base" }
+# gpui-base 0.8.1 plus one hook for the colour of **bold** text (crates/gpui-base/VENDORED.md)
+gpui-base = { path = "crates/gpui-base" }

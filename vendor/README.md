@@ -6,5 +6,4 @@
   are removed, so `Cargo.lock` lists no crate that no target builds (owner decision 2026-11-18: no crate with that
   name in the lock). Only `gpui-pre-linux` depends on it, on Linux, through the default `z` (zbus) feature, which is
   unchanged. Re-sync from crates.io when GPUI is bumped.
-- `gpui-base/`: crates.io `gpui-base` 0.8.1 (Apache-2.0) plus a small patch for the colour of bold text, through the same
-  `[patch.crates-io]`; see `gpui-base/VENDORED.md` (source checksum, exact patch, how to re-apply on a bump).
+- `gpui-base` moved to `crates/gpui-base` (crates.io `gpui-base` 0.8.1 plus a bold-colour patch, same `[patch.crates-io]`; see its `VENDORED.md`).
