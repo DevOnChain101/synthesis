@@ -455,6 +455,13 @@ fn bash_wildcards_and_unexpandable_words_meet_the_user_patterns() {
     ] {
         assert_eq!(d(&p, "Bash", json!({ "command": cmd })), Q, "{cmd}");
     }
+    // brace expansion makes several words out of one: not judged by text, a question
+    for cmd in ["cat config/{prod,x}.json", "cat a.{dat,x}"] {
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), Q, "{cmd}");
+    }
+    // a backslash the shell drops (`va\ult` is `vault`) does not hide a denied path, user pattern or built-in
+    assert_eq!(d(&p, "Bash", json!({ "command": "cat va\\ult/k.txt" })), D);
+    assert_eq!(d(&p, "Bash", json!({ "command": "cat .en\\v" })), D);
     // Grep `glob` / Glob `pattern` read as a path against the list
     assert_eq!(d(&p, "Glob", json!({ "pattern": "vault/**/*.json" })), D);
     // no user pattern: nothing changes

@@ -343,13 +343,6 @@ pub fn standard_policy_git(
     let mut p = SandboxPolicy::standard(&ws.root, &tmp);
     p.network = network;
     p.writable_roots.extend(ws.additional_dirs.iter().cloned());
-    // `synt.secrets.deny` patterns that name concrete places: hidden from commands too (Bash indirect reads)
-    let (apply, _) = split_secret_deny(
-        &p,
-        ws.secrets.sandbox_deny_paths(&ws.root),
-        landlock_first(),
-    );
-    p.deny_paths.extend(apply);
     if let Some(git_dir) = git_dir {
         // <main>/.git/worktrees/<id> -> <main>/.git (objects, refs, config)
         let common = git_dir
@@ -362,10 +355,18 @@ pub fn standard_policy_git(
         p.readable_roots.push(common.to_path_buf());
         p.protect([ws.root.join(".git")]);
     }
+    // `synt.secrets.deny` patterns that name concrete places: hidden from commands too (Bash indirect reads)
+    let (apply, _) = split_secret_deny(
+        &p,
+        ws.secrets.sandbox_deny_paths(&ws.root),
+        landlock_first(),
+    );
+    p.deny_paths.extend(apply);
     Ok(p)
 }
 
-/// The first sandbox backend on this host is Landlock (cached: detection probes the system).
+/// The first sandbox backend on this host is Landlock. Cached for the life of the process (detection probes the
+/// system); a backend that appears or disappears later (bubblewrap installed mid-session) is picked up on restart.
 pub fn landlock_first() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *C.get_or_init(|| synthesis_sandbox::detect().name() == "landlock")

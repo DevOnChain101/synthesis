@@ -91,13 +91,21 @@ pub(crate) fn judge(sp: &SecretPolicy, word: &str, bases: &[PathBuf], root: &Pat
     if sp.deny_list().is_empty() {
         return Verdict::Clear;
     }
+    // bash drops a backslash outside quotes (`.en\v.local` is `.env.local`); the parser keeps it, so judge both
+    if !cfg!(windows) && word.contains('\\') {
+        let plain = word.replace('\\', "");
+        if !matches!(judge(sp, &plain, bases, root), Verdict::Clear) {
+            return Verdict::Hit;
+        }
+    }
     let hit = |p: &Path| sp.is_secret_path(p, root);
     // the text itself, conservatively: `secrets/*` is under `secrets/**`, `*.pfx` is `*.pfx`
     if hit(Path::new(word)) {
         return Verdict::Hit;
     }
     let starts_user = word.starts_with('~') && !word.starts_with("~/") && word != "~";
-    if word.contains(['$', '`', '[']) || starts_user {
+    // `{a,b}` is brace expansion: the shell makes several words out of one
+    if word.contains(['$', '`', '[', '{']) || starts_user {
         return Verdict::Unknown;
     }
     if !word.contains(['*', '?']) {

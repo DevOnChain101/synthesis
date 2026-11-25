@@ -1167,7 +1167,11 @@ impl Permissions {
                 let bare = word.rsplit(['<', '>']).next().unwrap_or(word);
                 let val = bare.rsplit_once('=').map(|(_, v)| v);
                 for t in [word.as_str(), bare].into_iter().chain(val) {
-                    if synthesis_core::secrets::names_secret(t) {
+                    if synthesis_core::secrets::names_secret(t)
+                        || (!cfg!(windows)
+                            && t.contains('\\')
+                            && synthesis_core::secrets::names_secret(&t.replace('\\', "")))
+                    {
                         return true;
                     }
                     // the user's `synt.secrets.deny`: a wildcard is expanded here (no shell), a word that

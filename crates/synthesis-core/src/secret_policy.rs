@@ -309,6 +309,9 @@ impl Pat {
                 },
             )
         };
+        if shown.split('/').any(|c| c == ".") || shown == "." {
+            return Err("a `.` segment never matches (use ./x only at the start)".into());
+        }
         let segs = fold(&shown, ci)
             .split('/')
             .filter(|x| !x.is_empty())
@@ -320,8 +323,8 @@ impl Pat {
                 }
             })
             .collect::<Vec<_>>();
-        if segs.is_empty() {
-            return Err("empty".into());
+        if segs.iter().all(|x| matches!(x, Seg::Deep)) {
+            return Err("only ** names no file".into());
         }
         Ok(Pat {
             raw: raw.to_string(),
@@ -542,6 +545,14 @@ mod tests {
             !hit(&d, "/w/proj/e\u{301}.cert"),
             "case-sensitive systems keep the bytes"
         );
+    }
+
+    #[test]
+    fn patterns_that_can_never_match_are_rejected() {
+        let (d, diag) = dl(&["**", "**/**", "a/./b", ".", "./ok.key"], CS);
+        assert_eq!(diag.len(), 4, "{diag:?}");
+        assert_eq!(d.patterns().collect::<Vec<_>>(), ["./ok.key"]);
+        assert!(hit(&d, "/w/proj/ok.key"));
     }
 
     #[test]
