@@ -10,7 +10,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use synthesis_core::outcome::{Contract, ContractKind, Envelope, HARD_MAX_TOKENS, HARD_MAX_TURNS};
+use synthesis_core::outcome::{
+    Contract, ContractKind, DEFAULT_ATTEMPT_MAX_TURNS, Envelope, HARD_MAX_TOKENS, HARD_MAX_TURNS,
+};
 use synthesis_session::outcome::OutcomePolicy;
 
 use crate::{AttemptEnv, CompileError, CompiledEnvelope, compile_envelope};
@@ -175,13 +177,16 @@ impl Profile {
             prompt,
             max_cost_usd: cap,
             max_wall_secs: wall,
-            max_turns: policy.attempt_max_turns.clamp(1, HARD_MAX_TURNS).min(
-                if contract.kind == ContractKind::ReadOnly {
-                    READ_ONLY_MAX_TURNS
-                } else {
-                    HARD_MAX_TURNS
-                },
-            ),
+            max_turns: match (
+                contract.kind == ContractKind::ReadOnly,
+                policy.attempt_max_turns,
+            ) {
+                (true, None) => READ_ONLY_MAX_TURNS,
+                (true, Some(n)) => n.clamp(1, HARD_MAX_TURNS).min(READ_ONLY_MAX_TURNS),
+                (false, n) => n
+                    .unwrap_or(DEFAULT_ATTEMPT_MAX_TURNS)
+                    .clamp(1, HARD_MAX_TURNS),
+            },
             max_tokens: policy.attempt_max_tokens.clamp(1, HARD_MAX_TOKENS),
             contract_version: contract.version,
             envelope: contract.envelope.clone(),

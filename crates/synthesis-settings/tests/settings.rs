@@ -1464,13 +1464,13 @@ fn managed_planner_settings_win_and_an_unusable_one_fails_closed_to_the_stub() {
 fn orchestrator_turn_and_token_limits_have_defaults_bounds_and_managed_wins() {
     let f = fx();
     let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
-    assert_eq!((o.max_turns, o.max_tokens), (50, 2_000_000));
+    assert_eq!((o.max_turns, o.max_tokens), (None, 2_000_000));
 
     f.user(json!({"synt":{"orchestrator":{"max_turns": 200, "max_tokens": 20_000_000}}}));
     let s = f.load(ProjectTrust::Trusted);
     assert_eq!(
         (
-            s.synthesis.orchestrator.max_turns,
+            s.synthesis.orchestrator.max_turns.unwrap(),
             s.synthesis.orchestrator.max_tokens
         ),
         (200, 20_000_000)
@@ -1517,6 +1517,6 @@ fn orchestrator_turn_and_token_limits_have_defaults_bounds_and_managed_wins() {
             .synthesis
             .orchestrator
             .max_turns,
-        20
+        Some(20)
     );
 }

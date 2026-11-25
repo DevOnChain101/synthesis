@@ -215,7 +215,8 @@ pub struct OrchestratorSettings {
     pub attempt_max_cost_usd: Option<f64>,
     pub attempt_max_wall_secs: Option<u64>,
     /// Provider calls per attempt (a turn), 1..=200, never unlimited.
-    pub max_turns: u32,
+    /// `None` (unset): 50 for a write attempt, 80 for a read-only one; set: both, read-only at most 80.
+    pub max_turns: Option<u32>,
     /// Raw total tokens per attempt (provider usage counts, no prices), 1..=20_000_000.
     pub max_tokens: u64,
     pub worktree_retention_days: u32,
@@ -236,7 +237,7 @@ impl Default for OrchestratorSettings {
             max_cost_usd: None,
             attempt_max_cost_usd: None,
             attempt_max_wall_secs: None,
-            max_turns: 50,
+            max_turns: None,
             max_tokens: 2_000_000,
             worktree_retention_days: 7,
             decision_expiry_hours: 24,
@@ -307,7 +308,7 @@ impl OrchestratorSettings {
                     None => bad(diags, &mut invalid, what, k, "a positive number"),
                 },
                 "max_turns" => match int(v, 1, ORCH_HARD_MAX_TURNS) {
-                    Some(n) => self.max_turns = n as u32,
+                    Some(n) => self.max_turns = Some(n as u32),
                     None => bad(diags, &mut invalid, what, k, "a whole number from 1 to 200"),
                 },
                 "max_tokens" => match int(v, 1, ORCH_HARD_MAX_TOKENS) {

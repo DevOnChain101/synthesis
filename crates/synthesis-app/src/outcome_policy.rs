@@ -38,6 +38,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_settings_ceilings_equal_the_core_ceilings_and_reach_the_policy() {
+        use synthesis_core::outcome::{HARD_MAX_TOKENS, HARD_MAX_TURNS};
+        assert_eq!(
+            synthesis_settings::ORCH_HARD_MAX_TURNS,
+            u64::from(HARD_MAX_TURNS)
+        );
+        assert_eq!(synthesis_settings::ORCH_HARD_MAX_TOKENS, HARD_MAX_TOKENS);
+        let p = outcome_policy(&OrchestratorSettings::default());
+        assert_eq!(
+            (p.attempt_max_turns, p.attempt_max_tokens),
+            (None, 2_000_000)
+        );
+    }
+
+    #[test]
     fn the_disclosure_is_the_plan_text() {
         let plan = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
