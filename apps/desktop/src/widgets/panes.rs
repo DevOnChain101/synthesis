@@ -112,12 +112,23 @@ pub fn diff_grid(d: &Value) -> Div {
                     n("new_lines")
                 )),
         );
-        for l in h
+        let lines: Vec<&Value> = h
             .get("lines")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-        {
+            .collect();
+        let signs: Vec<char> = lines
+            .iter()
+            .map(|l| {
+                l.get("tag")
+                    .and_then(Value::as_str)
+                    .and_then(|t| t.chars().next())
+                    .unwrap_or(' ')
+            })
+            .collect();
+        let marks = synthesis_view::project::gutter::sign_marks(&signs);
+        for (l, mark) in lines.into_iter().zip(marks) {
             let tag = l.get("tag").and_then(Value::as_str).unwrap_or(" ");
             let tx = l.get("text").and_then(Value::as_str).unwrap_or("");
             let (fg, bg) = match tag {
@@ -135,9 +146,11 @@ pub fn diff_grid(d: &Value) -> Div {
                     .child(s)
             };
             let row = div()
+                .relative()
                 .flex()
                 .pr(px(12.))
                 .whitespace_nowrap()
+                .children(mark.map(|m| mark_bar(m).left_0()))
                 .child(cell(no(l, "old_no"), 34.))
                 .child(cell(no(l, "new_no"), 34.))
                 .child(
@@ -172,6 +185,18 @@ pub fn diff_grid(d: &Value) -> Div {
         );
     }
     col
+}
+
+/// The gutter bar of a changed line (VS Code's colours): green added, blue edited, red removed. Absolutely
+/// placed (`left`/`right` to the caller) so it never moves the text.
+pub fn mark_bar(m: synthesis_view::project::gutter::Mark) -> Div {
+    use synthesis_view::project::gutter::Mark;
+    let c = match m {
+        Mark::Added => t::SUCCESS,
+        Mark::Modified => t::INFO,
+        Mark::Removed => t::ERROR,
+    };
+    div().absolute().top_0().bottom_0().w(px(3.)).bg(hsla(c))
 }
 
 /// One line of a unified diff from `git diff`, coloured by its first character.

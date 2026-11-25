@@ -12,6 +12,7 @@ use gpui::{
     Styled as _, div, prelude::*, px,
 };
 use synthesis_cli_ui_render::theme as t;
+use synthesis_view::project::gutter::{diff_signs, sign_marks};
 use synthesis_view::project::{self, FileDiff, row_paths};
 
 use super::TuiView;
@@ -19,7 +20,7 @@ use super::panels::{dim, strong, with_alpha};
 use super::tabs::read_preview;
 use crate::theme::hsla;
 use crate::widgets::codeblock::icon_btn;
-use crate::widgets::panes::{git_line, note};
+use crate::widgets::panes::{git_line, mark_bar, note};
 
 /// What the viewer keeps of the git side of the explorer (in `TabState`).
 #[derive(Default)]
@@ -76,12 +77,14 @@ impl TuiView {
     /// The status letter of the file `path` of the tree.
     fn file_status(&self, path: &str) -> Option<char> {
         let d = self.tree.data.as_ref()?;
-        d.rows
-            .iter()
-            .zip(row_paths(d))
-            .find(|(r, p)| p == path && !r.dir)
-            .and_then(|(r, _)| r.status)
-            .filter(|c| *c != '!')
+        let row = d.rows.iter().zip(row_paths(d)).find(|(_, p)| p == path);
+        match row {
+            Some((r, _)) if r.dir => None,
+            Some((r, _)) => r.status,
+            // a file of a folder not opened in the tree (a click in Source Control): the status of the repository
+            None => d.listing.status.get(path).copied(),
+        }
+        .filter(|c| *c != '!')
     }
 
     /// Reads the diff of `path` off the UI thread (a click on a file, Refresh). Same epoch guard as the preview.
@@ -205,7 +208,15 @@ impl TuiView {
                     .py(px(6.))
                     .px(px(12.))
                     .text_size(px(super::filesel::FONT_PX))
-                    .children(f.lines.iter().map(|l| git_line(l)))
+                    .children(f.lines.iter().zip(sign_marks(&diff_signs(&f.lines))).map(
+                        |(l, m)| {
+                            // a pair of removed and added lines is an edit: blue bar on both
+                            div()
+                                .relative()
+                                .children(m.map(|m| mark_bar(m).left(px(-10.))))
+                                .child(git_line(l))
+                        },
+                    ))
                     .when(f.cut, |d| {
                         d.child(
                             div()

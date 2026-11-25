@@ -130,6 +130,8 @@ pub struct TabState {
     pub preview: Option<Preview>,
     /// Git side of the explorer: file/diff switch and the diff of the selected file.
     pub egit: super::explorer_git::State,
+    /// The Source Control section of the explorer.
+    pub scm: super::scm_view::State,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
     /// Text (anchor and head, line and char) selected in the preview; a drag is in progress; the right-click menu's spot.
@@ -574,6 +576,9 @@ impl TuiView {
             return;
         }
         self.request_scan(cx);
+        if self.ts.scm.open {
+            self.request_scm(cx);
+        }
         if let Some(sel) = self.ts.tree_sel.clone().filter(|p| self.is_file(p)) {
             self.open_preview(sel, cx);
         }
@@ -1062,15 +1067,44 @@ impl TuiView {
             .flex_col()
             .border_r_1()
             .border_color(hsla(t::RULE))
-            .child(self.fx_header())
+            .child(self.section_header(
+                "fx-files-head",
+                self.files_title(),
+                !self.ts.scm.files_shut,
+                cx,
+                |this, _, cx| this.toggle_files(cx),
+            ))
+            .when(!self.ts.scm.files_shut, |d| {
+                d.child(
+                    div()
+                        .id("fx-tree")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
+                        .child(rows),
+                )
+            })
+            // owner-requested section (like VS Code): collapsed until opened
             .child(
-                div()
-                    .id("fx-tree")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(rows),
-            );
+                self.section_header(
+                    "fx-scm-head",
+                    self.scm_title(),
+                    self.ts.scm.open,
+                    cx,
+                    |this, window, cx| this.toggle_scm(window, cx),
+                )
+                .border_t_1(),
+            )
+            .when(self.ts.scm.open, |d| {
+                d.child(
+                    div()
+                        .id("fx-scm")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
+                        .child(self.scm_body(cx)),
+                )
+            });
         let body = div()
             .id("fx-body")
             .flex_1()
@@ -1181,6 +1215,16 @@ impl TuiView {
                         cx.notify();
                     }));
                 let info = format!("{n} lines \u{b7} {}", human_size(b.size));
+                // added / edited / removed lines against HEAD, from the diff the viewer already reads
+                let gut = self
+                    .ts
+                    .egit
+                    .diff
+                    .as_ref()
+                    .filter(|(dp, _)| *dp == p.path)
+                    .and_then(|(_, r)| r.as_ref().ok())
+                    .map(|f| project::gutter::gutter(&f.lines))
+                    .unwrap_or_default();
                 if md && !self.ts.md_raw {
                     // formatted: the chat's own Markdown view (selectable text; no line-wise quote here, use raw)
                     let id = p
@@ -1262,11 +1306,26 @@ impl TuiView {
                                     )
                                     .child(
                                         div()
+                                            .relative()
                                             .w(px(w))
                                             .flex_none()
                                             .pr(px(12.))
                                             .text_right()
                                             .text_color(dim())
+                                            .children(
+                                                gut.mark(i + 1)
+                                                    .map(|m| panes::mark_bar(m).right(px(4.))),
+                                            )
+                                            // a deletion: a red line above this one (below the last line at the end)
+                                            .children(
+                                                gut.removed
+                                                    .contains(&(i + 1))
+                                                    .then(|| removed_line().top(px(-1.))),
+                                            )
+                                            .children(
+                                                (i + 1 == n && gut.removed.contains(&(n + 1)))
+                                                    .then(|| removed_line().bottom(px(-1.))),
+                                            )
                                             .child((i + 1).to_string()),
                                     )
                                     .child(
@@ -1311,6 +1370,16 @@ impl TuiView {
             }
         }
     }
+}
+
+/// The red mark of removed lines in the gutter of the file viewer (the caller sets `top` or `bottom`).
+fn removed_line() -> Div {
+    div()
+        .absolute()
+        .right(px(2.))
+        .w(px(8.))
+        .h(px(2.))
+        .bg(hsla(t::ERROR))
 }
 
 /// A file the preview can show formatted.
