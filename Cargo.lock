@@ -7410,6 +7410,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "synthesis-config",
+ "synthesis-core",
  "synthesis-platform",
  "tempfile",
  "unicode-properties",
