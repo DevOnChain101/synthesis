@@ -340,3 +340,116 @@ fn the_handoff_entry_comes_from_the_driving_view_behind_the_chat(cx: &mut TestAp
     assert_eq!(h.folder, std::path::PathBuf::from("/work/proj"));
     assert_eq!(h.scope, crate::handoff::Scope::Local);
 }
+
+// ------------------------------------------------------------------------------------------ images
+
+fn png(w: u32, h: u32, pad: usize) -> Vec<u8> {
+    let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+    v.extend_from_slice(b"IHDR");
+    v.extend_from_slice(&w.to_be_bytes());
+    v.extend_from_slice(&h.to_be_bytes());
+    v.resize(v.len() + pad, 0);
+    v
+}
+
+fn clip(c: &mut Chat<'_>, f: gpui::ImageFormat, bytes: Vec<u8>) {
+    c.v.update(|_, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+            f, bytes,
+        )))
+    });
+}
+
+/// A key in the frame; true when the embedded view took it.
+fn press(c: &mut Chat<'_>, tui: &Entity<TuiView>, keys: &'static str) -> bool {
+    let ks = gpui::Keystroke::parse(keys).unwrap();
+    tui.update_in(c.v, |t, w, cx| t.on_key(&ks, w, cx))
+}
+
+fn held(c: &Chat<'_>, tui: &Entity<TuiView>) -> usize {
+    tui.read_with(c.v, |t, _| t.embed_live().unwrap().images.len())
+}
+
+fn last_note(c: &Chat<'_>) -> String {
+    c.tui.read_with(c.v, |t, _| {
+        match t.embed_live().unwrap().view.convo.items.last() {
+            Some(Item::Notice { text, .. }) => text.clone(),
+            _ => String::new(),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_pasted_image_is_a_chip_in_the_frame_and_the_tui_cap_holds(cx: &mut TestAppContext) {
+    let mut c = chat(cx, vec![], vec![], false);
+    let tui = c.tui.clone();
+    clip(&mut c, gpui::ImageFormat::Png, png(4, 4, 8));
+    for _ in 0..5 {
+        assert!(press(&mut c, &tui, "cmd-v"));
+    }
+    assert_eq!(held(&c, &tui), 5);
+    c.v.run_until_parked();
+    assert!(c.v.debug_bounds("sa-chat-images").is_some());
+    assert!(
+        press(&mut c, &tui, "cmd-v"),
+        "an image is consumed even when refused"
+    );
+    assert_eq!(held(&c, &tui), 5);
+    assert!(last_note(&c).contains("at most 5"), "{}", last_note(&c));
+    tui.update(c.v, |t, cx| t.embed_unattach(0, cx));
+    assert_eq!(held(&c, &tui), 4);
+}
+
+#[gpui::test]
+fn a_non_image_and_an_oversize_image_are_refused_in_a_frame(cx: &mut TestAppContext) {
+    let mut c = chat(cx, vec![], vec![], false);
+    let tui = c.tui.clone();
+    // text on the clipboard: Cmd+V is left to the box, Alt+V says there is no image
+    c.v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
+    assert!(!press(&mut c, &tui, "cmd-v"));
+    assert!(press(&mut c, &tui, "alt-v"));
+    assert!(last_note(&c).contains("no image"));
+    clip(
+        &mut c,
+        gpui::ImageFormat::Png,
+        b"not a png at all, just text bytes".to_vec(),
+    );
+    assert!(press(&mut c, &tui, "cmd-v"));
+    assert!(last_note(&c).contains("not a PNG"), "{}", last_note(&c));
+    clip(&mut c, gpui::ImageFormat::Gif, vec![1; 32]);
+    assert!(press(&mut c, &tui, "cmd-v"));
+    assert!(last_note(&c).contains("not supported"));
+    clip(&mut c, gpui::ImageFormat::Png, png(4, 4, 5 << 20));
+    assert!(press(&mut c, &tui, "cmd-v"));
+    assert!(last_note(&c).contains("4 MB"), "{}", last_note(&c));
+    assert_eq!(held(&c, &tui), 0);
+}
+
+#[gpui::test]
+fn a_paste_attaches_to_the_frame_that_took_the_key_only(cx: &mut TestAppContext) {
+    let mut a = chat(cx, vec![], vec![], false);
+    let (_f2, cfg) = fx(1);
+    let other = a.v.update(|w, cx| {
+        cx.new(|cx| {
+            let mut t = TuiView::live(w, cx, cfg, Default::default(), 0.);
+            t.embed = Some(Embed {
+                headless: true,
+                ..Embed::default()
+            });
+            let mut l = Live::new();
+            l.starting = false;
+            t.set_live(l);
+            t.shown = false; // a frame behind the one on screen
+            t
+        })
+    });
+    let tui = a.tui.clone();
+    clip(&mut a, gpui::ImageFormat::Png, png(4, 4, 8));
+    assert!(press(&mut a, &tui, "cmd-v"));
+    assert_eq!((held(&a, &tui), held(&a, &other)), (1, 0));
+    assert!(
+        !press(&mut a, &other, "cmd-v"),
+        "a frame that is not on screen takes no keys"
+    );
+    assert_eq!(held(&a, &other), 0);
+}
