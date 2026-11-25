@@ -365,7 +365,7 @@ The fake providers are scripted to comply with the attack; the host must stop it
 
 Super Agent tab only. The TUI view keeps its own title bar and gets none of this.
 - **Rail's top row:** the traffic lights, the logo, the collapse-rail button, then **back and forward**, greyed when there is no history in that direction.
-- **Title row:** the **open frames are tabs**, starting at the rail's right edge: drag to reorder (the first, home, is pinned), close button on the active or hovered tab, `+` for a new session, overflow menu, Cmd+T / Cmd+W / Ctrl+Tab. No limit on open session frames (owner decision 2026-11-25, replaces the 6-frame cap of 2026-11-21 that #245 removed from the code).
+- **Title row:** the **open frames are tabs**, starting at the rail's right edge: drag to reorder (the first, home, is pinned), close button on the active or hovered tab, `+` for a new session, overflow menu, Cmd+T / Cmd+W / Ctrl+Tab. No limit on open session frames (owner decision 2026-11-25, replaces the 6-frame cap of 2026-11-21 that #245 removed from the code); past a soft threshold (setting `synt.desktop.sessions.warn_at`, default 6 live sessions) creating a new session shows a warning and still creates it (owner, 2026-11-25: warn, never block).
 - **No "Super Agent" label and no breadcrumb.** The `TUI | Super Agent` mode buttons and the badge stay at the right of the bar where S0 put them.
 - **Settings is the title-bar gear** (kept as in S0). The app's Settings view stays as it is (owner decision 2026-11-21); the mock's Settings page is not ported.
 - History walks Super Agent frames: the home (command centre, 5.5), the session frames, the outcome frames and the worker frames.
