@@ -4217,6 +4217,11 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
     let mut o = complete::Options::new(&cwd_now);
     o.commands = &live.commands;
     o.limit = 8;
+    o.secrets = live
+        .engine
+        .as_ref()
+        .map(|e| e.secrets())
+        .unwrap_or_default();
     let s = complete::suggest(&ed, &o, &StdFs)?;
     let now = now_ms();
     let items = s

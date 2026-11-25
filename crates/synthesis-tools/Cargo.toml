@@ -14,6 +14,7 @@ synthesis-config = { path = "../synthesis-config" }
 synthesis-platform = { path = "../synthesis-platform" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-terminal = { path = "../synthesis-terminal" }
+synthesis-sandbox = { path = "../synthesis-sandbox" }
 synthesis-verification = { path = "../synthesis-verification" }
 base64 = "0.22"
 # Capability-based dir handles: open files relative to the workspace root, no symlink escape (F12).
@@ -47,5 +48,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
-synthesis-sandbox = { path = "../synthesis-sandbox" }
 tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "net", "io-util"] }

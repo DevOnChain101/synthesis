@@ -461,7 +461,12 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     for d in &st.diagnostics {
         add(Level::Warn, format!("settings: {}", san(d)));
     }
-    for (level, text) in secret_rows(&st.synthesis.secrets_deny, &h.user, &root) {
+    for (level, text) in secret_rows(
+        &st.synthesis.secrets_deny,
+        &h.user,
+        &root,
+        best.name() == "landlock",
+    ) {
         add(level, text);
     }
     if let Ok(cfg) = load_config(env, &h, Some(cwd), ProjectTrust::Untrusted) {
@@ -561,25 +566,43 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     v
 }
 
-/// The `orchestrator planner:` line: names and numbers only.
 /// `synt.secrets.deny`: what is configured, which patterns were dropped, and which of them the OS sandbox
 /// enforces (concrete paths) and which only the permission layer does.
-fn secret_rows(patterns: &[String], user_home: &Path, root: &Path) -> Vec<(Level, String)> {
-    let (sp, diag) = crate::ctx::secret_policy(patterns, user_home);
+fn secret_rows(
+    patterns: &[String],
+    user_home: &Path,
+    root: &Path,
+    landlock: bool,
+) -> Vec<(Level, String)> {
+    let (sp, diag) = crate::ctx::secret_policy(patterns, user_home, Some(root));
     let mut v: Vec<(Level, String)> = diag.into_iter().map(|d| (Level::Warn, san(&d))).collect();
     let cover = sp.deny_list().sandbox_paths(root);
+    let std_policy = synthesis_sandbox::SandboxPolicy::standard(root, &std::env::temp_dir());
+    let (passed, kept) =
+        synthesis_tools::split_secret_deny(&std_policy, sp.sandbox_deny_paths(root), landlock);
     v.push((
         Level::Ok,
         format!(
-            "secrets: built-in secret names (by path name, not content) plus {} synt.secrets.deny pattern(s); the OS sandbox hides {} of them as paths",
+            "secrets: built-in secret names (by path name, not content) plus {} synt.secrets.deny pattern(s); {} passed to the sandbox as deny paths",
             sp.deny_list().patterns().count(),
-            sp.sandbox_deny_paths(root).len()
+            passed.len()
         ),
     ));
+    if !kept.is_empty() {
+        v.push((
+            Level::Warn,
+            format!(
+                "secrets: the Landlock backend cannot deny a place inside the workspace, so {} path(s) are enforced by the permission layer only, not by the OS sandbox: {}",
+                kept.len(),
+                san(&kept.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "))
+            ),
+        ));
+    }
     v.extend(cover.permission_only.iter().map(|l| (Level::Warn, san(l))));
     v
 }
 
+/// The `orchestrator planner:` line: names and numbers only.
 fn planner_row(p: &synthesis_settings::PlannerSettings) -> String {
     use synthesis_settings::PlannerMode;
     match p.mode {
@@ -977,7 +1000,7 @@ mod tests {
         let pats: Vec<String> = ["secrets/**", "**/*.pfx", "!.env", "~/vault/**"]
             .map(String::from)
             .to_vec();
-        let rows = secret_rows(&pats, Path::new("/h/u"), Path::new("/w/p"));
+        let rows = secret_rows(&pats, Path::new("/h/u"), Path::new("/w/p"), false);
         let text = rows
             .iter()
             .map(|r| r.1.as_str())
@@ -989,10 +1012,26 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("3 synt.secrets.deny pattern(s)") && text.contains("hides 2 of them"),
+            text.contains("3 synt.secrets.deny pattern(s)")
+                && text.contains("2 passed to the sandbox as deny paths"),
             "{text}"
         );
         assert!(!text.contains("\"secrets/**\" is enforced"), "{text}");
+        // Landlock cannot deny inside the workspace: a Warn row names the path, nothing is passed for it
+        let rows = secret_rows(&pats, Path::new("/h/u"), Path::new("/w/p"), true);
+        let text = rows
+            .iter()
+            .map(|r| r.1.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Landlock backend cannot deny") && text.contains("/w/p/secrets"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 passed to the sandbox as deny paths"),
+            "{text}"
+        );
     }
 
     #[test]

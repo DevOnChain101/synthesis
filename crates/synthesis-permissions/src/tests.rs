@@ -396,7 +396,7 @@ fn secret_file_reads_are_denied_in_every_mode_and_no_rule_lifts_it() {
 fn a_user_deny_pattern_is_a_secret_for_every_mode_and_no_rule_lifts_it() {
     use synthesis_core::secret_policy::{DenyList, SecretPolicy};
     let f = fx();
-    let (dl, _) = DenyList::new(&["vault/**".to_string()], None, PathPolicy::NATIVE);
+    let (dl, _) = DenyList::new(&["vault/**".to_string()], None, None, PathPolicy::NATIVE);
     fs::create_dir_all(f.cwd.join("vault")).unwrap();
     fs::write(f.cwd.join("vault/k.txt"), "x").unwrap();
     let mut env = f.env(Mode::Default);
@@ -419,6 +419,47 @@ fn a_user_deny_pattern_is_a_secret_for_every_mode_and_no_rule_lifts_it() {
     // a path no pattern names stays readable
     let p = Permissions::new(PermissionRules::default(), env);
     assert_eq!(d(&p, "Read", json!({ "file_path": f.cwd.join("a") })), A);
+}
+
+#[test]
+fn bash_wildcards_and_unexpandable_words_meet_the_user_patterns() {
+    use synthesis_core::secret_policy::{DenyList, SecretPolicy};
+    let f = fx();
+    fs::create_dir_all(f.cwd.join("vault")).unwrap();
+    fs::create_dir_all(f.cwd.join("certs")).unwrap();
+    fs::write(f.cwd.join("vault/k.txt"), "x").unwrap();
+    fs::write(f.cwd.join("certs/a.dat"), "x").unwrap();
+    fs::write(f.cwd.join("certs/b.txt"), "x").unwrap();
+    let pats = ["vault/**".to_string(), "*.dat".to_string()];
+    let (dl, _) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
+    let mut env = f.env(Mode::Default);
+    env.secrets = SecretPolicy::new(dl);
+    let p = Permissions::new(PermissionRules::default(), env);
+    // expanded in the cwd, each match judged: denied for every reader
+    for cmd in [
+        "cat vault/*",
+        "cat certs/*.dat",
+        "head -1 certs/a.d?t",
+        "cat v*/k.txt",
+    ] {
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), D, "{cmd}");
+    }
+    // a wildcard that matches only allowed files stays allowed
+    assert_eq!(d(&p, "Bash", json!({ "command": "cat certs/*.txt" })), A);
+    // a word the shell would expand (`$`, backticks, a class, ~user) cannot be judged: a question, not a pass
+    for cmd in [
+        "cat $F",
+        "cat `echo vault/k.txt`",
+        "cat other/[k].txt",
+        "cat ~bob/x",
+    ] {
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), Q, "{cmd}");
+    }
+    // Grep `glob` / Glob `pattern` read as a path against the list
+    assert_eq!(d(&p, "Glob", json!({ "pattern": "vault/**/*.json" })), D);
+    // no user pattern: nothing changes
+    let plain = Permissions::new(PermissionRules::default(), f.env(Mode::Default));
+    assert_eq!(d(&plain, "Bash", json!({ "command": "cat vault/*" })), A);
 }
 
 #[test]

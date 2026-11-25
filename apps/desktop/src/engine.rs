@@ -746,8 +746,9 @@ impl Engine {
         self.remote.is_some()
     }
 
-    /// The session's secret-path rule (built-ins plus `synt.secrets.deny`); a remote engine applies its own, so
-    /// the built-ins alone here.
+    /// The session's secret-path rule (built-ins plus `synt.secrets.deny`); a local engine always has a session.
+    /// A remote (WSL) engine applies its own policy to what it serves; the window's own checks on its folder use
+    /// the built-in names only (listed in docs/SECURITY.md).
     pub fn secrets(&self) -> synthesis_core::secret_policy::SecretPolicy {
         self.live
             .as_ref()

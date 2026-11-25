@@ -46,7 +46,13 @@ pub fn from_range(path: &str, lines: &[String], a: usize, b: usize) -> Result<Qu
     if lo >= lines.len() {
         return Err("nothing to quote: select some lines".into());
     }
-    from_picked(path, lo, &lines[lo..=hi], &Default::default())
+    from_picked(
+        path,
+        lo,
+        &lines[lo..=hi],
+        &Default::default(),
+        std::path::Path::new(""),
+    )
 }
 
 /// `picked` (the exact selected text, one entry per line) starting at 0-based line `lo`, capped. Refuses a
@@ -56,9 +62,10 @@ fn from_picked(
     lo: usize,
     picked: &[String],
     secrets: &synthesis_core::secret_policy::SecretPolicy,
+    root: &std::path::Path,
 ) -> Result<Quote, String> {
     if path.chars().any(char::is_control)
-        || secrets.is_secret_path(std::path::Path::new(path), std::path::Path::new(""))
+        || secrets.is_secret_path(std::path::Path::new(path), root)
     {
         return Err("this file cannot be quoted".into());
     }
@@ -470,9 +477,16 @@ impl TuiView {
             .and_then(|l| l.live.engine.as_ref())
             .map(|e| e.secrets())
             .unwrap_or_default();
+        let root = std::path::PathBuf::from(self.live.as_ref().map_or("", |l| l.live.cwd.as_str()));
         let made = self.ts.sel.filter(|s| !s.is_empty()).and_then(|s| {
             self.shown_file().map(|(p, lines)| {
-                from_picked(p, s.range().0.line, &filesel::pieces(lines, &s), &secrets)
+                from_picked(
+                    p,
+                    s.range().0.line,
+                    &filesel::pieces(lines, &s),
+                    &secrets,
+                    &root,
+                )
             })
         });
         let res = made
@@ -565,11 +579,36 @@ mod tests {
                 head: filesel::Pos { line: 1, col: 6 },
             },
         );
-        let q = from_picked("a.rs", 1, &picked, &Default::default()).unwrap();
+        let q = from_picked(
+            "a.rs",
+            1,
+            &picked,
+            &Default::default(),
+            std::path::Path::new(""),
+        )
+        .unwrap();
         assert_eq!((q.from, q.to), (2, 4));
         assert_eq!(q.lines, [" = 2;", "let x3 = 3;", "let "]);
-        assert!(from_picked("a.rs", 0, &["  ".into()], &Default::default()).is_err());
-        assert!(from_picked(".env", 0, &["x".into()], &Default::default()).is_err());
+        assert!(
+            from_picked(
+                "a.rs",
+                0,
+                &["  ".into()],
+                &Default::default(),
+                std::path::Path::new("")
+            )
+            .is_err()
+        );
+        assert!(
+            from_picked(
+                ".env",
+                0,
+                &["x".into()],
+                &Default::default(),
+                std::path::Path::new("")
+            )
+            .is_err()
+        );
     }
 
     #[test]

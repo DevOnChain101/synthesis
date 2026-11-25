@@ -898,7 +898,7 @@ mod tests {
             "vault".to_string(),
             "!.env".to_string(),
         ];
-        let (dl, diag) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+        let (dl, diag) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
         assert_eq!(diag.len(), 1);
         let sp = SecretPolicy::new(dl);
         let l = |q: &str| -> Vec<String> {

@@ -325,7 +325,7 @@ mod tests {
         use synthesis_core::{PathPolicy, secret_policy::DenyList};
         let d = repo();
         let pats = ["notes/**".to_string(), "!.env".to_string()];
-        let (dl, diag) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+        let (dl, diag) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
         assert_eq!(diag.len(), 1);
         let sp = SecretPolicy::new(dl);
         assert_eq!(

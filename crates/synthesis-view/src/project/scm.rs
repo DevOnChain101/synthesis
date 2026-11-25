@@ -56,8 +56,20 @@ pub enum Act {
     Commit(String),
 }
 
-fn secret_in(sp: &SecretPolicy, root: &Path, rel: &str) -> bool {
-    sp.is_secret_shaped_in(Path::new(rel), root) || sp.is_secret_target_in(&root.join(rel), root)
+/// The user's patterns anchor at the WORKSPACE folder the app was opened on; git reports paths relative to the
+/// repository's top folder, which may be above it.
+#[derive(Clone, Copy)]
+struct Guard<'a> {
+    sp: &'a SecretPolicy,
+    ws: &'a Path,
+}
+
+/// `rel` is relative to `top` (the git work tree). The built-in names are judged as before, the user's
+/// patterns on the real place against the workspace (a path outside it meets name and absolute patterns only).
+fn secret_in(g: Guard, top: &Path, rel: &str) -> bool {
+    synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), top)
+        || synthesis_core::secrets::is_secret_target_in(&top.join(rel), top)
+        || g.sp.denies(&top.join(rel), g.ws)
 }
 
 /// A git that may be run here: trusted folder, a `.git` that stays inside it, a work tree that is this folder.
@@ -85,10 +97,11 @@ fn ready(cwd: &Path, env: &Env, trusted: bool) -> Result<(Git, Vec<String>, Path
 /// The state of the repository: `status --porcelain=v1 -z -b`, every untracked file by itself.
 pub fn status(cwd: &Path, env: &Env, trusted: bool, sp: &SecretPolicy) -> Result<Scm, String> {
     let (git, guards, top) = ready(cwd, env, trusted)?;
-    read(&git, &guards, &top, sp)
+    let ws = synthesis_core::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    read(&git, &guards, &top, Guard { sp, ws: &ws })
 }
 
-fn read(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> Result<Scm, String> {
+fn read(git: &Git, guards: &[String], cwd: &Path, g: Guard) -> Result<Scm, String> {
     let args = [
         "status",
         "--porcelain=v1",
@@ -100,7 +113,7 @@ fn read(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> Result<S
     let (raw, cut) = git
         .run_with(cwd, guards, &args, 0)
         .ok_or("git could not produce the status")?;
-    let mut s = parse(&raw, cwd, sp);
+    let mut s = parse(&raw, cwd, g);
     s.cut |= cut;
     if s.head == "detached" {
         let sha = git
@@ -112,7 +125,7 @@ fn read(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> Result<S
     Ok(s)
 }
 
-fn parse(st: &[u8], root: &Path, sp: &SecretPolicy) -> Scm {
+fn parse(st: &[u8], root: &Path, g: Guard) -> Scm {
     let mut s = Scm::default();
     // only EMPTY records are skipped here: a filter on the length would let a rename origin of 1-3 bytes
     // go unconsumed below and swallow the entry after it
@@ -134,7 +147,7 @@ fn parse(st: &[u8], root: &Path, sp: &SecretPolicy) -> Scm {
             continue; // not a path that can be acted on
         }
         let entry = |letter| Entry {
-            secret: secret_in(sp, root, &text),
+            secret: secret_in(g, root, &text),
             path: text.clone(),
             letter,
         };
@@ -272,7 +285,7 @@ fn name_status(
     guards: &[String],
     cwd: &Path,
     args: &[&str],
-    sp: &SecretPolicy,
+    g: Guard,
 ) -> Result<(Vec<String>, usize, usize), String> {
     // exit 0 and a whole answer, else a partial list could pass the gate
     let o = git
@@ -294,7 +307,7 @@ fn name_status(
         };
         let path = String::from_utf8_lossy(path).to_string();
         // the secret test runs on EVERY record, before any decision about the path's shape
-        if st != b"D" && secret_in(sp, cwd, &path) {
+        if st != b"D" && secret_in(g, cwd, &path) {
             secret.push(clean_line(&path));
         }
         if st.len() != 1 || safe_rel(&path).is_err() || path.contains('\u{fffd}') {
@@ -306,12 +319,7 @@ fn name_status(
 
 /// The commit gate: reads the index itself (not the capped, parsed lists) and refuses unless every staged path
 /// was checked and none is secret-shaped (a deletion is exempt). `Ok(count)` of staged paths.
-fn commit_gate(
-    git: &Git,
-    guards: &[String],
-    cwd: &Path,
-    sp: &SecretPolicy,
-) -> Result<usize, String> {
+fn commit_gate(git: &Git, guards: &[String], cwd: &Path, g: Guard) -> Result<usize, String> {
     let (secret, skipped, n) = name_status(
         git,
         guards,
@@ -326,7 +334,7 @@ fn commit_gate(
             "--no-ext-diff",
             "--no-textconv",
         ],
-        sp,
+        g,
     )?;
     if n == 0 {
         return Err("nothing is staged".into());
@@ -348,7 +356,7 @@ fn commit_gate(
 /// After a commit: did a secret-shaped path get in anyway? The index is checked before the commit and git then
 /// reads it again, so a process that changes the index in between could slip a file in (accepted residual, see
 /// docs/specs/desktop.md). The commit is never undone here; the note says how.
-fn committed_secrets(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> String {
+fn committed_secrets(git: &Git, guards: &[String], cwd: &Path, g: Guard) -> String {
     match name_status(
         git,
         guards,
@@ -363,7 +371,7 @@ fn committed_secrets(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy
             "--no-renames",
             "HEAD",
         ],
-        sp,
+        g,
     ) {
         Ok((secret, _, _)) if secret.is_empty() => String::new(),
         Ok((secret, _, _)) => format!(
@@ -469,8 +477,10 @@ pub fn apply(
         Act::StageAll => None,
     };
     let (git, guards, top) = ready(cwd, env, trusted)?;
+    let ws = synthesis_core::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let g = Guard { sp, ws: &ws };
     let cwd = top.as_path();
-    let now = read(&git, &guards, cwd, sp)?;
+    let now = read(&git, &guards, cwd, g)?;
     let stale = || "the file changed since the list was read; the list is refreshed".to_string();
     let add = |paths: &[&str]| -> Result<(), String> {
         for c in paths.chunks(CHUNK) {
@@ -544,14 +554,14 @@ pub fn apply(
             Ok(String::new())
         }
         Act::Commit(_) => {
-            commit_gate(&git, &guards, cwd, sp)?;
+            commit_gate(&git, &guards, cwd, g)?;
             signing_program_in_repo(&git, cwd)?;
             let mut extra = guards.clone();
             extra.extend(["-c".to_string(), "user.useConfigOnly=true".to_string()]);
             let msg = msg.expect("a commit has a message");
             // `--no-verify` is a second lock on the hooks `core.hooksPath` already switched off
             git.write(cwd, &extra, &["commit", "-q", "--no-verify", "-m", &msg])?;
-            Ok(committed_secrets(&git, &guards, cwd, sp))
+            Ok(committed_secrets(&git, &guards, cwd, g))
         }
     }
 }
@@ -872,7 +882,7 @@ mod tests {
     fn user_pattern(p: &[&str]) -> SecretPolicy {
         use synthesis_core::{PathPolicy, secret_policy::DenyList};
         let v: Vec<String> = p.iter().map(|x| x.to_string()).collect();
-        SecretPolicy::new(DenyList::new(&v, None, PathPolicy::NATIVE).0)
+        SecretPolicy::new(DenyList::new(&v, None, None, PathPolicy::NATIVE).0)
     }
 
     #[test]
@@ -921,12 +931,68 @@ mod tests {
         git(d.path(), &["add", "-f", "vault/k.txt"]);
         git(d.path(), &["commit", "-q", "-m", "k"]);
         let (g, guards, _) = ready(d.path(), &e, true).unwrap();
-        let n = committed_secrets(&g, &guards, d.path(), &sp);
+        let n = committed_secrets(
+            &g,
+            &guards,
+            d.path(),
+            Guard {
+                sp: &sp,
+                ws: d.path(),
+            },
+        );
         assert!(
             n.contains("vault/k.txt") && n.contains("git reset --soft HEAD~1"),
             "{n}"
         );
-        assert!(!committed_secrets(&g, &guards, d.path(), &Default::default()).contains("vault"));
+        assert!(
+            !committed_secrets(
+                &g,
+                &guards,
+                d.path(),
+                Guard {
+                    sp: &Default::default(),
+                    ws: d.path()
+                }
+            )
+            .contains("vault")
+        );
+    }
+
+    #[test]
+    fn user_patterns_anchor_at_the_workspace_not_at_the_git_top_folder() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        let sp = user_pattern(&["vault/**"]);
+        let ws = d.path().join("pkg");
+        std::fs::create_dir_all(ws.join("vault")).unwrap();
+        std::fs::create_dir_all(d.path().join("vault")).unwrap();
+        std::fs::write(ws.join("vault/k.json"), "k\n").unwrap();
+        std::fs::write(ws.join("ok.txt"), "o\n").unwrap();
+        // outside the workspace: `vault/**` is anchored at pkg/, so this is not matched
+        std::fs::write(d.path().join("vault/x.json"), "x\n").unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let s = status(&ws, &e, true, &sp).unwrap();
+        let sec = |p: &str| s.changes.iter().find(|x| x.path == p).map(|x| x.secret);
+        assert_eq!(sec("pkg/vault/k.json"), Some(true), "{:?}", s.changes);
+        assert_eq!(sec("pkg/ok.txt"), Some(false));
+        assert_eq!(sec("vault/x.json"), Some(false));
+        // stage and stage-all refuse it
+        let err = apply(&ws, &e, true, &Act::Stage("pkg/vault/k.json".into()), &sp).unwrap_err();
+        assert!(err.contains("looks like a secret"), "{err}");
+        let note = apply(&ws, &e, true, &Act::StageAll, &sp).unwrap();
+        assert!(
+            note.starts_with("1 secret-looking file(s) skipped"),
+            "{note}"
+        );
+        // staged outside the app: the commit gate refuses
+        git(d.path(), &["add", "-f", "pkg/vault/k.json"]);
+        let err = apply(&ws, &e, true, &Act::Commit("go".into()), &sp).unwrap_err();
+        assert!(err.contains("pkg/vault/k.json"), "{err}");
+        // post-commit report
+        git(d.path(), &["commit", "-q", "-m", "k"]);
+        let (g, guards, top) = ready(&ws, &e, true).unwrap();
+        let n = committed_secrets(&g, &guards, &top, Guard { sp: &sp, ws: &ws });
+        assert!(n.contains("pkg/vault/k.json"), "{n}");
     }
 
     #[test]
@@ -1102,7 +1168,15 @@ mod tests {
         git(d.path(), &["add", "-f", "id_rsa"]);
         git(d.path(), &["commit", "-q", "-m", "k"]);
         let (g, guards, _) = ready(d.path(), &env(), true).unwrap();
-        let n = committed_secrets(&g, &guards, d.path(), &Default::default());
+        let n = committed_secrets(
+            &g,
+            &guards,
+            d.path(),
+            Guard {
+                sp: &Default::default(),
+                ws: d.path(),
+            },
+        );
         assert!(
             n.contains("id_rsa") && n.contains("git reset --soft HEAD~1"),
             "{n}"
@@ -1111,7 +1185,15 @@ mod tests {
         git(d.path(), &["add", "b"]);
         git(d.path(), &["commit", "-q", "-m", "b"]);
         assert_eq!(
-            committed_secrets(&g, &guards, d.path(), &Default::default()),
+            committed_secrets(
+                &g,
+                &guards,
+                d.path(),
+                Guard {
+                    sp: &Default::default(),
+                    ws: d.path()
+                }
+            ),
             ""
         );
     }

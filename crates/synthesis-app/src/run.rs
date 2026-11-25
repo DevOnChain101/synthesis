@@ -1541,7 +1541,7 @@ pub fn prepare(
         ),
     };
     let (secret_policy, secret_diag) =
-        crate::ctx::secret_policy(&settings.synthesis.secrets_deny, &h.user);
+        crate::ctx::secret_policy(&settings.synthesis.secrets_deny, &h.user, Some(&ws.root));
     for d in &secret_diag {
         eprintln!("synt: warning: {}", sanitize_for_display(d));
     }

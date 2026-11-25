@@ -71,6 +71,7 @@ mod automode_defaults;
 pub mod bash;
 pub mod irreversible;
 pub mod paths;
+mod secretglob;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -1127,14 +1128,19 @@ impl Permissions {
             "Glob" => non_empty(input, "pattern"),
             _ => None,
         };
-        by_pattern.is_some_and(names_secret)
-            || non_empty(input, field).is_some_and(|t| {
-                let abs = paths::resolve(&self.env.cwd, t);
-                [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
-                    .into_iter()
-                    .flatten()
-                    .any(|c| self.env.secrets.is_secret_path(&c, root))
-            })
+        by_pattern.is_some_and(|g| {
+            names_secret(g) || {
+                // a search glob read conservatively as a path: `vault/**/*.json` against `vault/**`
+                let g = Path::new(g);
+                self.env.secrets.deny_list().matches(g, root)
+            }
+        }) || non_empty(input, field).is_some_and(|t| {
+            let abs = paths::resolve(&self.env.cwd, t);
+            [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
+                .into_iter()
+                .flatten()
+                .any(|c| self.env.secrets.is_secret_path(&c, root))
+        })
     }
 
     /// A read-only (or auto-safe) command, or a known reader, with an operand that names a secret file or could match
@@ -1147,6 +1153,7 @@ impl Permissions {
             return false;
         };
         let mut bases = vec![self.env.cwd.clone()];
+        let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
         for seg in segs {
             let w = bash::unwrap_words(&seg, true);
             let prog = paths::basename(w.first().map_or("", String::as_str), self.policy());
@@ -1162,6 +1169,13 @@ impl Permissions {
                 for t in [word.as_str(), bare].into_iter().chain(val) {
                     if synthesis_core::secrets::names_secret(t) {
                         return true;
+                    }
+                    // the user's `synt.secrets.deny`: a wildcard is expanded here (no shell), a word that
+                    // cannot be expanded is a question (never a silent pass) unless a hard check is asked
+                    match secretglob::judge(&self.env.secrets, t, &bases, root) {
+                        secretglob::Verdict::Hit => return true,
+                        secretglob::Verdict::Unknown if !readers_only => return true,
+                        _ => {}
                     }
                     if !t.contains(['$', '`', '*', '?', '[']) {
                         for b in &bases {

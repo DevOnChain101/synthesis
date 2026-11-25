@@ -14,11 +14,16 @@
 //! - `!` (negation), `#`, empty patterns and `..` are invalid: a pattern can never allow a path.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::outcome::glob_matches;
+use unicode_normalization::UnicodeNormalization;
+
 use crate::secrets;
 use crate::{PathPolicy, canonicalize, lexical_normalize};
+
+/// Longest pattern and longest list taken; the rest is dropped with a diagnostic (the built-ins stay).
+pub const MAX_PATTERN: usize = 256;
+pub const MAX_PATTERNS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -29,13 +34,19 @@ enum Kind {
     Abs,
 }
 
+/// One pattern segment: `**` (zero or more path segments) or a name with `*`/`?` (`*` never crosses a `/`).
+#[derive(Debug, Clone)]
+enum Seg {
+    Deep,
+    Lit(Vec<char>),
+}
+
 #[derive(Debug, Clone)]
 struct Pat {
     raw: String,
     kind: Kind,
-    /// Normalised text (case-folded when the policy is case-insensitive); `**/x` also as `x`.
-    globs: Vec<String>,
-    /// Original-case text (`~` expanded) for building a concrete path.
+    segs: Vec<Seg>,
+    /// Original-case text (`~` expanded, `//` collapsed) for building a concrete path.
     shown: String,
 }
 
@@ -53,34 +64,107 @@ pub struct DenyList {
     ci: bool,
 }
 
-fn slashed(s: &str, ci: bool) -> String {
+/// Matching form of a text: `/` separators, NFC and lower case where the file system folds (macOS, Windows).
+fn fold(s: &str, ci: bool) -> String {
     let n = s.replace('\\', "/");
     let n = match n.strip_prefix("//?/") {
         Some(r) => r.to_string(),
         None => n,
     };
-    if ci { n.to_lowercase() } else { n }
+    if ci {
+        n.nfc().collect::<String>().to_lowercase()
+    } else {
+        n
+    }
 }
 
 fn wild(s: &str) -> bool {
     s.contains(['*', '?'])
 }
 
+/// `*` (any run) and `?` (one character) against one path segment.
+fn seg_fit(p: &[char], t: &[char]) -> bool {
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) && p[pi] != '*' {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+/// Does the pattern cover `t` or a folder above it (a pattern that names a folder covers what is below)?
+fn covers(segs: &[Seg], t: &[Vec<char>]) -> bool {
+    let (np, nt) = (segs.len(), t.len());
+    let mut ok = vec![vec![false; nt + 1]; np + 1];
+    ok[np].iter_mut().for_each(|x| *x = true);
+    for pi in (0..np).rev() {
+        for ti in (0..=nt).rev() {
+            ok[pi][ti] = match &segs[pi] {
+                Seg::Deep => ok[pi + 1][ti] || (ti < nt && ok[pi][ti + 1]),
+                Seg::Lit(l) => ti < nt && seg_fit(l, &t[ti]) && ok[pi + 1][ti + 1],
+            };
+        }
+    }
+    ok[0][0]
+}
+
+fn chars_of(s: &str) -> Vec<Vec<char>> {
+    s.split('/')
+        .filter(|x| !x.is_empty())
+        .map(|x| x.chars().collect())
+        .collect()
+}
+
 impl DenyList {
-    /// Parses `patterns`; every invalid one is dropped and named in the returned diagnostics.
-    /// `home` expands `~/`.
+    /// Parses `patterns`; every invalid one is dropped and named in the returned diagnostics. `home` expands
+    /// `~/`; `root` (the workspace) only sharpens the diagnostic for an absolute pattern.
     pub fn new(
         patterns: &[String],
         home: Option<&Path>,
+        root: Option<&Path>,
         policy: PathPolicy,
     ) -> (DenyList, Vec<String>) {
         let ci = policy.case_insensitive;
         let (mut pats, mut diag) = (vec![], vec![]);
-        for raw in patterns {
+        if patterns.len() > MAX_PATTERNS {
+            diag.push(format!(
+                "synt.secrets.deny: {} patterns given, only the first {MAX_PATTERNS} are used; the built-in secret rules still apply",
+                patterns.len()
+            ));
+        }
+        for raw in patterns.iter().take(MAX_PATTERNS) {
             match Pat::parse(raw, home, ci) {
-                Ok(p) => pats.push(p),
+                Ok(p) => {
+                    let lit = raw.trim().replace('\\', "/");
+                    if p.kind == Kind::Abs && lit.starts_with('/') {
+                        let under = |b: Option<&Path>| {
+                            b.is_some_and(|b| {
+                                fold(&p.shown, ci).starts_with(fold(&b.to_string_lossy(), ci).trim_end_matches('/'))
+                            })
+                        };
+                        if !under(root) && !under(home) {
+                            diag.push(format!(
+                                "synt.secrets.deny: pattern {raw:?} is an absolute path (use ./x for a path inside the workspace)"
+                            ));
+                        }
+                    }
+                    pats.push(p);
+                }
                 Err(e) => diag.push(format!(
-                    "synt.secrets.deny: pattern {raw:?} ignored ({e}); the built-in secret rules still apply"
+                    "synt.secrets.deny: pattern {:?} ignored ({e}); the built-in secret rules still apply",
+                    raw.chars().take(80).collect::<String>()
                 )),
             }
         }
@@ -103,30 +187,28 @@ impl DenyList {
         }
         // `a/./b`, `a//b` and `x/../a` are the same place as `a/b`
         let (path, root) = (lexical_normalize(path), lexical_normalize(root));
-        let (path, root) = (path.as_path(), root.as_path());
-        let full = slashed(&path.to_string_lossy(), self.ci);
-        let base = slashed(&root.to_string_lossy(), self.ci);
+        let full = fold(&path.to_string_lossy(), self.ci);
+        let base = fold(&root.to_string_lossy(), self.ci);
         let base = base.trim_end_matches('/');
         let rel = (!base.is_empty())
             .then(|| full.strip_prefix(base).filter(|r| r.starts_with('/')))
             .flatten()
-            .map(|r| r.trim_start_matches('/'))
             // a relative `path` is already workspace-relative
             .or_else(|| (!path.is_absolute() && !full.starts_with('/')).then_some(full.as_str()));
-        self.pats.iter().any(|p| {
-            let hit = |text: &str, whole: bool| {
-                let segs = || text.split('/').filter(|s| !s.is_empty());
-                match p.kind {
-                    Kind::Name => segs().any(|s| p.globs.iter().any(|g| fit(g, s))),
-                    _ if whole => prefixes(text).any(|x| p.globs.iter().any(|g| fit(g, x))),
-                    _ => false,
-                }
-            };
-            match p.kind {
-                Kind::Name => hit(rel.unwrap_or(&full), true),
-                Kind::Rel => rel.is_some_and(|r| hit(r, true)),
-                Kind::Abs => hit(&full, true),
+        let (full_t, rel_t) = (chars_of(&full), rel.map(chars_of));
+        self.pats.iter().any(|p| match p.kind {
+            Kind::Name => {
+                let Seg::Lit(l) = &p.segs[0] else {
+                    return false;
+                };
+                rel_t
+                    .as_ref()
+                    .unwrap_or(&full_t)
+                    .iter()
+                    .any(|s| seg_fit(l, s))
             }
+            Kind::Rel => rel_t.as_ref().is_some_and(|r| covers(&p.segs, r)),
+            Kind::Abs => covers(&p.segs, &full_t),
         })
     }
 
@@ -176,25 +258,14 @@ impl DenyList {
     }
 }
 
-/// `glob_matches`, failing closed when the pattern is too costly to decide.
-fn fit(pat: &str, text: &str) -> bool {
-    glob_matches(pat.as_bytes(), text.as_bytes()).unwrap_or(true)
-}
-
-/// `a`, `a/b`, `a/b/c` of `a/b/c` (and `/a`, `/a/b` of an absolute path).
-fn prefixes(s: &str) -> impl Iterator<Item = &str> {
-    s.match_indices('/')
-        .map(|(i, _)| i)
-        .filter(|i| *i > 0)
-        .chain(std::iter::once(s.len()))
-        .map(move |i| &s[..i])
-}
-
 impl Pat {
     fn parse(raw: &str, home: Option<&Path>, ci: bool) -> Result<Pat, String> {
         let t = raw.trim();
         if t.is_empty() {
             return Err("empty".into());
+        }
+        if t.chars().count() > MAX_PATTERN {
+            return Err(format!("longer than {MAX_PATTERN} characters"));
         }
         if t.starts_with(['!', '#']) {
             return Err("a pattern can only deny: no negation or comments".into());
@@ -202,7 +273,11 @@ impl Pat {
         if t.contains(['[', ']', '{', '}', '\0']) {
             return Err("[], {} and NUL are not supported".into());
         }
-        let s = t.replace('\\', "/");
+        let mut s = t.replace('\\', "/");
+        let lead = s.starts_with("//") as usize;
+        while s[lead..].contains("//") {
+            s = format!("{}{}", &s[..lead], s[lead..].replace("//", "/"));
+        }
         let s = s.trim_end_matches('/');
         if s.is_empty() || s.split('/').any(|c| c == "..") {
             return Err("empty or contains ..".into());
@@ -234,25 +309,24 @@ impl Pat {
                 },
             )
         };
-        let n = if ci {
-            shown.to_lowercase()
-        } else {
-            shown.clone()
-        };
-        let mut globs = vec![n.clone()];
-        if kind == Kind::Rel {
-            // `**/` and `/**/` also match zero folders
-            if let Some(r) = n.strip_prefix("**/") {
-                globs.push(r.to_string());
-            }
-            if n.contains("/**/") {
-                globs.push(n.replace("/**/", "/"));
-            }
+        let segs = fold(&shown, ci)
+            .split('/')
+            .filter(|x| !x.is_empty())
+            .map(|x| {
+                if x == "**" {
+                    Seg::Deep
+                } else {
+                    Seg::Lit(x.chars().collect())
+                }
+            })
+            .collect::<Vec<_>>();
+        if segs.is_empty() {
+            return Err("empty".into());
         }
         Ok(Pat {
             raw: raw.to_string(),
             kind,
-            globs,
+            segs,
             shown,
         })
     }
@@ -263,12 +337,15 @@ impl Pat {
 #[derive(Debug, Clone, Default)]
 pub struct SecretPolicy {
     deny: Arc<DenyList>,
+    /// Last workspace root and its real path (a stat per check otherwise).
+    canon_root: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
 }
 
 impl SecretPolicy {
     pub fn new(deny: DenyList) -> Self {
         Self {
             deny: Arc::new(deny),
+            canon_root: Arc::default(),
         }
     }
 
@@ -283,7 +360,21 @@ impl SecretPolicy {
         v
     }
 
-    fn user(&self, path: &Path, root: &Path) -> bool {
+    fn real_root(&self, root: &Path) -> PathBuf {
+        let mut c = self.canon_root.lock().unwrap_or_else(|e| e.into_inner());
+        match &*c {
+            Some((r, real)) if r == root => real.clone(),
+            _ => {
+                let real = canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+                *c = Some((root.to_path_buf(), real.clone()));
+                real
+            }
+        }
+    }
+
+    /// Only the user's patterns (no built-in names): this spelling and its real path. `root` is the WORKSPACE
+    /// root the relative patterns are anchored at, whatever folder the caller's own paths are relative to.
+    pub fn denies(&self, path: &Path, root: &Path) -> bool {
         !self.deny.is_empty()
             && (self.deny.matches(path, root)
                 || canonicalize(if path.is_relative() {
@@ -291,25 +382,22 @@ impl SecretPolicy {
                 } else {
                     path.to_path_buf()
                 })
-                .is_ok_and(|r| {
-                    let rr = canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-                    self.deny.matches(&r, &rr)
-                }))
+                .is_ok_and(|r| self.deny.matches(&r, &self.real_root(root))))
     }
 
     /// [`secrets::is_secret_path`] (a name) or a pattern, on this spelling and its real path.
     pub fn is_secret_path(&self, path: &Path, root: &Path) -> bool {
-        secrets::is_secret_path(path) || self.user(path, root)
+        secrets::is_secret_path(path) || self.denies(path, root)
     }
 
     /// [`secrets::is_secret_shaped_in`] or a pattern.
     pub fn is_secret_shaped_in(&self, path: &Path, root: &Path) -> bool {
-        secrets::is_secret_shaped_in(path, root) || self.user(path, root)
+        secrets::is_secret_shaped_in(path, root) || self.denies(path, root)
     }
 
     /// [`secrets::is_secret_target_in`] or a pattern (the path and its real path).
     pub fn is_secret_target_in(&self, path: &Path, root: &Path) -> bool {
-        secrets::is_secret_target_in(path, root) || self.user(path, root)
+        secrets::is_secret_target_in(path, root) || self.denies(path, root)
     }
 }
 
@@ -328,7 +416,7 @@ mod tests {
 
     fn dl(p: &[&str], pol: PathPolicy) -> (DenyList, Vec<String>) {
         let v: Vec<String> = p.iter().map(|s| s.to_string()).collect();
-        DenyList::new(&v, Some(Path::new("/h/u")), pol)
+        DenyList::new(&v, Some(Path::new("/h/u")), Some(Path::new("/w/proj")), pol)
     }
     fn hit(d: &DenyList, p: &str) -> bool {
         d.matches(Path::new(p), Path::new("/w/proj"))
@@ -347,7 +435,11 @@ mod tests {
             ],
             CS,
         );
-        assert!(diag.is_empty(), "{diag:?}");
+        // only the absolute `/opt/k` (outside workspace and home) is flagged
+        assert!(
+            diag.len() == 1 && diag[0].contains("/opt/k") && diag[0].contains("./x"),
+            "{diag:?}"
+        );
         for p in [
             "/w/proj/.env.local",
             "/w/proj/x/y/.env.local",
@@ -386,6 +478,85 @@ mod tests {
     }
 
     #[test]
+    fn several_double_star_groups_match_zero_or_more_folders_and_do_not_over_match() {
+        let t = |pats: &[&str], yes: &[&str], no: &[&str]| {
+            let (d, diag) = dl(pats, CS);
+            assert!(diag.is_empty(), "{diag:?}");
+            for p in yes {
+                assert!(
+                    hit(&d, &format!("/w/proj/{p}")),
+                    "{pats:?} should match {p}"
+                );
+            }
+            for p in no {
+                assert!(
+                    !hit(&d, &format!("/w/proj/{p}")),
+                    "{pats:?} must not match {p}"
+                );
+            }
+        };
+        t(
+            &["**/keys/**/*.json"],
+            &[
+                "keys/b.json",
+                "keys/a/b.json",
+                "x/keys/b.json",
+                "x/y/keys/a/b/c.json",
+            ],
+            &["keys/b.txt", "key/b.json", "x/b.json", "keys"],
+        );
+        t(
+            &["src/**/keys/**/*.json"],
+            &[
+                "src/keys/a/b.json",
+                "src/keys/b.json",
+                "src/x/keys/y/z.json",
+            ],
+            &[
+                "keys/b.json",
+                "other/keys/b.json",
+                "src/keys/b.txt",
+                "src/x/b.json",
+            ],
+        );
+        t(
+            &["a/**/b/**/c"],
+            &["a/b/x/c", "a/b/c", "a/q/b/c", "a/q/r/b/s/t/c/d"],
+            &["a/b/x/d", "b/c", "z/a/b/c", "a/c"],
+        );
+        t(&["a/**/**/c"], &["a/c", "a/x/y/c"], &["a/x"]);
+    }
+
+    #[test]
+    fn question_mark_is_one_character_and_unicode_is_normalised_where_the_file_system_folds() {
+        let (d, _) = dl(&["caf?.key", "\u{e9}.cert"], CS);
+        assert!(
+            hit(&d, "/w/proj/caf\u{e9}.key"),
+            "? is one character, not one byte"
+        );
+        assert!(!hit(&d, "/w/proj/cafee.key") && !hit(&d, "/w/proj/caf.key"));
+        // NFD name (e + combining acute) against an NFC pattern: the same file on macOS
+        let (ci, _) = dl(&["\u{e9}.cert"], CI);
+        assert!(hit(&ci, "/w/proj/e\u{301}.cert"));
+        assert!(
+            !hit(&d, "/w/proj/e\u{301}.cert"),
+            "case-sensitive systems keep the bytes"
+        );
+    }
+
+    #[test]
+    fn caps_and_double_slashes() {
+        let long = "a".repeat(MAX_PATTERN + 1);
+        let many: Vec<String> = (0..MAX_PATTERNS + 3).map(|i| format!("p{i}")).collect();
+        let (d, diag) = DenyList::new(&many, None, None, CS);
+        assert_eq!(d.patterns().count(), MAX_PATTERNS);
+        assert!(diag.iter().any(|x| x.contains("only the first")));
+        let (d, diag) = DenyList::new(&[long, "secrets//deep///**".into()], None, None, CS);
+        assert_eq!(diag.len(), 1, "{diag:?}");
+        assert!(d.matches(Path::new("/w/proj/secrets/deep/x"), Path::new("/w/proj")));
+    }
+
+    #[test]
     fn case_is_folded_only_where_the_policy_says() {
         let (ci, _) = dl(&["Secrets/**", "*.PFX"], CI);
         assert!(hit(&ci, "/w/proj/SECRETS/a") && hit(&ci, "/w/proj/a.pfx"));
@@ -404,7 +575,7 @@ mod tests {
         let (d, diag) = dl(&["!src/x", "", "#c", "a/../b", "[ab]", "~", "ok.key2"], CS);
         assert_eq!(diag.len(), 6, "{diag:?}");
         assert_eq!(d.patterns().collect::<Vec<_>>(), ["ok.key2"]);
-        let (d, diag) = DenyList::new(&["~/x".into()], None, CS);
+        let (d, diag) = DenyList::new(&["~/x".into()], None, None, CS);
         assert!(d.is_empty() && diag.len() == 1);
     }
 
@@ -427,7 +598,7 @@ mod tests {
             std::fs::create_dir_all(root.join("vault")).unwrap();
             std::fs::write(root.join("vault/k"), "x").unwrap();
             std::os::unix::fs::symlink(root.join("vault/k"), root.join("innocent.txt")).unwrap();
-            let (d, _) = DenyList::new(&["vault/**".into()], None, CS);
+            let (d, _) = DenyList::new(&["vault/**".into()], None, None, CS);
             let p = SecretPolicy::new(d);
             assert!(p.is_secret_target_in(&root.join("innocent.txt"), &root));
             assert!(!p.is_secret_target_in(&root.join("vault.txt"), &root));

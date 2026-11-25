@@ -328,12 +328,50 @@ fn a_citation_over_lines_that_hold_a_secret_is_refused() {
         end_line: 1,
         quote: "note".into(),
     };
-    let checked = check_citation(&root, &c, &Redactor::new([]));
+    let checked = check_citation(&root, &c, &Redactor::new([]), &Default::default());
     assert!(
         !checked.ok && checked.why.contains("secret"),
         "{}",
         checked.why
     );
+}
+
+#[test]
+fn a_citation_of_a_path_the_user_denies_is_refused_without_reading_it() {
+    use synthesis_core::{
+        PathPolicy,
+        secret_policy::{DenyList, SecretPolicy},
+    };
+    let r = rig();
+    let root = folder(&r);
+    std::fs::create_dir_all(root.join("vault")).unwrap();
+    std::fs::write(root.join("vault/k.txt"), "one\n").unwrap();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    let (dl, _) = DenyList::new(&["vault/**".to_string()], None, None, PathPolicy::NATIVE);
+    let sp = SecretPolicy::new(dl);
+    let cite = |p: &str| Citation {
+        path: p.into(),
+        start_line: 1,
+        end_line: 1,
+        quote: "one".into(),
+    };
+    let denied = check_citation(&root, &cite("vault/k.txt"), &Redactor::new([]), &sp);
+    assert!(
+        !denied.ok && denied.why.contains("secret"),
+        "{}",
+        denied.why
+    );
+    // the same file without the pattern is read; the verdict is not an oracle for the denied path
+    assert!(
+        check_citation(
+            &root,
+            &cite("vault/k.txt"),
+            &Redactor::new([]),
+            &Default::default()
+        )
+        .ok
+    );
+    assert!(check_citation(&root, &cite("a.txt"), &Redactor::new([]), &sp).ok);
 }
 
 #[test]
@@ -360,18 +398,39 @@ fn citations_that_escape_the_folder_are_refused() {
         "",
         "missing.txt",
     ] {
-        let c = check_citation(&root, &cite(bad, "one"), &Redactor::new([]));
+        let c = check_citation(
+            &root,
+            &cite(bad, "one"),
+            &Redactor::new([]),
+            &Default::default(),
+        );
         assert!(!c.ok, "{bad:?} must be refused: {}", c.why);
     }
-    assert!(check_citation(&root, &cite("a.txt", "one"), &Redactor::new([])).ok);
+    assert!(
+        check_citation(
+            &root,
+            &cite("a.txt", "one"),
+            &Redactor::new([]),
+            &Default::default()
+        )
+        .ok
+    );
     // whitespace is normalized; the quote must be in the cited lines only
     let two = Citation {
         start_line: 2,
         end_line: 2,
         ..cite("a.txt", "two\tthree")
     };
-    assert!(check_citation(&root, &two, &Redactor::new([])).ok);
-    assert!(!check_citation(&root, &cite("a.txt", "four"), &Redactor::new([])).ok);
+    assert!(check_citation(&root, &two, &Redactor::new([]), &Default::default()).ok);
+    assert!(
+        !check_citation(
+            &root,
+            &cite("a.txt", "four"),
+            &Redactor::new([]),
+            &Default::default()
+        )
+        .ok
+    );
     // end to end: a failed citation is on the card and accept is not offered
     let escape =
         json!([{"path": "../outside.txt", "start_line": 1, "end_line": 1, "quote": "one"}]);
@@ -480,6 +539,7 @@ fn kill_9_before_settle_leaves_one_consistent_review() {
         &report,
         OffsetDateTime::now_utc(),
         &Redactor::new([]),
+        None,
     )
     .unwrap();
     assert_eq!(review(&w).id, d.id);
@@ -666,6 +726,7 @@ fn open_review_after_a_crash_opens_one_review() {
         &report,
         OffsetDateTime::now_utc(),
         &Redactor::new([]),
+        None,
     )
     .unwrap();
     open_review(
@@ -675,6 +736,7 @@ fn open_review_after_a_crash_opens_one_review() {
         &report,
         OffsetDateTime::now_utc(),
         &Redactor::new([]),
+        None,
     )
     .unwrap();
     assert_eq!(review(&w).brief["evidence"]["citations_verified"], "1 of 1");
@@ -771,6 +833,7 @@ fn kill_9_after_the_review_is_opened_keeps_one_review() {
         &report,
         OffsetDateTime::now_utc(),
         &Redactor::new([]),
+        None,
     )
     .unwrap();
     let id = w.id().clone();
@@ -814,9 +877,9 @@ fn a_registered_session_secret_is_masked_in_the_report_and_the_citation() {
         end_line: 1,
         quote: "note".into(),
     };
-    assert!(check_citation(&root, &c, &Redactor::new([])).ok);
+    assert!(check_citation(&root, &c, &Redactor::new([]), &Default::default()).ok);
     let reg = Redactor::new([secret.to_string()]);
-    let checked = check_citation(&root, &c, &reg);
+    let checked = check_citation(&root, &c, &reg, &Default::default());
     assert!(
         !checked.ok && checked.why.contains("secret"),
         "{}",
@@ -839,6 +902,7 @@ fn a_registered_session_secret_is_masked_in_the_report_and_the_citation() {
         &report,
         OffsetDateTime::now_utc(),
         &reg,
+        None,
     )
     .unwrap();
     let shown = review(&w).brief["report"].as_str().unwrap().to_owned();
@@ -858,14 +922,19 @@ fn a_citation_path_that_holds_a_secret_is_refused() {
         end_line: 1,
         quote: "note".into(),
     };
-    let checked = check_citation(&root, &c(&name), &Redactor::new([]));
+    let checked = check_citation(&root, &c(&name), &Redactor::new([]), &Default::default());
     assert!(
         !checked.ok && checked.why.contains("path holds a secret"),
         "{}",
         checked.why
     );
     let reg = Redactor::new(["zq-path-session-secret-4".to_string()]);
-    let checked = check_citation(&root, &c("zq-path-session-secret-4.txt"), &reg);
+    let checked = check_citation(
+        &root,
+        &c("zq-path-session-secret-4.txt"),
+        &reg,
+        &Default::default(),
+    );
     assert!(
         checked.why.contains("path holds a secret"),
         "{}",

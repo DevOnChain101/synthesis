@@ -443,6 +443,8 @@ pub struct IndependentVerifier {
     pub timeout: Duration,
     /// Masks session secrets (and secret patterns) in a report shown for review.
     pub redactor: synthesis_events::Redactor,
+    /// The user's secret-path rule per repository (report citations); `None` = built-in names only.
+    pub secrets_for: Option<crate::report::SecretsFor>,
     jobs: BTreeMap<WorkItemId, Job>,
 }
 
@@ -476,6 +478,7 @@ impl IndependentVerifier {
             runner,
             timeout,
             redactor: synthesis_events::Redactor::new([]),
+            secrets_for: None,
             jobs: BTreeMap::new(),
         })
     }
@@ -561,7 +564,13 @@ impl IndependentVerifier {
         // A read-only goal's subject is a report, not a commit: no independent check can judge it.
         // Only a person's accepted `report_review` can (S1 section 2.3); until then the item waits.
         if self.contract.kind == ContractKind::ReadOnly {
-            return crate::report::review_verdict(w, item, &att, &self.redactor);
+            return crate::report::review_verdict(
+                w,
+                item,
+                &att,
+                &self.redactor,
+                self.secrets_for.as_ref(),
+            );
         }
         let Some(commit) = att.subject_commit.clone() else {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));

@@ -67,10 +67,12 @@ pub fn read_tool_search(user_settings: &Path) -> (ToolSearchMode, Vec<String>) {
 pub fn secret_policy(
     patterns: &[String],
     user_home: &Path,
+    root: Option<&Path>,
 ) -> (synthesis_core::secret_policy::SecretPolicy, Vec<String>) {
     let (d, diag) = synthesis_core::secret_policy::DenyList::new(
         patterns,
         Some(user_home),
+        root,
         synthesis_core::PathPolicy::NATIVE,
     );
     (synthesis_core::secret_policy::SecretPolicy::new(d), diag)
@@ -90,7 +92,7 @@ pub fn secret_policy_for(
         env,
     };
     let s = synthesis_settings::load_settings(&lc, synthesis_config::ProjectTrust::Untrusted);
-    secret_policy(&s.synthesis.secrets_deny, &h.user)
+    secret_policy(&s.synthesis.secrets_deny, &h.user, Some(repo))
 }
 
 /// Days a stored image is kept: `synt.images.retentionDays` of the USER settings.json (a

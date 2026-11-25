@@ -913,7 +913,7 @@ fn secrets_deny_patterns_that_name_places_reach_the_sandbox_deny_list() {
         synthesis_core::WorkspaceContext::open("w", &root, &root, &[], t.path().join("art"), "pg")
             .unwrap();
     let pats = ["secrets/**".to_string(), "**/*.pfx".to_string()];
-    let (dl, _) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+    let (dl, _) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
     let ws = ws.with_secrets(SecretPolicy::new(dl));
     let p = synthesis_tools::standard_policy(&ws).unwrap();
     assert!(
@@ -954,7 +954,7 @@ async fn a_user_deny_pattern_blocks_read_grep_and_glob_and_the_defaults_still_ho
         "*.pfx".to_string(),
         "!.env".to_string(),
     ];
-    let (dl, diag) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+    let (dl, diag) = DenyList::new(&pats, None, None, PathPolicy::NATIVE);
     assert_eq!(diag.len(), 1, "{diag:?}");
     let ws = (*f.ctx.workspace)
         .clone()
