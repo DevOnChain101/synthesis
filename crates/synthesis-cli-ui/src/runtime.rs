@@ -263,6 +263,7 @@ fn cfg_for(o: &Options) -> AppConfig {
             ColorMode::Ansi16 | ColorMode::Mono
         ),
         agent_defs: o.harness.agent_defs().into_iter().map(|(n, _)| n).collect(),
+        secrets: s.workspace.secrets.clone(),
     }
 }
 
@@ -1326,6 +1327,7 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         project_trusted: false,
         plain_logo: matches!(o.color, ColorMode::Ansi16 | ColorMode::Mono),
         agent_defs: vec![],
+        secrets: Default::default(),
     };
     let mut app = App::new(cfg, &o.events, o.now);
     app.startup_notes(&o.startup_notes);

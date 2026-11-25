@@ -257,6 +257,9 @@ impl SettingsSchema {
             b("synt.sandbox.wsl.hide_windows_drives", Execution, "WSL: hide Windows drives from commands", true)
                 .help("On WSL the sandbox hides /mnt/c and the other Windows drives from commands (the workspace and --sandbox-read folders on a drive stay). Off: drives stay readable (still never writable). Costs when on: sibling projects on a drive and symlinks into /mnt/c are not visible.")
                 .edit(Edit::Confirm("this lets sandboxed commands READ your Windows drives")),
+            Field::new("synt.secrets.deny", Execution, "Extra secret paths", List(ListItem::Text))
+                .scope(Scope::Tighten)
+                .help("Patterns of files the agent must never read, show or commit, added to the built-in secret names (a project can only add). `*.pfx`, `.env.local`, `secrets/**`, `~/vault/**`, `/abs/path`; `*` within a name, `**` across folders, no `!`. Detection is by path name, not content. The OS sandbox also hides the patterns that name concrete folders or files (`synt doctor` lists the rest)."),
             Field::new("synt.sandbox.network.allowedHosts", Execution, "Hosts for --network hosts", List(ListItem::Text))
                 .scope(Scope::UserManaged)
                 .help("Hosts commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`. Only through the egress proxy; a name never reaches a private address. It limits destinations, not what is sent to an allowed host. Managed settings replace this list."),

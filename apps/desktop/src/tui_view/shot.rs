@@ -493,7 +493,7 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     if let Some(Submitted::Send(t)) = l.prompt.as_deref().map(|p| live.submit(p)) {
         let t = match (&l.select, l.quote) {
             (Some((f, a, b)), true) => {
-                let lines = super::tabs::read_preview(&ws, f)?.lines;
+                let lines = super::tabs::read_preview(&ws, f, &Default::default())?.lines;
                 let q = super::quote::from_range(f, &lines, a - 1, b - 1)?;
                 super::quote::compose(&t, &[q])
             }

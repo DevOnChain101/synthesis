@@ -244,6 +244,11 @@ impl Service {
                 if o.base_commit.is_empty() {
                     return Err("a read-only goal changes nothing: it has no diff".into());
                 }
+                // fail closed on a home we cannot find: the built-in names still apply
+                let env = synthesis_config::Env::from_process();
+                let secrets = crate::homes(&env)
+                    .map(|h| crate::ctx::secret_policy_for(&env, &h, Path::new(&o.repo_root)).0)
+                    .unwrap_or_default();
                 // repository, base and commit are the owner's records, never a worker's or a caller's
                 let d = synthesis_orchestrator::commit_diff(
                     Path::new(&o.repo_root),
@@ -251,6 +256,7 @@ impl Service {
                     &o.base_commit,
                     &commit,
                     &std::sync::atomic::AtomicBool::new(false),
+                    &secrets,
                 )
                 .map_err(s)?;
                 let files = d

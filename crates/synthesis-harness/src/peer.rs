@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use synthesis_core::{AgentSession, Budget, SessionStatus, secrets::is_secret_path};
+use synthesis_core::{AgentSession, Budget, SessionStatus, secret_policy::SecretPolicy};
 use synthesis_events::{Event, PeerAddr, SubagentInfo, TaskStatus};
 use synthesis_peers::address::{candidates, parse, resolve};
 use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
@@ -436,9 +436,9 @@ fn redact_value(v: &Value, redact: &dyn Fn(&str) -> String) -> Value {
 
 /// A string leaf of a tool input that names a secret, Synthesis state, or a path outside the
 /// workspace.
-fn names_private_path(t: &str, root: &str, home: &str) -> bool {
+fn names_private_path(t: &str, root: &str, home: &str, secrets: &SecretPolicy) -> bool {
     let p = std::path::Path::new(t);
-    is_secret_path(p)
+    secrets.is_secret_path(p, std::path::Path::new(root))
         || t.contains(".ssh/")
         || t.contains(".aws/")
         || t.contains(".gnupg")
@@ -479,6 +479,7 @@ fn sanitize(
     home: &str,
     share: &[String],
     redact: &dyn Fn(&str) -> String,
+    secrets: &SecretPolicy,
 ) -> Vec<Message> {
     let mut hidden: BTreeSet<String> = BTreeSet::new();
     let mut shared: BTreeSet<String> = BTreeSet::new();
@@ -495,7 +496,9 @@ fn sanitize(
                         shared.insert(id.clone());
                     }
                     if !(SHARED_RESULTS.contains(&name.as_str()) || ok)
-                        || toks.iter().any(|t| names_private_path(t, root, home))
+                        || toks
+                            .iter()
+                            .any(|t| names_private_path(t, root, home, secrets))
                     {
                         hidden.insert(id.clone());
                     }
@@ -627,7 +630,14 @@ impl Harness {
             let home = p.run_dir.parent().map(|h| h.to_string_lossy().into_owned());
             let files = changed
                 .iter()
-                .filter(|f| !names_private_path(f, &root, home.as_deref().unwrap_or("")))
+                .filter(|f| {
+                    !names_private_path(
+                        f,
+                        &root,
+                        home.as_deref().unwrap_or(""),
+                        &p.session.workspace.secrets,
+                    )
+                })
                 .take(50)
                 .map(String::as_str)
                 .collect::<Vec<_>>()
@@ -1778,6 +1788,7 @@ impl Harness {
                     .unwrap_or_default(),
                 &link.config.share_commands,
                 &redact,
+                &link.session.workspace.secrets,
             )
         });
         let turn = Block::Text {
@@ -2258,7 +2269,14 @@ mod tests {
         ];
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
         let share = vec!["cargo test*".to_string()];
-        let t = dump(&sanitize(&hist, "/w", "/h/.synt", &share, &red));
+        let t = dump(&sanitize(
+            &hist,
+            "/w",
+            "/h/.synt",
+            &share,
+            &red,
+            &Default::default(),
+        ));
         assert!(
             t.contains("FAIL token=[REDACTED]") && !t.contains("sk-LEAK-1"),
             "{t}"
@@ -2288,7 +2306,7 @@ mod tests {
             result("f", "other-repo-line"),
         ];
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
-        let out = sanitize(&hist, "/w", "/h/.synt", &[], &red);
+        let out = sanitize(&hist, "/w", "/h/.synt", &[], &red, &Default::default());
         let t = dump(&out);
         assert!(t.contains("fn main() {} token=[REDACTED]"), "{t}");
         for leaked in [

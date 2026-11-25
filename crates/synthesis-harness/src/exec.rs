@@ -1517,7 +1517,7 @@ impl Harness {
                                 w.first().map(String::as_str),
                                 Some("cat" | "less" | "more" | "head" | "tail" | "bat")
                             ) && w.iter().skip(1).any(|a| {
-                                synthesis_core::secrets::is_secret_shaped_in(
+                                task.workspace.secrets.is_secret_shaped_in(
                                     std::path::Path::new(a),
                                     &task.workspace.root,
                                 )
@@ -1533,10 +1533,9 @@ impl Harness {
                 .get("file_path")
                 .and_then(Value::as_str)
                 .is_some_and(|p| {
-                    synthesis_core::secrets::is_secret_shaped_in(
-                        std::path::Path::new(p),
-                        &task.workspace.root,
-                    )
+                    task.workspace
+                        .secrets
+                        .is_secret_shaped_in(std::path::Path::new(p), &task.workspace.root)
                 })
         {
             protected &= self.sink.add_secrets_from(&text);

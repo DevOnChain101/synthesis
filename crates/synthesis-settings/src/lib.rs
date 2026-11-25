@@ -123,6 +123,10 @@ pub struct SynthesisSettings {
     /// `orchestrator` (outcome orchestration): user and managed settings only, managed wins.
     pub orchestrator: OrchestratorSettings,
     pub compat: Compat,
+    /// `secrets.deny` (user, managed AND project settings, any trust): extra path patterns that count as
+    /// secret. The union of all scopes; it can only add denials, so a repository's list is honoured even
+    /// when the project is not trusted. Syntax and validation: `synthesis_core::secret_policy`.
+    pub secrets_deny: Vec<String>,
 }
 
 /// Keys of `synt.sandbox.limits`: file size, memory (cgroup), disk quota in MiB; tasks (cgroup),
@@ -985,6 +989,7 @@ impl Settings {
                 "{what}: key \"synthesis\" was renamed to \"synt\", ignored"
             ));
         }
+        self.apply_secrets_deny(raw, what);
         if trusted {
             if let Some(b) = raw.get("disableAllHooks").and_then(Value::as_bool) {
                 self.disable_all_hooks = b;
@@ -1102,6 +1107,34 @@ impl Settings {
                 .filter(|m| !m.trim().is_empty())
                 .map(|m| m.trim().to_string()),
         };
+    }
+
+    /// `synt.secrets.deny`: strings only, appended once each; anything else is named and skipped.
+    fn apply_secrets_deny(&mut self, raw: &Value, what: &str) {
+        let Some(d) = raw
+            .get("synt")
+            .and_then(|n| n.get("secrets"))
+            .and_then(|s| s.get("deny"))
+        else {
+            return;
+        };
+        let Some(list) = d.as_array() else {
+            self.diagnostics.push(format!(
+                "{what}: synt.secrets.deny must be a list of strings, ignored"
+            ));
+            return;
+        };
+        for p in list {
+            match p.as_str() {
+                Some(p) if !self.synthesis.secrets_deny.iter().any(|x| x == p) => {
+                    self.synthesis.secrets_deny.push(p.to_string());
+                }
+                Some(_) => {}
+                None => self.diagnostics.push(format!(
+                    "{what}: synt.secrets.deny entry is not a string, ignored"
+                )),
+            }
+        }
     }
 
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {

@@ -10,6 +10,7 @@ use std::path::Path;
 use super::{Git, MAX_BYTES, clean_line};
 use synthesis_cli_ui_base::imgclip::Output;
 use synthesis_config::Env;
+use synthesis_core::secret_policy::SecretPolicy;
 
 /// Lines of one diff the explorer keeps.
 pub const DIFF_LINES: usize = 2000;
@@ -172,9 +173,14 @@ fn unless_secret(lines: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 /// A new file shown as one added hunk (`lines` are the file's text, already read safely).
-pub fn all_added(root: &Path, rel: &str, lines: &[String]) -> Result<FileDiff, String> {
+pub fn all_added(
+    root: &Path,
+    rel: &str,
+    lines: &[String],
+    secrets: &SecretPolicy,
+) -> Result<FileDiff, String> {
     safe_rel(rel)?;
-    if synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), root) {
+    if secrets.is_secret_shaped_in(Path::new(rel), root) {
         return Err(HIDDEN_SECRET.into());
     }
     let n = lines.len().min(DIFF_LINES);
@@ -192,9 +198,15 @@ pub fn all_added(root: &Path, rel: &str, lines: &[String]) -> Result<FileDiff, S
 
 /// `git diff HEAD -- rel` (the index when there is no commit yet) of a tracked file. Never the content of a
 /// secret file, and never a diff with secret-shaped text in it.
-pub fn file_diff(cwd: &Path, env: &Env, trusted: bool, rel: &str) -> Result<FileDiff, String> {
+pub fn file_diff(
+    cwd: &Path,
+    env: &Env,
+    trusted: bool,
+    rel: &str,
+    secrets: &SecretPolicy,
+) -> Result<FileDiff, String> {
     safe_rel(rel)?;
-    if synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), cwd) {
+    if secrets.is_secret_shaped_in(Path::new(rel), cwd) {
         return Err(HIDDEN_SECRET.into());
     }
     if !trusted {
@@ -300,12 +312,35 @@ mod tests {
     fn a_changed_file_has_its_diff_against_head() {
         let d = repo();
         std::fs::write(d.path().join("a.txt"), "one\nthree\n").unwrap();
-        let f = file_diff(d.path(), &env(), true, "a.txt").unwrap();
+        let f = file_diff(d.path(), &env(), true, "a.txt", &Default::default()).unwrap();
         assert!(f.lines.iter().any(|l| l == "-two"), "{:?}", f.lines);
         assert!(f.lines.iter().any(|l| l == "+three"));
         assert!(!f.cut);
-        assert!(file_diff(d.path(), &env(), false, "a.txt").is_err());
-        assert!(file_diff(d.path(), &env(), true, "../a.txt").is_err());
+        assert!(file_diff(d.path(), &env(), false, "a.txt", &Default::default()).is_err());
+        assert!(file_diff(d.path(), &env(), true, "../a.txt", &Default::default()).is_err());
+    }
+
+    #[test]
+    fn a_file_named_by_a_user_pattern_is_withheld_and_defaults_still_hold() {
+        use synthesis_core::{PathPolicy, secret_policy::DenyList};
+        let d = repo();
+        let pats = ["notes/**".to_string(), "!.env".to_string()];
+        let (dl, diag) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+        assert_eq!(diag.len(), 1);
+        let sp = SecretPolicy::new(dl);
+        assert_eq!(
+            file_diff(d.path(), &env(), true, "notes/a.txt", &sp).unwrap_err(),
+            HIDDEN_SECRET
+        );
+        assert_eq!(
+            all_added(d.path(), "notes/a.txt", &["x".into()], &sp).unwrap_err(),
+            HIDDEN_SECRET
+        );
+        assert_eq!(
+            file_diff(d.path(), &env(), true, ".env", &sp).unwrap_err(),
+            HIDDEN_SECRET
+        );
+        assert!(all_added(d.path(), "n.txt", &["x".into()], &sp).is_ok());
     }
 
     #[test]
@@ -313,27 +348,34 @@ mod tests {
         let d = repo();
         std::fs::write(d.path().join(".env"), "A=2\n").unwrap();
         assert_eq!(
-            file_diff(d.path(), &env(), true, ".env").unwrap_err(),
+            file_diff(d.path(), &env(), true, ".env", &Default::default()).unwrap_err(),
             HIDDEN_SECRET
         );
         assert_eq!(
-            all_added(Path::new("."), ".env", &["A=2".into()]).unwrap_err(),
+            all_added(Path::new("."), ".env", &["A=2".into()], &Default::default()).unwrap_err(),
             HIDDEN_SECRET
         );
         std::fs::write(d.path().join("a.txt"), "API_KEY=abcdef123456\n").unwrap();
         assert_eq!(
-            file_diff(d.path(), &env(), true, "a.txt").unwrap_err(),
+            file_diff(d.path(), &env(), true, "a.txt", &Default::default()).unwrap_err(),
             HIDDEN_SHAPED
         );
         assert!(
             all_added(
                 Path::new("."),
                 "n.txt",
-                &["Authorization: Bearer abcdefghijklmnop1234".into()]
+                &["Authorization: Bearer abcdefghijklmnop1234".into()],
+                &Default::default()
             )
             .is_err()
         );
-        let ok = all_added(Path::new("."), "n.txt", &["hello".into()]).unwrap();
+        let ok = all_added(
+            Path::new("."),
+            "n.txt",
+            &["hello".into()],
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(ok.lines.last().unwrap(), "+hello");
     }
 
@@ -344,13 +386,14 @@ mod tests {
             .map(|i| format!("line {i}\n"))
             .collect();
         std::fs::write(d.path().join("a.txt"), big).unwrap();
-        let f = file_diff(d.path(), &env(), true, "a.txt").unwrap();
+        let f = file_diff(d.path(), &env(), true, "a.txt", &Default::default()).unwrap();
         assert!(f.cut);
         assert_eq!(f.lines.len(), DIFF_LINES);
         let added = all_added(
             Path::new("."),
             "n.txt",
             &vec!["x".to_string(); DIFF_LINES + 5],
+            &Default::default(),
         )
         .unwrap();
         assert!(added.cut && added.lines.len() == DIFF_LINES + 3);
@@ -382,7 +425,7 @@ mod tests {
         assert!(gitdir_ok(&w).is_ok());
         std::fs::write(w.join(".git"), "garbage").unwrap();
         assert!(gitdir_ok(&w).is_err());
-        assert!(file_diff(&w, &env(), true, "a.txt").is_err());
+        assert!(file_diff(&w, &env(), true, "a.txt", &Default::default()).is_err());
     }
 
     #[test]
@@ -398,7 +441,7 @@ mod tests {
             other.path().display()
         ));
         std::fs::write(&cfg, c).unwrap();
-        let e = file_diff(d.path(), &env(), true, "a.txt").unwrap_err();
+        let e = file_diff(d.path(), &env(), true, "a.txt", &Default::default()).unwrap_err();
         assert!(e.contains("git was not run"), "{e}");
         let l = crate::project::scan_lazy(d.path(), &env(), true, None);
         assert!(!l.listing.git && l.listing.status.is_empty());
@@ -465,11 +508,11 @@ mod tests {
         std::fs::write(d.path().join("secrets/data.json"), "{}").unwrap();
         for rel in ["secrets/data.json", ".kube/config", ".azure/x"] {
             assert_eq!(
-                file_diff(d.path(), &env(), true, rel).unwrap_err(),
+                file_diff(d.path(), &env(), true, rel, &Default::default()).unwrap_err(),
                 HIDDEN_SECRET
             );
             assert_eq!(
-                all_added(d.path(), rel, &["x".into()]).unwrap_err(),
+                all_added(d.path(), rel, &["x".into()], &Default::default()).unwrap_err(),
                 HIDDEN_SECRET
             );
         }
@@ -516,7 +559,7 @@ mod tests {
         std::fs::write(w.join("a.txt"), "changed\n").unwrap();
         std::fs::write(w.join("new.txt"), "new\n").unwrap();
         let listing = crate::project::scan_lazy(w, &env(), true, None);
-        let diff = file_diff(w, &env(), true, "a.txt");
+        let diff = file_diff(w, &env(), true, "a.txt", &Default::default());
         assert!(!marker.exists(), "a program of the repository ran");
         assert!(listing.listing.git, "{:?}", listing.note);
         assert!(diff.is_ok(), "{diff:?}");

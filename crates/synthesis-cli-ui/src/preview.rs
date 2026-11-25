@@ -20,7 +20,12 @@ fn resolve(cwd: &Path, file: &str) -> PathBuf {
 
 /// `None`: not a file-change tool, the file is outside `cwd`, unreadable or too large, or an
 /// edit does not apply.
-pub fn change_diff(cwd: &Path, tool: &str, input: &Value) -> Option<Value> {
+pub fn change_diff(
+    cwd: &Path,
+    tool: &str,
+    input: &Value,
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
+) -> Option<Value> {
     if !matches!(tool, "Edit" | "MultiEdit" | "Write") {
         return None;
     }
@@ -48,7 +53,9 @@ pub fn change_diff(cwd: &Path, tool: &str, input: &Value) -> Option<Value> {
     if tool == "Write" {
         let content = input.get("content")?.as_str()?;
         let kind = if exists { "overwrite" } else { "create" };
-        return Some(synthesis_tools::file_diff(file, kind, &before, content));
+        return Some(synthesis_tools::file_diff(
+            secrets, &root, file, kind, &before, content,
+        ));
     }
     let edits: Vec<&Value> = match input.get("edits").and_then(Value::as_array) {
         Some(a) => a.iter().collect(),
@@ -67,7 +74,9 @@ pub fn change_diff(cwd: &Path, tool: &str, input: &Value) -> Option<Value> {
             text.replacen(old, new, 1)
         };
     }
-    Some(synthesis_tools::file_diff(file, "update", &before, &text))
+    Some(synthesis_tools::file_diff(
+        secrets, &root, file, "update", &before, &text,
+    ))
 }
 
 #[cfg(test)]
@@ -84,6 +93,7 @@ mod tests {
             &cwd,
             "Edit",
             &json!({"file_path": "a.txt", "old_string": "three", "new_string": "3"}),
+            &Default::default(),
         )
         .unwrap();
         let line = &v["hunks"][0]["lines"];
@@ -93,13 +103,14 @@ mod tests {
             (Some(1), Some(1))
         );
         let missing = json!({"file_path": "a.txt", "old_string": "nope", "new_string": "x"});
-        assert!(change_diff(&cwd, "Edit", &missing).is_none());
+        assert!(change_diff(&cwd, "Edit", &missing, &Default::default()).is_none());
         let outside = json!({"file_path": "/etc/hosts", "old_string": "a", "new_string": "b"});
-        assert!(change_diff(&cwd, "Edit", &outside).is_none());
+        assert!(change_diff(&cwd, "Edit", &outside, &Default::default()).is_none());
         let w = change_diff(
             &cwd,
             "Write",
             &json!({"file_path": "n.txt", "content": "x\ny\n"}),
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(w["kind"], "create");

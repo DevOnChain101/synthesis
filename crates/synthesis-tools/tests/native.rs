@@ -899,3 +899,96 @@ async fn read_offset_past_eof_notice() {
         text(&o)
     );
 }
+
+#[test]
+fn secrets_deny_patterns_that_name_places_reach_the_sandbox_deny_list() {
+    use synthesis_core::{
+        PathPolicy,
+        secret_policy::{DenyList, SecretPolicy},
+    };
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("p");
+    std::fs::create_dir_all(&root).unwrap();
+    let ws =
+        synthesis_core::WorkspaceContext::open("w", &root, &root, &[], t.path().join("art"), "pg")
+            .unwrap();
+    let pats = ["secrets/**".to_string(), "**/*.pfx".to_string()];
+    let (dl, _) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+    let ws = ws.with_secrets(SecretPolicy::new(dl));
+    let p = synthesis_tools::standard_policy(&ws).unwrap();
+    assert!(
+        p.deny_paths.contains(&ws.root.join("secrets")),
+        "{:?}",
+        p.deny_paths
+    );
+    assert!(
+        !p.deny_paths
+            .iter()
+            .any(|d| d.to_string_lossy().contains("pfx"))
+    );
+    // the defaults are still there
+    let plain = synthesis_tools::standard_policy(
+        &synthesis_core::WorkspaceContext::open("w", &root, &root, &[], t.path().join("art"), "pg")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(plain.deny_paths.iter().all(|d| p.deny_paths.contains(d)));
+}
+
+#[tokio::test]
+async fn a_user_deny_pattern_blocks_read_grep_and_glob_and_the_defaults_still_hold() {
+    use synthesis_core::{
+        PathPolicy,
+        secret_policy::{DenyList, SecretPolicy},
+    };
+    let mut f = fx();
+    let w = f.root.clone();
+    std::fs::create_dir_all(w.join("vault")).unwrap();
+    std::fs::write(w.join("vault/k.txt"), "needle-vault").unwrap();
+    std::fs::write(w.join("cert.PFX"), "needle-pfx").unwrap();
+    std::fs::write(w.join("ok.txt"), "needle-ok").unwrap();
+    std::fs::write(w.join(".env"), "needle-env").unwrap();
+    // a project cannot say "allow": the negation is dropped, the built-in `.env` rule stays
+    let pats = [
+        "vault/**".to_string(),
+        "*.pfx".to_string(),
+        "!.env".to_string(),
+    ];
+    let (dl, diag) = DenyList::new(&pats, None, PathPolicy::NATIVE);
+    assert_eq!(diag.len(), 1, "{diag:?}");
+    let ws = (*f.ctx.workspace)
+        .clone()
+        .with_secrets(SecretPolicy::new(dl));
+    f.ctx.workspace = Arc::new(ws);
+    let r = f
+        .run("Read", json!({"file_path": w.join("vault/k.txt")}))
+        .await;
+    assert!(r.is_error && !text(&r).contains("needle"), "{r:?}");
+    let r = f.run("Read", json!({"file_path": w.join(".env")})).await;
+    assert!(r.is_error && !text(&r).contains("needle"), "{r:?}");
+    let r = f.run("Read", json!({"file_path": w.join("ok.txt")})).await;
+    assert!(!r.is_error, "{r:?}");
+    let g = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "output_mode": "content"}),
+        )
+        .await;
+    let t = text(&g);
+    assert!(t.contains("needle-ok"), "{t}");
+    for leaked in ["needle-vault", "needle-env"] {
+        assert!(!t.contains(leaked), "{leaked} leaked: {t}");
+    }
+    // macOS and Windows fold case, Linux does not
+    assert_eq!(
+        t.contains("needle-pfx"),
+        !PathPolicy::NATIVE.case_insensitive,
+        "{t}"
+    );
+    let l = f.run("Glob", json!({"pattern": "**/*", "path": w})).await;
+    assert!(
+        !text(&l).contains("vault/k.txt") && text(&l).contains("ok.txt"),
+        "{}",
+        text(&l)
+    );
+}

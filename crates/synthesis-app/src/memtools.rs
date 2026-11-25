@@ -365,6 +365,7 @@ mod tests {
             tool_written: Mutex::default(),
             taint: Arc::default(),
             retrieved: Mutex::default(),
+            secret_paths: Default::default(),
         });
         let ws = WorkspaceContext::open("w", &repo.root, &repo.root, &[], root.join("art"), "pg")
             .unwrap();

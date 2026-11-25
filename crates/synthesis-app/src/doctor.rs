@@ -461,6 +461,9 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     for d in &st.diagnostics {
         add(Level::Warn, format!("settings: {}", san(d)));
     }
+    for (level, text) in secret_rows(&st.synthesis.secrets_deny, &h.user, &root) {
+        add(level, text);
+    }
     if let Ok(cfg) = load_config(env, &h, Some(cwd), ProjectTrust::Untrusted) {
         let plan = crate::mcp::plan(&cfg, &st, &st, cwd, trust, &[]);
         add(
@@ -559,6 +562,24 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
 }
 
 /// The `orchestrator planner:` line: names and numbers only.
+/// `synt.secrets.deny`: what is configured, which patterns were dropped, and which of them the OS sandbox
+/// enforces (concrete paths) and which only the permission layer does.
+fn secret_rows(patterns: &[String], user_home: &Path, root: &Path) -> Vec<(Level, String)> {
+    let (sp, diag) = crate::ctx::secret_policy(patterns, user_home);
+    let mut v: Vec<(Level, String)> = diag.into_iter().map(|d| (Level::Warn, san(&d))).collect();
+    let cover = sp.deny_list().sandbox_paths(root);
+    v.push((
+        Level::Ok,
+        format!(
+            "secrets: built-in secret names (by path name, not content) plus {} synt.secrets.deny pattern(s); the OS sandbox hides {} of them as paths",
+            sp.deny_list().patterns().count(),
+            sp.sandbox_deny_paths(root).len()
+        ),
+    ));
+    v.extend(cover.permission_only.iter().map(|l| (Level::Warn, san(l))));
+    v
+}
+
 fn planner_row(p: &synthesis_settings::PlannerSettings) -> String {
     use synthesis_settings::PlannerMode;
     match p.mode {
@@ -948,6 +969,30 @@ mod tests {
         assert!(legacy_notes(&Env::from_pairs([("PATH", "")]), &h, d.path(), None).is_empty());
         std::fs::write(&file, r#"{"synt":{"tui":{"opacity":80}}}"#).unwrap();
         assert!(legacy_notes(&Env::from_pairs([("PATH", "")]), &h, d.path(), None).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)] // the sample paths are POSIX absolute
+    fn secret_rows_say_which_patterns_the_os_sandbox_cannot_enforce() {
+        let pats: Vec<String> = ["secrets/**", "**/*.pfx", "!.env", "~/vault/**"]
+            .map(String::from)
+            .to_vec();
+        let rows = secret_rows(&pats, Path::new("/h/u"), Path::new("/w/p"));
+        let text = rows
+            .iter()
+            .map(|r| r.1.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("\"!.env\" ignored"), "{text}");
+        assert!(
+            text.contains("pattern \"**/*.pfx\" is enforced by the permission layer only, not by the OS sandbox on this platform"),
+            "{text}"
+        );
+        assert!(
+            text.contains("3 synt.secrets.deny pattern(s)") && text.contains("hides 2 of them"),
+            "{text}"
+        );
+        assert!(!text.contains("\"secrets/**\" is enforced"), "{text}");
     }
 
     #[test]

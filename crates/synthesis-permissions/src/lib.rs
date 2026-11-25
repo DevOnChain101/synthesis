@@ -378,6 +378,8 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+    /// Built-in secret names plus `synt.secrets.deny`; the default is the built-ins alone.
+    pub secrets: synthesis_core::secret_policy::SecretPolicy,
     /// Allow rules written in USER-level settings (`$SYNT_HOME`), never a project's. Only these
     /// can lift the read-only-path refusal of the edit tools and the irreversible-action table.
     pub user_allow: Vec<String>,
@@ -600,6 +602,7 @@ impl Env {
             protected_hard: false,
             project_root: None,
             memory_notes: None,
+            secrets: Default::default(),
             user_allow: vec![],
             sandbox_enforcing: false,
             worktree: false,
@@ -1038,7 +1041,7 @@ impl Permissions {
     /// Secret-shaped, with the secret directory names counted only below the project root.
     fn secret_shaped(&self, p: &Path) -> bool {
         let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
-        synthesis_core::secrets::is_secret_shaped_in(p, root)
+        self.env.secrets.is_secret_shaped_in(p, root)
     }
 
     /// Engine-enforced read ban (`Env::deny_read`, `Env::deny_secret_reads`); no rule or mode lifts it.
@@ -1113,7 +1116,8 @@ impl Permissions {
     /// Read/Grep/Glob aimed at a secret file (`.env`, keys, ...): the `path`, a Grep `glob` or a Glob
     /// `pattern` that names one or could match one (`.env*`, `*.pem`), by name or through a link.
     fn names_secret_file(&self, tool: &str, input: &Value) -> bool {
-        use synthesis_core::secrets::{is_secret_path, names_secret};
+        use synthesis_core::secrets::names_secret;
+        let root = self.env.project_root.as_deref().unwrap_or(&self.env.cwd);
         if !OUTSIDE_READ_TOOLS.contains(&tool) {
             return false;
         }
@@ -1129,7 +1133,7 @@ impl Permissions {
                 [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
                     .into_iter()
                     .flatten()
-                    .any(|c| is_secret_path(&c))
+                    .any(|c| self.env.secrets.is_secret_path(&c, root))
             })
     }
 

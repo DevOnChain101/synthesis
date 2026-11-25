@@ -343,6 +343,8 @@ pub fn standard_policy_git(
     let mut p = SandboxPolicy::standard(&ws.root, &tmp);
     p.network = network;
     p.writable_roots.extend(ws.additional_dirs.iter().cloned());
+    // `synt.secrets.deny` patterns that name concrete places: hidden from commands too (Bash indirect reads)
+    p.deny_paths.extend(ws.secrets.sandbox_deny_paths(&ws.root));
     if let Some(git_dir) = git_dir {
         // <main>/.git/worktrees/<id> -> <main>/.git (objects, refs, config)
         let common = git_dir

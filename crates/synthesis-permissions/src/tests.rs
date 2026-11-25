@@ -393,6 +393,35 @@ fn secret_file_reads_are_denied_in_every_mode_and_no_rule_lifts_it() {
 }
 
 #[test]
+fn a_user_deny_pattern_is_a_secret_for_every_mode_and_no_rule_lifts_it() {
+    use synthesis_core::secret_policy::{DenyList, SecretPolicy};
+    let f = fx();
+    let (dl, _) = DenyList::new(&["vault/**".to_string()], None, PathPolicy::NATIVE);
+    fs::create_dir_all(f.cwd.join("vault")).unwrap();
+    fs::write(f.cwd.join("vault/k.txt"), "x").unwrap();
+    let mut env = f.env(Mode::Default);
+    env.secrets = SecretPolicy::new(dl);
+    let read = json!({ "file_path": f.cwd.join("vault/k.txt") });
+    let allow = rules(&["Read(vault/**)"], &[], &[]);
+    for r in [PermissionRules::default(), allow] {
+        for mode in Mode::ALL {
+            let mut e = env.clone();
+            e.mode = mode;
+            let p = Permissions::new(r.clone(), e);
+            assert_eq!(d(&p, "Read", read.clone()), D, "{mode:?}");
+            assert_eq!(
+                d(&p, "Bash", json!({ "command": "cat vault/k.txt" })),
+                D,
+                "{mode:?}"
+            );
+        }
+    }
+    // a path no pattern names stays readable
+    let p = Permissions::new(PermissionRules::default(), env);
+    assert_eq!(d(&p, "Read", json!({ "file_path": f.cwd.join("a") })), A);
+}
+
+#[test]
 fn secret_files_are_denied_through_grep_globs_and_bash_readers_in_every_mode() {
     let f = fx();
     let cwd = f.cwd.to_string_lossy().into_owned();

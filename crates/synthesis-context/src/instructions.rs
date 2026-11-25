@@ -73,8 +73,7 @@ struct Ctx<'a> {
 /// No instruction file or `@import`, user-scope included (a `#` note can plant an import), may
 /// pull secret files (or anything the permission layer denies) into the prompt.
 fn read_denied(real: &Path, ctx: &Ctx) -> bool {
-    synthesis_core::secrets::is_secret_shaped_in(real, &ctx.ws.root)
-        || ctx.deny.is_some_and(|d| d(real))
+    ctx.ws.secrets.is_secret_shaped_in(real, &ctx.ws.root) || ctx.deny.is_some_and(|d| d(real))
 }
 
 fn inside_workspace(ws: &WorkspaceContext, real: &Path) -> bool {

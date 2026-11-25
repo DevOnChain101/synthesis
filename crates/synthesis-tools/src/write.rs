@@ -66,6 +66,8 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         "created": created,
         "bytes": md.len(),
         "diff": (created || before.is_some()).then(|| crate::diff::for_file(
+            &ctx.workspace.secrets,
+            &ctx.workspace.root,
             file_path,
             if created { "create" } else { "overwrite" },
             before.as_deref().unwrap_or(""),

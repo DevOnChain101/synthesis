@@ -988,6 +988,8 @@ pub struct MemoryRun {
     pub taint: Arc<std::sync::atomic::AtomicBool>,
     /// The `memory.retrieved` event, held until the session has started (`announce`).
     pub retrieved: Mutex<Option<Event>>,
+    /// Built-in secret names plus `synt.secrets.deny`: a tool call on such a path is left out of the digest.
+    pub secret_paths: synthesis_core::secret_policy::SecretPolicy,
 }
 
 /// Emits `memory.retrieved` once; call it right after `session.started`.
@@ -1048,6 +1050,7 @@ pub struct StartArgs<'a> {
     pub sink: Option<EventSink>,
     pub pricing: Option<synthesis_harness::Pricing>,
     pub taint: Arc<std::sync::atomic::AtomicBool>,
+    pub secret_paths: synthesis_core::secret_policy::SecretPolicy,
 }
 
 /// Opens memory for a run and retrieves the block. No store, an opted-out repository or a disabled
@@ -1097,6 +1100,7 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         tool_written: Mutex::default(),
         taint: a.taint.clone(),
         retrieved: Mutex::new(retrieved),
+        secret_paths: a.secret_paths.clone(),
     };
     let run = Arc::new(run);
     let for_skills = run.clone();
@@ -1321,10 +1325,14 @@ fn clip(t: &str, n: usize) -> String {
 
 /// What identifies a tool call for the digest; a call that touches a secret path is left out so the
 /// reflection model never sees (or cites) it.
-fn tool_arg(input: &serde_json::Value) -> Option<String> {
+fn tool_arg(
+    input: &serde_json::Value,
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
+    root: &Path,
+) -> Option<String> {
     let field = |k: &str| input.get(k).and_then(|v| v.as_str());
     for k in ["file_path", "notebook_path", "path"] {
-        if field(k).is_some_and(|p| synthesis_core::secrets::is_secret_path(Path::new(p))) {
+        if field(k).is_some_and(|p| secrets.is_secret_path(Path::new(p), root)) {
             return None;
         }
     }
@@ -1344,7 +1352,12 @@ fn tool_arg(input: &serde_json::Value) -> Option<String> {
     Some(clip(arg, 120))
 }
 
-pub fn digest_of(request: &str, out: &synthesis_harness::TaskOutcome) -> Digest {
+pub fn digest_of(
+    request: &str,
+    out: &synthesis_harness::TaskOutcome,
+    secrets: &synthesis_core::secret_policy::SecretPolicy,
+    root: &Path,
+) -> Digest {
     let mut d = Digest {
         request: clip(request, 400),
         status: format!("{:?}", out.status),
@@ -1367,7 +1380,7 @@ pub fn digest_of(request: &str, out: &synthesis_harness::TaskOutcome) -> Digest 
                             name,
                             input: Some(input),
                         } => {
-                            if let Some(arg) = tool_arg(input) {
+                            if let Some(arg) = tool_arg(input, secrets, root) {
                                 d.tools.push(ToolRow {
                                     id: id.clone(),
                                     name: name.clone(),
@@ -1412,7 +1425,7 @@ pub fn task_ended(
     }
     let status = format!("{:?}", out.status);
     let ok = out.status == synthesis_events::TaskStatus::Completed;
-    let mut d = digest_of(request, out);
+    let mut d = digest_of(request, out, &m.secret_paths, &m.root);
     d.untrusted_project = !m.project_trusted;
     // out.reason is model-influenced text: it is left out of the episode
     let mut body = format!("Request: {}\nStatus: {status}", clip(request, 400));
@@ -2034,6 +2047,7 @@ mod tests {
             tool_written: Mutex::default(),
             taint: Arc::default(),
             retrieved: Mutex::default(),
+            secret_paths: Default::default(),
         });
         Run { _d: d, run }
     }

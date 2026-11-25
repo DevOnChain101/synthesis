@@ -61,6 +61,38 @@ pub fn read_tool_search(user_settings: &Path) -> (ToolSearchMode, Vec<String>) {
     ToolSearchMode::from_settings(&v)
 }
 
+/// The secret-path rule of a session: the built-in names plus `synt.secrets.deny` (every settings scope; a
+/// project's list only adds). Invalid patterns are dropped and returned as diagnostics. `~/` expands against
+/// the user's home from the injected [`crate::Homes`], never a global.
+pub fn secret_policy(
+    patterns: &[String],
+    user_home: &Path,
+) -> (synthesis_core::secret_policy::SecretPolicy, Vec<String>) {
+    let (d, diag) = synthesis_core::secret_policy::DenyList::new(
+        patterns,
+        Some(user_home),
+        synthesis_core::PathPolicy::NATIVE,
+    );
+    (synthesis_core::secret_policy::SecretPolicy::new(d), diag)
+}
+
+/// [`secret_policy`] for owner-side code that has no session: the user's and managed settings plus the
+/// repository's (untrusted filter: its list can only add).
+pub fn secret_policy_for(
+    env: &synthesis_config::Env,
+    h: &crate::Homes,
+    repo: &Path,
+) -> (synthesis_core::secret_policy::SecretPolicy, Vec<String>) {
+    let lc = synthesis_config::LoadContext {
+        cwd: repo,
+        synthesis_home: &h.synthesis,
+        user_home: &h.user,
+        env,
+    };
+    let s = synthesis_settings::load_settings(&lc, synthesis_config::ProjectTrust::Untrusted);
+    secret_policy(&s.synthesis.secrets_deny, &h.user)
+}
+
 /// Days a stored image is kept: `synt.images.retentionDays` of the USER settings.json (a
 /// repository must not keep images longer). Default 30, `0` = forever, at most 3650; anything
 /// else keeps the default with a diagnostic naming the key.
