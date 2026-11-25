@@ -1505,6 +1505,25 @@ impl TuiView {
         self.on_prompt_changed(cx);
     }
 
+    /// Up/Down/Tab/Esc of the completion popup (the TUI prompt's and the Super Agent composer's). True: consumed.
+    fn comp_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(lu) = &mut self.live else {
+            return false;
+        };
+        let Some(c) = &mut lu.comp else {
+            return false;
+        };
+        match key {
+            "up" => c.sel = (c.sel + c.items.len() - 1) % c.items.len(),
+            "down" => c.sel = (c.sel + 1) % c.items.len(),
+            "tab" => return self.accept_completion(window, cx),
+            "escape" => lu.comp = None,
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
     /// The text changed (typing, paste, history, completion): refresh the popup.
     fn on_prompt_changed(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -1517,9 +1536,13 @@ impl TuiView {
         cx.notify();
     }
 
-    fn accept_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(lu) = &mut self.live else { return };
-        let Some(c) = lu.comp.take() else { return };
+    fn accept_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(lu) = &mut self.live else {
+            return false;
+        };
+        let Some(c) = lu.comp.take() else {
+            return false;
+        };
         let (text, cursor) = {
             let s = lu.prompt.read(cx);
             (s.value().to_string(), s.cursor())
@@ -1536,6 +1559,7 @@ impl TuiView {
             s.set_selected_range(byte..byte, cx);
         });
         self.on_prompt_changed(cx);
+        true
     }
 
     // ---- keys ----
@@ -1568,11 +1592,12 @@ impl TuiView {
         {
             return done;
         }
-        // the chat is the host's: only a dialog (answered here, same arming rules) and the panes above take keys
+        // the chat is the host's: only a dialog (answered here, same arming rules), the panes above and the
+        // completion popup of its composer take keys
         if self.embed.as_ref().is_some_and(|e| e.headless)
             && self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
         {
-            return false;
+            return !ks.modifiers.modified() && self.comp_key(ks.key.as_str(), window, cx);
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());
         let Some(lu) = &mut self.live else {
@@ -1860,30 +1885,12 @@ impl TuiView {
             return self.sidebar_key(key, ks, window, cx);
         }
         // the completion popup
-        if let Some(c) = &mut lu.comp {
-            match key {
-                "up" => {
-                    c.sel = (c.sel + c.items.len() - 1) % c.items.len();
-                    cx.notify();
-                    return true;
-                }
-                "down" => {
-                    c.sel = (c.sel + 1) % c.items.len();
-                    cx.notify();
-                    return true;
-                }
-                "tab" => {
-                    self.accept_completion(window, cx);
-                    return true;
-                }
-                "escape" => {
-                    lu.comp = None;
-                    cx.notify();
-                    return true;
-                }
-                _ => {}
-            }
+        if lu.comp.is_some() && self.comp_key(key, window, cx) {
+            return true;
         }
+        let Some(lu) = &mut self.live else {
+            return false;
+        };
         let (text, cursor) = {
             let s = lu.prompt.read(cx);
             (s.value().to_string(), s.cursor())
@@ -2820,6 +2827,14 @@ impl TuiView {
     /// What a command or picker asked the window to do.
     pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        // a command the Super Agent frame cannot act on says so, never silence
+        if self.embed.is_some()
+            && let Some(why) = super::embed_chat::embed_note(&a)
+        {
+            lu.live.note(why, false);
+            lu.dirty = true;
+            return cx.notify();
+        }
         let busy = lu.live.busy;
         match a {
             Action::Clear => {
