@@ -24,7 +24,7 @@ use synthesis_cli_ui_render::theme as t;
 use synthesis_view::project::{self, ProjectData};
 
 use super::panels::{OnClick, dim, icon, strong, text, with_alpha};
-use super::{ChatTab, TuiView};
+use super::{ChatTab, TuiView, WantPane};
 use crate::live::NoticeKind;
 use crate::theme::hsla;
 use crate::widgets::codeblock::icon_btn;
@@ -290,8 +290,13 @@ impl TuiView {
     }
 
     /// Sets the tab and, when asked, what it shows (`/diff FILE`).
-    pub(super) fn show_tab(&mut self, tab: ChatTab, file: Option<String>, cx: &mut Context<Self>) {
-        self.select_tab(tab, cx);
+    pub(crate) fn show_tab(&mut self, tab: ChatTab, file: Option<String>, cx: &mut Context<Self>) {
+        if self.embed.is_some() {
+            // an embedded frame has no tab strip: its owner shows the pane in the sidebar
+            cx.emit(WantPane(tab));
+        } else {
+            self.select_tab(tab, cx);
+        }
         if let (ChatTab::Diff, Some(f)) = (tab, file) {
             let found = self.live.as_ref().and_then(|l| {
                 l.live
@@ -318,7 +323,7 @@ impl TuiView {
             return;
         }
         let changes = lu.live.view.panes.files.len();
-        if self.ts.tab == ChatTab::Diff
+        if self.pane_tab() == ChatTab::Diff
             && !self.ts.diff_init
             && let Some(f) = lu.live.view.panes.files.last()
         {
@@ -344,7 +349,7 @@ impl TuiView {
                 self.pane_scroll.scroll_to_bottom();
             }
         }
-        if self.ts.tab == ChatTab::Files {
+        if self.pane_tab() == ChatTab::Files {
             // the plain listing of an untrusted folder gives way to the git one once it is trusted
             let stale = self.tree.for_cwd != lu.live.cwd
                 || self.tree.at_changes != changes

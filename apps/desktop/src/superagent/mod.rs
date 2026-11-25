@@ -134,6 +134,11 @@ impl SuperAgentView {
                 v.show_terminal(&e.0, cx)
             }),
         );
+        subs.push(
+            cx.subscribe(&host, |v, _, e: &session::host::WantPane, cx| {
+                v.show_pane(&e.0, e.1, cx)
+            }),
+        );
         let home = cx.new(|cx| HomeView::new(outcomes.clone(), cx));
         subs.push(cx.subscribe(&home, |v, _, e: &HomeEvent, cx| match e {
             HomeEvent::OpenOutcome(id) => v.open(Frame::Outcome(id.clone()), cx),

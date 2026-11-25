@@ -218,6 +218,10 @@ pub struct TuiView {
 pub(crate) struct WantTerminal;
 impl gpui::EventEmitter<WantTerminal> for TuiView {}
 
+/// An embedded view asks its owner to show its Files or Diff pane (`/files`, `/diff`).
+pub(crate) struct WantPane(pub ChatTab);
+impl gpui::EventEmitter<WantPane> for TuiView {}
+
 /// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
 /// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
 #[derive(Clone, Debug, Default)]

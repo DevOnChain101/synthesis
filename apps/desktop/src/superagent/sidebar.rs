@@ -28,9 +28,17 @@ pub enum Segment {
     Details,
     Terminal,
     Browser,
+    Files,
+    Diff,
 }
 
-const ALL: [Segment; 3] = [Segment::Details, Segment::Terminal, Segment::Browser];
+const ALL: [Segment; 5] = [
+    Segment::Details,
+    Segment::Terminal,
+    Segment::Browser,
+    Segment::Files,
+    Segment::Diff,
+];
 
 impl Segment {
     pub fn label(self) -> &'static str {
@@ -38,6 +46,8 @@ impl Segment {
             Self::Details => "Details",
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
+            Self::Files => "Files",
+            Self::Diff => "Diff",
         }
     }
 
@@ -46,7 +56,14 @@ impl Segment {
             Self::Details => None,
             Self::Terminal => Some(ChatTab::Terminal),
             Self::Browser => Some(ChatTab::Browser),
+            Self::Files => Some(ChatTab::Files),
+            Self::Diff => Some(ChatTab::Diff),
         }
+    }
+
+    /// The segment that shows the TUI view's tab `t` (`None`: the chat has none).
+    pub fn of(t: ChatTab) -> Option<Self> {
+        ALL.into_iter().find(|s| s.tab() == Some(t))
     }
 }
 
@@ -56,6 +73,8 @@ pub struct Avail {
     pub details: bool,
     pub terminal: bool,
     pub browser: bool,
+    pub files: bool,
+    pub diff: bool,
 }
 
 impl Avail {
@@ -64,6 +83,8 @@ impl Avail {
             Segment::Details => self.details,
             Segment::Terminal => self.terminal,
             Segment::Browser => self.browser,
+            Segment::Files => self.files,
+            Segment::Diff => self.diff,
         }
     }
 
@@ -83,6 +104,9 @@ pub fn avail(f: &Frame, remote: bool) -> Avail {
             details: true,
             terminal: true,
             browser: !remote,
+            // WSL: the tree and the change badges work, the per-file diff says so itself
+            files: true,
+            diff: true,
         },
         Frame::Outcome(_) | Frame::Worker(..) => Avail {
             details: true,
@@ -215,6 +239,17 @@ impl SuperAgentView {
         let a = self.side_avail(cx);
         if self.front_session(cx).as_deref() == Some(id) && a.has(Segment::Terminal) {
             (self.side.open, self.side.seg) = (true, Segment::Terminal);
+            self.sync_side(cx);
+        }
+    }
+
+    /// `/files` or `/diff` in session `id`: its pane opens in the sidebar (only for the front session).
+    pub(crate) fn show_pane(&mut self, id: &str, tab: ChatTab, cx: &mut Context<Self>) {
+        let (a, seg) = (self.side_avail(cx), Segment::of(tab));
+        if let Some(s) = seg.filter(|s| a.has(*s))
+            && self.front_session(cx).as_deref() == Some(id)
+        {
+            (self.side.open, self.side.seg) = (true, s);
             self.sync_side(cx);
         }
     }
@@ -426,6 +461,13 @@ mod tests {
     #[test]
     fn the_availability_table() {
         let all = |a: Avail| (a.details, a.terminal, a.browser);
+        // Files and Diff follow the session frame, WSL included
+        assert!(avail(&s(), true).has(Segment::Files) && avail(&s(), true).has(Segment::Diff));
+        assert!(!avail(&Frame::Outcome("o".into()), false).has(Segment::Files));
+        assert!(!avail(&Frame::Home, false).has(Segment::Diff));
+        assert_eq!(Segment::of(ChatTab::Files), Some(Segment::Files));
+        assert_eq!(Segment::of(ChatTab::Diff), Some(Segment::Diff));
+        assert_eq!(Segment::of(ChatTab::Chat), None);
         assert_eq!(all(avail(&Frame::Home, false)), (false, false, false));
         assert_eq!(all(avail(&s(), false)), (true, true, true));
         // WSL: a shell through wsl.exe, no browser

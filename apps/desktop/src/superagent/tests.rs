@@ -682,6 +682,28 @@ mod side {
         finish(&f, &sa, v);
     }
 
+    /// `/files` and `/diff` in a session frame open that segment of the sidebar and put the view's pane there.
+    #[gpui::test]
+    fn files_and_diff_commands_select_their_sidebar_segment(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        let front = |sa: &Entity<SuperAgentView>, v: &mut VisualTestContext| {
+            sa.read_with(v, |s, cx| s.host.read(cx).views().last().cloned().unwrap())
+        };
+        for (tab, seg) in [
+            (ChatTab::Files, Segment::Files),
+            (ChatTab::Diff, Segment::Diff),
+        ] {
+            let view = front(&sa, v);
+            view.update(v, |t, cx| t.show_tab(tab, None, cx));
+            v.run_until_parked();
+            assert_eq!(shown(&sa, v), Some(seg));
+            assert_eq!(tabs(&sa, v), [ChatTab::Chat, tab]);
+            // the centre of an embedded frame stays on the chat
+            assert_eq!(view.read_with(v, |t, _| t.ts.tab), ChatTab::Chat);
+        }
+        finish(&f, &sa, v);
+    }
+
     #[gpui::test]
     fn the_title_bar_icons_follow_the_availability_table(cx: &mut TestAppContext) {
         let (f, sa, v) = two(cx);
