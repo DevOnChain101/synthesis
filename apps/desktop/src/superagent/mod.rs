@@ -294,6 +294,7 @@ impl SuperAgentView {
             .1
             .display()
             .to_string();
+        let cwd = synthesis_harness::sanitize_for_display(&cwd);
         let title = self.host.read(cx).info(id, cx)?.title;
         Some(chat::RunTarget { view, title, cwd })
     }

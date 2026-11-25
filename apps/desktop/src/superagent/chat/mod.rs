@@ -304,8 +304,14 @@ impl ConductorChat {
             UiMsg::Event(e) => self.convo.apply(&e),
             UiMsg::TaskDone(Err(e)) => self.notice = Some(sanitize_for_display(&e)),
             // queued: the modal, a card and a Needs-you row show it until the person answers (or the chat closes)
-            UiMsg::Approval(a) => self.asks.push(&a, Instant::now()),
-            UiMsg::Withdraw(id) => self.asks.withdraw(&id, Instant::now()),
+            UiMsg::Approval(a) => {
+                if !self.asks.push(&a)
+                    && let Some(e) = self.live.as_ref().and_then(Live::engine)
+                {
+                    e.answer(&a.id, Choice::Deny);
+                }
+            }
+            UiMsg::Withdraw(id) => self.asks.withdraw(&id),
             UiMsg::Input(a) => {
                 if let Some(e) = self.live.as_ref().and_then(Live::engine) {
                     e.answer_input(&a.id, None);
@@ -347,10 +353,9 @@ impl ConductorChat {
     /// The modal of the front ask (drawn over the window by the Super Agent view); the next one appears when this
     /// one is answered.
     pub(crate) fn modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (queued, allow) = (
-            self.asks.all().len().checked_sub(1)?,
-            self.asks.armed(Instant::now()),
-        );
+        let now = Instant::now();
+        self.asks.shown(now);
+        let (queued, allow) = (self.asks.all().len().checked_sub(1)?, self.asks.armed(now));
         let on = self.ask_on(&self.asks.front()?.id.clone(), cx);
         if !allow {
             // the buttons wake up once the delay has passed
@@ -588,7 +593,19 @@ impl ConductorChat {
             )
             .into_any_element();
         };
-        let blocks = crate::tui_view::run_block::embed_blocks(
+        // a click counts only while nothing moves in this chat either (its turn, a streaming reply)
+        let quiet = !self.convo.running
+            && !self.convo.items.iter().any(|i| {
+                matches!(
+                    i,
+                    Item::Assistant {
+                        streaming: true,
+                        ..
+                    }
+                )
+            });
+        let blocks = crate::tui_view::run_block::embed_blocks_in(
+            quiet,
             &r.view,
             &id,
             text,
@@ -602,7 +619,7 @@ impl ConductorChat {
             .gap(px(t::S2))
             .child(
                 text_note(format!(
-                    "Run types into the terminal of {}, in {}. This text is untrusted: every Run asks twice.",
+                    "Run types into the terminal of {}, which starts in {} (the shell may have moved since). This text is untrusted: every Run asks twice.",
                     r.title, r.cwd
                 )),
             )
@@ -734,13 +751,23 @@ impl ConductorChat {
 }
 
 impl Render for ConductorChat {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for s in &self.cards {
             self.focus
                 .entry(s.card.id.clone())
                 .or_insert_with(|| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
         }
         let body = if self.gate == Gate::Ready {
+            // the Run gate must see this chat move (a new row, a new ask, a resize) and cancel a pending confirm
+            if let Some(r) = &self.run {
+                let rows = self.convo.items.len() + self.cards.len() + self.asks.all().len();
+                r.view.read(cx).embed_note_shape(
+                    0.,
+                    0.,
+                    rows,
+                    f32::from(window.viewport_size().width),
+                );
+            }
             let rows = self.transcript(cx);
             div()
                 .flex()

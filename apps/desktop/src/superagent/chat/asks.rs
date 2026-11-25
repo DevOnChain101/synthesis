@@ -25,6 +25,10 @@ pub const ARM: Duration = Duration::from_millis(crate::live::ARM_MS as u64);
 /// Lines of the tool input a card lists (the modal lists [`MODAL_LINES`]); the count of the rest is said.
 const CARD_LINES: usize = 6;
 const MODAL_LINES: usize = 60;
+/// Asks held at once; more are denied on arrival.
+pub const MAX_ASKS: usize = 32;
+/// Longest text of one field or input line shown; the rest is cut and said so.
+const CUT: usize = 2048;
 /// Prefix of the Needs-you key of an ask of this chat (never a session id).
 pub const KEY: &str = "ask:";
 
@@ -35,6 +39,20 @@ pub struct Ask {
     pub lines: Vec<String>,
     /// What can be pressed, in order; Deny is always last.
     pub options: Vec<(Choice, String)>,
+    /// Some text was cut at [`CUT`] bytes.
+    pub cut: bool,
+}
+
+fn cut(s: String, hit: &mut bool) -> String {
+    if s.len() <= CUT {
+        return s;
+    }
+    *hit = true;
+    let mut n = CUT;
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    s[..n].to_string()
 }
 
 #[derive(Default)]
@@ -45,9 +63,13 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn push(&mut self, a: &AskApproval, now: Instant) {
-        if self.q.iter().any(|x| x.id == a.id) {
-            return;
+    /// Queues `a`. `false`: the queue is full, nothing was kept and the caller must deny it now. An ask with the id
+    /// of a queued one replaces it (the engine keeps one waiter per id, so the old one is gone there too).
+    #[must_use]
+    pub fn push(&mut self, a: &AskApproval) -> bool {
+        let dup = self.q.iter().position(|x| x.id == a.id);
+        if dup.is_none() && self.q.len() >= MAX_ASKS {
+            return false;
         }
         let views: Vec<Value> = a.suggestions.iter().map(suggestion_view).collect();
         let options = permission_options(&views, false)
@@ -58,14 +80,30 @@ impl Queue {
                 _ => (Choice::Deny, "Deny".to_string()),
             })
             .collect();
-        self.q.push(Ask {
+        let mut hit = false;
+        let ask = Ask {
             id: a.id.clone(),
-            tool: sanitize_for_display(&a.tool),
-            reason: sanitize_for_display(&a.reason),
-            lines: input_lines(&a.tool, &a.input, usize::MAX),
+            tool: cut(sanitize_for_display(&a.tool), &mut hit),
+            reason: cut(sanitize_for_display(&a.reason), &mut hit),
+            lines: input_lines(&a.tool, &a.input, usize::MAX)
+                .into_iter()
+                .map(|l| cut(l, &mut hit))
+                .collect(),
             options,
-        });
-        self.front_since.get_or_insert(now);
+            cut: hit,
+        };
+        match dup {
+            Some(i) => self.q[i] = ask,
+            None => self.q.push(ask),
+        }
+        true
+    }
+
+    /// The front ask is on screen at `now`: its arming delay starts at the first time it is drawn.
+    pub fn shown(&mut self, now: Instant) {
+        if !self.q.is_empty() {
+            self.front_since.get_or_insert(now);
+        }
     }
 
     pub fn all(&self) -> &[Ask] {
@@ -90,17 +128,17 @@ impl Queue {
         }
         self.q.remove(i);
         if i == 0 {
-            self.front_since = (!self.q.is_empty()).then_some(now);
+            self.front_since = None;
         }
         Some(choice)
     }
 
     /// The ask is gone on the engine's side (cancelled, expired): it just leaves.
-    pub fn withdraw(&mut self, id: &str, now: Instant) {
+    pub fn withdraw(&mut self, id: &str) {
         if let Some(i) = self.q.iter().position(|a| a.id == id) {
             self.q.remove(i);
             if i == 0 {
-                self.front_since = (!self.q.is_empty()).then_some(now);
+                self.front_since = None;
             }
         }
     }
@@ -171,6 +209,12 @@ pub fn body(
                     })
             })),
     );
+    if a.cut {
+        c = c.child(
+            text(t::T2, t::W_MEDIUM, t::SOFT_BEIGE)
+                .child("Some text was cut at 2 KiB: this is not the whole request"),
+        );
+    }
     if hidden > 0 {
         c = c.child(text(t::T2, t::W_MEDIUM, t::SOFT_BEIGE).child(format!(
             "... {hidden} more lines NOT shown here: this is not the whole input"

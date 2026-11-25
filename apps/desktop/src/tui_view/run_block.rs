@@ -105,7 +105,7 @@ impl TuiView {
                 label: need.map_or("Run in terminal".into(), |n| n.label().into()),
                 warn: need.is_some_and(Need::warn),
                 on_click: Box::new(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                    this.run_command(&block, &cmd, streaming, tainted, ev, cx)
+                    this.run_command(&block, &cmd, (streaming, tainted, true), ev, cx)
                 })),
                 on_hover: Some(Box::new(move |on, _, cx| {
                     this.update(cx, |t, _| {
@@ -132,8 +132,7 @@ impl TuiView {
         &mut self,
         block: &cb::Block,
         cmd: &str,
-        streaming: bool,
-        tainted: bool,
+        (streaming, tainted, owner_quiet): (bool, bool, bool),
         ev: &ClickEvent,
         cx: &mut Context<Self>,
     ) {
@@ -143,7 +142,7 @@ impl TuiView {
                 && ev.standard_click()
                 && ev.click_count() == 1,
             streaming,
-            quiet: self.chat_quiet(),
+            quiet: owner_quiet && self.chat_quiet(),
             tainted,
             runnable: self.run_blocked().is_none(),
         };
@@ -192,6 +191,20 @@ pub(crate) fn embed_blocks(
     this: &gpui::Entity<TuiView>,
     id: &str,
     text: &str,
+    flags: (bool, bool),
+    prose: &mut dyn FnMut(usize, String) -> AnyElement,
+    cx: &gpui::App,
+) -> Option<AnyElement> {
+    embed_blocks_in(true, this, id, text, flags, prose, cx)
+}
+
+/// [`embed_blocks`] for an owner whose own chat must be still too: `quiet` false (its turn runs, its reply
+/// streams) keeps every click from counting, whatever the session's chat does.
+pub(crate) fn embed_blocks_in(
+    quiet: bool,
+    this: &gpui::Entity<TuiView>,
+    id: &str,
+    text: &str,
     (streaming, tainted): (bool, bool),
     prose: &mut dyn FnMut(usize, String) -> AnyElement,
     cx: &gpui::App,
@@ -236,7 +249,7 @@ pub(crate) fn embed_blocks(
             warn: need.is_some_and(Need::warn),
             on_click: Box::new(move |ev, _, cx| {
                 click.update(cx, |t, cx| {
-                    t.run_command(&block, &cmd, streaming, tainted, ev, cx)
+                    t.run_command(&block, &cmd, (streaming, tainted, quiet), ev, cx)
                 })
             }),
             on_hover: Some(Box::new(move |on, _, cx| {

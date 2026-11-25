@@ -649,8 +649,9 @@ fn ask(id: &str) -> crate::engine::AskApproval {
 fn queue(ids: &[&str], t0: Instant) -> asks::Queue {
     let mut q = asks::Queue::default();
     for id in ids {
-        q.push(&ask(id), t0);
+        assert!(q.push(&ask(id)));
     }
+    q.shown(t0);
     q
 }
 
@@ -670,6 +671,7 @@ fn asks_come_one_at_a_time_in_arrival_order() {
     assert_eq!(q.take("a", Choice::Once, late), Some(Choice::Once));
     assert_eq!(q.front().map(|a| a.id.as_str()), Some("b"));
     // the next one waits out its own delay
+    q.shown(late);
     assert_eq!(q.take("b", Choice::Once, late), None);
     assert_eq!(
         q.take("b", Choice::Always, late + asks::ARM),
@@ -720,8 +722,8 @@ fn deny_works_on_any_ask_at_once_and_closing_denies_all() {
     );
     assert_eq!(
         code.matches(".answer(").count(),
-        2,
-        "Drop, and the click through the queue"
+        3,
+        "Drop, overflow, and the click through the queue"
     );
     assert!(
         !code.contains("Choice::Once") && !code.contains("Choice::Always"),
@@ -823,4 +825,54 @@ fn every_orchestrator_command_asks_twice_and_tool_results_and_oversize_blocks_ha
         cb::Press::Ignored
     );
     assert_eq!(g.press(b, "ls", ctx, 3_000), cb::Press::Run);
+}
+
+#[test]
+fn an_ask_is_armed_from_its_first_draw_not_from_its_arrival() {
+    let t0 = Instant::now();
+    let mut q = asks::Queue::default();
+    assert!(q.push(&ask("a")));
+    // raised while another view was on screen: a long wait before the first draw arms nothing
+    assert_eq!(q.take("a", Choice::Once, t0 + asks::ARM * 10), None);
+    q.shown(t0 + asks::ARM * 10);
+    assert_eq!(q.take("a", Choice::Once, t0 + asks::ARM * 10), None);
+    assert_eq!(
+        q.take("a", Choice::Once, t0 + asks::ARM * 11),
+        Some(Choice::Once)
+    );
+}
+
+#[test]
+fn the_queue_is_capped_and_a_reused_id_replaces_instead_of_hanging() {
+    let mut q = asks::Queue::default();
+    for i in 0..asks::MAX_ASKS {
+        assert!(q.push(&ask(&format!("a{i}"))));
+    }
+    assert!(!q.push(&ask("over")), "the caller denies it at once");
+    assert_eq!(q.all().len(), asks::MAX_ASKS);
+    let mut again = ask("a3");
+    again.reason = "new".into();
+    assert!(q.push(&again), "same id: replaced, not refused");
+    assert_eq!(q.all().len(), asks::MAX_ASKS);
+    assert_eq!(q.all().iter().find(|a| a.id == "a3").unwrap().reason, "new");
+    // the chat denies the overflow through the engine
+    assert!(include_str!("mod.rs").contains("!self.asks.push(&a)"));
+}
+
+#[test]
+fn long_fields_are_cut_and_say_so() {
+    let mut a = ask("a");
+    a.reason = "r".repeat(10_000);
+    a.input = json!({"command": "x".repeat(10_000)});
+    let mut q = asks::Queue::default();
+    assert!(q.push(&a));
+    let f = q.front().unwrap();
+    assert!(f.cut && f.reason.len() <= 2048 && f.lines.iter().all(|l| l.len() <= 2048));
+}
+
+#[test]
+fn the_run_gate_sees_this_chat_move_and_its_own_turn_must_be_still() {
+    let src = include_str!("mod.rs");
+    assert!(src.contains(".embed_note_shape(") && src.contains("self.asks.all().len()"));
+    assert!(src.contains("embed_blocks_in(") && src.contains("!self.convo.running"));
 }
