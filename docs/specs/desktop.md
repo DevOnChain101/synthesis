@@ -56,9 +56,9 @@ of the TUI design, in this repo, running the Rust engine in process.
 - Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
   `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
   with `runtime_shaders` (Command Line Tools only, no Xcode). Never mix with a git `gpui`.
-- `gpui-base =0.8.1` is vendored in `vendor/gpui-base` (`[patch.crates-io]`) with one hook, `TextViewStyle::with_strong`, the
+- `gpui-base =0.8.1` is vendored in `crates/gpui-base` (`[patch.crates-io]`) with one hook, `TextViewStyle::with_strong`, the
   colour of `**bold**` (assistant markdown shows it in `ACCENT_LIGHT`). On the next gpui-component / gpui-base bump
-  re-apply it: `vendor/gpui-base/VENDORED.md`.
+  re-apply it: `crates/gpui-base/VENDORED.md`.
 
 ## 3. Build matrix
 

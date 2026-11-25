@@ -15,8 +15,8 @@
     selection and copy (`to_markdown`) keep the markdown alignment.
 - Used by: `assistant_style` in `apps/desktop/src/tui_view/chat.rs` (`.with_strong(ACCENT_LIGHT)`), so the TUI chat,
   run blocks and Super Agent markdown get it.
-- Wired in the root `Cargo.toml` by `[patch.crates-io] gpui-base = { path = "vendor/gpui-base" }`; `exclude =
-  ["vendor"]` keeps it out of the workspace (fmt, clippy, tests skip it).
+- Wired in the root `Cargo.toml` by `[patch.crates-io] gpui-base = { path = "crates/gpui-base" }`; `exclude =
+  ["vendor", "crates/gpui-base"]` keeps it out of the workspace (fmt, clippy, tests skip it).
 - On a gpui-component / gpui-base bump: unpack the new `gpui-base` into this directory, re-apply the patch above
-  (about 25 lines, `git log -p -- vendor/gpui-base` shows it), update the version and sha256 here, or drop the patch
+  (about 25 lines, `git log -p -- crates/gpui-base` shows it), update the version and sha256 here, or drop the patch
   and this directory if upstream gained a bold colour.
