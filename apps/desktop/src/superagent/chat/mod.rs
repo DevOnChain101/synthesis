@@ -350,10 +350,18 @@ impl ConductorChat {
         }
     }
 
+    /// Esc: closes the modal without deciding (the ask stays in its card and in Needs you).
+    pub(crate) fn dismiss_modal(&mut self, cx: &mut Context<Self>) -> bool {
+        let closed = self.asks.dismiss();
+        cx.notify();
+        closed
+    }
+
     /// The modal of the front ask (drawn over the window by the Super Agent view); the next one appears when this
     /// one is answered.
     pub(crate) fn modal(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = Instant::now();
+        self.asks.front_modal()?;
         self.asks.shown(now);
         let (queued, allow) = (self.asks.all().len().checked_sub(1)?, self.asks.armed(now));
         let on = self.ask_on(&self.asks.front()?.id.clone(), cx);

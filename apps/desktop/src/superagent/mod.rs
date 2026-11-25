@@ -854,6 +854,15 @@ impl SuperAgentView {
             return self.outcomes.update(cx, |o, cx| o.on_key(ev, window, cx));
         }
         let bare = !(m.control || m.alt || m.platform || m.shift);
+        if bare
+            && key == "escape"
+            && self
+                .chat
+                .clone()
+                .is_some_and(|c| c.update(cx, |c, cx| c.dismiss_modal(cx)))
+        {
+            return true;
+        }
         if bare && self.grip_focus.is_focused(window) && matches!(key, "left" | "right") {
             self.resize_side(
                 if key == "left" {

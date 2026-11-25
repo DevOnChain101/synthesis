@@ -3290,8 +3290,18 @@ impl TuiView {
 
     /// Files dropped on the window: images are attached, anything else is said.
     pub fn drop_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        // a frame that is not on screen takes no drop (like its keys)
+        if self.embed.is_some() && !self.shown {
+            return;
+        }
         let Some(lu) = &mut self.live else { return };
         let Some(e) = lu.live.engine.clone() else {
+            lu.live.note(
+                "image: the session is still starting, drop it again in a moment",
+                true,
+            );
+            lu.dirty = true;
+            cx.notify();
             return;
         };
         for p in paths {

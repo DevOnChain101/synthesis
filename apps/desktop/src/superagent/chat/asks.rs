@@ -60,6 +60,8 @@ pub struct Queue {
     q: Vec<Ask>,
     /// When the front ask became the front one.
     front_since: Option<Instant>,
+    /// The ask whose modal was closed with Esc: it stays queued (card, Needs you) but is not decided.
+    dismissed: Option<String>,
 }
 
 impl Queue {
@@ -93,7 +95,14 @@ impl Queue {
             cut: hit,
         };
         match dup {
-            Some(i) => self.q[i] = ask,
+            Some(i) => {
+                if i == 0 {
+                    // new content in front: it is armed afresh and its modal opens again
+                    self.front_since = None;
+                    self.dismissed = None;
+                }
+                self.q[i] = ask;
+            }
             None => self.q.push(ask),
         }
         true
@@ -104,6 +113,20 @@ impl Queue {
         if !self.q.is_empty() {
             self.front_since.get_or_insert(now);
         }
+    }
+
+    /// Esc on the modal: closes it without deciding. `false`: no modal was open.
+    pub fn dismiss(&mut self) -> bool {
+        let id = self.front_modal().map(|a| a.id.clone());
+        self.dismissed = id.clone();
+        id.is_some()
+    }
+
+    /// The front ask unless its modal was closed.
+    pub fn front_modal(&self) -> Option<&Ask> {
+        self.q
+            .first()
+            .filter(|a| self.dismissed.as_deref() != Some(&a.id))
     }
 
     pub fn all(&self) -> &[Ask] {

@@ -426,6 +426,27 @@ fn a_non_image_and_an_oversize_image_are_refused_in_a_frame(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn a_drop_while_starting_says_so_and_a_hidden_frame_ignores_it(cx: &mut TestAppContext) {
+    let a = chat(cx, vec![], vec![], false);
+    let tui = a.tui.clone();
+    let p = [std::path::PathBuf::from("/work/proj/a.png")];
+    tui.update(a.v, |t, _| t.shown = false);
+    tui.update(a.v, |t, cx| t.drop_files(&p, cx));
+    assert_eq!(
+        last_note(&a),
+        "",
+        "a frame behind the one on screen takes no drop"
+    );
+    tui.update(a.v, |t, _| t.shown = true);
+    tui.update(a.v, |t, cx| t.drop_files(&p, cx));
+    assert!(
+        last_note(&a).contains("still starting"),
+        "{}",
+        last_note(&a)
+    );
+}
+
+#[gpui::test]
 fn a_paste_attaches_to_the_frame_that_took_the_key_only(cx: &mut TestAppContext) {
     let mut a = chat(cx, vec![], vec![], false);
     let (_f2, cfg) = fx(1);

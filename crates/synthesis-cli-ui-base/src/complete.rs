@@ -21,6 +21,8 @@ pub struct DirEntry {
     pub name: String,
     /// A directory, or a link to one.
     pub is_dir: bool,
+    /// A symbolic link (its target is checked for secret names too).
+    pub is_link: bool,
 }
 
 pub struct FileMeta {
@@ -49,12 +51,14 @@ impl CompletionFs for StdFs {
         for e in std::fs::read_dir(abs).ok()?.flatten() {
             let ft = e.file_type().ok();
             let mut is_dir = ft.is_some_and(|t| t.is_dir());
-            if !is_dir && ft.is_some_and(|t| t.is_symlink()) {
+            let is_link = ft.is_some_and(|t| t.is_symlink());
+            if !is_dir && is_link {
                 is_dir = std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()); // dangling link: a file
             }
             kids.push(DirEntry {
                 name: e.file_name().to_string_lossy().into_owned(),
                 is_dir,
+                is_link,
             });
         }
         Some(kids)
@@ -273,6 +277,19 @@ fn path_item(rel: String, abs: PathBuf, is_dir: bool, order: usize) -> Item {
     }
 }
 
+/// A link whose real path is secret-shaped (names only; the target is never read).
+fn secret_link_target(link: &Path, root: &Path, fs: &dyn CompletionFs) -> bool {
+    fs.realpath(link).is_some_and(|t| {
+        let r = fs.realpath(root).unwrap_or_else(|| root.to_path_buf());
+        synthesis_core::secrets::is_secret_shaped_in(&t, &r)
+    })
+}
+
+/// An extra context root that is itself secret-shaped, or resolves to such a path.
+fn secret_dir(dir: &Path, root: &Path, fs: &dyn CompletionFs) -> bool {
+    synthesis_core::secrets::is_secret_shaped_in(dir, root) || secret_link_target(dir, root, fs)
+}
+
 /// `@` suggestions: the query is split at its last `/` into a folder and a name part; the
 /// folder's children whose names start with the name part are listed.
 fn file_items(
@@ -337,7 +354,9 @@ fn file_items(
                 continue;
             }
             // names only are listed, but a secret-shaped one is not offered at all
-            if synthesis_core::secrets::is_secret_shaped_in(&abs.join(&k.name), &roots[0]) {
+            if synthesis_core::secrets::is_secret_shaped_in(&abs.join(&k.name), &roots[0])
+                || (k.is_link && secret_link_target(&abs.join(&k.name), &roots[0], fs))
+            {
                 continue;
             }
             if starts(&k.name) {
@@ -359,7 +378,7 @@ fn file_items(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if starts(&base) {
+            if starts(&base) && !secret_dir(&dir, &roots[0], fs) {
                 items.push(path_item(
                     format!("{}/", shown.trim_end_matches('/')),
                     dir,
@@ -826,6 +845,26 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn secret_links_and_extra_roots_are_not_offered() {
+        let d = tree(&["id_rsa", "ok.txt", "x/.ssh/k"]);
+        let cwd = real(&d);
+        std::os::unix::fs::symlink(cwd.join("id_rsa"), cwd.join("innocent")).unwrap();
+        std::os::unix::fs::symlink(cwd.join("ok.txt"), cwd.join("id_rsa.link")).unwrap();
+        let l = labels("", &cwd);
+        assert!(l.contains(&"@ok.txt".to_string()), "{l:?}");
+        assert!(
+            l.iter().all(|x| x != "@innocent" && x != "@id_rsa.link"),
+            "{l:?}"
+        );
+        let roots = [cwd.clone(), cwd.join("x/.ssh"), cwd.join("x")];
+        let (items, _) = file_items("", &roots, &[], &StdFs);
+        let l: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(l.iter().all(|x| !x.contains(".ssh")), "{l:?}");
+        assert!(l.iter().any(|x| x.ends_with("/x/")), "{l:?}");
+    }
+
     #[test]
     fn scoring() {
         assert_eq!(score("", "x"), Some(0.0));
@@ -843,6 +882,7 @@ mod tests {
             Some(vec![DirEntry {
                 name: "virtual.txt".into(),
                 is_dir: false,
+                is_link: false,
             }])
         }
         fn lstat(&self, _: &Path) -> Option<FileMeta> {
