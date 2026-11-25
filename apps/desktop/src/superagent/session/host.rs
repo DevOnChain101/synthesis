@@ -45,6 +45,8 @@ pub struct SessionHost {
     views: Vec<(String, Entity<TuiView>)>,
     /// The chat each frame draws: the embedded view only drives the engine and owns the panes (`Embed::headless`).
     chats: Vec<(String, Entity<ChatHost>)>,
+    /// Frames opened on a stored session, by the session id asked for (known before the engine reports it).
+    stored: Vec<(String, String)>,
     /// The session frame that is on screen (`None`: another frame, or another view of the window).
     front: Option<String>,
     window_active: bool,
@@ -71,6 +73,7 @@ impl SessionHost {
             cfg,
             views: Vec::new(),
             chats: Vec::new(),
+            stored: Vec::new(),
             front: None,
             window_active: window.is_window_active(),
             focus_pending: false,
@@ -104,10 +107,16 @@ impl SessionHost {
 
     /// The frame of the hosted session `sid` (a store id, never a frame id), when one hosts it.
     pub fn frame_of(&self, sid: &str, cx: &App) -> Option<String> {
-        self.views
+        self.stored
             .iter()
-            .find(|(_, v)| v.read(cx).embed_handoff().is_some_and(|h| h.sid == sid))
+            .find(|(_, s)| s == sid)
             .map(|(i, _)| i.clone())
+            .or_else(|| {
+                self.views
+                    .iter()
+                    .find(|(_, v)| v.read(cx).embed_handoff().is_some_and(|h| h.sid == sid))
+                    .map(|(i, _)| i.clone())
+            })
     }
 
     /// Opens the stored session `sid` of `scope` in frame `id`: the folder is the one its record names, the
@@ -134,12 +143,13 @@ impl SessionHost {
         }
         let rec = synthesis_session::Reader::open(&home)
             .and_then(|r| r.get_session(sid))
-            .map_err(|e| format!("cannot open session {sid}: {e}"))?;
+            .map_err(|_| format!("cannot open session {sid}: not in this store"))?;
         if !synthesis_app::peers::session_lock_free(&home, sid) {
             return Err(crate::tui_view::driver::locked_hint(true));
         }
         let folder = std::path::PathBuf::from(&rec.cwd);
         self.open_with(id, &folder, Some(sid.to_string()), window, cx)?;
+        self.stored.push((id.to_string(), sid.to_string()));
         Ok(folder)
     }
 
@@ -231,6 +241,7 @@ impl SessionHost {
     pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.views.iter().position(|(v, _)| v == id) {
             let (_, view) = self.views.remove(i);
+            self.stored.retain(|(f, _)| f != id);
             self.chats.retain(|(c, _)| c != id);
             // the closed view takes no key while it waits to be released
             view.update(cx, |t, cx| {
@@ -299,9 +310,14 @@ impl SessionHost {
 
     /// Every hosted session that has a store id, with `last` (a frame id) as the focused one. Engines that
     /// have not reported a session yet are left out (nothing stored to list).
-    pub fn handoff(&self, last: Option<&str>, cx: &App) -> crate::handoff::Handoff {
+    pub fn handoff(
+        &self,
+        last: Option<&str>,
+        skip: &[String],
+        cx: &App,
+    ) -> crate::handoff::Handoff {
         let mut h = crate::handoff::Handoff::default();
-        for (id, v) in &self.views {
+        for (id, v) in self.views.iter().filter(|(i, _)| !skip.contains(i)) {
             if let Some(s) = v.read(cx).embed_handoff() {
                 if last == Some(id.as_str()) {
                     h.focused = Some((s.scope.clone(), s.sid.clone()));
@@ -316,9 +332,16 @@ impl SessionHost {
     /// turn or waits for an approval keeps it. Each receiver fires when one lock is free.
     pub fn release_idle(
         &mut self,
+        skip: &[String],
         cx: &mut Context<Self>,
     ) -> Vec<futures::channel::oneshot::Receiver<()>> {
-        let views: Vec<_> = self.views.iter().map(|(_, v)| v.clone()).collect();
+        // a conductor-owned session is never handed to the TUI: it keeps its engine
+        let views: Vec<_> = self
+            .views
+            .iter()
+            .filter(|(i, _)| !skip.contains(i))
+            .map(|(_, v)| v.clone())
+            .collect();
         views
             .iter()
             .filter_map(|v| v.update(cx, |t, cx| t.release_idle(cx)))
@@ -839,6 +862,15 @@ pub(crate) mod tests {
         };
         wait(v, &|t| users(t) == 1 && !t.embed_info().1, "first turn");
         let held = view.read_with(v, |t, _| t.embed_handoff().unwrap());
+        // a conductor-owned frame is left out of the handoff and keeps its engine on a mode switch
+        let skip = vec![a.to_string_lossy().into_owned()];
+        assert!(
+            h.read_with(v, |h, cx| h.handoff(None, &skip, cx))
+                .sessions
+                .is_empty()
+        );
+        assert!(h.update(v, |h, cx| h.release_idle(&skip, cx)).is_empty());
+        assert!(!locks_all_free(&f.home), "still held");
         // the engine of frame "a" holds the lock: refused with the lock's reason, nothing hosted
         let why = h
             .update_in(v, |h, w, cx| {

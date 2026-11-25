@@ -650,6 +650,7 @@ impl TuiView {
             .iter()
             .any(|i| matches!(i, Item::User(_)));
         if me.sid.is_empty()
+            || me.scope != crate::handoff::Scope::Local
             || !stored
             || h.sessions
                 .iter()

@@ -145,6 +145,12 @@ impl Shell {
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+        // a goal, outcome, worker or conductor frame is never handed to the TUI, whichever way the switch comes
+        let in_sa = self.view == View::SuperAgent
+            || (self.view == View::Settings && self.back == View::SuperAgent);
+        if v == View::Tui && in_sa && !self.legacy_ui && !self.sa.read(cx).tui_switch_allowed() {
+            return;
+        }
         if self.view == View::Settings && v != View::Settings {
             // whichever way Settings is left, a slider drag never released does not stay on the window
             self.settings
@@ -245,6 +251,12 @@ impl Shell {
 
     /// A session that waits for a tool permission is answered in the TUI view, in that session.
     fn open_waiting_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // the question waits in the TUI: leave a frame that may not switch for the home first
+        if !self.sa.read(cx).tui_switch_allowed() {
+            self.sa.update(cx, |s, cx| {
+                s.open(crate::superagent::frames::Frame::Home, cx)
+            });
+        }
         self.go(View::Tui, window, cx);
         if !id.starts_with('#') {
             self.tui.update(cx, |t, cx| t.open_session(id, cx));
@@ -572,13 +584,6 @@ impl Render for Shell {
                 match k.key.as_str() {
                     "," if s.view == View::Settings => s.go(s.back, window, cx),
                     "," => s.go(View::Settings, window, cx),
-                    // a goal, outcome or worker frame is not handed to the TUI (see `tui_switch_allowed`)
-                    "1" if s.view == View::SuperAgent
-                        && !s.legacy_ui
-                        && !s.sa.read(cx).tui_switch_allowed() =>
-                    {
-                        return;
-                    }
                     "1" => s.go(View::Tui, window, cx),
                     "2" => s.go(View::SuperAgent, window, cx),
                     // the collapsed side columns of the TUI view (narrow windows): sidebar, inspector
@@ -896,6 +901,31 @@ mod tests {
     fn y(v: &mut gpui::VisualTestContext, sel: &'static str) -> Option<(f32, f32)> {
         v.debug_bounds(sel)
             .map(|b| (f32::from(b.origin.y), f32::from(b.size.height)))
+    }
+
+    /// Every way into `go(Tui)` (a key, a button, a link) is refused from a frame that may not switch, from
+    /// Settings over it too; the home and a plain session may.
+    #[gpui::test]
+    fn go_refuses_the_tui_from_goal_frames_by_any_route(cx: &mut TestAppContext) {
+        use crate::superagent::frames::Frame;
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1000., 800.);
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        sa.update(v, |s, cx| s.open(Frame::Outcome("o1".into()), cx));
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+        shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Settings);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        // a question waiting in the TUI still gets there: the frame goes to the home first
+        shell.update_in(v, |s, window, cx| s.open_waiting_session("#x", window, cx));
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Tui);
+        assert_eq!(
+            sa.read_with(v, |s, _| s.frames.active().clone()),
+            Frame::Home
+        );
     }
 
     #[gpui::test]

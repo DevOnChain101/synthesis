@@ -332,7 +332,7 @@ impl SuperAgentView {
     /// The sessions this view hosts, for the TUI when the person switches to it.
     pub(crate) fn handoff(&self, cx: &gpui::App) -> crate::handoff::Handoff {
         let last = self.frames.last_session();
-        self.host.read(cx).handoff(last, cx)
+        self.host.read(cx).handoff(last, &self.conductor_owned, cx)
     }
 
     /// Mode switch to the TUI: idle sessions give their engines back (see `TuiView::release_idle`).
@@ -340,7 +340,8 @@ impl SuperAgentView {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Vec<futures::channel::oneshot::Receiver<()>> {
-        self.host.update(cx, |h, cx| h.release_idle(cx))
+        let skip = self.conductor_owned.clone();
+        self.host.update(cx, |h, cx| h.release_idle(&skip, cx))
     }
 
     pub(crate) fn focus_tab(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -621,11 +622,11 @@ impl SuperAgentView {
             }
         };
         let (id, fresh) = self.open_session_folder(&folder, window, cx)?;
-        self.conductor_owned.push(id.clone());
         if !fresh {
             // never type the card's line into a session the person is already using
             return Err("a session is already open in that folder".into());
         }
+        self.conductor_owned.push(id.clone());
         let text = req.first_message.clone();
         self.host
             .update(cx, |h, cx| h.first_message(&id, text, window, cx));
