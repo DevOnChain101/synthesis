@@ -32,6 +32,10 @@ pub struct Info {
 pub struct WantTerminal(pub String);
 impl gpui::EventEmitter<WantTerminal> for SessionHost {}
 
+/// A hosted session asks to show its Files or Diff pane (`/files`, `/diff`).
+pub struct WantPane(pub String, pub ChatTab);
+impl gpui::EventEmitter<WantPane> for SessionHost {}
+
 pub struct SessionHost {
     cfg: Option<LiveCfg>,
     views: Vec<(String, Entity<TuiView>)>,
@@ -113,6 +117,11 @@ impl SessionHost {
         let fid = id.to_string();
         cx.subscribe(&view, move |_, _, _: &crate::tui_view::WantTerminal, cx| {
             cx.emit(WantTerminal(fid.clone()))
+        })
+        .detach();
+        let fid = id.to_string();
+        cx.subscribe(&view, move |_, _, e: &crate::tui_view::WantPane, cx| {
+            cx.emit(WantPane(fid.clone(), e.0))
         })
         .detach();
         let chat = cx.new(|cx| ChatHost::new(view.clone(), window, cx));
