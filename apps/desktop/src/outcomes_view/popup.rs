@@ -60,6 +60,8 @@ pub struct Wire {
     tool_ages: Ages,
     /// `(key, title)` of the sessions waiting for a tool permission: the shell pushes them (`set_waiting_tools`).
     tools: Vec<(String, String)>,
+    /// The same for the permission asks of the orchestrator chat (`set_chat_asks`).
+    chat_asks: Vec<(String, String)>,
     /// A fixed clock (the shots and tests); `None`: the real one.
     pub fixed_now: Option<i64>,
     pub shown: Option<Shown>,
@@ -83,6 +85,7 @@ impl Wire {
             ages: Ages::default(),
             tool_ages: Ages::default(),
             tools: vec![],
+            chat_asks: vec![],
             fixed_now: None,
             shown: None,
             cursor: None,
@@ -114,6 +117,14 @@ impl OutcomesView {
         }
     }
 
+    /// The permission asks waiting in the orchestrator chat (pushed by the Super Agent view).
+    pub fn set_chat_asks(&mut self, asks: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if self.pop.chat_asks != asks {
+            self.pop.chat_asks = asks;
+            cx.notify();
+        }
+    }
+
     /// What waits for the person: sessions waiting for a tool permission and outcome decisions, the longest waiting
     /// first. Empty unless the link is up (while outcomes are off or unsupported nothing is counted).
     pub fn approval_rows(&self) -> Vec<Row> {
@@ -124,6 +135,7 @@ impl OutcomesView {
         let tools = w
             .tools
             .iter()
+            .chain(&w.chat_asks)
             .map(|(key, subject)| Row {
                 since: w.tool_ages.since(key).unwrap_or(now),
                 key: key.clone(),
@@ -227,8 +239,10 @@ impl OutcomesView {
             vec![]
         };
         w.ages.observe(pending, now);
-        w.tool_ages
-            .observe(w.tools.iter().map(|(k, _)| k.as_str()), now);
+        w.tool_ages.observe(
+            w.tools.iter().chain(&w.chat_asks).map(|(k, _)| k.as_str()),
+            now,
+        );
         let goal_of = |id: &str| {
             st.items
                 .iter()

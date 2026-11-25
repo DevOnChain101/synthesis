@@ -236,6 +236,12 @@ impl SuperAgentView {
 
     /// A Run click in the chat of session `id`: its Terminal pane opens in the sidebar (only for the front session).
     pub(crate) fn show_terminal(&mut self, id: &str, cx: &mut Context<Self>) {
+        // the orchestrator chat's Run comes from the home: the session whose terminal it is comes forward first
+        if self.host.read(cx).ids().iter().any(|i| i == id)
+            && self.front_session(cx).as_deref() != Some(id)
+        {
+            self.open(Frame::Session(id.to_string()), cx);
+        }
         let a = self.side_avail(cx);
         if self.front_session(cx).as_deref() == Some(id) && a.has(Segment::Terminal) {
             (self.side.open, self.side.seg) = (true, Segment::Terminal);
