@@ -74,6 +74,7 @@ pub fn body(name: &str) -> Option<&'static str> {
         "close" => r#"<path d="M6 6l12 12M18 6L6 18"/>"#,
         "clock" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>"#,
         "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
+        "minus" => r#"<path d="M5 12h14"/>"#,
         "fast" => r#"<path d="M4 6l7 6-7 6zM13 6l7 6-7 6z"/>"#,
         "cpu" => {
             r#"<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>"#
@@ -119,6 +120,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "send" => "send",
         "play-triangle" => "play-tri",
         "plus" => "plus",
+        "minus" => "minus",
         "user" => "user",
         "shield" => "shield",
         "users" => "users",
@@ -188,6 +190,7 @@ mod tests {
             "chevrons-right",
             "send",
             "plus",
+            "minus",
             "user",
             "shield",
             "users",

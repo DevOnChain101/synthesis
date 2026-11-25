@@ -23,6 +23,7 @@ mod quote;
 mod rewind;
 pub(crate) mod run_block;
 pub mod sample;
+mod scm_view;
 pub mod select;
 #[cfg(feature = "shot")]
 pub mod shot;

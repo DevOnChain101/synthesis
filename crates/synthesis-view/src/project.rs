@@ -154,6 +154,8 @@ pub fn diff_lines(p: &ProjectData, which: &str) -> Vec<String> {
 }
 
 mod filediff;
+pub mod gutter;
+pub mod scm;
 pub use filediff::{DIFF_LINES, FileDiff, all_added, file_diff, safe_rel};
 
 const MAX_ROWS: usize = 400;
@@ -232,9 +234,9 @@ impl Git {
         filter_guards_from(self.raw(cwd, &[], &["config", "-z", "--get-regexp", r"^filter\."]))
     }
 
-    /// One hardened git call, the raw result (`None`: git is missing or could not be started).
-    fn raw(&self, cwd: &Path, extra: &[String], args: &[&str]) -> Option<Output> {
-        let exe = self.exe.as_ref()?;
+    /// The full argument list of one hardened git call: the switches that turn the repository's programs off, then `extra`
+    /// and `args`.
+    fn argv(&self, extra: &[String], args: &[&str]) -> Vec<String> {
         let mut argv: Vec<String> = [
             "-c",
             "core.fsmonitor=false",
@@ -267,8 +269,14 @@ impl Git {
         ]);
         argv.extend(extra.iter().cloned());
         argv.extend(args.iter().map(|s| (*s).to_string()));
+        argv
+    }
+
+    /// One hardened git call, the raw result (`None`: git is missing or could not be started).
+    fn raw(&self, cwd: &Path, extra: &[String], args: &[&str]) -> Option<Output> {
+        let exe = self.exe.as_ref()?;
         self.exec
-            .run_with(exe, &argv, Some(cwd), Some(&self.env))
+            .run_with(exe, &self.argv(extra, args), Some(cwd), Some(&self.env))
             .ok()
     }
 
