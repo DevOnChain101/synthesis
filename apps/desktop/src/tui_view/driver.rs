@@ -1627,7 +1627,7 @@ impl TuiView {
     // ---- keys ----
 
     /// Handles a keystroke before the focused input sees it. True: consumed.
-    pub(super) fn on_key(
+    pub(crate) fn on_key(
         &mut self,
         ks: &Keystroke,
         window: &mut Window,
@@ -1661,6 +1661,11 @@ impl TuiView {
         {
             if self.files_key(ks, window, cx) {
                 return true;
+            }
+            // Cmd/Ctrl+V and Alt+V attach a clipboard image exactly like the TUI (text pastes in the box itself)
+            if ks.key == "v" && (ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt)
+            {
+                return self.paste_image(ks.modifiers.alt, cx);
             }
             return !ks.modifiers.modified() && self.comp_key(ks.key.as_str(), window, cx);
         }
