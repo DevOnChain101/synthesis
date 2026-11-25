@@ -449,6 +449,47 @@ impl ChatHost {
             )
         };
         let card = composer_card(input, left, action.into_any_element());
+        // the attached images (the TUI's chips); `/images clear` and the x drop them
+        let chips = (!live.images.is_empty()).then(|| {
+            div()
+                .debug_selector(|| "sa-chat-images".to_string())
+                .flex()
+                .items_center()
+                .gap(px(t::S2))
+                .px(px(t::S1))
+                .children(live.images.iter().enumerate().map(|(i, a)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(t::S1))
+                        .px(px(t::S2))
+                        .rounded(px(t::R_PILL))
+                        .border_1()
+                        .border_color(t::stroke())
+                        .text_size(px(t::T2.0))
+                        .text_color(hsla(t::TEXT_STRONG))
+                        .child(format!("{} {:.1} MB", a.name, a.bytes as f64 / 1e6))
+                        .child(
+                            div()
+                                .id(("sa-unattach", i))
+                                .debug_selector(move || format!("sa-unattach-{i}"))
+                                .cursor_pointer()
+                                .text_color(hsla(t::TEXT))
+                                .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
+                                .child("\u{d7}")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.tui.update(cx, |t, cx| t.embed_unattach(i, cx))
+                                })),
+                        )
+                }))
+        });
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap(px(t::S1))
+            .children(chips)
+            .child(card)
+            .into_any_element();
         let Some(pop) = self.completion_el(cx) else {
             return card;
         };
@@ -625,6 +666,10 @@ impl Render for ChatHost {
             .id("sa-chat-host")
             .debug_selector(|| "sa-chat-host".to_string())
             .track_focus(&self.focus)
+            // an image file dropped on the chat is attached by the embedded view (the TUI's own rules)
+            .on_drop(cx.listener(|this, p: &gpui::ExternalPaths, _, cx| {
+                this.tui.update(cx, |t, cx| t.drop_files(p.paths(), cx))
+            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 // Esc stops the running turn (a dialog's Esc is taken by the embedded view first)
                 if ev.keystroke.key == "escape" {

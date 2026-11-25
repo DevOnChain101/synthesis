@@ -21,6 +21,15 @@ impl TuiView {
         self.live.as_ref().map(|l| l.prompt.clone())
     }
 
+    /// The x on an image chip: the TUI's own unattach.
+    pub(crate) fn embed_unattach(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(lu) = &mut self.live {
+            lu.live.remove_image(i);
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// The Send button: what Enter does.
     pub(crate) fn embed_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.submit_prompt(false, window, cx);
