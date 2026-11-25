@@ -669,25 +669,13 @@ impl ConductorChat {
             _ => self.notice.clone(),
         };
         let action = if running {
-            kit::button(
-                "sa-chat-stop",
-                "Stop",
-                ButtonKind::Secondary,
-                false,
-                Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
-            )
-            .into_any_element()
+            chathost::stop_button(cx.listener(|this, _, _, cx| this.stop(cx)))
         } else {
-            // an icon, not the accent-filled text button: this mode keeps the composer neutral
-            super::ib(
-                "sa-chat-send",
-                "send",
-                "Send".into(),
-                (32., 32.),
-                (!starting, false),
+            chathost::send_button(
+                !self.composer.read(cx).value().trim().is_empty(),
+                !starting,
                 cx.listener(|this, _, window, cx| this.submit(window, cx)),
             )
-            .into_any_element()
         };
         div()
             .flex()
