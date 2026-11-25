@@ -351,11 +351,9 @@ fn section(
             .child(body)
             .child(buttons);
     }
-    // hugs the longest line (a long one wraps at the chat width)
+    // full chat width like the one-row command (a long line wraps)
     outer
         .flex_col()
-        .self_start()
-        .max_w_full()
         .child(
             div()
                 .flex()
@@ -466,23 +464,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_box_hugs_its_longest_line_up_to_the_chat_width(cx: &mut TestAppContext) {
+    fn every_box_is_the_full_chat_width(cx: &mut TestAppContext) {
         let w = |v: &mut gpui::VisualTestContext, sel: &'static str| {
             v.debug_bounds(sel).expect(sel).size.width
         };
-        let (v, _) = open(cx, "```rust\nls\n```");
-        let short = w(v, "p-b0");
         let (v, _) = open(
             cx,
-            "```sh\nls\necho a-considerably-longer-second-line-here\n```",
+            "```rust\nls\n```\n```bash\na\nb\nc\n```\n```bash\n$ ls\n```",
         );
-        let two = w(v, "p-b0");
-        let long: &'static str =
-            Box::leak(format!("```sh\necho {}\n```", "x".repeat(900)).into_boxed_str());
-        let (v, _) = open(cx, long);
-        let (full, win) = (w(v, "p-b0"), v.update(|w, _| w.viewport_size().width));
-        assert!(short < two && two < win / 2., "{short:?} {two:?}");
-        assert!(full <= win && full > win / 2., "{full:?} {win:?}");
+        let (a, b, c) = (w(v, "p-b0"), w(v, "p-b1"), w(v, "p-b2"));
+        assert!(
+            a == b && b == c && a > v.update(|w, _| w.viewport_size().width) / 2.,
+            "{a:?} {b:?} {c:?}"
+        );
     }
 
     #[gpui::test]

@@ -93,7 +93,7 @@ pub fn read_preview(
     let text = String::from_utf8_lossy(&buf);
     let mut lines: Vec<String> = text
         .lines()
-        .map(synthesis_harness::sanitize_for_display)
+        .map(synthesis_harness::sanitize_content_line)
         .collect();
     let cut_lines = lines.len() > PREVIEW_LINES;
     lines.truncate(PREVIEW_LINES);
@@ -600,7 +600,8 @@ impl TuiView {
             .flex()
             .items_center()
             .px(px(10.))
-            .py(px(6.))
+            // as tall as the viewer header (22 px buttons + 2 * 7 padding + border), so the two rules align
+            .h(px(37.))
             .border_b_1()
             .border_color(hsla(t::RULE))
             .child(
