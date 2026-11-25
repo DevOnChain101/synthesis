@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
+    prelude::*, px,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use synthesis_app::conductor::{Payload, PersonClick};
@@ -658,7 +659,8 @@ impl ConductorChat {
         )
     }
 
-    fn composer_el(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn composer_el(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let focused = self.composer.focus_handle(cx).contains_focused(window, cx);
         let starting = self.phase == Phase::Starting;
         let running = self.live.as_ref().is_some_and(Live::running);
         let hint = match &self.phase {
@@ -674,20 +676,18 @@ impl ConductorChat {
                 false,
                 Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
             )
+            .into_any_element()
         } else {
-            kit::button(
+            // an icon, not the accent-filled text button: this mode keeps the composer neutral
+            super::ib(
                 "sa-chat-send",
-                "Send",
-                if starting {
-                    ButtonKind::Disabled
-                } else {
-                    ButtonKind::Primary
-                },
-                false,
-                Some(Box::new(
-                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                )),
+                "send",
+                "Send".into(),
+                (32., 32.),
+                (!starting, false),
+                cx.listener(|this, _, window, cx| this.submit(window, cx)),
             )
+            .into_any_element()
         };
         div()
             .flex()
@@ -699,7 +699,8 @@ impl ConductorChat {
                     .bordered(false)
                     .into_any_element(),
                 vec![chathost::pill("sa-chat-chip", "Super-Agent").into_any_element()],
-                action.into_any_element(),
+                action,
+                focused,
             ))
             .children(matches!(self.phase, Phase::Failed(_)).then(|| {
                 kit::button(
@@ -785,7 +786,7 @@ impl Render for ConductorChat {
                 .px(px(t::S4))
                 .children(rows)
                 .children(self.notes.iter().map(|n| note_row(&clip(n))))
-                .child(self.composer_el(cx))
+                .child(self.composer_el(window, cx))
                 .into_any_element()
         } else {
             div()

@@ -552,3 +552,5 @@ Open questions (my recommendation in italics):
   - conductor.md (the tool set, N6/RT7 amended);
   - terminal-browser.md (Super Agent hosting, 5.3; the sidebar section was added 2026-11-21).
 - **Smoke runbook additions:** read-only goal; rejected report; a live message delivered; a message queued; Terminal and Browser in a Super Agent session.
+
+- **Composer is neutral (owner decision 2026-11-25).** The Super Agent chat composers (home chat, session chat) send with an icon button (`send`, tooltip "Send", id `sa-chat-send`) and use the hairline border (the `BORDER` token while focused) and muted text; the TUI view's accent frame and accent controls do not apply here.

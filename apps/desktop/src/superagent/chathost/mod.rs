@@ -392,7 +392,7 @@ impl ChatHost {
         )
     }
 
-    fn composer_el(&self, live: &Live, cx: &Context<Self>) -> AnyElement {
+    fn composer_el(&self, live: &Live, window: &Window, cx: &Context<Self>) -> AnyElement {
         let running = live.busy || live.convo().running;
         let model_name = {
             let m = sanitize_for_display(&live.view.status.model);
@@ -403,10 +403,11 @@ impl ChatHost {
             format!("{} mode", if m.is_empty() { "default" } else { &m })
         };
         let starting = live.starting;
-        let input = self
-            .tui
-            .read(cx)
-            .embed_prompt()
+        let prompt = self.tui.read(cx).embed_prompt();
+        let focused = prompt
+            .as_ref()
+            .is_some_and(|p| p.focus_handle(cx).contains_focused(window, cx));
+        let input = prompt
             .map(|p| {
                 Textarea::new(&p)
                     .appearance(false)
@@ -433,22 +434,20 @@ impl ChatHost {
                 false,
                 Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
             )
+            .into_any_element()
         } else {
-            kit::button(
+            // an icon, not the accent-filled text button: this mode keeps the composer neutral
+            super::ib(
                 "sa-chat-send",
-                "Send",
-                if starting {
-                    ButtonKind::Disabled
-                } else {
-                    ButtonKind::Primary
-                },
-                false,
-                Some(Box::new(
-                    cx.listener(|this, _, window, cx| this.send(window, cx)),
-                )),
+                "send",
+                "Send".into(),
+                (32., 32.),
+                (!starting, false),
+                cx.listener(|this, _, window, cx| this.send(window, cx)),
             )
+            .into_any_element()
         };
-        let card = composer_card(input, left, action.into_any_element());
+        let card = composer_card(input, left, action, focused);
         // the attached images (the TUI's chips); `/images clear` and the x drop them
         let chips = (!live.images.is_empty()).then(|| {
             div()
@@ -584,6 +583,7 @@ pub(crate) fn composer_card(
     input: AnyElement,
     left: Vec<AnyElement>,
     action: AnyElement,
+    focused: bool,
 ) -> AnyElement {
     div()
         .debug_selector(|| "sa-chat-composer".to_string())
@@ -594,7 +594,12 @@ pub(crate) fn composer_card(
         .rounded(px(t::R_FLOAT))
         .bg(hsla(t::ELEVATED))
         .border_1()
-        .border_color(t::stroke())
+        // neutral frame, a notch lighter while the box has focus (never the TUI's accent)
+        .border_color(if focused {
+            hsla(t::BORDER)
+        } else {
+            t::stroke()
+        })
         .child(div().px(px(t::S1)).child(input))
         .child(
             div()
@@ -659,7 +664,7 @@ impl Render for ChatHost {
             self.scroll.scroll_to_bottom();
         }
         self.seen = sig;
-        let composer = self.composer_el(live, cx);
+        let composer = self.composer_el(live, window, cx);
         let dialog = self.dialog(window, cx);
         let empty = rows.is_empty();
         div()
