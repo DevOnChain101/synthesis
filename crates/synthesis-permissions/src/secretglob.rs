@@ -92,7 +92,8 @@ pub(crate) fn judge(sp: &SecretPolicy, word: &str, bases: &[PathBuf], root: &Pat
         return Verdict::Clear;
     }
     // bash drops a backslash outside quotes (`.en\v.local` is `.env.local`); the parser keeps it, so judge both
-    if !cfg!(windows) && word.contains('\\') {
+    // (on Windows the backslash is also a separator, so both readings are judged: fail closed)
+    if word.contains('\\') {
         let plain = word.replace('\\', "");
         if !matches!(judge(sp, &plain, bases, root), Verdict::Clear) {
             return Verdict::Hit;
