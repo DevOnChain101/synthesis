@@ -242,6 +242,7 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
         max_attempts_per_work_item: oat,
         attempt_max_cost_usd: oac,
         attempt_max_wall_secs: oaw,
+        max_turns: omt,
     } = ob;
     let super::Budgets {
         max_cost_usd: nco,
@@ -249,6 +250,7 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
         max_attempts_per_work_item: nat,
         attempt_max_cost_usd: nac,
         attempt_max_wall_secs: naw,
+        max_turns: nmt,
     } = nb;
     let budget =
         |d: &mut ContractDiff, name: &str, o: Option<String>, n: Option<String>, up: bool| {
@@ -280,6 +282,13 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
         oaw.map(|v| v.to_string()),
         naw.map(|v| v.to_string()),
         limit_up(*oaw, *naw),
+    );
+    budget(
+        &mut d,
+        "max_turns",
+        omt.map(|v| v.to_string()),
+        nmt.map(|v| v.to_string()),
+        limit_up(*omt, *nmt),
     );
 
     // a pattern added to the allowed paths, or taken off the denied ones, gives more room (a pattern
@@ -397,6 +406,25 @@ mod tests {
     }
 
     #[test]
+    fn raising_or_removing_max_turns_widens_and_lowering_does_not() {
+        let widens = |o: Option<u32>, n: Option<u32>| {
+            let mut a = contract(&["c1"]);
+            a.envelope.budgets.max_turns = o;
+            let mut b = a.clone();
+            b.envelope.budgets.max_turns = n;
+            diff_contracts(&a, &b)
+                .widens
+                .iter()
+                .any(|x| x.contains("max_turns"))
+        };
+        assert!(widens(Some(10), Some(11)));
+        assert!(widens(Some(10), None));
+        assert!(!widens(Some(10), Some(9)));
+        assert!(!widens(None, Some(10)));
+        assert!(!widens(None, None));
+    }
+
+    #[test]
     fn removing_the_cap_of_an_attempt_widens_and_a_lower_bar_weakens() {
         let mut a = contract(&["c1", "c2"]);
         a.envelope.budgets.attempt_max_wall_secs = Some(60);
@@ -465,6 +493,7 @@ mod tests {
         base.envelope.quality_gates = vec!["g".into()];
         base.envelope.budgets.attempt_max_cost_usd = Some(1.0);
         base.envelope.budgets.attempt_max_wall_secs = Some(10);
+        base.envelope.budgets.max_turns = Some(10);
         let v = serde_json::to_value(&base).unwrap();
         fn paths(v: &serde_json::Value, at: String, out: &mut Vec<String>) {
             match v {
