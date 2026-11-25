@@ -246,6 +246,7 @@ fn ro_profile_from_stored_contract_has_four_read_tools_no_write_and_no_network()
     assert_eq!(after("--network"), "deny");
     assert_eq!(after("--permission-mode"), "dontAsk");
     assert_eq!(after("--max-turns"), "80");
+    assert_eq!(after("--max-tokens"), "2000000");
     // nothing that could write or widen: no allow rule, no worktree, no extra directory, no trust
     for flag in [
         "--allow",
@@ -295,6 +296,58 @@ fn ro_profile_from_stored_contract_has_four_read_tools_no_write_and_no_network()
     assert!(!wr.is_read_only());
     assert!(!wr.argv().iter().any(|a| a == "--read-only-session"));
     assert_eq!(wr.permission_mode(), "default");
+    // a write attempt is capped too: turns and raw tokens come from the policy
+    let flag = |p: &Profile, f: &str| {
+        let a = p.argv();
+        a[a.iter().position(|x| x == f).unwrap() + 1]
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert_eq!(flag(&wr, "--max-turns"), "50");
+    assert_eq!(flag(&wr, "--max-tokens"), "2000000");
+    // a caller may lower the turns of a write attempt, never raise them
+    assert!(
+        Profile::build(
+            PathBuf::from("synt"),
+            &env,
+            &contract(),
+            &policy(),
+            0.0,
+            "x".into()
+        )
+        .unwrap()
+        .with_extra(&["--max-turns", "51"])
+        .is_err()
+    );
+    let lowered = Profile::build(
+        PathBuf::from("synt"),
+        &env,
+        &contract(),
+        &policy(),
+        0.0,
+        "x".into(),
+    )
+    .unwrap()
+    .with_extra(&["--max-turns", "7"])
+    .unwrap();
+    assert_eq!(flag(&lowered, "--max-turns"), "7");
+    // a policy above the ceilings (hand-built) is cut to them; a read-only attempt keeps its 80
+    let mut big = policy();
+    big.attempt_max_turns = Some(u32::MAX);
+    big.attempt_max_tokens = u64::MAX;
+    let w = Profile::build(
+        PathBuf::from("synt"),
+        &env,
+        &contract(),
+        &big,
+        0.0,
+        "x".into(),
+    )
+    .unwrap();
+    assert_eq!(flag(&w, "--max-turns"), "200");
+    assert_eq!(flag(&w, "--max-tokens"), "20000000");
+    let ro = Profile::build(PathBuf::from("synt"), &env, &stored, &big, 0.0, "x".into()).unwrap();
+    assert_eq!(flag(&ro, "--max-turns"), "80");
 }
 
 fn write_report(r: &Rig, w: &OutcomeWriter, sid: &str, text: &str) {
@@ -407,4 +460,39 @@ fn ro_attempt_without_a_report_fails_and_never_blocks_on_a_decision() {
         WorkItemState::RetryableFailure | WorkItemState::TerminalFailure
     ));
     assert!(w.list_decisions(w.id()).unwrap().is_empty());
+}
+
+#[test]
+fn turns_unset_or_set_apply_to_read_only_and_write_attempts() {
+    let r = rig();
+    let root = folder(&r);
+    let (mut w, it) = ro_outcome(&r, &root, &contract_ro());
+    let env = r
+        .allocator()
+        .allocate_in_place(&mut w, &spec(&it, &root), now())
+        .unwrap();
+    let ro = w.get_contract(w.id(), 1).unwrap().0;
+    let turns = |c: &Contract, set: Option<u32>| {
+        let mut p = policy();
+        p.attempt_max_turns = set;
+        let a = Profile::build(PathBuf::from("synt"), &env, c, &p, 0.0, "x".into())
+            .unwrap()
+            .argv();
+        a[a.iter().position(|x| x == "--max-turns").unwrap() + 1]
+            .to_string_lossy()
+            .into_owned()
+    };
+    let wr = contract();
+    assert_eq!(
+        (turns(&ro, None), turns(&wr, None)),
+        ("80".into(), "50".into())
+    );
+    assert_eq!(
+        (turns(&ro, Some(30)), turns(&wr, Some(30))),
+        ("30".into(), "30".into())
+    );
+    assert_eq!(
+        (turns(&ro, Some(120)), turns(&wr, Some(120))),
+        ("80".into(), "120".into())
+    );
 }

@@ -28,12 +28,29 @@ pub fn outcome_policy(o: &OrchestratorSettings) -> OutcomePolicy {
     p.max_cost_usd = o.max_cost_usd;
     p.attempt_max_cost_usd = o.attempt_max_cost_usd;
     p.attempt_max_wall_secs = o.attempt_max_wall_secs;
+    p.attempt_max_turns = o.max_turns;
+    p.attempt_max_tokens = o.max_tokens;
     p
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_settings_ceilings_equal_the_core_ceilings_and_reach_the_policy() {
+        use synthesis_core::outcome::{HARD_MAX_TOKENS, HARD_MAX_TURNS};
+        assert_eq!(
+            synthesis_settings::ORCH_HARD_MAX_TURNS,
+            u64::from(HARD_MAX_TURNS)
+        );
+        assert_eq!(synthesis_settings::ORCH_HARD_MAX_TOKENS, HARD_MAX_TOKENS);
+        let p = outcome_policy(&OrchestratorSettings::default());
+        assert_eq!(
+            (p.attempt_max_turns, p.attempt_max_tokens),
+            (None, 2_000_000)
+        );
+    }
 
     #[test]
     fn the_disclosure_is_the_plan_text() {

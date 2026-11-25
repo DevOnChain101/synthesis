@@ -1201,6 +1201,10 @@ pub struct OutcomePolicy {
     /// A ceiling makes a per-attempt cap mandatory in the contract.
     pub attempt_max_cost_usd: Option<f64>,
     pub attempt_max_wall_secs: Option<u64>,
+    /// Provider calls per attempt and raw total tokens per attempt; always set, never above the
+    /// hard ceilings of `synthesis_core::outcome`.
+    pub attempt_max_turns: Option<u32>,
+    pub attempt_max_tokens: u64,
 }
 
 impl OutcomePolicy {
@@ -1219,6 +1223,8 @@ impl OutcomePolicy {
             max_cost_usd: None,
             attempt_max_cost_usd: None,
             attempt_max_wall_secs: None,
+            attempt_max_turns: None,
+            attempt_max_tokens: synthesis_core::outcome::DEFAULT_ATTEMPT_MAX_TOKENS,
         }
     }
 

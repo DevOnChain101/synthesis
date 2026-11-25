@@ -10,7 +10,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use synthesis_core::outcome::{Contract, ContractKind, Envelope};
+use synthesis_core::outcome::{
+    Contract, ContractKind, DEFAULT_ATTEMPT_MAX_TURNS, Envelope, HARD_MAX_TOKENS, HARD_MAX_TURNS,
+};
 use synthesis_session::outcome::OutcomePolicy;
 
 use crate::{AttemptEnv, CompileError, CompiledEnvelope, compile_envelope};
@@ -97,6 +99,10 @@ pub struct Profile {
     prompt: String,
     max_cost_usd: f64,
     max_wall_secs: u64,
+    /// Provider calls and raw total tokens of the attempt: from the settings, never above the
+    /// hard ceilings (the settings validation and `OutcomePolicy` keep them there; `min` here too).
+    max_turns: u32,
+    max_tokens: u64,
     contract_version: u32,
     envelope: Envelope,
     compiled: CompiledEnvelope,
@@ -171,6 +177,17 @@ impl Profile {
             prompt,
             max_cost_usd: cap,
             max_wall_secs: wall,
+            max_turns: match (
+                contract.kind == ContractKind::ReadOnly,
+                policy.attempt_max_turns,
+            ) {
+                (true, None) => READ_ONLY_MAX_TURNS,
+                (true, Some(n)) => n.clamp(1, HARD_MAX_TURNS).min(READ_ONLY_MAX_TURNS),
+                (false, n) => n
+                    .unwrap_or(DEFAULT_ATTEMPT_MAX_TURNS)
+                    .clamp(1, HARD_MAX_TURNS),
+            },
+            max_tokens: policy.attempt_max_tokens.clamp(1, HARD_MAX_TOKENS),
             contract_version: contract.version,
             envelope: contract.envelope.clone(),
             compiled,
@@ -231,12 +248,13 @@ impl Profile {
     /// `--max-tool-calls N`, each with its value). Anything else is refused.
     pub fn with_extra(mut self, args: &[&str]) -> Result<Self, ProfileError> {
         let extra = allowed_extra(args)?;
-        if self.read_only {
-            // a caller may lower the caps of a read-only attempt, never raise them
-            for (flag, cap) in [
-                ("--max-turns", READ_ONLY_MAX_TURNS),
-                ("--max-tool-calls", READ_ONLY_MAX_TOOL_CALLS),
-            ] {
+        // a caller may lower the caps of an attempt, never raise them
+        {
+            let mut caps = vec![("--max-turns", self.max_turns)];
+            if self.read_only {
+                caps.push(("--max-tool-calls", READ_ONLY_MAX_TOOL_CALLS));
+            }
+            for (flag, cap) in caps {
                 let bad = extra
                     .windows(2)
                     .any(|w| w[0] == flag && w[1].parse::<u32>().map_or(true, |n| n > cap));
@@ -301,6 +319,11 @@ impl Profile {
             "--max-wall-secs".into(),
             self.max_wall_secs.to_string().into(),
         ]);
+        // every attempt: provider calls and raw tokens are capped, never unlimited
+        if !self.extra.iter().any(|a| a == "--max-turns") {
+            v.extend(["--max-turns".into(), self.max_turns.to_string().into()]);
+        }
+        v.extend(["--max-tokens".into(), self.max_tokens.to_string().into()]);
         v.extend(["--permission-mode".into(), self.permission_mode().into()]);
         if self.read_only {
             // the worker keeps only Read, Grep, Glob (`--read-only-session`), no hooks or
@@ -313,9 +336,6 @@ impl Profile {
             ]);
             for r in crate::planrun::FIXED_DENY {
                 v.extend(["--deny".into(), r.into()]);
-            }
-            if !self.extra.iter().any(|a| a == "--max-turns") {
-                v.extend(["--max-turns".into(), READ_ONLY_MAX_TURNS.to_string().into()]);
             }
             if !self.extra.iter().any(|a| a == "--max-tool-calls") {
                 v.extend([

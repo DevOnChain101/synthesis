@@ -14,6 +14,14 @@ pub const MAX_PATH_PATTERN_CHARS: usize = 512;
 /// Hard ceilings: a contract cannot ask for more than these whatever the settings say.
 pub const MAX_PARALLEL_WORKERS: u32 = 16;
 pub const MAX_ATTEMPTS_PER_WORK_ITEM: u32 = 10;
+/// Hard ceilings of one attempt's work, never unlimited: provider calls (turns) and raw total
+/// tokens from provider usage counts (no prices). `synt.orchestrator.max_turns` / `max_tokens`
+/// accept at most these.
+pub const HARD_MAX_TURNS: u32 = 200;
+pub const HARD_MAX_TOKENS: u64 = 20_000_000;
+/// Settings defaults of a write attempt.
+pub const DEFAULT_ATTEMPT_MAX_TURNS: u32 = 50;
+pub const DEFAULT_ATTEMPT_MAX_TOKENS: u64 = 2_000_000;
 /// Defaults of plan D10: 2 workers, 2 retries (so 3 attempts). The cost cap has no default.
 pub const DEFAULT_MAX_PARALLEL_WORKERS: u32 = 2;
 pub const DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM: u32 = 3;
