@@ -68,6 +68,15 @@ pub trait Effects: Send + Sync {
         via: &'a Via,
     ) -> BoxFuture<'a, Result<String, String>>;
     fn pause_outcome<'a>(&'a self, id: &'a str, via: &'a Via) -> BoxFuture<'a, Result<(), String>>;
+    /// The person's clicked card to a worker: only through the orchestrator's `attempt.message` call, whose
+    /// gateway gate (`Action::MessageWorker`) decides. `via` carries the payload hash.
+    fn message_worker<'a>(
+        &'a self,
+        outcome: &'a str,
+        work_item: &'a str,
+        text: &'a str,
+        via: &'a Via,
+    ) -> BoxFuture<'a, Result<(), String>>;
 }
 
 pub struct ProposalExecutor {
@@ -163,6 +172,11 @@ impl ProposalExecutor {
                 fx.create_goal(&g, via).await.map(|_| ())
             }
             Payload::PauseOutcome { outcome } => fx.pause_outcome(outcome, via).await,
+            Payload::MessageWorker {
+                outcome,
+                work_item,
+                text,
+            } => fx.message_worker(outcome, work_item, text, via).await,
         }
     }
 }

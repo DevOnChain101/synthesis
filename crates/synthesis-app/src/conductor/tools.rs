@@ -149,7 +149,6 @@ pub struct ProposeGoal {
 #[serde(untagged)]
 pub enum AssignTarget {
     Session(SessionT),
-    #[allow(dead_code)] // parsed to check the shape; a work-item card is off until P2c
     Item(ItemT),
 }
 

@@ -70,6 +70,17 @@ impl ProposalCard {
                 "Send",
                 true,
             ),
+            "message_worker" => (
+                format!(
+                    "Message to worker {}",
+                    payload
+                        .get("work_item")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                ),
+                "Send",
+                true,
+            ),
             "interrupt" => ("Interrupt a session".into(), "Interrupt", false),
             "close" => ("Close a session".into(), "Close", false),
             "pause_outcome" => ("Pause an outcome".into(), "Pause", false),

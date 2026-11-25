@@ -267,6 +267,32 @@ impl Effects for DesktopEffects {
             }
         })
     }
+    fn message_worker<'a>(
+        &'a self,
+        outcome: &'a str,
+        work_item: &'a str,
+        text: &'a str,
+        via: &'a Via,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        let (o, w, t) = (outcome.to_string(), work_item.to_string(), text.to_string());
+        let (sha, key) = (
+            via.proposal_sha256.clone(),
+            format!("msg-{}", via.proposal_id),
+        );
+        let r = self.outcomes.effect(move |c| {
+            let rev = c.outcome(&o)?.revision;
+            Ok(
+                c.send_worker_card_message(&o, &w, &t, Some(rev), &sha, &key)?
+                    .state,
+            )
+        });
+        Box::pin(async move {
+            match r.await? {
+                CommandState::Applied | CommandState::Queued => Ok(()),
+                s => Err(format!("the orchestrator did not deliver it ({s:?})")),
+            }
+        })
+    }
 }
 
 // ------------------------------------------------------------------------------------------ the engine

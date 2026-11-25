@@ -131,6 +131,16 @@ impl Effects for Fx {
         self.0.lock().unwrap().push(format!("pause:{id}"));
         Box::pin(async { Ok(()) })
     }
+    fn message_worker<'a>(
+        &'a self,
+        _: &'a str,
+        w: &'a str,
+        _: &'a str,
+        _: &'a Via,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        self.0.lock().unwrap().push(format!("worker:{w}"));
+        Box::pin(async { Ok(()) })
+    }
 }
 
 struct Rig {

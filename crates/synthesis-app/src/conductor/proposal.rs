@@ -59,6 +59,12 @@ pub enum Payload {
     PauseOutcome {
         outcome: String,
     },
+    /// Text to the worker of a work item of an outcome this conductor can read (never automatic).
+    MessageWorker {
+        outcome: String,
+        work_item: String,
+        text: String,
+    },
 }
 
 impl Payload {
@@ -68,9 +74,10 @@ impl Payload {
             Payload::CreateSession { .. } => Some(Action::CreateSession),
             Payload::SendMessage { .. } => Some(Action::SendMessage),
             Payload::Interrupt { .. } => Some(Action::Interrupt),
-            Payload::CreateGoal { .. } | Payload::Close { .. } | Payload::PauseOutcome { .. } => {
-                None
-            }
+            Payload::CreateGoal { .. }
+            | Payload::Close { .. }
+            | Payload::PauseOutcome { .. }
+            | Payload::MessageWorker { .. } => None,
         }
     }
 

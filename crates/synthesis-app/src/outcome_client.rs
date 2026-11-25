@@ -457,6 +457,50 @@ impl<T: Transport> OutcomeClient<T> {
         expected_revision: Option<i64>,
         key: &str,
     ) -> Result<CommandReply, ClientError> {
+        self.worker_message(
+            outcome,
+            work_item,
+            text,
+            brief_change,
+            expected_revision,
+            None,
+            key,
+        )
+    }
+
+    /// As [`Self::send_worker_message`] for a conductor card the person clicked: the payload hash rides along
+    /// (the server labels the message `card`). Same `attempt.message` call and the same gateway gate.
+    pub fn send_worker_card_message(
+        &mut self,
+        outcome: &str,
+        work_item: &str,
+        text: &str,
+        expected_revision: Option<i64>,
+        proposal_sha256: &str,
+        key: &str,
+    ) -> Result<CommandReply, ClientError> {
+        self.worker_message(
+            outcome,
+            work_item,
+            text,
+            false,
+            expected_revision,
+            Some(proposal_sha256.into()),
+            key,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn worker_message(
+        &mut self,
+        outcome: &str,
+        work_item: &str,
+        text: &str,
+        brief_change: bool,
+        expected_revision: Option<i64>,
+        proposal_sha256: Option<String>,
+        key: &str,
+    ) -> Result<CommandReply, ClientError> {
         if cfg!(windows) {
             return Err(ClientError::Refused(
                 "worker messages are not available on native Windows; open the folder in WSL2"
@@ -471,7 +515,7 @@ impl<T: Transport> OutcomeClient<T> {
             text: text.into(),
             brief_change,
             expected_revision,
-            proposal_sha256: None,
+            proposal_sha256,
             cmd: self.args(key),
         })?;
         self.reply(v, key, "attempt.message")
