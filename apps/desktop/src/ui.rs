@@ -17,8 +17,8 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::popup::OpenSession;
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::popup::OpenSession;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
 use crate::superagent::material;
 use crate::superagent::session::host::SessionHost;
@@ -35,7 +35,7 @@ pub const ICONS: [&str; 2] = ["square-terminal", "undo-2"];
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Tui,
-    /// The Super Agent view (`outcomes_view`: the things it shows are called outcomes).
+    /// The Super Agent view (`superagent::outcomes`: the things it shows are called outcomes).
     SuperAgent,
     Settings,
 }
@@ -809,7 +809,7 @@ impl Shell {
         cx.subscribe_in(
             &outcomes,
             window,
-            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, window, cx| {
+            |s: &mut Shell, _, e: &crate::superagent::outcomes::OpenFolder, window, cx| {
                 // a plain New session opens as a tab of Super Agent, never in the TUI view; a refusal is the view's notice
                 s.sa.update(cx, |v, cx| {
                     let _ = v.open_session_folder(&e.0, window, cx);
@@ -961,7 +961,7 @@ mod tests {
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(f.base.join("f1")))
+            cx.emit(crate::superagent::outcomes::OpenFolder(f.base.join("f1")))
         });
         v.run_until_parked();
         let mut sid = None;
@@ -1233,7 +1233,7 @@ mod tests {
         assert_eq!(shell.read_with(v, |s, cx| s.waiting(cx)), 2);
         // the link not ready (off, windows, unreachable): the badge goes
         o.update(v, |o, cx| {
-            o.state.screen = crate::outcomes_view::model::Screen::Off;
+            o.state.screen = crate::superagent::outcomes::model::Screen::Off;
             cx.notify();
         });
         v.run_until_parked();
@@ -1380,7 +1380,7 @@ mod tests {
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         let dir = tempfile::tempdir().unwrap();
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(dir.path().to_path_buf()))
+            cx.emit(crate::superagent::outcomes::OpenFolder(dir.path().to_path_buf()))
         });
         v.run_until_parked();
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
@@ -1441,7 +1441,7 @@ mod tests {
         let folder = f.base.join("f1");
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(folder.clone()))
+            cx.emit(crate::superagent::outcomes::OpenFolder(folder.clone()))
         });
         v.run_until_parked();
         // the person stays in Super Agent, in a session frame with a real embedded chat
@@ -1540,7 +1540,7 @@ mod tests {
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         o.update(v, |o, cx| {
-            o.state.centre = crate::outcomes_view::model::CentreTab::Goal;
+            o.state.centre = crate::superagent::outcomes::model::CentreTab::Goal;
             cx.notify();
         });
         v.run_until_parked();

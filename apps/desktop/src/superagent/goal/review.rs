@@ -14,7 +14,7 @@ use synthesis_view::outcomes::CriteriaView;
 use super::model::approve_ok;
 use super::view::mod_name;
 use super::{Dialog, GoalForm};
-use crate::outcomes_view::form::{DiffView, Review, Stage};
+use crate::superagent::outcomes::form::{DiffView, Review, Stage};
 use crate::superagent::frames::GoalKind;
 use crate::superagent::kit::{self, ButtonKind, text};
 use crate::superagent::tokens::{self as t, hsla};

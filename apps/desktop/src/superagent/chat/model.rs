@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use synthesis_config::Env;
 use synthesis_view::conductor::ProposalCard;
 
-use crate::outcomes_view::link::gate as orchestrator_gate;
-use crate::outcomes_view::model::Screen;
+use crate::superagent::outcomes::link::gate as orchestrator_gate;
+use crate::superagent::outcomes::model::Screen;
 
 /// A card ignores Confirm for this long after it first showed these bytes.
 pub const ARM: Duration = Duration::from_millis(400);

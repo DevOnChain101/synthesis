@@ -14,9 +14,9 @@ use synthesis_view::outcomes::CriteriaView;
 
 use super::GoalForm;
 use super::model::Field;
-use crate::outcomes_view::form::Review;
-use crate::outcomes_view::link::FormMsg;
-use crate::outcomes_view::sample;
+use crate::superagent::outcomes::form::Review;
+use crate::superagent::outcomes::link::FormMsg;
+use crate::superagent::outcomes::sample;
 use crate::superagent::frames::GoalKind;
 use crate::superagent::tokens::{self as t, hsla};
 

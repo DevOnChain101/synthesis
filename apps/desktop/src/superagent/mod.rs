@@ -9,6 +9,7 @@ pub mod frames;
 pub mod goal;
 pub mod home;
 pub mod kit;
+pub mod outcomes;
 pub mod material;
 mod picker;
 pub mod port;
@@ -31,8 +32,8 @@ use std::sync::Arc;
 use futures::StreamExt as _;
 use gpui::Subscription;
 
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::popup::OpenSession;
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::popup::OpenSession;
 use crate::ui::{TITLEBAR_H, Tip, View};
 use crate::widgets::chrome::icon;
 use chat::{ConductorChat, OpenEnableGuide, OpenSettings};
@@ -643,7 +644,7 @@ impl SuperAgentView {
             Some(f) => PathBuf::from(f),
             None => {
                 let home = self.synt_home.as_ref().ok_or("sessions need a live app")?;
-                crate::outcomes_view::kind_picker::make_scratch(home)?
+                crate::superagent::outcomes::kind_picker::make_scratch(home)?
             }
         };
         let (id, fresh) = self.open_session_folder(&folder, window, cx)?;

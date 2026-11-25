@@ -193,7 +193,7 @@ impl OutcomesView {
                 .items_center()
                 .child(main)
                 .children((*k == Kind::Session).then(|| {
-                    crate::outcomes_view::form_view::small_button(
+                    crate::superagent::outcomes::form_view::small_button(
                         "out-kind-folder",
                         "Choose folder...",
                         self.click(cx, |this, cx| this.session_in_folder(cx)),

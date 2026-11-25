@@ -10,8 +10,8 @@ use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 
 use super::model::Field;
 use super::{GoalForm, review};
-use crate::outcomes_view::form::Stage;
-use crate::outcomes_view::model::Screen;
+use crate::superagent::outcomes::form::Stage;
+use crate::superagent::outcomes::model::Screen;
 use crate::superagent::frames::GoalKind;
 use crate::superagent::kit::{self, ButtonKind, text};
 use crate::superagent::tokens::{self as t, hsla};

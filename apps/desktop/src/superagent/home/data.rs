@@ -7,8 +7,8 @@ use synthesis_view::outcomes::{NeedsYou, WSL2_REFUSAL};
 
 use crate::approvals::{self, Kind, Row};
 use crate::live::now_ms;
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::model::{Effect, Item, Screen, State};
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::model::{Effect, Item, Screen, State};
 use crate::superagent::kit::Status;
 
 /// What ships later (approvals-concept A1 queue view model, A4 `resolve_many`): the one-tap recommended button, batch
@@ -196,7 +196,7 @@ pub fn build(st: &State, rows: Vec<Row>, now: i64) -> Model {
         }
         let meta = vec![
             i.row.state.clone(),
-            crate::outcomes_view::render::budget_line(&i.budget),
+            crate::superagent::outcomes::render::budget_line(&i.budget),
         ];
         if matches!(status, Status::Verified | Status::Failed) {
             m.finished.push(FinRow {

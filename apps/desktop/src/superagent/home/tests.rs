@@ -8,8 +8,8 @@ use super::card::{more_label, shown_rows, why_not};
 use super::data::{self, Gates, Risk, Target};
 use super::*;
 use crate::approvals::{Ages, Popup, decision_rows};
-use crate::outcomes_view::popup::SAMPLE_NOW;
-use crate::outcomes_view::sample;
+use crate::superagent::outcomes::popup::SAMPLE_NOW;
+use crate::superagent::outcomes::sample;
 
 fn sample_model() -> Model {
     let st = sample::state();

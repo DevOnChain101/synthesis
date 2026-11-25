@@ -23,9 +23,9 @@ use synthesis_view::outcomes::{InspectorContent, MessageRow};
 
 use super::outcome::{AttemptRow, item_finished, item_status, word};
 use crate::live::{ARM_MS, now_ms};
-use crate::outcomes_view::link::{Delivery, UNSETTLED};
-use crate::outcomes_view::model::{Screen, State};
-use crate::outcomes_view::{MessageSent, OutcomesView};
+use crate::superagent::outcomes::link::{Delivery, UNSETTLED};
+use crate::superagent::outcomes::model::{Screen, State};
+use crate::superagent::outcomes::{MessageSent, OutcomesView};
 use crate::superagent::home::{RowSpec, row, section};
 use crate::superagent::kit::{self, ButtonKind, Status};
 use crate::superagent::tokens::{self as t, hsla};
@@ -667,7 +667,7 @@ impl Render for WorkerFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outcomes_view::sample;
+    use crate::superagent::outcomes::sample;
     use serde_json::json;
 
     /// The sample with the engine advertising `attempt_message`.
@@ -803,7 +803,7 @@ mod tests {
 
     // ------------------------------------------------------------------ the composer, with a real window
 
-    use crate::outcomes_view::link::Req;
+    use crate::superagent::outcomes::link::Req;
     use gpui::{TestAppContext, VisualTestContext, px, size};
     use std::sync::mpsc::Receiver;
 
@@ -823,7 +823,7 @@ mod tests {
         item: &str,
     ) -> (Rig, &'a mut VisualTestContext) {
         cx.update(gpui_component::init);
-        let (link, rx) = crate::outcomes_view::link::Link::fake();
+        let (link, rx) = crate::superagent::outcomes::link::Link::fake();
         let outcomes = cx.new(|cx| {
             let mut o = OutcomesView::with_state(state, cx);
             o.set_link(link);
@@ -1135,10 +1135,10 @@ mod tests {
         assert_eq!(
             callers,
             [
-                "src/outcomes_view/link.rs",
-                "src/outcomes_view/link/tests.rs",
-                "src/outcomes_view/mod.rs",
                 "src/superagent/chat/glue.rs",
+                "src/superagent/outcomes/link.rs",
+                "src/superagent/outcomes/link/tests.rs",
+                "src/superagent/outcomes/mod.rs",
                 "src/superagent/session/worker.rs",
             ]
         );

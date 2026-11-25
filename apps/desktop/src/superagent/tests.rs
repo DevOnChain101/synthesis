@@ -510,14 +510,14 @@ fn a_form_with_an_approval_in_flight_keeps_its_frame_and_says_so(cx: &mut TestAp
     let f = goal_form(&sa, v, GoalKind::Writes).unwrap();
     f.update(v, |f, cx| {
         f.apply_form(
-            crate::outcomes_view::link::FormMsg::Review(Box::new(
-                crate::outcomes_view::sample::review(false),
+            crate::superagent::outcomes::link::FormMsg::Review(Box::new(
+                crate::superagent::outcomes::sample::review(false),
             )),
             cx,
         );
-        f.form.stage = crate::outcomes_view::form::Stage::Approving(
-            match std::mem::replace(&mut f.form.stage, crate::outcomes_view::form::Stage::Edit) {
-                crate::outcomes_view::form::Stage::Review(r) => r,
+        f.form.stage = crate::superagent::outcomes::form::Stage::Approving(
+            match std::mem::replace(&mut f.form.stage, crate::superagent::outcomes::form::Stage::Edit) {
+                crate::superagent::outcomes::form::Stage::Review(r) => r,
                 _ => unreachable!(),
             },
         );

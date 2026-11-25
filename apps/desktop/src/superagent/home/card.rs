@@ -1,4 +1,4 @@
-//! The decision card, in place of the row on Review (port of `outcomes_view::render::card` and `card_layout`, with the
+//! The decision card, in place of the row on Review (port of `superagent::outcomes::render::card` and `card_layout`, with the
 //! rules of #167 as moved by S0): nothing preselected, every field of the brief shown in the server's order, choose
 //! and send are two acts, the whole brief must be opened before Send when text is hidden, and the keys act 400 ms
 //! after the card got them. The state is `approvals::Popup`; this file only draws it.
@@ -12,7 +12,7 @@ use synthesis_view::outcomes::BriefRow;
 use super::data::NeedRow;
 use super::{HomeView, Open};
 use crate::approvals::Popup;
-use crate::outcomes_view::render::card_layout;
+use crate::superagent::outcomes::render::card_layout;
 use crate::superagent::kit::{self, ButtonKind};
 use crate::superagent::tokens::{self as t, hsla};
 

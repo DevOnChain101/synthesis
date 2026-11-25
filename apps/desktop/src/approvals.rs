@@ -12,9 +12,9 @@ use synthesis_config::Env;
 use synthesis_view::outcomes::DecisionCard;
 
 use crate::live::ARM_MS;
-use crate::outcomes_view::ask::Ask;
-use crate::outcomes_view::link;
-use crate::outcomes_view::model::{Effect, Item, Screen};
+use crate::superagent::outcomes::ask::Ask;
+use crate::superagent::outcomes::link;
+use crate::superagent::outcomes::model::{Effect, Item, Screen};
 
 /// `Ok` when the platform supports outcomes and `synt.orchestrator.enabled` is true; `Err` is why not. Checked
 /// before any panel, tab, popup, worker thread or poll exists: while it is `Err` the TUI view draws nothing of this.
@@ -246,7 +246,7 @@ impl Popup {
 mod tests {
     use super::*;
     use crate::live::ARM_MS;
-    use crate::outcomes_view::sample;
+    use crate::superagent::outcomes::sample;
 
     fn card() -> DecisionCard {
         sample::state().cards()[0].clone()
