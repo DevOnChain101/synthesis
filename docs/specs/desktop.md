@@ -510,7 +510,7 @@ answers a pending approval (the title bar keeps the red "approval needed", a cli
 
 **Window opacity and blur.** `synt.tui.opacity` (whole percent, 30 to 100, default 100; under 30 the window is too faint to read, so
 the loader and the slider refuse it) and `synt.tui.blur` (default off). Opacity scales the alpha of the window's background fills
-only (`theme::fill`: the shell, the title bar, the TUI view, the panels); text, borders and the Settings popup stay opaque. The window
+only (`theme::fill`: the shell, the title bar, the TUI view, the panels; owner decision 2026-11-25: the Super Agent view follows the same opacity and blur, its shell and panel fills use `tokens::window_fill`; glass material keeps its own tint). A view that paints its own ground (TUI) is never stacked on the shell's ground, also under the Settings popup, so the title bar and the body show one alpha; text, borders and the Settings popup stay opaque. The window
 asks GPUI for `Opaque` at 100 %, else `Blurred` (blur on and supported) or `Transparent` (`WindowBackgroundAppearance`, set at open
 and on every change). Blur: macOS (NSVisualEffectView) and Windows (acrylic) support it; on Linux GPUI blurs only on some Wayland
 compositors and never on X11, so the control is disabled there with that reason. Blur shows only under 100 % opacity. Dragging the

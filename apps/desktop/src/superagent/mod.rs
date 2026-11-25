@@ -1045,7 +1045,7 @@ impl SuperAgentView {
             .flex_col()
             .overflow_hidden()
             .rounded(px(t::R_PANEL))
-            .bg(hsla(t::BG))
+            .bg(t::window_fill(t::BG))
             .border_1()
             .border_color(t::stroke())
             .children(notice.map(|n| {

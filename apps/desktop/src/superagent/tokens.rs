@@ -38,11 +38,16 @@ pub const SCRIM_A: f32 = 0.72;
 pub const GLASS_TINT_A: f32 = 0.86;
 pub const GLASS_TINT_POP_A: f32 = 0.88;
 
+/// `c` as a window background: at the window opacity (`synt.tui.opacity`), like the TUI view's fills.
+pub fn window_fill(c: u32) -> Hsla {
+    alpha(c, crate::theme::alpha())
+}
+
 /// A shell fill of the Super Agent view (rail, title row, sidebar): solid, or the glass tint over the blurred window.
 pub fn surface_fill() -> Hsla {
     match super::material::current() {
         super::material::Material::Glass => alpha(SURFACE, GLASS_TINT_A),
-        super::material::Material::Opaque => hsla(SURFACE),
+        super::material::Material::Opaque => window_fill(SURFACE),
     }
 }
 /// 1 px hairlines and inset rims.
