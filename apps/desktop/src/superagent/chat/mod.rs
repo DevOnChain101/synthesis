@@ -505,6 +505,7 @@ impl ConductorChat {
                     first_message: t, ..
                 }
                 | Payload::SendMessage { text: t, .. }
+                | Payload::MessageWorker { text: t, .. }
                 | Payload::CreateGoal { contract: t, .. } => Some(t),
                 _ => None,
             })

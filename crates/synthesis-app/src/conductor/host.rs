@@ -105,6 +105,8 @@ fn parse<T: DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid input: {e}"))
 }
 
+const WORKER_OFF: &str = "message_worker is not available yet: it needs the live worker inbox (P2c). Ask the person to message the worker in its session.";
+
 /// A person-visible text field: not empty, within `max` bytes, no hidden or control characters (T11).
 fn check_text(field: &str, s: &str, max: usize) -> Result<(), String> {
     if s.trim().is_empty() || s.len() > max {
@@ -339,11 +341,35 @@ impl ConductorHost {
             Payload::Interrupt { session, sid } | Payload::Close { session, sid } => {
                 self.live_session(session, sid)
             }
+            Payload::MessageWorker {
+                outcome,
+                work_item,
+                text,
+            } => {
+                if !MESSAGE_WORKER_ENABLED {
+                    return Err(WORKER_OFF.into());
+                }
+                self.check_worker(outcome, work_item, text)
+            }
             Payload::PauseOutcome { outcome } => self
                 .reads
                 .outcome(outcome)
                 .map(|_| ())
                 .ok_or_else(|| "not_found: no such outcome".into()),
+        }
+    }
+
+    /// Text and ownership of a worker message; the dark flag is checked by the callers, not here.
+    fn check_worker(&self, outcome: &str, work_item: &str, text: &str) -> Result<(), String> {
+        check_text("text", text, TEXT_MAX)?;
+        // refused, never masked: the person's card must show the bytes the worker would read
+        if self.digests.redactor().redact_str(text) != text {
+            return Err("text looks like a secret: refused".into());
+        }
+        // the item must be one the host can read, and sit in the outcome the card names
+        match self.reads.item(work_item) {
+            Some(i) if i.outcome_id == outcome && self.reads.outcome(outcome).is_some() => Ok(()),
+            _ => Err("not_found: no such work item in an outcome of yours".into()),
         }
     }
 
@@ -390,6 +416,7 @@ impl ConductorHost {
                     first_message: x, ..
                 }
                 | Payload::SendMessage { text: x, .. }
+                | Payload::MessageWorker { text: x, .. }
                 | Payload::CreateGoal { contract: x, .. } => *x = t,
                 _ => return Err("this card has no text to edit".into()),
             }
@@ -402,14 +429,20 @@ impl ConductorHost {
             self.set_state(&mut st, i, State::Stale, Some(e.clone()));
             return Err(format!("stale: {e}"));
         }
-        if let Payload::SendMessage { sid, .. } = &payload {
+        let target = match &payload {
+            Payload::SendMessage { sid, .. } => Some(sid.clone()),
+            // prefixed so a work item id never shares a budget with a session id
+            Payload::MessageWorker { work_item, .. } => Some(format!("w:{work_item}")),
+            _ => None,
+        };
+        if let Some(sid) = target {
             let now = (self.clock)();
-            if !st.sends.allows(sid, now) {
+            if !st.sends.allows(&sid, now) {
                 return Err(format!(
                     "limit: {MAX_SENDS_PER_TARGET} sends to one session in 10 minutes"
                 ));
             }
-            st.sends.record(sid, now);
+            st.sends.record(&sid, now);
         }
         let p = &mut st.proposals[i];
         p.payload = payload;
@@ -629,10 +662,9 @@ impl ConductorHost {
             _ => return Err("invalid input: basis must be explicit or described".into()),
         };
         let target = match a.target {
-            AssignTarget::Item(_) if !MESSAGE_WORKER_ENABLED => {
-                return Err("message_worker is not available yet: it needs the live worker inbox (P2c). Ask the person to message the worker in its session.".into());
+            AssignTarget::Item(ItemT { work_item }) => {
+                return self.propose_worker(work_item, a.text, a.brief_change, &a.alternatives);
             }
-            AssignTarget::Item(_) => return Err("message_worker has no card until P2c".into()),
             AssignTarget::Session(SessionT { session }) => session,
         };
         if a.brief_change {
@@ -691,6 +723,35 @@ impl ConductorHost {
         )
     }
 
+    fn propose_worker(
+        &self,
+        work_item: String,
+        text: String,
+        brief_change: bool,
+        alternatives: &[String],
+    ) -> Result<Value, String> {
+        if !MESSAGE_WORKER_ENABLED {
+            return Err(WORKER_OFF.into());
+        }
+        if brief_change || !alternatives.is_empty() {
+            return Err("invalid input: a worker card has no brief_change or alternatives".into());
+        }
+        if !valid_id(&work_item) {
+            return Err("invalid input: work_item".into());
+        }
+        let item = self
+            .reads
+            .item(&work_item)
+            .ok_or("not_found: no such work item in an outcome of yours")?;
+        let payload = Payload::MessageWorker {
+            outcome: item.outcome_id,
+            work_item,
+            text,
+        };
+        self.revalidate(&payload)?;
+        self.store(payload, Some("a worker message always needs your card"))
+    }
+
     fn ambiguous(&self, rows: &[SessionRow]) -> String {
         let c: Vec<String> = rows
             .iter()
@@ -747,5 +808,145 @@ impl HostTools for ConductorHost {
     fn call<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
         let r = self.dispatch(name, input);
         Box::pin(async move { r })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conductor::reads::{ItemRow, OutcomeRow, SessionReport};
+
+    struct R;
+    impl ConductorReads for R {
+        fn sessions(&self) -> Vec<SessionRow> {
+            vec![]
+        }
+        fn session_report(&self, _: &str) -> Option<SessionReport> {
+            None
+        }
+        fn outcomes(&self, _: Option<&str>) -> Vec<OutcomeRow> {
+            vec![]
+        }
+        fn outcome(&self, id: &str) -> Option<OutcomeRow> {
+            (id == "o1").then(|| OutcomeRow {
+                id: "o1".into(),
+                title: "t".into(),
+                kind: "write".into(),
+                state: "running".into(),
+                needs_you: 0,
+                spent_usd: 0.0,
+                cap_usd: 1.0,
+            })
+        }
+        fn item(&self, id: &str) -> Option<ItemRow> {
+            let outcome_id = match id {
+                "w1" => "o1",
+                "w2" => "o2",
+                _ => return None,
+            };
+            Some(ItemRow {
+                id: id.into(),
+                outcome_id: outcome_id.into(),
+                state: "running".into(),
+                attempts: 1,
+                needs_you: false,
+                spent_usd: 0.0,
+            })
+        }
+        fn report(&self, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    fn host(now: Arc<std::sync::atomic::AtomicU64>) -> ConductorHost {
+        let cfg = HostConfig {
+            max_sessions: 3,
+            confirm: Confirm::All,
+            home: std::env::temp_dir(),
+            synt_home: std::env::temp_dir(),
+            models: vec![],
+            secrets: vec!["hunter2-secret".into()],
+        };
+        ConductorHost::new(cfg, Arc::new(R)).with_clock(Arc::new(move || {
+            now.load(std::sync::atomic::Ordering::SeqCst)
+        }))
+    }
+
+    #[test]
+    fn worker_message_validation_and_dark_flag() {
+        let h = host(Arc::default());
+        assert!(h.check_worker("o1", "w1", "please rebase").is_ok());
+        // an item of an outcome that is not readable, or named under another outcome
+        assert!(
+            h.check_worker("o2", "w2", "hi")
+                .unwrap_err()
+                .contains("not_found")
+        );
+        assert!(h.check_worker("o1", "w2", "hi").is_err());
+        assert!(h.check_worker("o1", "nope", "hi").is_err());
+        assert!(
+            h.check_worker("o1", "w1", &"x".repeat(TEXT_MAX + 1))
+                .is_err()
+        );
+        assert!(h.check_worker("o1", "w1", "bell\u{7}").is_err());
+        assert!(
+            h.check_worker("o1", "w1", "key hunter2-secret")
+                .unwrap_err()
+                .contains("secret")
+        );
+        assert!(
+            h.check_worker(
+                "o1",
+                "w1",
+                "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"
+            )
+            .is_err()
+        );
+        // dark: every path refuses with the one message
+        let p = Payload::MessageWorker {
+            outcome: "o1".into(),
+            work_item: "w1".into(),
+            text: "hi".into(),
+        };
+        assert_eq!(h.revalidate(&p).unwrap_err(), WORKER_OFF);
+        assert_eq!(
+            h.propose_worker("w1".into(), "hi".into(), false, &[])
+                .unwrap_err(),
+            WORKER_OFF
+        );
+        assert!(h.proposals().is_empty());
+    }
+
+    #[test]
+    fn worker_and_session_send_budgets_are_separate() {
+        let mut log = SendLog::default();
+        for _ in 0..MAX_SENDS_PER_TARGET {
+            log.record("w:abc", 1);
+        }
+        assert!(!log.allows("w:abc", 1) && log.allows("abc", 1));
+    }
+
+    #[test]
+    fn worker_proposal_expires_after_the_ttl() {
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(100));
+        let h = host(now.clone());
+        // stored directly: the flag is off, so no tool call can make one
+        h.store(
+            Payload::MessageWorker {
+                outcome: "o1".into(),
+                work_item: "w1".into(),
+                text: "hi".into(),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(h.proposals()[0].state, State::Shown);
+        now.store(100 + PROPOSAL_TTL_SECS, std::sync::atomic::Ordering::SeqCst);
+        let id = h.proposals()[0].id.clone();
+        assert_eq!(h.proposal(&id).unwrap().state, State::Expired);
+        assert!(
+            h.claim(&id, &h.proposal(&id).unwrap().payload_sha256, None)
+                .is_err()
+        );
     }
 }

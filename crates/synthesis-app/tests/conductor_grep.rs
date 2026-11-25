@@ -204,7 +204,7 @@ fn no_conductor_tool_can_write_outside_its_allowed_set() {
             "a public way to run a proposal without a click: {head}"
         );
     }
-    assert_eq!(exec.matches("fx.").count(), 6, "one call per effect");
+    assert_eq!(exec.matches("fx.").count(), 7, "one call per effect");
     // the host's own mutating methods are crate-private: only the executor reaches them
     let host = code(
         &conductor_files()
