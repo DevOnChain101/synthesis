@@ -244,6 +244,9 @@ impl Git {
             "core.untrackedCache=false",
             "-c",
             "core.quotepath=false",
+            // paths of a listing are the repository's, whatever folder the app was opened on
+            "-c",
+            "diff.relative=false",
             "-c",
             "protocol.allow=never",
             // no pager, no ssh or credential programs can be named by a repository's config

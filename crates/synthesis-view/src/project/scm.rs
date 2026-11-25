@@ -12,7 +12,7 @@
 //! - git's error text is shown sanitised, redacted and capped.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,9 @@ fn secret_in(root: &Path, rel: &str) -> bool {
 }
 
 /// A git that may be run here: trusted folder, a `.git` that stays inside it, a work tree that is this folder.
-fn ready(cwd: &Path, env: &Env, trusted: bool) -> Result<(Git, Vec<String>), String> {
+/// Also the top folder of the work tree: the paths git reports (and takes back) are relative to it, so every later
+/// call runs there, not in the subfolder the app may have been opened on.
+fn ready(cwd: &Path, env: &Env, trusted: bool) -> Result<(Git, Vec<String>, PathBuf), String> {
     if !trusted {
         return Err("the folder is not trusted: git is not run here".into());
     }
@@ -73,13 +75,17 @@ fn ready(cwd: &Path, env: &Env, trusted: bool) -> Result<(Git, Vec<String>), Str
     let guards = git
         .filter_guards(cwd)
         .map_err(|why| format!("{why}; git was not run"))?;
-    Ok((git, guards))
+    let top = git
+        .run(cwd, &["rev-parse", "--show-toplevel"], b'\n')
+        .and_then(|(o, _)| std::fs::canonicalize(String::from_utf8_lossy(&o).trim()).ok())
+        .ok_or("the work tree could not be found")?;
+    Ok((git, guards, top))
 }
 
 /// The state of the repository: `status --porcelain=v1 -z -b`, every untracked file by itself.
 pub fn status(cwd: &Path, env: &Env, trusted: bool) -> Result<Scm, String> {
-    let (git, guards) = ready(cwd, env, trusted)?;
-    read(&git, &guards, cwd)
+    let (git, guards, top) = ready(cwd, env, trusted)?;
+    read(&git, &guards, &top)
 }
 
 fn read(git: &Git, guards: &[String], cwd: &Path) -> Result<Scm, String> {
@@ -267,12 +273,15 @@ fn name_status(
     cwd: &Path,
     args: &[&str],
 ) -> Result<(Vec<String>, usize, usize), String> {
-    let (raw, cut) = git
-        .run_with(cwd, guards, args, 0)
+    // exit 0 and a whole answer, else a partial list could pass the gate
+    let o = git
+        .raw(cwd, guards, args)
+        .filter(|o| !o.timed_out && o.code == Some(0))
         .ok_or("git could not list the staged files; nothing was committed")?;
-    if cut {
+    if o.truncated {
         return Err("the list of staged files is too long to check; nothing was committed".into());
     }
+    let raw = o.stdout;
     let mut it = raw.split(|c| *c == 0).filter(|r| !r.is_empty());
     let (mut secret, mut skipped, mut n) = (vec![], 0, 0);
     while let Some(st) = it.next() {
@@ -307,6 +316,7 @@ fn commit_gate(git: &Git, guards: &[String], cwd: &Path) -> Result<usize, String
             "--name-status",
             "-z",
             "--no-renames",
+            "--no-relative",
             "--no-ext-diff",
             "--no-textconv",
         ],
@@ -444,7 +454,8 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
         }
         Act::StageAll => None,
     };
-    let (git, guards) = ready(cwd, env, trusted)?;
+    let (git, guards, top) = ready(cwd, env, trusted)?;
+    let cwd = top.as_path();
     let now = read(&git, &guards, cwd)?;
     let stale = || "the file changed since the list was read; the list is refreshed".to_string();
     let add = |paths: &[&str]| -> Result<(), String> {
@@ -897,7 +908,7 @@ mod tests {
         std::fs::write(d.path().join("id_rsa"), "k").unwrap();
         git(d.path(), &["add", "-f", "id_rsa"]);
         git(d.path(), &["commit", "-q", "-m", "k"]);
-        let (g, guards) = ready(d.path(), &env(), true).unwrap();
+        let (g, guards, _) = ready(d.path(), &env(), true).unwrap();
         let n = committed_secrets(&g, &guards, d.path());
         assert!(
             n.contains("id_rsa") && n.contains("git reset --soft HEAD~1"),
@@ -907,6 +918,29 @@ mod tests {
         git(d.path(), &["add", "b"]);
         git(d.path(), &["commit", "-q", "-m", "b"]);
         assert_eq!(committed_secrets(&g, &guards, d.path()), "");
+    }
+
+    #[test]
+    fn opened_on_a_subfolder_the_whole_repository_is_listed_checked_and_staged() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        std::fs::create_dir(d.path().join("sub")).unwrap();
+        let sub = d.path().join("sub");
+        git(d.path(), &["config", "diff.relative", "true"]);
+        std::fs::write(d.path().join("id_rsa"), "k").unwrap();
+        git(d.path(), &["add", "-f", "id_rsa"]);
+        // staged at the root, the app is on `sub` and diff.relative is on: the gate still sees it
+        let err = apply(&sub, &e, true, &Act::Commit("go".into())).unwrap_err();
+        assert!(err.contains("id_rsa"), "{err}");
+        apply(&sub, &e, true, &Act::Unstage("id_rsa".into())).unwrap();
+        // a file in the parent of the folder the app is on stages (root-relative path, literal pathspec)
+        std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
+        apply(&sub, &e, true, &Act::Stage("a.txt".into())).unwrap();
+        assert_eq!(
+            paths(&status(&sub, &e, true).unwrap().staged),
+            [("a.txt", 'M')]
+        );
+        apply(&sub, &e, true, &Act::Commit("go".into())).unwrap();
     }
 
     #[test]
