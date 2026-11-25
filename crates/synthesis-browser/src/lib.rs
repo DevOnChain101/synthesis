@@ -2296,6 +2296,52 @@ mod tests {
 
     use super::*;
 
+    /// A child session whose `Network.enable` fails (so its rebinding check could never run) is
+    /// closed and never resumed. Fake CDP peer over a duplex pipe.
+    #[tokio::test]
+    async fn child_session_without_network_enable_is_closed_not_resumed() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (client_r, mut peer_w) = tokio::io::duplex(8192);
+        let (client_w, peer_r) = tokio::io::duplex(8192);
+        let cdp = Arc::new(Cdp::from_pipe(client_r, client_w, 16));
+        let params = json!({"sessionId": "C1", "waitingForDebugger": true,
+            "targetInfo": {"type": "iframe", "targetId": "T1"}});
+        let task = tokio::spawn(secure_child(cdp, params));
+        let mut peer_r = tokio::io::BufReader::new(peer_r);
+        let mut methods = Vec::new();
+        while methods.last().map(String::as_str) != Some("Target.closeTarget") {
+            let mut buf = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), peer_r.read_until(0, &mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            buf.pop();
+            let req: Value = serde_json::from_slice(&buf).unwrap();
+            let method = req["method"].as_str().unwrap().to_owned();
+            let reply = if method == "Network.enable" {
+                json!({"id": req["id"], "error": {"code": -32000, "message": "denied"}})
+            } else {
+                json!({"id": req["id"], "result": {}})
+            };
+            peer_w
+                .write_all(format!("{reply}\0").as_bytes())
+                .await
+                .unwrap();
+            methods.push(method);
+        }
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(methods.iter().any(|m| m == "Network.enable"), "{methods:?}");
+        assert!(
+            !methods
+                .iter()
+                .any(|m| m == "Runtime.runIfWaitingForDebugger"),
+            "{methods:?}"
+        );
+    }
+
     #[test]
     fn the_view_follows_the_pane_size_and_scale() {
         let m =
