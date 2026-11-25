@@ -28,9 +28,9 @@ use super::kit::{self, ButtonKind, Status};
 use super::tokens::{self as t, hsla};
 use crate::approvals::Popup;
 use crate::live::ARM_MS;
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::kind_picker::{ROWS, refusal};
-use crate::outcomes_view::model::Screen;
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::kind_picker::{ROWS, refusal};
+use crate::superagent::outcomes::model::Screen;
 use crate::widgets::chrome::OnClick;
 use data::{Gates, Model, Target};
 

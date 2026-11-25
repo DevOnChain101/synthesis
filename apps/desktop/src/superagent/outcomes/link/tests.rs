@@ -9,7 +9,7 @@ use synthesis_app::proto::Call;
 use synthesis_session::outcome::Surface;
 
 use super::*;
-use crate::outcomes_view::sample;
+use crate::superagent::outcomes::sample;
 
 /// A scripted orchestrator: the sample's replies, a log of the methods called, and a decision that can move.
 #[derive(Clone, Default)]

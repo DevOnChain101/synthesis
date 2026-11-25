@@ -2,7 +2,7 @@ use serde_json::json;
 use synthesis_core::outcome::Capability;
 
 use super::*;
-use crate::outcomes_view::sample;
+use crate::superagent::outcomes::sample;
 
 /// An absolute folder on every OS (`/tmp/x` on Unix, `C:\\...\\x` on Windows).
 fn ws(name: &str) -> String {

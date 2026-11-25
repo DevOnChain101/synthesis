@@ -6,17 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
-};
-use synthesis_cli_ui_render::theme as t;
 use synthesis_view::outcomes::WSL2_REFUSAL;
 
-use super::OutcomesView;
 use super::model::{Effect, Screen, State};
-use crate::theme::hsla;
-use crate::widgets::chrome::{black_a, dim, strong, text, with_alpha};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -147,113 +139,6 @@ pub fn make_scratch(synt_home: &Path) -> Result<PathBuf, String> {
     let dir = parent.join(uuid::Uuid::new_v4().simple().to_string());
     mk(&dir, false).map_err(|e| format!("cannot make the session folder: {e}"))?;
     Ok(dir)
-}
-
-impl OutcomesView {
-    pub(super) fn picker_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let p = self.state.picker.as_ref()?;
-        let rows = ROWS.iter().enumerate().map(|(i, k)| {
-            let off = refusal(*k, &self.state.screen, self.state.read_only_goal);
-            let on = p.cursor == Some(i);
-            let main = div()
-                .id(("out-kind", i))
-                .debug_selector(move || format!("out-kind-{i}"))
-                .flex_1()
-                .min_w(px(0.))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .px(px(12.))
-                .py(px(9.))
-                .rounded(px(8.))
-                .when(on, |d| d.bg(hsla(t::ELEVATED)))
-                .when(off.is_none(), |d| {
-                    d.cursor_pointer()
-                        .hover(|d| d.bg(with_alpha(hsla(t::ELEVATED), 0.7)))
-                })
-                .on_click(self.click(cx, move |this, _| this.state.pick(i)))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if off.is_some() { dim() } else { strong() })
-                        .child(div().text_color(dim()).child((i + 1).to_string()))
-                        .child(k.label()),
-                )
-                .child(
-                    div()
-                        .pl(px(16.))
-                        .text_size(px(11.))
-                        .text_color(dim())
-                        .child(off.unwrap_or(k.blurb())),
-                );
-            div()
-                .flex()
-                .items_center()
-                .child(main)
-                .children((*k == Kind::Session).then(|| {
-                    crate::outcomes_view::form_view::small_button(
-                        "out-kind-folder",
-                        "Choose folder...",
-                        self.click(cx, |this, cx| this.session_in_folder(cx)),
-                    )
-                }))
-        });
-        let panel = div()
-            .debug_selector(|| "out-kind-picker".to_string())
-            .w(px(520.))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .p(px(10.))
-            .rounded(px(10.))
-            .bg(crate::theme::fill(t::SURFACE))
-            .child(
-                div()
-                    .px(px(12.))
-                    .pb(px(4.))
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(strong())
-                    .child("New"),
-            )
-            .children(rows)
-            .children(p.notice.as_ref().map(|n| {
-                div()
-                    .debug_selector(|| "out-kind-notice".to_string())
-                    .px(px(12.))
-                    .pt(px(4.))
-                    .text_color(hsla(t::WARN))
-                    .child(synthesis_harness::sanitize_for_display(n))
-            }))
-            .child(
-                div()
-                    .px(px(12.))
-                    .pt(px(6.))
-                    .text_size(px(11.))
-                    .text_color(dim())
-                    .child(
-                        "Up/Down, 1-3 or a click choose, Enter starts the chosen row, Esc closes.",
-                    ),
-            );
-        Some(
-            div()
-                .debug_selector(|| "out-kind-scrim".to_string())
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(24.))
-                .text_color(text())
-                .bg(black_a(0.55))
-                .child(panel)
-                .into_any_element(),
-        )
-    }
 }
 
 #[cfg(test)]

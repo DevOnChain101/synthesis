@@ -14,12 +14,12 @@ use gpui::{
 use synthesis_core::outcome::ContractKind;
 use synthesis_view::outcomes::{BriefRow, InspectorContent, WSL2_REFUSAL};
 
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::model::{Screen, State};
-use crate::outcomes_view::render::budget_line;
 use crate::superagent::home::data::status_of;
 use crate::superagent::home::{RowSpec, row, section};
 use crate::superagent::kit::{self, ButtonKind, Status};
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::model::{Screen, State};
+use crate::superagent::outcomes::render::budget_line;
 use crate::superagent::tokens::{self as t, hsla};
 
 /// The most characters of a report shown; the rest is said, not hidden.
@@ -705,7 +705,7 @@ impl Render for OutcomeFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outcomes_view::sample;
+    use crate::superagent::outcomes::sample;
     use synthesis_view::outcomes::InspectorTab;
 
     fn ready(st: &State, id: &str) -> Ready {

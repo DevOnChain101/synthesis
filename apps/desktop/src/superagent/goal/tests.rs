@@ -9,8 +9,8 @@ use synthesis_core::outcome::ContractKind;
 
 use super::model::{Field, approve_ok, field_of, why_not_send};
 use super::*;
-use crate::outcomes_view::form::Submit;
-use crate::outcomes_view::sample;
+use crate::superagent::outcomes::form::Submit;
+use crate::superagent::outcomes::sample;
 
 const COMMIT: &str = "9433c678e4b1d2f0a7c35e8b61d9f4a02c7b5e13";
 

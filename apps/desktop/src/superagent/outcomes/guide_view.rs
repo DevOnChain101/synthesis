@@ -1,16 +1,15 @@
-//! Drawing of the guided enable flow (`model::Guide` is its state): the button of the Off and not-migrated
-//! screens and the disclosure dialog over the tab. The text is the build's own `ENABLE_NOTICE`, line for line,
+//! Drawing of the guided enable flow (`model::Guide` is its state): the disclosure dialog over the tab. The text is the build's own `ENABLE_NOTICE`, line for line,
 //! never reworded here. Nothing starts focused; the buttons are drawn from the model's focus.
 
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
 use synthesis_app::outcome_cmd::ENABLE_NOTICE;
 use synthesis_cli_ui_render::theme as t;
 
 use super::OutcomesView;
-use super::model::{Btn, Screen, Step};
+use super::model::{Btn, Step};
 use crate::theme::{self, hsla};
 use crate::widgets::chrome::{black_a, dim, rule, strong, text};
 
@@ -23,33 +22,17 @@ pub(super) fn labels(step: Step) -> (&'static str, &'static str) {
 }
 
 impl OutcomesView {
-    /// The screen's own button (Off: turn on; not migrated: migrate). It only opens the disclosure.
-    pub(super) fn guide_open_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let label = match self.state.screen {
-            Screen::Off => labels(Step::Setting).0,
-            Screen::NotReady(_) => labels(Step::Migrate).0,
-            _ => return None,
-        };
-        Some(
-            div()
-                .id("out-guide-open")
-                .debug_selector(|| "out-guide-open".to_string())
-                .cursor_pointer()
-                .flex_none()
-                .self_start()
-                .mt(px(6.))
-                .px(px(14.))
-                .py(px(6.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(hsla(t::ACCENT))
-                .text_color(hsla(t::ACCENT_LIGHT))
-                .font_weight(FontWeight::MEDIUM)
-                .hover(|d| d.bg(hsla(t::ELEVATED)))
-                .on_click(self.click(cx, |this, _| this.state.open_guide()))
-                .child(format!("{label}..."))
-                .into_any_element(),
-        )
+    /// A click handler: the keys go to this view, then `f` runs.
+    fn click(
+        &self,
+        cx: &Context<Self>,
+        f: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |this, _: &ClickEvent, w, cx| {
+            w.focus(&this.focus, cx);
+            f(this, cx);
+            cx.notify();
+        })
     }
 
     pub(super) fn guide_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {

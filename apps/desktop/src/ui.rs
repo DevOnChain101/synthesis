@@ -17,10 +17,10 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::popup::OpenSession;
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
 use crate::superagent::material;
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::popup::OpenSession;
 use crate::superagent::session::host::SessionHost;
 use crate::superagent::{SuperAgentView, SwitchView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
@@ -35,7 +35,7 @@ pub const ICONS: [&str; 2] = ["square-terminal", "undo-2"];
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Tui,
-    /// The Super Agent view (`outcomes_view`: the things it shows are called outcomes).
+    /// The Super Agent view (`superagent::outcomes`: the things it shows are called outcomes).
     SuperAgent,
     Settings,
 }
@@ -104,8 +104,6 @@ pub struct Shell {
     outcomes: Entity<OutcomesView>,
     /// What `View::SuperAgent` shows; `outcomes` stays its data and link owner.
     sa: Entity<SuperAgentView>,
-    /// Tests of the old outcomes UI (deleted in phase E) mount it in place of `sa`.
-    legacy_ui: bool,
     /// A restart was asked from Settings and the new session is not live yet.
     restarting: bool,
     /// The Super Agent button counts what waits for the person: only a live app (never the sample), and the count is
@@ -132,7 +130,7 @@ impl Shell {
             View::Tui => {
                 self.tui.update(cx, |t, cx| t.toggle_focus(cx));
             }
-            View::SuperAgent if !self.legacy_ui => self.sa.update(cx, |s, cx| s.toggle_focus(cx)),
+            View::SuperAgent => self.sa.update(cx, |s, cx| s.toggle_focus(cx)),
             _ => {}
         }
     }
@@ -148,7 +146,7 @@ impl Shell {
         // a goal, outcome, worker or conductor frame is never handed to the TUI, whichever way the switch comes
         let in_sa = self.view == View::SuperAgent
             || (self.view == View::Settings && self.back == View::SuperAgent);
-        if v == View::Tui && in_sa && !self.legacy_ui && !self.sa.read(cx).tui_switch_allowed() {
+        if v == View::Tui && in_sa && !self.sa.read(cx).tui_switch_allowed() {
             self.sa.update(cx, |s, cx| {
                 s.set_notice(
                     "the TUI is offered from the home or a plain session, not from a goal, outcome or worker".into(),
@@ -178,9 +176,9 @@ impl Shell {
         // entered can resume the same session; the lists are read again once the locks are free
         let mut closing = Vec::new();
         let mut to_open = None;
-        if v == View::Tui && from_sa && !self.legacy_ui {
+        if v == View::Tui && from_sa {
             closing = self.sa.update(cx, |s, cx| s.release_idle(cx));
-        } else if v == View::SuperAgent && from_tui && !self.legacy_ui {
+        } else if v == View::SuperAgent && from_tui {
             let hosted = self.sa.read(cx).handoff(cx);
             closing = self.tui.update(cx, |t, cx| {
                 t.release_if_hosted(&hosted, cx).into_iter().collect()
@@ -195,8 +193,7 @@ impl Shell {
                 None => {}
             }
         }
-        let handoff =
-            (v == View::Tui && from_sa && !self.legacy_ui).then(|| self.sa.read(cx).handoff(cx));
+        let handoff = (v == View::Tui && from_sa).then(|| self.sa.read(cx).handoff(cx));
         let has_handoff = handoff.is_some();
         self.view = v;
         // the card's keys never outlive the view: a hidden view must not take the window's focus back later
@@ -209,12 +206,10 @@ impl Shell {
                 o.state.remote = remote;
                 o.shown(window, cx)
             });
-            if !self.legacy_ui {
-                self.sa.update(cx, |v, cx| v.shown(window, cx));
-            }
+            self.sa.update(cx, |v, cx| v.shown(window, cx));
         }
         // the hosted chats take keys only while the Super Agent view itself is on screen (Settings over it: none)
-        let on_screen = v == View::SuperAgent && !self.legacy_ui;
+        let on_screen = v == View::SuperAgent;
         self.sa.update(cx, |s, cx| s.set_visible(on_screen, cx));
         // the lights (macOS only) sit in the first row of the Super Agent rail, else in the 30 px bar
         #[cfg(target_os = "macos")]
@@ -286,12 +281,6 @@ impl Shell {
     #[cfg(any(test, feature = "shot"))]
     pub(crate) fn outcomes(&self) -> &Entity<OutcomesView> {
         &self.outcomes
-    }
-
-    /// Shows the old outcomes UI instead of the Super Agent view (its tests, until phase E).
-    #[cfg(test)]
-    pub(crate) fn mount_legacy_ui(&mut self) {
-        self.legacy_ui = true;
     }
 
     /// The badge counts the sample's waiting things too (shots and tests of the badge).
@@ -468,14 +457,6 @@ impl Shell {
             .child(icon(glyph, 12., theme::hsla(t::TEXT)))
     }
 
-    fn sa_or_legacy(&self) -> gpui::AnyView {
-        if self.legacy_ui {
-            self.outcomes.clone().into()
-        } else {
-            self.sa.clone().into()
-        }
-    }
-
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         div()
@@ -574,11 +555,11 @@ impl Render for Shell {
         }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
-            View::SuperAgent => div().size_full().child(self.sa_or_legacy()),
+            View::SuperAgent => div().size_full().child(self.sa.clone()),
             // the panel slides over the view it was opened from
             View::Settings => {
                 let under = match self.back {
-                    View::SuperAgent => div().size_full().child(self.sa_or_legacy()),
+                    View::SuperAgent => div().size_full().child(self.sa.clone()),
                     _ => div().size_full().child(self.tui.clone()),
                 };
                 div()
@@ -619,7 +600,7 @@ impl Render for Shell {
                 cx.stop_propagation();
             }))
             // the Super Agent view draws its own title row over the whole window
-            .children((self.view != View::SuperAgent || self.legacy_ui).then(|| self.title_bar(cx)))
+            .children((self.view != View::SuperAgent).then(|| self.title_bar(cx)))
             .child(div().flex_1().min_h(px(0.)).child(content))
     }
 }
@@ -809,7 +790,7 @@ impl Shell {
         cx.subscribe_in(
             &outcomes,
             window,
-            |s: &mut Shell, _, e: &crate::outcomes_view::OpenFolder, window, cx| {
+            |s: &mut Shell, _, e: &crate::superagent::outcomes::OpenFolder, window, cx| {
                 // a plain New session opens as a tab of Super Agent, never in the TUI view; a refusal is the view's notice
                 s.sa.update(cx, |v, cx| {
                     let _ = v.open_session_folder(&e.0, window, cx);
@@ -890,7 +871,6 @@ impl Shell {
             settings,
             outcomes,
             sa,
-            legacy_ui: false,
             restarting: false,
             count_waiting: live_outcomes,
             anim_tick: None,
@@ -961,7 +941,7 @@ mod tests {
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(f.base.join("f1")))
+            cx.emit(crate::superagent::outcomes::OpenFolder(f.base.join("f1")))
         });
         v.run_until_parked();
         let mut sid = None;
@@ -1233,7 +1213,7 @@ mod tests {
         assert_eq!(shell.read_with(v, |s, cx| s.waiting(cx)), 2);
         // the link not ready (off, windows, unreachable): the badge goes
         o.update(v, |o, cx| {
-            o.state.screen = crate::outcomes_view::model::Screen::Off;
+            o.state.screen = crate::superagent::outcomes::model::Screen::Off;
             cx.notify();
         });
         v.run_until_parked();
@@ -1380,7 +1360,9 @@ mod tests {
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         let dir = tempfile::tempdir().unwrap();
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(dir.path().to_path_buf()))
+            cx.emit(crate::superagent::outcomes::OpenFolder(
+                dir.path().to_path_buf(),
+            ))
         });
         v.run_until_parked();
         assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
@@ -1441,7 +1423,7 @@ mod tests {
         let folder = f.base.join("f1");
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         o.update(v, |_, cx| {
-            cx.emit(crate::outcomes_view::OpenFolder(folder.clone()))
+            cx.emit(crate::superagent::outcomes::OpenFolder(folder.clone()))
         });
         v.run_until_parked();
         // the person stays in Super Agent, in a session frame with a real embedded chat
@@ -1540,7 +1522,7 @@ mod tests {
         let o = shell.read_with(v, |s, _| s.outcomes().clone());
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         o.update(v, |o, cx| {
-            o.state.centre = crate::outcomes_view::model::CentreTab::Goal;
+            o.state.centre = crate::superagent::outcomes::model::CentreTab::Goal;
             cx.notify();
         });
         v.run_until_parked();

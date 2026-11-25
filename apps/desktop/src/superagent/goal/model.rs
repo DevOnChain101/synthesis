@@ -1,15 +1,15 @@
 //! The pieces of the goal form that need no window: which field an error line belongs to, why Send is off, and
 //! the rule for the approve button (the decision card's: acts only on a fresh, deliberate press, 400 ms after the
-//! dialog showed). The contract, its validation and the flow are `outcomes_view::form`, unchanged.
+//! dialog showed). The contract, its validation and the flow are `superagent::outcomes::form`, unchanged.
 
 use std::time::Instant;
 
 use synthesis_view::outcomes::WSL2_REFUSAL;
 
-use crate::outcomes_view::form::{Form, Stage};
-use crate::outcomes_view::model::Screen;
 use crate::superagent::chat::model::ARM;
 use crate::superagent::frames::GoalKind;
+use crate::superagent::outcomes::form::{Form, Stage};
+use crate::superagent::outcomes::model::Screen;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -39,7 +39,7 @@ pub fn field_of(err: &str) -> Option<Field> {
     })
 }
 
-pub const READ_ONLY_SOON: &str = crate::outcomes_view::kind_picker::READ_ONLY_SOON;
+pub const READ_ONLY_SOON: &str = crate::superagent::outcomes::kind_picker::READ_ONLY_SOON;
 
 /// Why this form cannot be used at all right now (it is then replaced by the explanation), or `None`.
 pub fn blocked(screen: &Screen) -> Option<&'static str> {

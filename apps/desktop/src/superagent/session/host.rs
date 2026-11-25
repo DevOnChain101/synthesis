@@ -721,7 +721,7 @@ pub(crate) mod tests {
     ) {
         let (f, cfg) = fx(1);
         cx.executor().allow_parking();
-        let scratch = crate::outcomes_view::kind_picker::make_scratch(&f.home).unwrap();
+        let scratch = crate::superagent::outcomes::kind_picker::make_scratch(&f.home).unwrap();
         let (h, v) = host(cx, Some(cfg));
         assert!(open(&h, v, &scratch));
         let id = scratch.to_string_lossy().into_owned();
