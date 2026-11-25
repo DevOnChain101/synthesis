@@ -441,6 +441,8 @@ pub struct IndependentVerifier {
     runner: Arc<dyn CheckRunner>,
     /// Longest a single check may run.
     pub timeout: Duration,
+    /// Masks session secrets (and secret patterns) in a report shown for review.
+    pub redactor: synthesis_events::Redactor,
     jobs: BTreeMap<WorkItemId, Job>,
 }
 
@@ -473,6 +475,7 @@ impl IndependentVerifier {
             contract,
             runner,
             timeout,
+            redactor: synthesis_events::Redactor::new([]),
             jobs: BTreeMap::new(),
         })
     }
@@ -558,7 +561,7 @@ impl IndependentVerifier {
         // A read-only goal's subject is a report, not a commit: no independent check can judge it.
         // Only a person's accepted `report_review` can (S1 section 2.3); until then the item waits.
         if self.contract.kind == ContractKind::ReadOnly {
-            return crate::report::review_verdict(w, item, &att);
+            return crate::report::review_verdict(w, item, &att, &self.redactor);
         }
         let Some(commit) = att.subject_commit.clone() else {
             return Ok(Verdict::Failed("the attempt recorded no commit".into()));

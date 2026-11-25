@@ -158,7 +158,11 @@ fn open_plain(p: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// The owner's check of one citation (no model): a plain relative path that stays inside `root`
 /// (no `..`, no absolute path, no link on the way or at the end), never a secret or a state path,
 /// at most 4 MiB read, and the quote appears within the cited lines (whitespace normalized).
-pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
+pub fn check_citation(
+    root: &std::path::Path,
+    c: &Citation,
+    gate: &synthesis_events::Redactor,
+) -> Checked {
     use std::io::Read;
     use std::path::Component;
     let no = |why| Checked {
@@ -239,7 +243,6 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
         .take((c.end_line - c.start_line + 1) as usize)
         .collect();
     let cited = window.join("\n");
-    let gate = synthesis_events::Redactor::new([]);
     if gate.redact_str(&cited) != cited || gate.redact_str(&c.quote) != c.quote {
         return no("the cited lines or the quote hold a secret");
     }
@@ -260,12 +263,12 @@ pub fn check_citation(root: &std::path::Path, c: &Citation) -> Checked {
 
 /// Model text for a person to read: control and hidden characters replaced (and counted), newlines
 /// and tabs kept, at most [`REPORT_MAX`] bytes.
-fn show(text: &str) -> (String, usize, bool) {
+fn show(text: &str, redactor: &synthesis_events::Redactor) -> (String, usize, bool) {
     let mut hidden = 0;
     let mut out = String::new();
     // a secret in the report (pasted or read from a file) is masked before anyone, or any later
     // model request, sees it
-    let text = synthesis_events::Redactor::new([]).redact_str(text);
+    let text = redactor.redact_str(text);
     for ch in text.chars() {
         if out.len() + ch.len_utf8() > REPORT_MAX {
             return (out, hidden, true);
@@ -315,6 +318,7 @@ fn issue(
     a: &AttemptRecord,
     p: &Prepared,
     rebrief: u64,
+    redactor: &synthesis_events::Redactor,
 ) -> Result<()> {
     let now = w.now();
     let o = w.get_outcome(w.id())?;
@@ -322,7 +326,12 @@ fn issue(
     let checks: Vec<(&Citation, Checked)> = p
         .cites
         .iter()
-        .map(|c| (c, check_citation(std::path::Path::new(&o.repo_root), c)))
+        .map(|c| {
+            (
+                c,
+                check_citation(std::path::Path::new(&o.repo_root), c, redactor),
+            )
+        })
         .collect();
     let all_ok = checks.iter().all(|(_, r)| r.ok);
     // accepting needs the whole report on the card, every citation checked and verified
@@ -441,6 +450,7 @@ pub fn open_review(
     attempt: &AttemptRecord,
     report: &AttemptReport,
     _now: OffsetDateTime,
+    redactor: &synthesis_events::Redactor,
 ) -> Result<()> {
     // the caller's record may predate the end of the attempt (its subject is set then)
     let mut a = w
@@ -457,7 +467,7 @@ pub fn open_review(
         return open(w, &d);
     }
     let (text, cites, too_many) = parse_report(&report.text);
-    let (shown, hidden, cut) = show(&text);
+    let (shown, hidden, cut) = show(&text, redactor);
     let p = Prepared {
         sha: report.sha256.clone(),
         shown,
@@ -466,7 +476,7 @@ pub fn open_review(
         cites,
         too_many,
     };
-    issue(w, item, &a, &p, 0)
+    issue(w, item, &a, &p, 0, redactor)
 }
 
 /// `preparing` -> `pending` (a replay after a crash between the two steps).
@@ -491,6 +501,7 @@ fn reissue(
     a: &AttemptRecord,
     old: &synthesis_session::outcome::DecisionRecord,
     rebrief: u64,
+    redactor: &synthesis_events::Redactor,
 ) -> Result<()> {
     let action = w
         .decision_action(&old.id)?
@@ -519,7 +530,7 @@ fn reissue(
         cites,
         too_many: action["too_many"].as_bool().unwrap_or(true),
     };
-    issue(w, item, a, &p, rebrief)
+    issue(w, item, a, &p, rebrief, redactor)
 }
 
 /// What the verifier says about a read-only goal's item (replaces the independent check, which
@@ -532,6 +543,7 @@ pub(crate) fn review_verdict(
     w: &mut OutcomeWriter,
     item: &WorkItemRecord,
     attempt: &AttemptRecord,
+    redactor: &synthesis_events::Redactor,
 ) -> std::result::Result<Verdict, SchedError> {
     let Some(subject) = attempt.subject_commit.clone() else {
         return Ok(Verdict::Failed("the attempt left no report".into()));
@@ -584,7 +596,7 @@ pub(crate) fn review_verdict(
     match w.decision_state(&last.id)? {
         DecisionState::Preparing => open(w, &last)?,
         DecisionState::Expired | DecisionState::Invalidated => {
-            reissue(w, item, attempt, &last, rebriefs)?
+            reissue(w, item, attempt, &last, rebriefs, redactor)?
         }
         DecisionState::NeedsMoreInfo
             if w.verified_resolution(&last.id)?
@@ -600,7 +612,7 @@ pub(crate) fn review_verdict(
                 &serde_json::json!({"rebriefed": last.id}),
                 &Effects::default(),
             )?;
-            reissue(w, item, attempt, &last, rebriefs + 1)?;
+            reissue(w, item, attempt, &last, rebriefs + 1, redactor)?;
         }
         _ => {}
     }

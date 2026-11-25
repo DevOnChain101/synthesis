@@ -160,6 +160,8 @@ pub struct Owner<'a> {
     pub planner: Option<PlannerCtx>,
     /// `synt.orchestrator.planner.max_items` of this cycle: a model plan is installed within it.
     pub max_items: usize,
+    /// Masks session secrets in a worker's report shown for review; shared with the runner and verifier.
+    pub redactor: synthesis_events::Redactor,
     /// The enable gate (build-time); a field so tests can close it in a debug build.
     #[doc(hidden)]
     pub enable_gate_open: bool,
@@ -248,6 +250,7 @@ impl<'a> Owner<'a> {
             replan_failed: BTreeMap::new(),
             planner: None,
             max_items: synthesis_core::outcome::MAX_PLAN_ITEMS,
+            redactor: synthesis_events::Redactor::new([]),
             enable_gate_open: synthesis_orchestrator::enable_gate_open(),
             plan_failed: BTreeSet::new(),
             #[cfg(feature = "test-provider")]
@@ -672,7 +675,7 @@ impl<'a> Owner<'a> {
         if !approved {
             return Err("its contract is not approved".into());
         }
-        let verifier = IndependentVerifier::for_outcome(
+        let mut verifier = IndependentVerifier::for_outcome(
             w,
             PathBuf::from(&o.repo_root),
             self.home.clone(),
@@ -680,6 +683,7 @@ impl<'a> Owner<'a> {
             CHECK_TIMEOUT,
         )
         .map_err(s)?;
+        verifier.redactor = self.redactor.clone();
         let b = &contract.envelope.budgets;
         let mut cfg = SchedConfig::new(
             b.max_parallel_workers.min(pol.max_parallel_workers),
@@ -704,6 +708,7 @@ impl<'a> Owner<'a> {
         // worker is never asked
         let sb = synthesis_sandbox::detect();
         use synthesis_sandbox::Guarantee;
+        runner.redactor = self.redactor.clone();
         runner.sandbox = Some((
             sb.name().to_string(),
             match sb.capabilities().filesystem {
