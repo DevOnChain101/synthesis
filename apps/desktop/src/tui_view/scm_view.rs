@@ -123,8 +123,14 @@ impl TuiView {
             lu.cfg.env.clone(),
             lu.live.trusted,
         );
+        let secrets = lu
+            .live
+            .engine
+            .as_ref()
+            .map(|e| e.secrets())
+            .unwrap_or_default();
         let (cwd, epoch) = (lu.live.cwd.clone(), self.tree.epoch);
-        let job = cx.background_spawn(async move { scm::status(&root, &env, trusted) });
+        let job = cx.background_spawn(async move { scm::status(&root, &env, trusted, &secrets) });
         cx.spawn(async move |this, cx| {
             let d = job.await;
             this.update(cx, |t, cx| {
@@ -152,11 +158,18 @@ impl TuiView {
             lu.cfg.env.clone(),
             lu.live.trusted,
         );
+        let secrets = lu
+            .live
+            .engine
+            .as_ref()
+            .map(|e| e.secrets())
+            .unwrap_or_default();
         let (cwd, epoch) = (lu.live.cwd.clone(), self.tree.epoch);
         let commit = matches!(act, Act::Commit(_));
         self.ts.scm.busy = true;
         self.ts.scm.note = None;
-        let job = cx.background_spawn(async move { scm::apply(&root, &env, trusted, &act) });
+        let job =
+            cx.background_spawn(async move { scm::apply(&root, &env, trusted, &act, &secrets) });
         cx.spawn_in(window, async move |this, cx| {
             let r = job.await;
             this.update_in(cx, |t, window, cx| {

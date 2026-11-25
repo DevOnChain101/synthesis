@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use super::filediff::{gitdir_ok, repo_ok, safe_rel};
 use super::{Git, clean_line};
 use synthesis_config::Env;
+use synthesis_core::secret_policy::SecretPolicy;
 
 /// Entries of each group the list keeps.
 const MAX_ENTRIES: usize = 500;
@@ -55,9 +56,8 @@ pub enum Act {
     Commit(String),
 }
 
-fn secret_in(root: &Path, rel: &str) -> bool {
-    synthesis_core::secrets::is_secret_shaped_in(Path::new(rel), root)
-        || synthesis_core::secrets::is_secret_target_in(&root.join(rel), root)
+fn secret_in(sp: &SecretPolicy, root: &Path, rel: &str) -> bool {
+    sp.is_secret_shaped_in(Path::new(rel), root) || sp.is_secret_target_in(&root.join(rel), root)
 }
 
 /// A git that may be run here: trusted folder, a `.git` that stays inside it, a work tree that is this folder.
@@ -83,12 +83,12 @@ fn ready(cwd: &Path, env: &Env, trusted: bool) -> Result<(Git, Vec<String>, Path
 }
 
 /// The state of the repository: `status --porcelain=v1 -z -b`, every untracked file by itself.
-pub fn status(cwd: &Path, env: &Env, trusted: bool) -> Result<Scm, String> {
+pub fn status(cwd: &Path, env: &Env, trusted: bool, sp: &SecretPolicy) -> Result<Scm, String> {
     let (git, guards, top) = ready(cwd, env, trusted)?;
-    read(&git, &guards, &top)
+    read(&git, &guards, &top, sp)
 }
 
-fn read(git: &Git, guards: &[String], cwd: &Path) -> Result<Scm, String> {
+fn read(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> Result<Scm, String> {
     let args = [
         "status",
         "--porcelain=v1",
@@ -100,7 +100,7 @@ fn read(git: &Git, guards: &[String], cwd: &Path) -> Result<Scm, String> {
     let (raw, cut) = git
         .run_with(cwd, guards, &args, 0)
         .ok_or("git could not produce the status")?;
-    let mut s = parse(&raw, cwd);
+    let mut s = parse(&raw, cwd, sp);
     s.cut |= cut;
     if s.head == "detached" {
         let sha = git
@@ -112,7 +112,7 @@ fn read(git: &Git, guards: &[String], cwd: &Path) -> Result<Scm, String> {
     Ok(s)
 }
 
-fn parse(st: &[u8], root: &Path) -> Scm {
+fn parse(st: &[u8], root: &Path, sp: &SecretPolicy) -> Scm {
     let mut s = Scm::default();
     // only EMPTY records are skipped here: a filter on the length would let a rename origin of 1-3 bytes
     // go unconsumed below and swallow the entry after it
@@ -134,7 +134,7 @@ fn parse(st: &[u8], root: &Path) -> Scm {
             continue; // not a path that can be acted on
         }
         let entry = |letter| Entry {
-            secret: secret_in(root, &text),
+            secret: secret_in(sp, root, &text),
             path: text.clone(),
             letter,
         };
@@ -272,6 +272,7 @@ fn name_status(
     guards: &[String],
     cwd: &Path,
     args: &[&str],
+    sp: &SecretPolicy,
 ) -> Result<(Vec<String>, usize, usize), String> {
     // exit 0 and a whole answer, else a partial list could pass the gate
     let o = git
@@ -293,7 +294,7 @@ fn name_status(
         };
         let path = String::from_utf8_lossy(path).to_string();
         // the secret test runs on EVERY record, before any decision about the path's shape
-        if st != b"D" && secret_in(cwd, &path) {
+        if st != b"D" && secret_in(sp, cwd, &path) {
             secret.push(clean_line(&path));
         }
         if st.len() != 1 || safe_rel(&path).is_err() || path.contains('\u{fffd}') {
@@ -305,7 +306,12 @@ fn name_status(
 
 /// The commit gate: reads the index itself (not the capped, parsed lists) and refuses unless every staged path
 /// was checked and none is secret-shaped (a deletion is exempt). `Ok(count)` of staged paths.
-fn commit_gate(git: &Git, guards: &[String], cwd: &Path) -> Result<usize, String> {
+fn commit_gate(
+    git: &Git,
+    guards: &[String],
+    cwd: &Path,
+    sp: &SecretPolicy,
+) -> Result<usize, String> {
     let (secret, skipped, n) = name_status(
         git,
         guards,
@@ -320,6 +326,7 @@ fn commit_gate(git: &Git, guards: &[String], cwd: &Path) -> Result<usize, String
             "--no-ext-diff",
             "--no-textconv",
         ],
+        sp,
     )?;
     if n == 0 {
         return Err("nothing is staged".into());
@@ -341,7 +348,7 @@ fn commit_gate(git: &Git, guards: &[String], cwd: &Path) -> Result<usize, String
 /// After a commit: did a secret-shaped path get in anyway? The index is checked before the commit and git then
 /// reads it again, so a process that changes the index in between could slip a file in (accepted residual, see
 /// docs/specs/desktop.md). The commit is never undone here; the note says how.
-fn committed_secrets(git: &Git, guards: &[String], cwd: &Path) -> String {
+fn committed_secrets(git: &Git, guards: &[String], cwd: &Path, sp: &SecretPolicy) -> String {
     match name_status(
         git,
         guards,
@@ -356,6 +363,7 @@ fn committed_secrets(git: &Git, guards: &[String], cwd: &Path) -> String {
             "--no-renames",
             "HEAD",
         ],
+        sp,
     ) {
         Ok((secret, _, _)) if secret.is_empty() => String::new(),
         Ok((secret, _, _)) => format!(
@@ -445,7 +453,13 @@ impl Git {
 }
 
 /// Does one click's work (see the module docs). `Ok` carries a note to show (what was skipped), maybe empty.
-pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, String> {
+pub fn apply(
+    cwd: &Path,
+    env: &Env,
+    trusted: bool,
+    act: &Act,
+    sp: &SecretPolicy,
+) -> Result<String, String> {
     let msg = match act {
         Act::Commit(m) => Some(clean_message(m)?),
         Act::Stage(p) | Act::Unstage(p) => {
@@ -456,7 +470,7 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
     };
     let (git, guards, top) = ready(cwd, env, trusted)?;
     let cwd = top.as_path();
-    let now = read(&git, &guards, cwd)?;
+    let now = read(&git, &guards, cwd, sp)?;
     let stale = || "the file changed since the list was read; the list is refreshed".to_string();
     let add = |paths: &[&str]| -> Result<(), String> {
         for c in paths.chunks(CHUNK) {
@@ -530,14 +544,14 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
             Ok(String::new())
         }
         Act::Commit(_) => {
-            commit_gate(&git, &guards, cwd)?;
+            commit_gate(&git, &guards, cwd, sp)?;
             signing_program_in_repo(&git, cwd)?;
             let mut extra = guards.clone();
             extra.extend(["-c".to_string(), "user.useConfigOnly=true".to_string()]);
             let msg = msg.expect("a commit has a message");
             // `--no-verify` is a second lock on the hooks `core.hooksPath` already switched off
             git.write(cwd, &extra, &["commit", "-q", "--no-verify", "-m", &msg])?;
-            Ok(committed_secrets(&git, &guards, cwd))
+            Ok(committed_secrets(&git, &guards, cwd, sp))
         }
     }
 }
@@ -601,7 +615,7 @@ mod tests {
     }
 
     fn st(d: &Path) -> Scm {
-        status(d, &env(), true).unwrap()
+        status(d, &env(), true, &Default::default()).unwrap()
     }
 
     fn paths(g: &[Entry]) -> Vec<(&str, char)> {
@@ -642,27 +656,36 @@ mod tests {
     fn stage_commit_and_unstage_work_and_the_lists_follow() {
         let d = repo();
         let (e, _h) = env_with_identity();
-        let go = |a: Act| apply(d.path(), &e, true, &a);
+        let go = |a: Act| apply(d.path(), &e, true, &a, &Default::default());
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
         std::fs::write(d.path().join("b.txt"), "b\n").unwrap();
         go(Act::Stage("a.txt".into())).unwrap();
         assert_eq!(
-            paths(&status(d.path(), &e, true).unwrap().staged),
+            paths(
+                &status(d.path(), &e, true, &Default::default())
+                    .unwrap()
+                    .staged
+            ),
             [("a.txt", 'M')]
         );
         go(Act::Unstage("a.txt".into())).unwrap();
-        assert!(status(d.path(), &e, true).unwrap().staged.is_empty());
+        assert!(
+            status(d.path(), &e, true, &Default::default())
+                .unwrap()
+                .staged
+                .is_empty()
+        );
         assert!(
             go(Act::Commit("m".into()))
                 .unwrap_err()
                 .contains("nothing is staged")
         );
         go(Act::StageAll).unwrap();
-        let s = status(d.path(), &e, true).unwrap();
+        let s = status(d.path(), &e, true, &Default::default()).unwrap();
         assert_eq!(s.staged.len(), 2);
         assert!(s.changes.is_empty());
         go(Act::Commit("-x two files".into())).unwrap();
-        let s = status(d.path(), &e, true).unwrap();
+        let s = status(d.path(), &e, true, &Default::default()).unwrap();
         assert!(s.staged.is_empty() && s.changes.is_empty());
         let log = Command::new("git")
             .args(["log", "-1", "--format=%s"])
@@ -677,13 +700,34 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         git(d.path(), &["init", "-q"]);
         std::fs::write(d.path().join("f"), "x").unwrap();
-        apply(d.path(), &env(), true, &Act::Stage("f".into())).unwrap();
+        apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Stage("f".into()),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(paths(&st(d.path()).staged), [("f", 'A')]);
-        apply(d.path(), &env(), true, &Act::Unstage("f".into())).unwrap();
+        apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Unstage("f".into()),
+            &Default::default(),
+        )
+        .unwrap();
         assert!(st(d.path()).staged.is_empty());
         let r = repo();
         std::fs::remove_file(r.path().join("a.txt")).unwrap();
-        apply(r.path(), &env(), true, &Act::Stage("a.txt".into())).unwrap();
+        apply(
+            r.path(),
+            &env(),
+            true,
+            &Act::Stage("a.txt".into()),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(paths(&st(r.path()).staged), [("a.txt", 'D')]);
     }
 
@@ -711,8 +755,15 @@ mod tests {
         // a hooks path in the repository's config is overridden as well
         git(d.path(), &["config", "core.hooksPath", ".git/hooks"]);
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        apply(d.path(), &e, true, &Act::StageAll).unwrap();
-        apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap();
+        apply(d.path(), &e, true, &Act::StageAll, &Default::default()).unwrap();
+        apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap();
         let ran: Vec<_> = std::fs::read_dir(d.path())
             .unwrap()
             .filter_map(|x| x.ok())
@@ -742,11 +793,23 @@ mod tests {
         std::fs::write(d.path().join(".git/config"), c).unwrap();
         std::fs::write(d.path().join(".gitattributes"), "*.txt filter=evil\n").unwrap();
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        let r = apply(d.path(), &e, true, &Act::Stage("a.txt".into()));
+        let r = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Stage("a.txt".into()),
+            &Default::default(),
+        );
         // the filter is switched off (or the whole call is refused): either way nothing ran
         let _ = r;
-        let _ = status(d.path(), &e, true);
-        let _ = apply(d.path(), &e, true, &Act::Commit("go".into()));
+        let _ = status(d.path(), &e, true, &Default::default());
+        let _ = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        );
         for n in ["fsm", "ssh", "ed", "ext", "clean"] {
             assert!(!mark(n).exists(), "{n} ran");
         }
@@ -767,8 +830,15 @@ mod tests {
             ],
         );
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        apply(d.path(), &e, true, &Act::StageAll).unwrap();
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        apply(d.path(), &e, true, &Act::StageAll, &Default::default()).unwrap();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("signing program"), "{err}");
         assert!(!m.exists());
     }
@@ -781,9 +851,16 @@ mod tests {
         std::fs::write(d.path().join("ok.txt"), "o\n").unwrap();
         let s = st(d.path());
         assert!(s.changes.iter().filter(|e| e.secret).count() == 2);
-        let err = apply(d.path(), &env(), true, &Act::Stage(".env".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Stage(".env".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains(".env") && !err.contains("A=1"), "{err}");
-        let note = apply(d.path(), &env(), true, &Act::StageAll).unwrap();
+        let note = apply(d.path(), &env(), true, &Act::StageAll, &Default::default()).unwrap();
         assert!(
             note.starts_with("2 secret-looking file(s) skipped"),
             "{note}"
@@ -792,15 +869,89 @@ mod tests {
         assert_eq!(paths(&s.staged), [("ok.txt", 'A')]);
     }
 
+    fn user_pattern(p: &[&str]) -> SecretPolicy {
+        use synthesis_core::{PathPolicy, secret_policy::DenyList};
+        let v: Vec<String> = p.iter().map(|x| x.to_string()).collect();
+        SecretPolicy::new(DenyList::new(&v, None, PathPolicy::NATIVE).0)
+    }
+
+    #[test]
+    fn a_user_pattern_blocks_staging_the_commit_and_is_reported_after_a_commit() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        let sp = user_pattern(&["vault/**", "*.dat"]);
+        std::fs::create_dir_all(d.path().join("vault")).unwrap();
+        std::fs::write(d.path().join("vault/k.txt"), "k\n").unwrap();
+        std::fs::write(d.path().join("a.dat"), "k\n").unwrap();
+        std::fs::write(d.path().join("ok.txt"), "o\n").unwrap();
+        // listed by name as secret, never staged (single and all)
+        let s = status(d.path(), &e, true, &sp).unwrap();
+        assert_eq!(s.changes.iter().filter(|x| x.secret).count(), 2);
+        let err = apply(d.path(), &e, true, &Act::Stage("vault/k.txt".into()), &sp).unwrap_err();
+        assert!(
+            err.contains("vault/k.txt") && err.contains("looks like a secret"),
+            "{err}"
+        );
+        let note = apply(d.path(), &e, true, &Act::StageAll, &sp).unwrap();
+        assert!(
+            note.starts_with("2 secret-looking file(s) skipped"),
+            "{note}"
+        );
+        assert_eq!(
+            paths(&status(d.path(), &e, true, &sp).unwrap().staged),
+            [("ok.txt", 'A')]
+        );
+        // without the pattern the same files are ordinary
+        assert!(
+            status(d.path(), &e, true, &Default::default())
+                .unwrap()
+                .changes
+                .iter()
+                .all(|x| !x.secret)
+        );
+        // staged outside the app: the gate over all staged records refuses
+        git(d.path(), &["add", "-f", "a.dat"]);
+        let err = apply(d.path(), &e, true, &Act::Commit("go".into()), &sp).unwrap_err();
+        assert!(
+            err.contains("a.dat") && err.contains("looks like a secret"),
+            "{err}"
+        );
+        git(d.path(), &["reset", "-q", "a.dat"]);
+        // slipped in after the gate: reported, not undone
+        git(d.path(), &["add", "-f", "vault/k.txt"]);
+        git(d.path(), &["commit", "-q", "-m", "k"]);
+        let (g, guards, _) = ready(d.path(), &e, true).unwrap();
+        let n = committed_secrets(&g, &guards, d.path(), &sp);
+        assert!(
+            n.contains("vault/k.txt") && n.contains("git reset --soft HEAD~1"),
+            "{n}"
+        );
+        assert!(!committed_secrets(&g, &guards, d.path(), &Default::default()).contains("vault"));
+    }
+
     #[test]
     fn a_secret_that_was_staged_elsewhere_blocks_the_commit() {
         let d = repo();
         let (e, _h) = env_with_identity();
         std::fs::write(d.path().join(".env"), "A=1\n").unwrap();
         git(d.path(), &["add", "-f", ".env"]);
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains(".env"), "{err}");
-        apply(d.path(), &e, true, &Act::Unstage(".env".into())).unwrap();
+        apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Unstage(".env".into()),
+            &Default::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -813,14 +964,21 @@ mod tests {
         git(d.path(), &["mv", "a", "a-b"]);
         std::fs::write(d.path().join("id_rsa"), "k\n").unwrap();
         git(d.path(), &["add", "-f", "id_rsa"]);
-        let s = status(d.path(), &e, true).unwrap();
+        let s = status(d.path(), &e, true, &Default::default()).unwrap();
         assert!(s.staged.iter().any(|x| x.path == "a-b"), "{:?}", s.staged);
         assert!(
             s.staged.iter().any(|x| x.path == "id_rsa" && x.secret),
             "{:?}",
             s.staged
         );
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("id_rsa"), "{err}");
     }
 
@@ -834,12 +992,19 @@ mod tests {
         std::fs::create_dir(d.path().join("server")).unwrap();
         std::fs::write(d.path().join("server/id_rsa"), "k").unwrap();
         git(d.path(), &["add", "-f", "."]);
-        let s = status(d.path(), &e, true).unwrap();
+        let s = status(d.path(), &e, true, &Default::default()).unwrap();
         assert!(
             s.cut && !s.staged.iter().any(|x| x.secret),
             "the list hid it"
         );
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("server/id_rsa"), "{err}");
     }
 
@@ -865,7 +1030,14 @@ mod tests {
                 "back\\slash",
             ],
         );
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("could not be checked"), "{err}");
         let head = Command::new("git")
             .args(["rev-list", "--count", "HEAD"])
@@ -888,7 +1060,14 @@ mod tests {
         git(d.path(), &["commit", "-q", "-m", "k"]);
         git(d.path(), &["rm", "-q", "--cached", "id_rsa"]);
         assert_eq!(
-            apply(d.path(), &e, true, &Act::Commit("untrack".into())).unwrap(),
+            apply(
+                d.path(),
+                &e,
+                true,
+                &Act::Commit("untrack".into()),
+                &Default::default()
+            )
+            .unwrap(),
             ""
         );
         // a conflicted file: refused by Stage, skipped by Stage all
@@ -903,9 +1082,16 @@ mod tests {
             .current_dir(d.path())
             .output();
         assert!(st(d.path()).changes.iter().any(|x| x.letter == '!'));
-        let err = apply(d.path(), &e, true, &Act::Stage("a.txt".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Stage("a.txt".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("conflict"), "{err}");
-        let note = apply(d.path(), &e, true, &Act::StageAll).unwrap();
+        let note = apply(d.path(), &e, true, &Act::StageAll, &Default::default()).unwrap();
         assert!(note.contains("conflicted"), "{note}");
     }
 
@@ -916,7 +1102,7 @@ mod tests {
         git(d.path(), &["add", "-f", "id_rsa"]);
         git(d.path(), &["commit", "-q", "-m", "k"]);
         let (g, guards, _) = ready(d.path(), &env(), true).unwrap();
-        let n = committed_secrets(&g, &guards, d.path());
+        let n = committed_secrets(&g, &guards, d.path(), &Default::default());
         assert!(
             n.contains("id_rsa") && n.contains("git reset --soft HEAD~1"),
             "{n}"
@@ -924,7 +1110,10 @@ mod tests {
         std::fs::write(d.path().join("b"), "x").unwrap();
         git(d.path(), &["add", "b"]);
         git(d.path(), &["commit", "-q", "-m", "b"]);
-        assert_eq!(committed_secrets(&g, &guards, d.path()), "");
+        assert_eq!(
+            committed_secrets(&g, &guards, d.path(), &Default::default()),
+            ""
+        );
     }
 
     #[test]
@@ -937,17 +1126,45 @@ mod tests {
         std::fs::write(d.path().join("id_rsa"), "k").unwrap();
         git(d.path(), &["add", "-f", "id_rsa"]);
         // staged at the root, the app is on `sub` and diff.relative is on: the gate still sees it
-        let err = apply(&sub, &e, true, &Act::Commit("go".into())).unwrap_err();
+        let err = apply(
+            &sub,
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("id_rsa"), "{err}");
-        apply(&sub, &e, true, &Act::Unstage("id_rsa".into())).unwrap();
+        apply(
+            &sub,
+            &e,
+            true,
+            &Act::Unstage("id_rsa".into()),
+            &Default::default(),
+        )
+        .unwrap();
         // a file in the parent of the folder the app is on stages (root-relative path, literal pathspec)
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        apply(&sub, &e, true, &Act::Stage("a.txt".into())).unwrap();
+        apply(
+            &sub,
+            &e,
+            true,
+            &Act::Stage("a.txt".into()),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
-            paths(&status(&sub, &e, true).unwrap().staged),
+            paths(&status(&sub, &e, true, &Default::default()).unwrap().staged),
             [("a.txt", 'M')]
         );
-        apply(&sub, &e, true, &Act::Commit("go".into())).unwrap();
+        apply(
+            &sub,
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -955,19 +1172,49 @@ mod tests {
         let d = repo();
         for bad in ["../x", "/etc/passwd", "a/../../x", ".git/config"] {
             assert!(
-                apply(d.path(), &env(), true, &Act::Stage(bad.into())).is_err(),
+                apply(
+                    d.path(),
+                    &env(),
+                    true,
+                    &Act::Stage(bad.into()),
+                    &Default::default()
+                )
+                .is_err(),
                 "{bad}"
             );
             assert!(
-                apply(d.path(), &env(), true, &Act::Unstage(bad.into())).is_err(),
+                apply(
+                    d.path(),
+                    &env(),
+                    true,
+                    &Act::Unstage(bad.into()),
+                    &Default::default()
+                )
+                .is_err(),
                 "{bad}"
             );
         }
         // a file that is not changed (any more) is not acted on
-        let err = apply(d.path(), &env(), true, &Act::Stage("a.txt".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Stage("a.txt".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("changed since"), "{err}");
-        assert!(apply(d.path(), &env(), true, &Act::Unstage("a.txt".into())).is_err());
-        assert!(apply(d.path(), &env(), false, &Act::StageAll).is_err());
+        assert!(
+            apply(
+                d.path(),
+                &env(),
+                true,
+                &Act::Unstage("a.txt".into()),
+                &Default::default()
+            )
+            .is_err()
+        );
+        assert!(apply(d.path(), &env(), false, &Act::StageAll, &Default::default()).is_err());
     }
 
     #[cfg(unix)]
@@ -978,15 +1225,29 @@ mod tests {
         std::fs::write(out.path().join("t"), "x").unwrap();
         std::os::unix::fs::symlink(out.path().join("t"), d.path().join("lnk")).unwrap();
         std::os::unix::fs::symlink(out.path(), d.path().join("dir")).unwrap();
-        let err = apply(d.path(), &env(), true, &Act::Stage("lnk".into())).unwrap_err();
+        let err = apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Stage("lnk".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("leaves the project"), "{err}");
         assert!(inside(d.path(), "dir/t").is_err());
-        let note = apply(d.path(), &env(), true, &Act::StageAll).unwrap();
+        let note = apply(d.path(), &env(), true, &Act::StageAll, &Default::default()).unwrap();
         assert!(note.contains("leaving the project"), "{note}");
         assert!(st(d.path()).staged.is_empty());
         // a link inside the project is a file like another
         std::os::unix::fs::symlink("a.txt", d.path().join("ok")).unwrap();
-        apply(d.path(), &env(), true, &Act::Stage("ok".into())).unwrap();
+        apply(
+            d.path(),
+            &env(),
+            true,
+            &Act::Stage("ok".into()),
+            &Default::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -999,13 +1260,14 @@ mod tests {
         assert!(!e.contains("abcdef123456"));
         let d = repo();
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        apply(d.path(), &env(), true, &Act::StageAll).unwrap();
+        apply(d.path(), &env(), true, &Act::StageAll, &Default::default()).unwrap();
         assert!(
             apply(
                 d.path(),
                 &env(),
                 true,
-                &Act::Commit("TOKEN=abcdef123456".into())
+                &Act::Commit("TOKEN=abcdef123456".into()),
+                &Default::default()
             )
             .is_err()
         );
@@ -1027,8 +1289,15 @@ mod tests {
             ("HOME", h.path().to_string_lossy().to_string()),
         ]);
         std::fs::write(d.path().join("a.txt"), "two\n").unwrap();
-        apply(d.path(), &e, true, &Act::StageAll).unwrap();
-        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        apply(d.path(), &e, true, &Act::StageAll, &Default::default()).unwrap();
+        let err = apply(
+            d.path(),
+            &e,
+            true,
+            &Act::Commit("go".into()),
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(
             err.to_lowercase().contains("identity")
                 || err.contains("user.name")

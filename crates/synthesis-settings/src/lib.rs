@@ -1124,16 +1124,28 @@ impl Settings {
             ));
             return;
         };
+        let mut added: Vec<&str> = vec![];
         for p in list {
             match p.as_str() {
                 Some(p) if !self.synthesis.secrets_deny.iter().any(|x| x == p) => {
                     self.synthesis.secrets_deny.push(p.to_string());
+                    added.push(p);
                 }
                 Some(_) => {}
                 None => self.diagnostics.push(format!(
                     "{what}: synt.secrets.deny entry is not a string, ignored"
                 )),
             }
+        }
+        // a repository can only deny, but it must not do so silently: say which file hid what
+        if what != "user settings" && what != "managed settings" && !added.is_empty() {
+            let shown: Vec<&str> = added.iter().take(5).copied().collect();
+            self.diagnostics.push(format!(
+                "{what}: synt.secrets.deny adds {} pattern(s) that hide matching files from the agent: {}{}",
+                added.len(),
+                shown.join(", "),
+                if added.len() > 5 { ", ..." } else { "" }
+            ));
         }
     }
 

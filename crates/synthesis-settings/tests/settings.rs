@@ -1473,6 +1473,19 @@ fn secrets_deny_is_the_union_of_all_scopes_even_for_an_untrusted_project() {
                 .iter()
                 .any(|d| d.contains("entry is not a string"))
         );
+        // the project's additions are announced with the patterns; the user's are not
+        assert!(
+            s.diagnostics.iter().any(|d| d
+                .starts_with("project settings: synt.secrets.deny adds 1 pattern(s)")
+                && d.contains("secrets/**")),
+            "{:?}",
+            s.diagnostics
+        );
+        assert!(
+            !s.diagnostics
+                .iter()
+                .any(|d| d.starts_with("user settings: synt.secrets.deny adds"))
+        );
     }
     let f = fx();
     f.user(json!({"synt":{"secrets":{"deny":"nope"}}}));
