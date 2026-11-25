@@ -1459,3 +1459,64 @@ fn managed_planner_settings_win_and_an_unusable_one_fails_closed_to_the_stub() {
         );
     }
 }
+
+#[test]
+fn orchestrator_turn_and_token_limits_have_defaults_bounds_and_managed_wins() {
+    let f = fx();
+    let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;
+    assert_eq!((o.max_turns, o.max_tokens), (50, 2_000_000));
+
+    f.user(json!({"synt":{"orchestrator":{"max_turns": 200, "max_tokens": 20_000_000}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(
+        (
+            s.synthesis.orchestrator.max_turns,
+            s.synthesis.orchestrator.max_tokens
+        ),
+        (200, 20_000_000)
+    );
+    assert!(s.diagnostics.is_empty(), "{:?}", s.diagnostics);
+
+    // zero, negative, fractional, text and above the ceiling are refused, never clamped
+    for (k, v) in [
+        ("max_turns", json!(0)),
+        ("max_turns", json!(201)),
+        ("max_turns", json!(-1)),
+        ("max_turns", json!(1.5)),
+        ("max_turns", json!("50")),
+        ("max_tokens", json!(0)),
+        ("max_tokens", json!(20_000_001)),
+        ("max_tokens", json!(-5)),
+        ("max_tokens", json!(1e3 + 0.5)),
+    ] {
+        let f = fx();
+        f.user(json!({"synt":{"orchestrator":{k: v}}}));
+        let s = f.load(ProjectTrust::Trusted);
+        assert_eq!(
+            s.synthesis.orchestrator,
+            OrchestratorSettings::default(),
+            "{k} {v}"
+        );
+        assert!(
+            s.diagnostics
+                .join("\n")
+                .contains(&format!("synt.orchestrator.{k}"))
+        );
+    }
+
+    // managed wins over user; a project file is not read
+    let f = fx();
+    f.user(json!({"synt":{"orchestrator":{"max_turns": 100}}}));
+    std::fs::write(
+        f.home.path().join("managed.json"),
+        r#"{"synt":{"orchestrator":{"max_turns":20}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        f.load_managed(ProjectTrust::Trusted)
+            .synthesis
+            .orchestrator
+            .max_turns,
+        20
+    );
+}

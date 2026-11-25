@@ -28,6 +28,8 @@ pub fn outcome_policy(o: &OrchestratorSettings) -> OutcomePolicy {
     p.max_cost_usd = o.max_cost_usd;
     p.attempt_max_cost_usd = o.attempt_max_cost_usd;
     p.attempt_max_wall_secs = o.attempt_max_wall_secs;
+    p.attempt_max_turns = o.max_turns;
+    p.attempt_max_tokens = o.max_tokens;
     p
 }
 

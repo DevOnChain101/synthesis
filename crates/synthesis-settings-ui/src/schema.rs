@@ -364,6 +364,18 @@ impl SettingsSchema {
                 .help("Experimental. Uses the stub planner; workers run with your configured provider and cost tokens. Turning it on shows the integrity notice first, and the Super Agent tab then asks separately before it migrates the session store. A managed settings file wins.")
                 .edit(Edit::Confirm("outcomes are opt-in: read the integrity notice before turning them on")),
         );
+        f.push(
+            Field::new("synt.orchestrator.max_turns", Execution, "Super Agent: turns per attempt", Int { min: 1, max: 200 })
+                .def(json!(50))
+                .scope(Scope::UserManaged)
+                .help("A turn is one call to the model provider. A Super Agent attempt stops when it uses this many (default 50, at most 200; never unlimited). Read-only attempts are capped at 80. A managed settings file wins."),
+        );
+        f.push(
+            Field::new("synt.orchestrator.max_tokens", Execution, "Super Agent: tokens per attempt", Int { min: 1, max: 20_000_000 })
+                .def(json!(2_000_000))
+                .scope(Scope::UserManaged)
+                .help("Total tokens (input, output and cache) one Super Agent attempt may use, from the provider's own counts (default 2,000,000, at most 20,000,000; never unlimited). A managed settings file wins."),
+        );
         // ---- APPEARANCE
         f.push(
             Field::new(
