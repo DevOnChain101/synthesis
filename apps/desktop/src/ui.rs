@@ -149,6 +149,12 @@ impl Shell {
         let in_sa = self.view == View::SuperAgent
             || (self.view == View::Settings && self.back == View::SuperAgent);
         if v == View::Tui && in_sa && !self.legacy_ui && !self.sa.read(cx).tui_switch_allowed() {
+            self.sa.update(cx, |s, cx| {
+                s.set_notice(
+                    "the TUI is offered from the home or a plain session, not from a goal, outcome or worker".into(),
+                    cx,
+                )
+            });
             return;
         }
         if self.view == View::Settings && v != View::Settings {
@@ -251,6 +257,15 @@ impl Shell {
 
     /// A session that waits for a tool permission is answered in the TUI view, in that session.
     fn open_waiting_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // a session a Super Agent frame hosts holds its lock (it is not idle): its question is answered in that frame
+        let frame = self.sa.read(cx).host.read(cx).frame_of(id, cx);
+        if let Some(f) = frame {
+            self.go(View::SuperAgent, window, cx);
+            self.sa.update(cx, |s, cx| {
+                s.open(crate::superagent::frames::Frame::Session(f), cx)
+            });
+            return;
+        }
         // the question waits in the TUI: leave a frame that may not switch for the home first
         if !self.sa.read(cx).tui_switch_allowed() {
             self.sa.update(cx, |s, cx| {
@@ -926,6 +941,53 @@ mod tests {
             sa.read_with(v, |s, _| s.frames.active().clone()),
             Frame::Home
         );
+    }
+
+    /// A waiting question of a session a Super Agent frame hosts is answered in that frame: the TUI would only
+    /// meet the frame's session lock.
+    #[gpui::test]
+    fn a_waiting_session_hosted_by_super_agent_is_shown_in_its_frame(cx: &mut TestAppContext) {
+        use crate::superagent::frames::Frame;
+        use crate::superagent::session::host::tests::fx;
+        let _g = theme::opacity_guard();
+        let (f, cfg) = fx(2);
+        cx.executor().allow_parking();
+        let (shell, v) = live(cx, cfg);
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        let o = shell.read_with(v, |s, _| s.outcomes().clone());
+        o.update(v, |_, cx| {
+            cx.emit(crate::outcomes_view::OpenFolder(f.base.join("f1")))
+        });
+        v.run_until_parked();
+        let mut sid = None;
+        for _ in 0..1200 {
+            v.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            v.run_until_parked();
+            sid = sa.read_with(v, |s, cx| {
+                s.host
+                    .read(cx)
+                    .views()
+                    .iter()
+                    .find_map(|t| t.read(cx).embed_handoff())
+            });
+            if sid.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let sid = sid.expect("the engine reported its session").sid;
+        sa.update(v, |s, cx| s.open(Frame::Home, cx));
+        shell.update_in(v, |s, window, cx| s.open_waiting_session(&sid, window, cx));
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+        assert_eq!(
+            sa.read_with(v, |s, _| s.frames.active().clone()),
+            Frame::Session("s1".into())
+        );
+        sa.update(v, |s, cx| s.close_tab(1, cx));
+        v.run_until_parked();
+        crate::superagent::session::host::tests::wait_free(&f.home);
     }
 
     #[gpui::test]
