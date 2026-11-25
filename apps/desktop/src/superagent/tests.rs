@@ -821,7 +821,10 @@ mod side {
     fn the_title_bar_icons_follow_the_availability_table(cx: &mut TestAppContext) {
         let (f, sa, v) = two(cx);
         // Files and Diff have icons too: a click opens their segment
-        for (id, seg) in [("sa-dock-files", Segment::Files), ("sa-dock-diff", Segment::Diff)] {
+        for (id, seg) in [
+            ("sa-dock-files", Segment::Files),
+            ("sa-dock-diff", Segment::Diff),
+        ] {
             let b = v.debug_bounds(id).unwrap();
             v.simulate_click(b.center(), Modifiers::default());
             assert_eq!(shown(&sa, v), Some(seg));
