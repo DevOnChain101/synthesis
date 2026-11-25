@@ -439,10 +439,9 @@ impl Shell {
             .gap(px(6.))
             .pl(px(if mac { TRAFFIC_LIGHTS_W } else { 10. }))
             .pr(px(if mac { 10. } else { 0. }))
-            .border_b_1()
-            .border_color(with_alpha(theme::hsla(t::TEXT), 0.12))
-            // translucent like the surface under it (the window opacity), so no opaque strip
-            .bg(theme::fill(t::BG))
+            // same ground as the view under it, no divider: the bar is not a separate block. The TUI view paints its own
+            // ground, so the bar paints the ground's top colour once (not stacked on the shell's, which is darker when translucent)
+            .when(self.view == View::Tui, |d| d.bg(theme::bar_ground()))
             .child(
                 // the drag region: the whole bar except the buttons
                 div()
@@ -544,7 +543,7 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::ground())
+            .when(self.view != View::Tui, |d| d.bg(theme::ground()))
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {
