@@ -191,6 +191,10 @@ pub fn check_citation(
     if rel.components().any(state) || is_secret_shaped_in(rel, std::path::Path::new("")) {
         return no("a secret or state path is never cited");
     }
+    // the path is echoed on the review card, so it must not carry a secret either
+    if gate.redact_str(&c.path) != c.path {
+        return no("the cited path holds a secret");
+    }
     // Windows reads `name.` and `name ` as `name`, and `PROGRA~1` as another name
     if cfg!(windows)
         && rel.components().any(|x| {

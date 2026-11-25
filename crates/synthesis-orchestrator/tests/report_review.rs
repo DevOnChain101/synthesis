@@ -844,3 +844,31 @@ fn a_registered_session_secret_is_masked_in_the_report_and_the_citation() {
     let shown = review(&w).brief["report"].as_str().unwrap().to_owned();
     assert!(!shown.contains(secret), "{shown}");
 }
+
+/// The cited path is echoed on the card: a path that holds a secret is refused, file or not.
+#[test]
+fn a_citation_path_that_holds_a_secret_is_refused() {
+    let r = rig();
+    let root = folder(&r);
+    let name = format!("{}_{}.txt", "ghp", "Z".repeat(36));
+    std::fs::write(root.join(&name), "note\n").unwrap();
+    let c = |path: &str| Citation {
+        path: path.into(),
+        start_line: 1,
+        end_line: 1,
+        quote: "note".into(),
+    };
+    let checked = check_citation(&root, &c(&name), &Redactor::new([]));
+    assert!(
+        !checked.ok && checked.why.contains("path holds a secret"),
+        "{}",
+        checked.why
+    );
+    let reg = Redactor::new(["zq-path-session-secret-4".to_string()]);
+    let checked = check_citation(&root, &c("zq-path-session-secret-4.txt"), &reg);
+    assert!(
+        checked.why.contains("path holds a secret"),
+        "{}",
+        checked.why
+    );
+}

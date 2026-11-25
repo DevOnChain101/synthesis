@@ -87,6 +87,8 @@ fn s<E: ToString>(e: E) -> String {
 /// the same config, by reference: `{env:}`/`{file:}` are already substituted at load) with the
 /// redactor, so a worker's report cannot carry one into a review. Returns the providers whose key
 /// is NOT protected (unresolved, rejected or no config); pattern redaction stays on for them.
+/// Project-level keys (a repo's own config) are out of scope by design: the owner reads the user
+/// and managed config only.
 fn learn_secrets(r: &synthesis_events::Redactor, env: &Env, h: &crate::Homes) -> Vec<String> {
     let cfg = match crate::load_config(env, h, None, synthesis_config::ProjectTrust::Untrusted) {
         Ok(c) => c,
@@ -97,15 +99,31 @@ fn learn_secrets(r: &synthesis_events::Redactor, env: &Env, h: &crate::Homes) ->
         if p.is_no_auth() {
             continue;
         }
-        match synthesis_config::resolve_credential(id, Some(p), &h.synthesis, env) {
-            Some(c) if r.add_secret_min(&c.secret, 8).is_ok() => {}
-            // no key at all (a built-in nobody configured) has nothing to leak; a reference that
-            // failed to resolve is named by the config warnings, as `resolve_provider` reads them
-            None if !cfg
+        // everything the config or the env holds as this provider's key, and its header values
+        let mut keys: Vec<String> = vec![];
+        let cred = synthesis_config::resolve_credential(id, Some(p), &h.synthesis, env);
+        keys.extend(cred.iter().map(|c| c.secret.clone()));
+        if let Some(synthesis_config::ApiKey::Value(k)) = &p.api_key {
+            keys.push(k.clone());
+        }
+        keys.extend(p.auth_token.clone());
+        let configured = cred.is_some() || p.api_key.is_some() || p.auth_token.is_some();
+        // a key that is set but cannot be protected (too short, reserved, no room) is named; a
+        // header value is registered when it can be (short ones are not secrets by themselves)
+        let mut ok = keys.iter().all(|k| r.add_secret_min(k, 8).is_ok());
+        for v in p.headers.iter().flat_map(|h| h.values()) {
+            let _ = r.add_secret_min(v, 8);
+        }
+        // nothing configured: a built-in nobody set up has nothing to leak; a reference that
+        // failed to resolve is named by the config warnings, as `resolve_provider` reads them
+        if !configured {
+            ok = !cfg
                 .warnings
                 .iter()
-                .any(|w| w.contains(&format!("provider \"{id}\""))) => {}
-            _ => open.push(id.clone()),
+                .any(|w| w.contains(&format!("provider \"{id}\"")));
+        }
+        if !ok {
+            open.push(id.clone());
         }
     }
     open
@@ -1499,6 +1517,46 @@ mod tests {
         );
         // the unresolved reference is named (never a value) and does not switch anything off
         assert_eq!(open, ["gone"]);
+    }
+
+    #[test]
+    fn a_set_but_unprotectable_key_is_named_without_any_warning_and_a_header_is_masked() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("synt.json"),
+            r#"{"$schema":"config.json/v1","providers":{"short":{"type":"openai","baseURL":"http://x/v1","apiKey":"abc"},"hdr":{"type":"openai","baseURL":"http://x/v1","apiKey":"fine-enough-key-1","headers":{"x-org":"zq-header-only-secret-5"}}}}"#,
+        )
+        .unwrap();
+        let h = crate::Homes {
+            user: home.path().to_path_buf(),
+            synthesis: home.path().to_path_buf(),
+        };
+        let r = synthesis_events::Redactor::new([]);
+        let open = learn_secrets(&r, &Env::from_pairs([("PATH", "/usr/bin")]), &h);
+        assert_eq!(open, ["short"]);
+        assert!(
+            !r.redact_str("h zq-header-only-secret-5")
+                .contains("zq-header")
+        );
+    }
+
+    #[test]
+    fn the_runner_and_the_verifier_share_the_owner_redactor() {
+        // shortcut: `build` needs a store, an approved contract and a worker host, so the wiring is
+        // pinned at the source (as `nothing_bypasses_csp` does); upgrade with an owner-level rig
+        let src = include_str!("orch_owner.rs");
+        for line in [
+            "verifier.redactor = self.redactor.clone();",
+            "runner.redactor = self.redactor.clone();",
+        ] {
+            assert_eq!(src.matches(line).count(), 2, "{line}"); // the code and this list
+        }
+        let owner = synthesis_events::Redactor::new([]);
+        let (runner, verifier) = (owner.clone(), owner.clone());
+        assert!(owner.add_secret_min("zq-late-owner-secret-3", 8).is_ok());
+        for r in [&runner, &verifier] {
+            assert!(!r.redact_str("zq-late-owner-secret-3").contains("zq-late"));
+        }
     }
 
     #[test]
