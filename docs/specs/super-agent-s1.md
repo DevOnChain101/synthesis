@@ -17,7 +17,7 @@ Status: Proposed design (2026-11-18); amended 2026-11-21 by the owner's v3 mock 
 - D7 dropped from the mounted design.
 - D8 amended: Terminal and Browser are a right sidebar, not centre tabs.
 - Needs you is part of the home (command centre).
-- New session opens inside Super Agent (embedded `TuiView` chat for v1), cap 6 session frames.
+- New session opens inside Super Agent (embedded `TuiView` chat for v1), no limit on session frames (owner, 2026-11-25: no limit on workspaces or sessions).
 - Material: opaque default; Liquid Glass only on macOS 27+ via `WindowBackgroundAppearance::Blurred`.
 - The delivery table (section 6) is replaced by phases A1 to E and the P6 gate.
 
@@ -328,7 +328,7 @@ Deliberately absent: approving, resolving, starting, resuming or cancelling, ena
 
 - **Per conductor turn:** ≤ 12 tool calls, ≤ 3 proposals, ≤ 1 `propose_goal`.
 - **Open proposals:** ≤ 10.
-- **Own sessions:** ≤ 10 sends per target per 10 min, and ≤ 6 live sessions.
+- **Own sessions:** ≤ 10 sends per target per 10 min, and ≤ 6 live sessions that the CONDUCTOR itself creates (`synt.conductor.max_sessions`, a brake on what the orchestrator spawns on its own; sessions and workspaces the person opens are not limited).
 - **Type split.** The host's outcome access is `ConductorReads`. Mutating calls go only through `ProposalExecutor::execute(proposal, PersonClick)`.
   - `PersonClick` is built only in the GPUI handler of an engaged card, or on Enter in the worker composer.
   - A grep test checks that no `conductor` module constructs it.
@@ -365,7 +365,7 @@ The fake providers are scripted to comply with the attack; the host must stop it
 
 Super Agent tab only. The TUI view keeps its own title bar and gets none of this.
 - **Rail's top row:** the traffic lights, the logo, the collapse-rail button, then **back and forward**, greyed when there is no history in that direction.
-- **Title row:** the **open frames are tabs**, starting at the rail's right edge: drag to reorder (the first, home, is pinned), close button on the active or hovered tab, `+` for a new session, overflow menu, Cmd+T / Cmd+W / Ctrl+Tab. At most **6 open session frames** (owner decision 2026-11-21); at the cap `+` is disabled and says why.
+- **Title row:** the **open frames are tabs**, starting at the rail's right edge: drag to reorder (the first, home, is pinned), close button on the active or hovered tab, `+` for a new session, overflow menu, Cmd+T / Cmd+W / Ctrl+Tab. No limit on open session frames (owner decision 2026-11-25, replaces the 6-frame cap of 2026-11-21 that #245 removed from the code); past a soft threshold (setting `synt.desktop.sessions.warn_at`, default 6 live sessions) creating a new session shows a warning and still creates it (owner, 2026-11-25: warn, never block).
 - **No "Super Agent" label and no breadcrumb.** The `TUI | Super Agent` mode buttons and the badge stay at the right of the bar where S0 put them.
 - **Settings is the title-bar gear** (kept as in S0). The app's Settings view stays as it is (owner decision 2026-11-21); the mock's Settings page is not ported.
 - History walks Super Agent frames: the home (command centre, 5.5), the session frames, the outcome frames and the worker frames.
@@ -430,7 +430,7 @@ Our engine and security model stay as they are. The fork's terminal is **not** p
 
 New session opens its chat **inside Super Agent**, in a session frame (a tab of 5.1). It **never switches to the TUI view** and never calls `TuiView::open_folder` from Super Agent. The two modes are separate.
 - **v1:** the session frame embeds a `TuiView` chat (`TuiView.embed`, started in the chosen folder), so it looks like the TUI chat inside the Super Agent chrome. The TUI view's own pixels must stay byte-identical (`design_tests` and shots unchanged). A `ChatHost` extraction (a chat shared by both views without the embedded `TuiView`) is a **follow-up**, not v1.
-- Cap: **6 open session frames**.
+- No cap on open session frames (owner, 2026-11-25).
 
 ### 5.7 Material (owner decision 2026-11-21)
 
@@ -458,7 +458,7 @@ Each phase is one PR, with CI 22/22 (fmt, clippy, tests on 3 OSes). SR = securit
 | **B1** Shell skeleton | 5.1 | `apps/desktop/src/superagent/{mod,frames,rail,tabstrip}.rs`; `ui.rs` and `outcomes_view/mod.rs` (**the only PR that edits them**: mounts `SuperAgentView` for `View::SuperAgent`, reroutes `OpenSession`/`OpenFolder` to Super Agent); `outcomes_view/history.rs` replaced by the frame stack | A1 | Rects and shots of both modes; TUI unchanged; chevrons greyed at the ends; truncation; per-frame drafts; tab drag, close, overflow, cap 6; Alt+Left/Right | no | 2026-11-21 |
 | **B2** Home (command centre) | 5.5 | `apps/desktop/src/superagent/home/*` | B1 | Needs you, Running, Finished, empty, error, loading shots; #167 decision-card rules (nothing preselected, brief before Send); recommended, batch and Undo absent in the view model | no | 2026-11-21 |
 | **B3** Chat, cards, `PersonClick`, conductor glue | 4.1-4.5 | `apps/desktop/src/superagent/chat/**` | B1, P3b, P1 | Shots; every card field rendered; nothing preselected; `inj-forged-card-text`; `PersonClick` allowlist guard (P3b hardening) | yes + supervisor | 2026-11-21 |
-| **C1** Plain session frames | 5.6 | `apps/desktop/src/superagent/session/{mod,frame}.rs` (hosts the embedded `TuiView`) | A2, B1 | New session opens in a frame, never switches to the TUI; cap 6; frame close shuts the engine; draft kept | yes | 2026-11-21 |
+| **C1** Plain session frames | 5.6 | `apps/desktop/src/superagent/session/{mod,frame}.rs` (hosts the embedded `TuiView`) | A2, B1 | New session opens in a frame, never switches to the TUI; no cap (2026-11-25); frame close shuts the engine; draft kept | yes | 2026-11-21 |
 | **C2** Right sidebar (**built 2026-11-23, awaits SR and a real-window check**: model, header, grip, title-bar icons, Cmd+I and Ctrl+`, per-session panes through `embed_side`/`embed_pane`; Details shows folder and status of a session and goal and state of an outcome only; the overlay below 1100 px has no slide; Left/Right between segments is not wired; the browser pane never closes its last page tab, so only the last shell closes the sidebar) | 5.3 | `apps/desktop/src/superagent/sidebar.rs` (+ `embed_*` helpers in `tui_view/driver.rs`, `session/host.rs`) | C1 | One pane per session; the tap `Arc` is shared (pointer equality); availability table (worker, outcome, home, WSL); resize 280-640, default 340; the T2 env-scrub and OSC 52 tests run against the Super Agent host; T15 cases | yes | decided D8, amended 2026-11-21 |
 | **C3** Outcome and worker frames | 5.1, 4.6 | `apps/desktop/src/superagent/session/{outcome,worker}.rs` | B1, P2c | Worker Enter sends the exact bytes once; native Windows composer disabled; Details only in the sidebar | no (the send path is P2c's) | 2026-11-21. **Built 2026-11-23 (awaits SR and a real-window check; the shell files are `session/{outcome,worker}.rs`):** the outcome frame (header, work items, attempts, decisions, contract, read-only report as inert text) answers nothing itself, a pending decision sends the person to the home card; the worker frame sends on a real Enter in its focused composer only (no Send button, one in-flight key, text kept on refusal, no card per NQ1, no `PersonClick`: the owner applies it as `user:superagent`); the composer is off with its reason on Windows, without `attempt_message`, when the item or outcome is finished and when the engine is not running. **Not built:** the conductor's `message_worker` card (`MESSAGE_WORKER_ENABLED` stays false: it needs a new `Payload` variant, host checks of the item, a card view, an executor effect with `proposal_sha256` and the red-team cases, a protocol-level change for the security review); the log tail is the control session's events that name the item (the first 1000 events read), not the worker's own transcript |
 | **D** Glass switch | 5.7 | `apps/desktop/src/superagent/material.rs` (switch), `tokens::{surface_fill,elevated_fill}`, `ui.rs` (`open`, `apply_look`) | A1, B1 | Opaque path unchanged; fallback on every failure; glass **unverified** until a macOS 27 host | built 2026-11-23: setting `synt.desktop.material` = `opaque` (default) \| `glass`, read at app start; glass needs macOS >= 27 (`sw_vers`) and `defaults read com.apple.universalaccess reduceTransparency` not 1, then `Blurred` window plus the 86 % tint on the rail, title row and docked sidebar (the content panel, home and the overlay sidebar stay opaque; the 88 % elevated tint gives only 3.98:1 for muted text over white, so it is unused); AA contrast tested over white and black backdrops. Residual: no glass shot, increase-contrast not read, no live switch (restart), unverified on macOS 27 | 2026-11-23 |
@@ -502,7 +502,7 @@ Critical path: P0, A2, C1, C2.
 | D8 | Terminal and Browser in Super Agent | Reuse the T2/B2/B6 panes per own session; security rules unchanged; the fork's terminal is not ported. **Amended 2026-11-21 (owner decision):** a right sidebar (Details, Terminal, Browser; 280-640, default 340; own session only), not centre tabs (5.3) |
 | D9 | Files tab | The fork's layout on our data model; read-only first (5.4) |
 | D10 | Home | 2026-11-21: Needs you is part of the home (command centre), not a tab; recommended one-tap, batch apply and Undo ship later, gated on approvals-concept A1/A4 (5.5) |
-| D11 | New session | 2026-11-21: opens its chat inside Super Agent (embedded `TuiView` chat in v1, `ChatHost` later); cap 6 open session frames (5.6) |
+| D11 | New session | 2026-11-21: opens its chat inside Super Agent (embedded `TuiView` chat in v1, `ChatHost` later); no cap on open session frames (owner, 2026-11-25; was 6, 5.6) |
 | D12 | Material | 2026-11-21: opaque default; Liquid Glass only on macOS 27+ via `WindowBackgroundAppearance::Blurred`; no `objc2`/`NSGlassEffectView` without an ADR-010 vetting and owner approval (5.7) |
 
 Open questions (my recommendation in italics):
