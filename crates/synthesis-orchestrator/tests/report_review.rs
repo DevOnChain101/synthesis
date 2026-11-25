@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use synthesis_core::SessionStatus;
 use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::*;
+use synthesis_events::Redactor;
 use synthesis_orchestrator::*;
 use synthesis_session::outcome::*;
 use synthesis_session::{NewMessage, OsProbe};
@@ -327,7 +328,7 @@ fn a_citation_over_lines_that_hold_a_secret_is_refused() {
         end_line: 1,
         quote: "note".into(),
     };
-    let checked = check_citation(&root, &c);
+    let checked = check_citation(&root, &c, &Redactor::new([]));
     assert!(
         !checked.ok && checked.why.contains("secret"),
         "{}",
@@ -359,18 +360,18 @@ fn citations_that_escape_the_folder_are_refused() {
         "",
         "missing.txt",
     ] {
-        let c = check_citation(&root, &cite(bad, "one"));
+        let c = check_citation(&root, &cite(bad, "one"), &Redactor::new([]));
         assert!(!c.ok, "{bad:?} must be refused: {}", c.why);
     }
-    assert!(check_citation(&root, &cite("a.txt", "one")).ok);
+    assert!(check_citation(&root, &cite("a.txt", "one"), &Redactor::new([])).ok);
     // whitespace is normalized; the quote must be in the cited lines only
     let two = Citation {
         start_line: 2,
         end_line: 2,
         ..cite("a.txt", "two\tthree")
     };
-    assert!(check_citation(&root, &two).ok);
-    assert!(!check_citation(&root, &cite("a.txt", "four")).ok);
+    assert!(check_citation(&root, &two, &Redactor::new([])).ok);
+    assert!(!check_citation(&root, &cite("a.txt", "four"), &Redactor::new([])).ok);
     // end to end: a failed citation is on the card and accept is not offered
     let escape =
         json!([{"path": "../outside.txt", "start_line": 1, "end_line": 1, "quote": "one"}]);
@@ -472,7 +473,15 @@ fn kill_9_before_settle_leaves_one_consistent_review() {
     let a = w.list_attempts(&it).unwrap().remove(0);
     let report = attempt_report(&r.store, &env.session_id).unwrap();
     let item = w.get_work_item(&it).unwrap();
-    open_review(&mut w, &item, &a, &report, OffsetDateTime::now_utc()).unwrap();
+    open_review(
+        &mut w,
+        &item,
+        &a,
+        &report,
+        OffsetDateTime::now_utc(),
+        &Redactor::new([]),
+    )
+    .unwrap();
     assert_eq!(review(&w).id, d.id);
     assert_eq!(w.authentic_evidence(w.id()).unwrap().len(), 1);
     // and after a restart the answer still counts
@@ -656,6 +665,7 @@ fn open_review_after_a_crash_opens_one_review() {
         &env.attempt,
         &report,
         OffsetDateTime::now_utc(),
+        &Redactor::new([]),
     )
     .unwrap();
     open_review(
@@ -664,6 +674,7 @@ fn open_review_after_a_crash_opens_one_review() {
         &env.attempt,
         &report,
         OffsetDateTime::now_utc(),
+        &Redactor::new([]),
     )
     .unwrap();
     assert_eq!(review(&w).brief["evidence"]["citations_verified"], "1 of 1");
@@ -759,6 +770,7 @@ fn kill_9_after_the_review_is_opened_keeps_one_review() {
         &env.attempt,
         &report,
         OffsetDateTime::now_utc(),
+        &Redactor::new([]),
     )
     .unwrap();
     let id = w.id().clone();
@@ -785,4 +797,78 @@ fn kill_9_after_the_review_is_opened_keeps_one_review() {
     let d = review(&w);
     assert_eq!(w.decision_state(&d.id).unwrap(), DecisionState::Pending);
     assert_eq!(w.authentic_evidence(w.id()).unwrap().len(), 1);
+}
+
+/// A secret value registered with the session is masked in the report shown and in a citation
+/// check, like the other call sites; without one the text is as before.
+#[test]
+fn a_registered_session_secret_is_masked_in_the_report_and_the_citation() {
+    let r = rig();
+    let root = folder(&r);
+    // not shaped like any token pattern: only the registered value can catch it
+    let secret = "zq-plain-session-secret-91";
+    std::fs::write(root.join("n.txt"), format!("note {secret}\n")).unwrap();
+    let c = Citation {
+        path: "n.txt".into(),
+        start_line: 1,
+        end_line: 1,
+        quote: "note".into(),
+    };
+    assert!(check_citation(&root, &c, &Redactor::new([])).ok);
+    let reg = Redactor::new([secret.to_string()]);
+    let checked = check_citation(&root, &c, &reg);
+    assert!(
+        !checked.ok && checked.why.contains("secret"),
+        "{}",
+        checked.why
+    );
+    let (mut w, it) = ro_outcome(&r, &root, &contract_ro());
+    let env = allocate(&r, &mut w, &it, &root);
+    write_report(
+        &r,
+        &w,
+        &env.session_id,
+        &json!({"report": format!("found {secret}"), "citations": good()}).to_string(),
+    );
+    let report = attempt_report(&r.store, &env.session_id).unwrap();
+    let item = w.get_work_item(&it).unwrap();
+    open_review(
+        &mut w,
+        &item,
+        &env.attempt,
+        &report,
+        OffsetDateTime::now_utc(),
+        &reg,
+    )
+    .unwrap();
+    let shown = review(&w).brief["report"].as_str().unwrap().to_owned();
+    assert!(!shown.contains(secret), "{shown}");
+}
+
+/// The cited path is echoed on the card: a path that holds a secret is refused, file or not.
+#[test]
+fn a_citation_path_that_holds_a_secret_is_refused() {
+    let r = rig();
+    let root = folder(&r);
+    let name = format!("{}_{}.txt", "ghp", "Z".repeat(36));
+    std::fs::write(root.join(&name), "note\n").unwrap();
+    let c = |path: &str| Citation {
+        path: path.into(),
+        start_line: 1,
+        end_line: 1,
+        quote: "note".into(),
+    };
+    let checked = check_citation(&root, &c(&name), &Redactor::new([]));
+    assert!(
+        !checked.ok && checked.why.contains("path holds a secret"),
+        "{}",
+        checked.why
+    );
+    let reg = Redactor::new(["zq-path-session-secret-4".to_string()]);
+    let checked = check_citation(&root, &c("zq-path-session-secret-4.txt"), &reg);
+    assert!(
+        checked.why.contains("path holds a secret"),
+        "{}",
+        checked.why
+    );
 }

@@ -182,6 +182,8 @@ pub struct Runner<'a> {
     /// The sandbox backend and guarantee the OWNER resolved for the workers it launches
     /// (`None`: not recorded). Written to the attempt at launch; never taken from the worker.
     pub sandbox: Option<(String, String)>,
+    /// Masks session secrets (and secret patterns) in a report opened for review.
+    pub redactor: synthesis_events::Redactor,
     /// Replaces the store call of the heartbeat (tests inject transient errors, feature
     /// `test-seam`). Always `None` in use.
     beat: Option<&'a BeatFn<'a>>,
@@ -204,6 +206,7 @@ impl<'a> Runner<'a> {
             poll,
             grace,
             sandbox: None,
+            redactor: synthesis_events::Redactor::new([]),
             beat: None,
         }
     }
@@ -648,7 +651,14 @@ impl Runner<'_> {
                 // the review is opened BEFORE the attempt is finished: no finished attempt ever
                 // lacks one, and a replay after a crash finds the same decision
                 let it = w.get_work_item(&attempt.work_item_id)?;
-                crate::open_review(w, &it, attempt, r, time::OffsetDateTime::now_utc())?;
+                crate::open_review(
+                    w,
+                    &it,
+                    attempt,
+                    r,
+                    time::OffsetDateTime::now_utc(),
+                    &self.redactor,
+                )?;
             }
             finish_in_place(w, attempt, end.task_status(), subject.as_deref())?;
             subject
