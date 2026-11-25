@@ -457,6 +457,15 @@ impl Shell {
             .child(icon(glyph, 12., theme::hsla(t::TEXT)))
     }
 
+    /// The view whose ground shows under the title bar: Settings slides over the view it was opened from.
+    fn under_view(&self) -> View {
+        if self.view == View::Settings {
+            self.back
+        } else {
+            self.view
+        }
+    }
+
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         div()
@@ -471,7 +480,9 @@ impl Shell {
             .pr(px(if mac { 10. } else { 0. }))
             // same ground as the view under it, no divider: the bar is not a separate block. The TUI view paints its own
             // ground, so the bar paints the ground's top colour once (not stacked on the shell's, which is darker when translucent)
-            .when(self.view == View::Tui, |d| d.bg(theme::bar_ground()))
+            .when(self.under_view() == View::Tui, |d| {
+                d.bg(theme::bar_ground())
+            })
             .child(
                 // the drag region: the whole bar except the buttons
                 div()
@@ -573,7 +584,8 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
-            .when(self.view != View::Tui, |d| d.bg(theme::ground()))
+            // only a view that paints no ground of its own gets the shell's (two stacked translucent grounds read darker)
+            .when(self.under_view() != View::Tui, |d| d.bg(theme::ground()))
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {
@@ -1023,6 +1035,24 @@ mod tests {
             shell.read_with(v, |s, _| (s.view, s.back)),
             (View::Settings, View::Tui)
         );
+    }
+
+    #[gpui::test]
+    fn settings_over_a_view_stacks_one_ground_not_two(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 930.);
+        shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+        // opened from the TUI view (which paints its own ground): the shell paints none and the bar paints the ground's top
+        assert_eq!(shell.read_with(v, |s, _| s.under_view()), View::Tui);
+        shell.update_in(v, |s, window, cx| {
+            s.back = View::SuperAgent;
+            s.go(View::Settings, window, cx)
+        });
+        assert_eq!(shell.read_with(v, |s, _| s.under_view()), View::SuperAgent);
+        // the Super Agent fills use the window opacity
+        theme::set_opacity(60);
+        assert_eq!(crate::superagent::tokens::window_fill(0x15171B).a, 0.6);
+        assert_eq!(theme::bar_ground().a, 0.6);
     }
 
     #[gpui::test]

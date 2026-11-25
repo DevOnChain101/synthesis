@@ -21,10 +21,15 @@ pub fn set_opacity(pct: u8) {
     );
 }
 
+/// The window opacity as an alpha (0..1).
+pub fn alpha() -> f32 {
+    f32::from(OPACITY.load(Ordering::Relaxed)) / 100.
+}
+
 /// A background fill at the window opacity. Text and borders use [`hsla`], never this, so they stay opaque.
 pub fn fill(c: t::Rgb) -> Hsla {
     Hsla {
-        a: f32::from(OPACITY.load(Ordering::Relaxed)) / 100.,
+        a: alpha(),
         ..hsla(c)
     }
 }
