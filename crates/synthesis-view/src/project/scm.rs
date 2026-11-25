@@ -1,5 +1,5 @@
 //! Source Control of the file explorer: what is staged and what is changed, stage, unstage and commit. The only
-//! place that WRITES to the user's repository, so it is narrow: every call is the hardened [`Git`] of `project`
+//! place that WRITES to the user's repository, so it is narrow: every call is the hardened `Git` of `project`
 //! (no fsmonitor, external diff, textconv, filter drivers, pager, ssh or credential programs; `core.hooksPath`
 //! points at nothing, so no hook runs; no terminal prompt; `--literal-pathspecs`, paths after `--`, never a shell;
 //! closed environment; process-group kill on a timeout). The repository is untrusted data:
@@ -843,21 +843,28 @@ mod tests {
         assert!(err.contains("server/id_rsa"), "{err}");
     }
 
+    // the names (tab, backslash, trailing dot) are not legal file names on Windows
+    #[cfg(unix)]
     #[test]
     fn a_staged_path_that_cannot_be_checked_is_refused_with_a_count() {
         let d = repo();
         let (e, _h) = env_with_identity();
         std::fs::write(d.path().join("ok.txt"), "x").unwrap();
         std::fs::write(d.path().join("tab\there"), "x").unwrap();
-        #[cfg(unix)]
         std::fs::write(d.path().join("back\\slash"), "x").unwrap();
         std::fs::write(d.path().join("dot."), "x").unwrap();
         git(
             d.path(),
-            &["add", "-f", "--", "ok.txt", "tab\there", "dot."],
+            &[
+                "add",
+                "-f",
+                "--",
+                "ok.txt",
+                "tab\there",
+                "dot.",
+                "back\\slash",
+            ],
         );
-        #[cfg(unix)]
-        git(d.path(), &["add", "-f", "--", "back\\slash"]);
         let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
         assert!(err.contains("could not be checked"), "{err}");
         let head = Command::new("git")
