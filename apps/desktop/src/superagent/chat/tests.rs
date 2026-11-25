@@ -767,6 +767,34 @@ fn an_ask_shows_as_modal_card_and_needs_you_row_and_leaves_all_together(cx: &mut
     assert!(chat.update(v, |c, cx| c.modal(cx)).is_none());
 }
 
+#[gpui::test]
+fn esc_closes_the_modal_without_deciding_and_a_replaced_front_ask_is_armed_afresh(
+    cx: &mut TestAppContext,
+) {
+    let (chat, v) = open_window(cx);
+    chat.update(v, |c, cx| c.on_msg(UiMsg::Approval(Box::new(ask("a"))), cx));
+    chat.update(v, |c, cx| c.on_msg(UiMsg::Approval(Box::new(ask("b"))), cx));
+    assert!(chat.update(v, |c, cx| c.modal(cx)).is_some());
+    assert!(chat.update(v, |c, cx| c.dismiss_modal(cx)));
+    assert!(chat.update(v, |c, cx| c.modal(cx)).is_none(), "closed");
+    assert_eq!(
+        chat.read_with(v, |c, _| c.waiting_asks().len()),
+        2,
+        "nothing decided"
+    );
+    // the front ask is replaced (same id, new content): armed afresh and shown again
+    chat.update(v, |c, _| {
+        let now = std::time::Instant::now() + asks::ARM * 2;
+        c.asks.shown(now);
+        assert!(c.asks.armed(now));
+    });
+    chat.update(v, |c, cx| c.on_msg(UiMsg::Approval(Box::new(ask("a"))), cx));
+    assert!(!chat.read_with(v, |c, _| {
+        c.asks.armed(std::time::Instant::now() + asks::ARM * 2)
+    }));
+    assert!(chat.update(v, |c, cx| c.modal(cx)).is_some());
+}
+
 #[test]
 fn every_orchestrator_command_asks_twice_and_tool_results_and_oversize_blocks_have_no_run() {
     use synthesis_view::codeblock::{self as cb, Need};
