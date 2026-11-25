@@ -222,6 +222,11 @@ impl gpui::EventEmitter<WantTerminal> for TuiView {}
 pub(crate) struct WantPane(pub ChatTab);
 impl gpui::EventEmitter<WantPane> for TuiView {}
 
+/// An embedded view was asked to resume another stored session (`/resume`): a frame is one session in one folder,
+/// so its owner opens that session in its own frame (or shows the one that hosts it) and says why when it cannot.
+pub(crate) struct WantStored(pub String);
+impl gpui::EventEmitter<WantStored> for TuiView {}
+
 /// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
 /// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
 #[derive(Clone, Debug, Default)]

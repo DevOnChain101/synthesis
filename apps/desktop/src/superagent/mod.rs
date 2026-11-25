@@ -90,6 +90,8 @@ pub struct SuperAgentView {
     /// The folder of each session (by frame id); a folder already hosted is not started twice.
     port: Arc<HostPort>,
     folders: Vec<(String, PathBuf)>,
+    /// Session frames the conductor started (its goals' sessions): not plain, never handed to the TUI.
+    conductor_owned: Vec<String>,
     /// The next session frame id is `s<N>`: the id is the conductor's handle too, minted per open and never reused,
     /// so a stale card can never reach another session.
     next_session: usize,
@@ -139,6 +141,14 @@ impl SuperAgentView {
                 v.show_pane(&e.0, e.1, cx)
             }),
         );
+        subs.push(cx.subscribe_in(
+            &host,
+            window,
+            |v, _, e: &session::host::WantStored, window, cx| {
+                // `/resume` in a frame: the chosen stored session opens in its own frame, the refusal is the notice
+                let _ = v.open_stored_session(&crate::handoff::Scope::Local, &e.1, window, cx);
+            },
+        ));
         let home = cx.new(|cx| HomeView::new(outcomes.clone(), cx));
         subs.push(cx.subscribe(&home, |v, _, e: &HomeEvent, cx| match e {
             HomeEvent::OpenOutcome(id) => v.open(Frame::Outcome(id.clone()), cx),
@@ -185,6 +195,7 @@ impl SuperAgentView {
             refocus: false,
             port: port.clone(),
             folders: Vec::new(),
+            conductor_owned: Vec::new(),
             next_session: 1,
             synt_home,
             had_guide: false,
@@ -425,6 +436,55 @@ impl SuperAgentView {
         Ok((id, true))
     }
 
+    /// A stored session (`sid` of `scope`) in a frame of its own: the frame that already hosts it comes to the
+    /// front, else a new one resumes it. One host per session id: a locked or foreign-scope session is refused
+    /// (`Err(why)`, also the view's notice) and nothing is opened.
+    pub fn open_stored_session(
+        &mut self,
+        scope: &crate::handoff::Scope,
+        sid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(String, bool), String> {
+        if *scope == crate::handoff::Scope::Local
+            && let Some(id) = self.host.read(cx).frame_of(sid, cx)
+        {
+            self.open(Frame::Session(id.clone()), cx);
+            return Ok((id, false));
+        }
+        let id = format!("s{}", self.next_session);
+        let opened = self
+            .host
+            .update(cx, |h, cx| h.open_stored(&id, scope, sid, window, cx));
+        match opened {
+            Ok(folder) => {
+                self.register_session(&id, &folder);
+                self.open(Frame::Session(id.clone()), cx);
+                Ok((id, true))
+            }
+            Err(why) => {
+                self.notice = Some(why.clone());
+                cx.notify();
+                Err(why)
+            }
+        }
+    }
+
+    pub(crate) fn set_notice(&mut self, why: String, cx: &mut Context<Self>) {
+        self.notice = Some(why);
+        cx.notify();
+    }
+
+    /// The TUI is offered only from a plain session or the home: never from a goal form, an outcome or a worker,
+    /// nor from a session the conductor started.
+    pub(crate) fn tui_switch_allowed(&self) -> bool {
+        match self.frames.active() {
+            Frame::Home | Frame::Picker => true,
+            Frame::Session(id) => !self.conductor_owned.contains(id),
+            Frame::Outcome(_) | Frame::Worker(..) | Frame::NewGoal(_) => false,
+        }
+    }
+
     /// The rail row of a hosted session; its id is the conductor's handle.
     fn register_session(&mut self, id: &str, folder: &std::path::Path) {
         self.next_session += 1;
@@ -554,6 +614,7 @@ impl SuperAgentView {
             }
         };
         let (id, fresh) = self.open_session_folder(&folder, window, cx)?;
+        self.conductor_owned.push(id.clone());
         if !fresh {
             // never type the card's line into a session the person is already using
             return Err("a session is already open in that folder".into());

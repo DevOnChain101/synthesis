@@ -413,11 +413,13 @@ impl TuiView {
         self.start_at(None, window, cx)
     }
 
-    /// Launches the view as one embedded chat frame: a new session in `folder`. It is not "the last session" of
+    /// Launches the view as one embedded chat frame: a new session in `folder`, or the stored session `resume`
+    /// (its engine takes the store lock; a refusal is the chat's note and nothing else starts). It is not "the last session" of
     /// the standalone view, and the engine and the shells end with the view (`on_release`).
     pub(crate) fn start_in(
         &mut self,
         folder: PathBuf,
+        resume: Option<String>,
         headless: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -435,7 +437,7 @@ impl TuiView {
         if let Some(lu) = &mut self.live {
             lu.add_sub(rel);
         }
-        self.start_at(Some(folder), window, cx);
+        self.start_at(Some((folder, resume)), window, cx);
         Ok(())
     }
 
@@ -615,6 +617,52 @@ impl TuiView {
             .flatten()
     }
 
+    /// Mode switch to the Super Agent: the TUI's open session, when the Super Agent does not host it already, is
+    /// given back while idle so a Super Agent frame can open it (one host at a time). `None`: nothing to hand over;
+    /// `Err`: it stays here (a turn runs or an ask waits), the reason is for the Super Agent view's notice.
+    pub(crate) fn hand_to_sa(
+        &mut self,
+        h: &crate::handoff::Handoff,
+        cx: &mut Context<Self>,
+    ) -> Option<
+        Result<
+            (
+                crate::handoff::Hosted,
+                futures::channel::oneshot::Receiver<()>,
+            ),
+            String,
+        >,
+    > {
+        if self.embed.is_some() {
+            return None;
+        }
+        let lu = self.live.as_ref()?;
+        let e = lu.live.engine.as_ref()?;
+        let me = crate::handoff::Hosted {
+            scope: Self::scope_of(Some(e)),
+            sid: lu.live.sid.clone(),
+            folder: PathBuf::from(&e.cwd),
+        };
+        let stored = lu
+            .live
+            .convo()
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::User(_)));
+        if me.sid.is_empty()
+            || !stored
+            || h.sessions
+                .iter()
+                .any(|x| x.scope == me.scope && x.sid == me.sid)
+        {
+            return None;
+        }
+        Some(self.release_idle(cx).map(|rx| (me, rx)).ok_or_else(|| {
+            "the TUI session is running or waits for you: it stays in the TUI until it is idle"
+                .into()
+        }))
+    }
+
     /// Why a session cannot be resumed here now: another process (a running tab of the other mode) holds it.
     fn note_held(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -761,7 +809,12 @@ impl TuiView {
         self.hold_for_engine(text, window, cx);
     }
 
-    fn start_at(&mut self, folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_at(
+        &mut self,
+        folder: Option<(PathBuf, Option<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| s.focus(window, cx));
         let weak = cx.weak_entity();
@@ -800,7 +853,8 @@ impl TuiView {
         };
         lu.tick_task = Some(tick);
         match folder {
-            Some(f) => self.launch_with(f.clone(), None, Some(Target::New(f)), vec![], cx),
+            Some((f, None)) => self.launch_with(f.clone(), None, Some(Target::New(f)), vec![], cx),
+            Some((f, Some(id))) => self.launch_with(f, None, Some(Target::Resume(id)), vec![], cx),
             None => self.launch(first.0, None, vec![], cx),
         }
     }
@@ -2461,12 +2515,20 @@ impl TuiView {
         // (its own released session is the exception: the resume after a mode switch)
         let own_release = matches!(&target, Target::Resume(id)
             if self.embed.as_ref().and_then(|e| e.released.as_ref()).is_some_and(|r| r.1 == *id));
+        if let (Some(_), false, Target::Resume(id)) = (&self.embed, own_release, &target) {
+            if *id == lu.live.sid {
+                lu.live.note("that session is already open here", false);
+            } else {
+                lu.live.note("/resume: opening it in its own tab", false);
+                cx.emit(super::WantStored(id.clone()));
+            }
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         if self.embed.is_some()
             && !own_release
-            && matches!(
-                target,
-                Target::Resume(_) | Target::New(_) | Target::CloseWorkspace(_)
-            )
+            && matches!(target, Target::New(_) | Target::CloseWorkspace(_))
         {
             lu.live.note("close the tab and start a new session", true);
             lu.dirty = true;
@@ -3767,11 +3829,16 @@ pub fn build(
         Some(Ok(id)) => match engine::load_resume_in_place(&home, &id) {
             Ok(r) => resume = Some(r),
             Err(e) => {
-                notes.push(if e.starts_with("cannot resume") {
+                let msg = if e.starts_with("cannot resume") {
                     e
                 } else {
                     format!("/resume: {e}")
-                });
+                };
+                // a start on a stored session that cannot be loaded is refused, never a new session in its place
+                if prior_sid.is_none() && matches!(&target, Some(Target::Resume(_))) {
+                    return Err(msg);
+                }
+                notes.push(msg);
                 // the session we came from continues
                 resume = back(&home, prior_sid.clone());
                 model = prior_model.clone();
@@ -4007,7 +4074,7 @@ async fn pump(
 const LOCKED: &str = "open for writing in another process";
 
 /// The refusal made actionable: which mode holds the session and how to move it.
-fn locked_hint(embedded: bool) -> String {
+pub(crate) fn locked_hint(embedded: bool) -> String {
     if embedded {
         "this session is open in the TUI (or another synt process): let its turn finish or stop it there, \
          then switch back to Super Agent (an idle session is handed over on the switch) and send again"
@@ -4993,6 +5060,59 @@ mod switch_tests {
         assert!(locked_hint(false).contains("Super Agent") && locked_hint(true).contains("TUI"));
     }
 
+    /// TUI -> Super Agent: the TUI's idle stored session is given back (lock free) and handed over with its id,
+    /// scope and folder; never while a turn runs, never when a frame already hosts it or nothing is stored.
+    #[gpui::test]
+    fn the_tui_session_is_handed_to_super_agent_idle_and_once(cx: &mut TestAppContext) {
+        use crate::handoff::{Handoff, Hosted, Scope};
+        let (_t, cfg, l) = setup();
+        let c = Arc::new(cfg.clone());
+        let w = open(cx, cfg, l, true);
+        let first = build(&c, c.project.clone(), None, None, None, None, vec![]).unwrap();
+        let (sid, cwd) = (first.engine.sid.clone(), first.engine.cwd.clone());
+        w.0.update(w.1, |t, cx| t.engine_ready(Ok(first), cx));
+        w.1.run_until_parked();
+        let none = Handoff::default();
+        assert!(
+            w.0.update(w.1, |t, cx| t.hand_to_sa(&none, cx)).is_none(),
+            "nothing stored yet: nothing to hand over"
+        );
+        w.0.update(w.1, |t, _| {
+            let lu = t.live.as_mut().unwrap();
+            lu.live.view.convo.items.push(Item::User("hi".into()));
+            lu.live.busy = true;
+        });
+        let r = w.0.update(w.1, |t, cx| t.hand_to_sa(&none, cx));
+        assert!(matches!(r, Some(Err(_))), "a running turn stays in the TUI");
+        assert!(!synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        w.0.update(w.1, |t, _| t.live.as_mut().unwrap().live.busy = false);
+        let hosted = Handoff {
+            sessions: vec![Hosted {
+                scope: Scope::Local,
+                sid: sid.clone(),
+                folder: cwd.clone().into(),
+            }],
+            focused: None,
+        };
+        assert!(
+            w.0.update(w.1, |t, cx| t.hand_to_sa(&hosted, cx)).is_none(),
+            "a frame hosts it already: one host per session id"
+        );
+        let (h, rx) =
+            w.0.update(w.1, |t, cx| t.hand_to_sa(&none, cx))
+                .unwrap()
+                .unwrap();
+        assert!(futures::executor::block_on(rx).is_ok());
+        assert!(synthesis_app::peers::session_lock_free(
+            &c.synthesis_home,
+            &sid
+        ));
+        assert_eq!((h.scope, h.sid, h.folder), (Scope::Local, sid, cwd.into()));
+    }
+
     /// WSL mode has no engine to ask until it is ready: the handoff waits and is applied when it is.
     #[gpui::test]
     fn a_pending_handoff_is_applied_when_the_engine_becomes_ready(cx: &mut TestAppContext) {
@@ -5264,8 +5384,26 @@ mod switch_tests {
             t.embed.as_mut().unwrap().folder = Some(f.clone())
         });
         assert_eq!(w.0.read_with(w.1, |t, _| t.recheck_target()), Ok(Some(f)));
+        // `/resume` of another stored session is the owner's to open in a frame of its own
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let log = asked.clone();
+        let _sub = w.1.update(|_, cx| {
+            cx.subscribe(&w.0, move |_, e: &crate::tui_view::WantStored, _| {
+                log.borrow_mut().push(e.0.clone())
+            })
+        });
+        w.0.update(w.1, |t, cx| {
+            t.switch(Target::Resume("session-b".into()), "k".into(), cx)
+        });
+        assert_eq!(*asked.borrow(), ["session-b"]);
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            assert!(!lu.live.starting && lu.engine_task.is_none(), "no relaunch");
+            assert!(lu.live.convo().items.iter().any(|i| {
+                matches!(i, Item::Notice { text, .. } if text.contains("its own tab"))
+            }));
+        });
         for target in [
-            Target::Resume("session-b".into()),
             Target::New("/elsewhere".into()),
             Target::CloseWorkspace("k".into()),
         ] {

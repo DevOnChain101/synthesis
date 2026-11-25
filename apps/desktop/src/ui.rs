@@ -165,6 +165,7 @@ impl Shell {
         // the mode being left gives back the engine of each idle session (running ones keep theirs), so the mode
         // entered can resume the same session; the lists are read again once the locks are free
         let mut closing = Vec::new();
+        let mut to_open = None;
         if v == View::Tui && from_sa && !self.legacy_ui {
             closing = self.sa.update(cx, |s, cx| s.release_idle(cx));
         } else if v == View::SuperAgent && from_tui && !self.legacy_ui {
@@ -172,6 +173,15 @@ impl Shell {
             closing = self.tui.update(cx, |t, cx| {
                 t.release_if_hosted(&hosted, cx).into_iter().collect()
             });
+            // a TUI session no frame hosts yet is given back idle and opened as a frame once its lock is free
+            match self.tui.update(cx, |t, cx| t.hand_to_sa(&hosted, cx)) {
+                Some(Ok((h, rx))) => {
+                    closing.push(rx);
+                    to_open = Some(h);
+                }
+                Some(Err(why)) => self.sa.update(cx, |s, cx| s.set_notice(why, cx)),
+                None => {}
+            }
         }
         let handoff =
             (v == View::Tui && from_sa && !self.legacy_ui).then(|| self.sa.read(cx).handoff(cx));
@@ -213,12 +223,20 @@ impl Shell {
             self.tui.update(cx, |t, cx| t.adopt_handoff(h, cx));
         }
         if !closing.is_empty() {
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 for r in closing {
                     let _ = r.await;
                 }
-                this.update(cx, |s, cx| s.tui.update(cx, |t, cx| t.refresh_store(cx)))
-                    .ok();
+                this.update_in(cx, |s, window, cx| {
+                    s.tui.update(cx, |t, cx| t.refresh_store(cx));
+                    if let Some(h) = to_open {
+                        // the lock is free now; a refusal is the Super Agent view's notice
+                        s.sa.update(cx, |v, cx| {
+                            let _ = v.open_stored_session(&h.scope, &h.sid, window, cx);
+                        });
+                    }
+                })
+                .ok();
             })
             .detach();
         }
@@ -554,6 +572,13 @@ impl Render for Shell {
                 match k.key.as_str() {
                     "," if s.view == View::Settings => s.go(s.back, window, cx),
                     "," => s.go(View::Settings, window, cx),
+                    // a goal, outcome or worker frame is not handed to the TUI (see `tui_switch_allowed`)
+                    "1" if s.view == View::SuperAgent
+                        && !s.legacy_ui
+                        && !s.sa.read(cx).tui_switch_allowed() =>
+                    {
+                        return;
+                    }
                     "1" => s.go(View::Tui, window, cx),
                     "2" => s.go(View::SuperAgent, window, cx),
                     // the collapsed side columns of the TUI view (narrow windows): sidebar, inspector

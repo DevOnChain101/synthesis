@@ -36,6 +36,10 @@ impl gpui::EventEmitter<WantTerminal> for SessionHost {}
 pub struct WantPane(pub String, pub ChatTab);
 impl gpui::EventEmitter<WantPane> for SessionHost {}
 
+/// A hosted session was asked to resume another stored one (`/resume`): the frame's id and the session id.
+pub struct WantStored(pub String, pub String);
+impl gpui::EventEmitter<WantStored> for SessionHost {}
+
 pub struct SessionHost {
     cfg: Option<LiveCfg>,
     views: Vec<(String, Entity<TuiView>)>,
@@ -95,6 +99,58 @@ impl SessionHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.open_with(id, folder, None, window, cx)
+    }
+
+    /// The frame of the hosted session `sid` (a store id, never a frame id), when one hosts it.
+    pub fn frame_of(&self, sid: &str, cx: &App) -> Option<String> {
+        self.views
+            .iter()
+            .find(|(_, v)| v.read(cx).embed_handoff().is_some_and(|h| h.sid == sid))
+            .map(|(i, _)| i.clone())
+    }
+
+    /// Opens the stored session `sid` of `scope` in frame `id`: the folder is the one its record names, the
+    /// engine resumes it in place. Refused (nothing hosted, `Err(why)` for the person) when the session is of
+    /// another scope than this host's store (WSL mode: its store is the distro's, resuming there is not built),
+    /// is not in the store, or is held by another process (the TUI, another synt): the lock is only asked, the
+    /// transcript is never read around it. The start itself takes the lock and re-checks. Returns the folder.
+    pub fn open_stored(
+        &mut self,
+        id: &str,
+        scope: &crate::handoff::Scope,
+        sid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<std::path::PathBuf, String> {
+        let Some(cfg) = self.cfg.as_ref() else {
+            return Err("sessions need a live app".into());
+        };
+        let home = cfg.synthesis_home.clone();
+        if *scope != crate::handoff::Scope::Local || crate::wsl::enabled(&home).unwrap_or(true) {
+            return Err(format!(
+                "the session belongs to {scope}: opening a stored session in Super Agent works for local sessions only"
+            ));
+        }
+        let rec = synthesis_session::Reader::open(&home)
+            .and_then(|r| r.get_session(sid))
+            .map_err(|e| format!("cannot open session {sid}: {e}"))?;
+        if !synthesis_app::peers::session_lock_free(&home, sid) {
+            return Err(crate::tui_view::driver::locked_hint(true));
+        }
+        let folder = std::path::PathBuf::from(&rec.cwd);
+        self.open_with(id, &folder, Some(sid.to_string()), window, cx)?;
+        Ok(folder)
+    }
+
+    fn open_with(
+        &mut self,
+        id: &str,
+        folder: &std::path::Path,
+        resume: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.view(id).is_some() {
             return Ok(());
         }
@@ -105,7 +161,7 @@ impl SessionHost {
         let r = view.update(cx, |t, cx| {
             // keys only after `sync` says this frame is on screen
             (t.active, t.shown) = (false, false);
-            t.start_in(folder.to_path_buf(), true, window, cx)
+            t.start_in(folder.to_path_buf(), resume, true, window, cx)
         });
         if r.is_err() {
             // a refused folder is no tab: it counts nowhere and nothing was started
@@ -119,9 +175,13 @@ impl SessionHost {
             cx.emit(WantTerminal(fid.clone()))
         })
         .detach();
-        let fid = id.to_string();
+        let (fid, fid2) = (id.to_string(), id.to_string());
         cx.subscribe(&view, move |_, _, e: &crate::tui_view::WantPane, cx| {
             cx.emit(WantPane(fid.clone(), e.0))
+        })
+        .detach();
+        cx.subscribe(&view, move |_, _, e: &crate::tui_view::WantStored, cx| {
+            cx.emit(WantStored(fid2.clone(), e.0.clone()))
         })
         .detach();
         let chat = cx.new(|cx| ChatHost::new(view.clone(), window, cx));
@@ -731,6 +791,110 @@ pub(crate) mod tests {
         assert!(view.read_with(v, |t, _| t.embed.as_ref().unwrap().released.is_none()));
         let id = a.to_string_lossy().into_owned();
         h.update(v, |h, cx| h.close(&id, cx));
+        drop(view);
+        v.run_until_parked();
+        wait_free(&f.home);
+    }
+
+    /// A stored session opens in a frame of its own (same id, same folder, its message replayed) once its lock is
+    /// free; while another host holds the lock, or from another scope, it is refused with a reason and nothing is
+    /// hosted (so exactly one host has a session id at a time).
+    #[gpui::test]
+    fn a_stored_session_opens_in_a_frame_only_when_its_lock_is_free_and_its_scope_is_ours(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::handoff::Scope;
+        let (f, cfg) = fx(1);
+        cx.executor().allow_parking();
+        let a = f.base.join("f0");
+        let (h, v) = host(cx, Some(cfg));
+        assert!(open(&h, v, &a));
+        let view = h.read_with(v, |h, _| h.views[0].1.clone());
+        let wait = |v: &mut VisualTestContext, ok: &dyn Fn(&TuiView) -> bool, what: &str| {
+            for _ in 0..1200 {
+                v.executor()
+                    .advance_clock(std::time::Duration::from_millis(100));
+                v.run_until_parked();
+                if view.read_with(v, |t, _| ok(t)) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("the engine did not get there: {what}");
+        };
+        wait(v, &|t| t.embed_handoff().is_some(), "started");
+        view.update_in(v, |t, w, cx| {
+            let p = t.embed_prompt().unwrap();
+            p.update(cx, |s, cx| s.set_value("hello".to_string(), w, cx));
+            t.embed_submit(w, cx)
+        });
+        let users = |t: &TuiView| {
+            t.embed_live().map_or(0, |l| {
+                l.convo()
+                    .items
+                    .iter()
+                    .filter(|i| matches!(i, synthesis_view::convo::Item::User(_)))
+                    .count()
+            })
+        };
+        wait(v, &|t| users(t) == 1 && !t.embed_info().1, "first turn");
+        let held = view.read_with(v, |t, _| t.embed_handoff().unwrap());
+        // the engine of frame "a" holds the lock: refused with the lock's reason, nothing hosted
+        let why = h
+            .update_in(v, |h, w, cx| {
+                h.open_stored("b", &Scope::Local, &held.sid, w, cx)
+            })
+            .unwrap_err();
+        assert!(why.contains("open in the TUI"), "{why}");
+        assert_eq!(h.read_with(v, |h, _| h.len()), 1);
+        assert_eq!(
+            h.read_with(v, |h, cx| h.frame_of(&held.sid, cx)).as_deref(),
+            Some(a.to_string_lossy().as_ref())
+        );
+        // another scope's id is never looked up in this store
+        let why = h
+            .update_in(v, |h, w, cx| {
+                h.open_stored("b", &Scope::Wsl("Ubuntu".into()), &held.sid, w, cx)
+            })
+            .unwrap_err();
+        assert!(why.contains("wsl:Ubuntu"), "{why}");
+        // an id that is not in the store
+        assert!(
+            h.update_in(v, |h, w, cx| h.open_stored(
+                "b",
+                &Scope::Local,
+                "nope",
+                w,
+                cx
+            ))
+            .is_err()
+        );
+        // the other host lets go: the session opens in a new frame with the same id and folder
+        let id = a.to_string_lossy().into_owned();
+        h.update(v, |h, cx| h.close(&id, cx));
+        drop(view);
+        v.run_until_parked();
+        wait_free(&f.home);
+        let folder = h
+            .update_in(v, |h, w, cx| {
+                h.open_stored("b", &Scope::Local, &held.sid, w, cx)
+            })
+            .unwrap();
+        assert_eq!(folder, a);
+        let view = h.read_with(v, |h, _| h.views[0].1.clone());
+        for _ in 0..1200 {
+            v.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            v.run_until_parked();
+            if view.read_with(v, |t, _| t.embed_handoff().is_some() && users(t) == 1) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let got = view.read_with(v, |t, _| (t.embed_handoff(), users(t)));
+        assert_eq!(got.0, Some(held), "same session id, scope and folder");
+        assert_eq!(got.1, 1, "the stored message is shown");
+        h.update(v, |h, cx| h.close("b", cx));
         drop(view);
         v.run_until_parked();
         wait_free(&f.home);
