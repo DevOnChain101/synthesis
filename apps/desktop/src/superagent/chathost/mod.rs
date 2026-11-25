@@ -448,7 +448,57 @@ impl ChatHost {
                 )),
             )
         };
-        composer_card(input, left, action.into_any_element())
+        let card = composer_card(input, left, action.into_any_element());
+        let Some(pop) = self.completion_el(cx) else {
+            return card;
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(t::S1))
+            .child(pop)
+            .child(card)
+            .into_any_element()
+    }
+
+    /// The `/command` and `@file` suggestions of the prompt (the TUI's own list, keys included), above the card.
+    fn completion_el(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let tui = self.tui.read(cx);
+        let (items, sel) = tui.embed_completion()?;
+        let rows = items.iter().enumerate().map(|(i, (label, detail))| {
+            div()
+                .flex()
+                .gap(px(t::S3))
+                .px(px(t::S2))
+                .rounded(px(t::R_PILL))
+                .when(i == sel, |d| d.bg(t::hover()))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(hsla(if i == sel { t::TEXT_STRONG } else { t::TEXT }))
+                        .child(sanitize_for_display(label)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_color(hsla(t::TEXT))
+                        .child(sanitize_for_display(detail)),
+                )
+        });
+        Some(
+            div()
+                .debug_selector(|| "sa-chat-completion".to_string())
+                .p(px(t::S1))
+                .rounded(px(t::R_PANEL))
+                .bg(hsla(t::ELEVATED))
+                .border_1()
+                .border_color(t::stroke())
+                .text_size(px(t::T2.0))
+                .children(rows)
+                .into_any_element(),
+        )
     }
 }
 

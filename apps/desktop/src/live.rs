@@ -737,6 +737,8 @@ pub struct Live {
     pub image_busy: bool,
     /// `/focus`: only the prompts, answers, results and notices show (the CLI's focus view).
     pub focus_view: bool,
+    /// `/focus` was typed: the Super Agent window follows with its own focus mode (taken by its owner).
+    pub focus_req: Option<bool>,
     /// The Usage & Metrics period (7 or 30 days).
     pub usage_days: usize,
     /// The `#note` the open "Remember this note?" dialog is about.
@@ -831,6 +833,7 @@ impl Live {
             images: vec![],
             image_busy: false,
             focus_view: false,
+            focus_req: None,
             usage_days: 7,
             pending_note: None,
             close_asked: None,
@@ -2181,6 +2184,7 @@ impl Live {
                     "off" => false,
                     _ => !self.focus_view,
                 };
+                self.focus_req = Some(self.focus_view);
                 self.note(
                     format!("focus view {}", if self.focus_view { "on" } else { "off" }),
                     false,
@@ -2632,7 +2636,9 @@ impl Live {
     }
 
     fn effort_menu(&mut self) {
-        let Some(e) = self.engine.clone() else { return };
+        let Some(e) = self.engine.clone() else {
+            return self.note("/effort: the session is still starting", true);
+        };
         if e.effort_tiers.is_empty() {
             return self.note("/effort: this model declares no effort tiers", true);
         }
@@ -2653,7 +2659,9 @@ impl Live {
     /// `/model`: the models of the config (and aliases) with what is known of each, the one in use
     /// marked; typing filters, the first row refreshes the list from the providers.
     fn open_model_picker(&mut self) {
-        let Some(e) = &self.engine else { return };
+        let Some(e) = &self.engine else {
+            return self.note("/model: the session is still starting", true);
+        };
         let mut rows = e.model_rows.clone();
         for m in &e.models {
             if !rows.iter().any(|r| r.value == *m) {
@@ -3730,6 +3738,51 @@ mod tests {
         );
         assert_eq!(l.queue.len(), 1);
         assert!(l.history.contains(&"/tdd now".to_string()));
+    }
+
+    /// Every command of the TUI table in a Super Agent frame (same `Live`, same `run_action` gate): it runs, or it
+    /// leaves a note, a dialog or a queued line. Never nothing.
+    #[test]
+    fn every_tui_command_runs_or_is_noted_in_a_super_agent_frame() {
+        use crate::tui_view::embed_chat::embed_note;
+        let extra = [
+            "open",
+            "reveal",
+            "send",
+            "panels",
+            "doctor",
+            "trust",
+            "rewind",
+            "context",
+            "close-workspace",
+            "clean",
+        ];
+        for name in WIRED.iter().chain(extra.iter()) {
+            let mut l = live_with_commands();
+            let before = l.view.convo.items.len();
+            match l.submit(&format!("/{name}")) {
+                Submitted::Do(a) => {
+                    let runs = embed_note(&a).is_none();
+                    let noted = matches!(a, Action::OpenSettings | Action::Panels(_));
+                    assert!(runs != noted, "/{name}: {a:?} neither runs nor is noted");
+                }
+                Submitted::Nothing => assert!(
+                    l.view.convo.items.len() > before
+                        || !l.dialogs.is_empty()
+                        || !l.queue.is_empty()
+                        || l.focus_req.is_some(),
+                    "/{name} was dropped silently"
+                ),
+                Submitted::Quit
+                | Submitted::Send(_)
+                | Submitted::Held
+                | Submitted::Inject { .. } => {}
+            }
+        }
+        // `/focus on|off` asks the window for its focus mode
+        let mut l = live_with_commands();
+        l.submit("/focus on");
+        assert_eq!(l.focus_req, Some(true));
     }
 
     fn event(t: &str, payload: Value) -> UiMsg {
