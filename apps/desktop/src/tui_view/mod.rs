@@ -14,7 +14,7 @@ mod clean;
 mod design_tests;
 pub mod dialog;
 pub mod driver;
-mod embed_chat;
+pub(crate) mod embed_chat;
 mod explorer_git;
 mod filesel;
 pub mod layout;

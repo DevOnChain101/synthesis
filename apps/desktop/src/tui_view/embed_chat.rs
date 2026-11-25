@@ -6,7 +6,7 @@ use gpui::{Context, Window};
 use gpui_component::input::TextareaState;
 
 use super::TuiView;
-use crate::live::Live;
+use crate::live::{Action, Live};
 
 impl TuiView {
     /// The engine state the host draws from.
@@ -65,5 +65,56 @@ impl TuiView {
     /// A toggle row of the `/rewind` confirmation.
     pub(crate) fn embed_toggle(&mut self, g: usize, cx: &mut Context<Self>) {
         self.rewind_toggle(g, cx);
+    }
+
+    /// The completion popup of the prompt (`/command`, `@file`): the rows (label, detail) and the highlighted one.
+    pub(crate) fn embed_completion(&self) -> Option<(&[(String, String)], usize)> {
+        let c = self.live.as_ref()?.comp.as_ref()?;
+        Some((&c.items, c.sel))
+    }
+
+    /// `/focus` typed in this frame: the state it asked for, once (the owner applies it to the whole window).
+    pub(crate) fn embed_take_focus_req(&mut self) -> Option<bool> {
+        self.live.as_mut()?.live.focus_req.take()
+    }
+}
+
+/// What a Super Agent frame says for a command whose action it cannot carry out (`None`: it runs). No wildcard:
+/// a new action must be classified here.
+pub(crate) fn embed_note(a: &Action) -> Option<&'static str> {
+    use Action::*;
+    match a {
+        OpenSettings => Some(
+            "/config: open Settings from the app's Settings entry (not available inside a session frame)",
+        ),
+        Panels(_) => {
+            Some("/panels: the dashboard panels belong to the TUI view; a session frame has none")
+        }
+        Model(_)
+        | RefreshModels
+        | Open(_)
+        | SetContext(_)
+        | Resume(_)
+        | TrustRevoked(_)
+        | AskTrust
+        | New
+        | CloseWorkspace(_)
+        | Close
+        | Clear
+        | Compact(_)
+        | ShowFiles
+        | Reveal(_)
+        | ShowDiff(_)
+        | TrustFolder(_)
+        | Recheck
+        | Quit
+        | Peers
+        | Doctor
+        | Send { .. }
+        | Rewind
+        | RewindPreview(_)
+        | RewindApply(_)
+        | Clean
+        | CleanApply { .. } => None,
     }
 }
