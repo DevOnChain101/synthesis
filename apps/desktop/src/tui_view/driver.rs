@@ -809,7 +809,7 @@ impl TuiView {
     /// browser): a pane left stops holding the keys, one shown gets them.
     pub(crate) fn embed_side(&mut self, side: Option<ChatTab>, cx: &mut Context<Self>) {
         let Some(e) = &mut self.embed else { return };
-        e.side = side.filter(|t| matches!(t, ChatTab::Terminal | ChatTab::Browser));
+        e.side = side.filter(|t| *t != ChatTab::Chat);
         match e.side {
             Some(ChatTab::Terminal) => {
                 let p = self.ensure_term(cx);
@@ -847,14 +847,18 @@ impl TuiView {
             .is_some_and(|e| e.is_remote())
     }
 
-    /// The Terminal or Browser pane of this embedded view, for the owner's right sidebar.
+    /// A pane of this embedded view (Terminal, Browser, Files, Diff), for the owner's right sidebar.
     pub(crate) fn embed_pane(&mut self, kind: ChatTab, cx: &mut Context<Self>) -> gpui::AnyElement {
-        debug_assert!(matches!(kind, ChatTab::Terminal | ChatTab::Browser));
-        if !matches!(kind, ChatTab::Terminal | ChatTab::Browser) {
+        debug_assert!(kind != ChatTab::Chat);
+        if kind == ChatTab::Chat {
             return gpui::IntoElement::into_any_element(gpui::Empty);
         }
         if self.pane_tab() != kind {
             self.embed_side(Some(kind), cx);
+        }
+        if matches!(kind, ChatTab::Files | ChatTab::Diff) {
+            // the headless view is never drawn, so its one-time pane setup (tree scan, first diff) runs here
+            self.tabs_tick(cx);
         }
         self.pane(cx)
     }
@@ -5254,9 +5258,10 @@ mod switch_tests {
             assert!(t.live.as_ref().unwrap().live.engine.is_none());
             assert!(t.term.is_none());
         });
-        // a pane that is no sidebar pane leaves the centre on the chat
+        // Files and Diff are sidebar panes too; the centre stays on the chat
         w.0.update(w.1, |t, cx| t.embed_side(Some(ChatTab::Diff), cx));
-        assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Chat);
+        assert_eq!(w.0.read_with(w.1, |t, _| t.pane_tab()), ChatTab::Diff);
+        assert_eq!(w.0.read_with(w.1, |t, _| t.ts.tab), ChatTab::Chat);
         forget_engine(&mut w);
     }
 
