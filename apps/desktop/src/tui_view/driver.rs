@@ -911,6 +911,9 @@ impl TuiView {
         if self.pane_tab() != kind {
             self.embed_side(Some(kind), cx);
         }
+        if kind == ChatTab::Files && self.files_focus.is_none() {
+            self.files_focus = Some(cx.focus_handle());
+        }
         if matches!(kind, ChatTab::Files | ChatTab::Diff) {
             // the headless view is never drawn, so its one-time pane setup (tree scan, first diff) runs here
             self.tabs_tick(cx);
@@ -1656,6 +1659,9 @@ impl TuiView {
         if self.embed.as_ref().is_some_and(|e| e.headless)
             && self.live.as_ref().is_none_or(|l| l.live.dialogs.is_empty())
         {
+            if self.files_key(ks, window, cx) {
+                return true;
+            }
             return !ks.modifiers.modified() && self.comp_key(ks.key.as_str(), window, cx);
         }
         let (file_sel, file_shown) = (self.has_file_sel(), self.shown_lines().is_some());

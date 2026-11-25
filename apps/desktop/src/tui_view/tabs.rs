@@ -16,8 +16,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, Stateful,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
+    Context, Div, InteractiveElement as _, IntoElement as _, Keystroke, ParentElement as _,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
 use gpui_component::text::TextView;
 use synthesis_cli_ui_render::theme as t;
@@ -631,6 +631,73 @@ impl TuiView {
         true
     }
 
+    /// Keys of the Files pane of an embedded view while it holds the focus, as in the TUI: Up/Down walk the tree,
+    /// Enter opens the row (a file's preview rules, a folder expands), Cmd/Ctrl+A and +C act on the file shown, Esc
+    /// gives the keys back to the composer. True: consumed.
+    pub(super) fn files_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pane_tab() != ChatTab::Files
+            || !self
+                .files_focus
+                .as_ref()
+                .is_some_and(|f| f.is_focused(window))
+        {
+            return false;
+        }
+        let cmd = ks.modifiers.platform || ks.modifiers.control;
+        match (ks.key.as_str(), cmd) {
+            ("up" | "down", false) => return self.step_tree(ks.key == "down", cx),
+            ("enter", false) => {
+                if let Some(p) = self.ts.tree_sel.clone() {
+                    self.activate_row(&p, cx);
+                }
+            }
+            ("a", true) if !ks.modifiers.shift && self.shown_lines().is_some() => {
+                self.select_all_file(cx)
+            }
+            ("c", true) if self.has_file_sel() => self.copy_selection(cx),
+            ("escape", false) => {
+                (self.ts.sel, self.ts.menu) = (None, None);
+                if let Some(lu) = &self.live {
+                    lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+                }
+                cx.notify();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Enter on a row of the tree: what a click does (a folder opens or closes, a file is read for the preview).
+    fn activate_row(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(d) = &self.tree.data else { return };
+        let Some(r) = row_paths(d)
+            .iter()
+            .position(|p| p == path)
+            .map(|i| &d.rows[i])
+        else {
+            return;
+        };
+        let (dir, more, notice) = (r.dir, r.more > 0, r.notice);
+        if notice || self.previewing() {
+        } else if more {
+            let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+            self.list_dir(parent.to_string(), true, cx);
+        } else if dir {
+            if !self.ts.tree_open.remove(path) {
+                self.ts.tree_open.insert(path.to_string());
+                self.list_dir(path.to_string(), false, cx);
+            }
+            cx.notify();
+        } else {
+            self.open_preview(path.to_string(), cx);
+        }
+    }
+
     /// A session that is not open is previewed in the chat: the tabs have nothing of it (see [`preview_note`]).
     pub(super) fn previewing(&self) -> bool {
         self.live.as_ref().is_some_and(|l| l.live.preview.is_some())
@@ -811,9 +878,18 @@ impl TuiView {
 
     /// `.fx`: the tree on the left (250px), the preview of the selected file on the right.
     fn files_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let focus = self.files_focus.clone();
         let shell = |body: Div| {
-            div()
-                .debug_selector(|| "tab-pane".to_string())
+            let mut d = div();
+            // a pane of an embedded view takes the keys once it is clicked (see `files_key`)
+            if let Some(f) = focus.clone() {
+                d = d
+                    .track_focus(&f)
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        window.focus(&f, cx)
+                    });
+            }
+            d.debug_selector(|| "tab-pane".to_string())
                 .flex_1()
                 .min_h(px(0.))
                 .my(px(10.))

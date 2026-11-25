@@ -208,6 +208,8 @@ pub struct TuiView {
     pub(crate) term: Option<gpui::Entity<term_pane::TermPane>>,
     /// `Some` when the view is one chat frame of the Super Agent surface (see [`Embed`]); `None` is the TUI view.
     pub(crate) embed: Option<Embed>,
+    /// The Files pane of an embedded view holds the keys while this has the focus (made when the pane is first drawn).
+    pub(crate) files_focus: Option<gpui::FocusHandle>,
     /// Run in terminal of the fenced command blocks: when each was first drawn whole, and the pending approval click.
     gate: std::cell::RefCell<synthesis_view::codeblock::Gate>,
     /// Origin of the gate's clock.
@@ -310,6 +312,7 @@ impl TuiView {
             window_active: None,
             term: None,
             embed: None,
+            files_focus: None,
             gate: Default::default(),
             epoch: std::time::Instant::now(),
         }

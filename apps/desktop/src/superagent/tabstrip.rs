@@ -237,6 +237,8 @@ impl SuperAgentView {
                 "  (Ctrl+`)",
             ))
             .child(tool(Segment::Browser, "sa-dock-browser", "globe", ""))
+            .child(tool(Segment::Files, "sa-dock-files", "folder", ""))
+            .child(tool(Segment::Diff, "sa-dock-diff", "git-branch", ""))
             .child(tool(
                 Segment::Details,
                 "sa-dock-details",
