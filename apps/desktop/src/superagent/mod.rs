@@ -127,7 +127,14 @@ impl SuperAgentView {
         let mut subs = vec![cx.observe_in(&outcomes, window, |v, _, window, cx| {
             v.outcomes_changed(window, cx)
         })];
-        subs.push(cx.observe(&host, |v, _, cx| {
+        subs.push(cx.observe(&host, |v, host, cx| {
+            // `/focus` typed in a session frame is the window's focus mode (Alt+Shift+F)
+            let asked = (host.read(cx).views().iter())
+                .filter_map(|t| t.update(cx, |t, _| t.embed_take_focus_req()))
+                .last();
+            if let Some(on) = asked {
+                v.set_focus_mode(on, cx);
+            }
             v.refresh_port(cx);
             cx.notify();
         }));
@@ -745,8 +752,11 @@ impl SuperAgentView {
 
     /// Focus mode on or off (Alt+Shift+F): applies to every hosted session.
     pub(crate) fn toggle_focus(&mut self, cx: &mut Context<Self>) {
-        self.focus_mode = !self.focus_mode;
-        let on = self.focus_mode;
+        self.set_focus_mode(!self.focus_mode, cx);
+    }
+
+    fn set_focus_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.focus_mode = on;
         for v in self.host.read(cx).views() {
             v.update(cx, |t, cx| t.set_focus(on, cx));
         }
