@@ -9,8 +9,8 @@ pub mod frames;
 pub mod goal;
 pub mod home;
 pub mod kit;
-pub mod outcomes;
 pub mod material;
+pub mod outcomes;
 mod picker;
 pub mod port;
 pub mod rail;
@@ -850,8 +850,8 @@ impl SuperAgentView {
             return self.picker_key(ev, window, cx);
         }
         let o = self.outcomes.read(cx);
-        if o.state.form.is_some() || o.state.guide.is_some() {
-            // the contract form and the enable dialog are modal: their keys are the outcomes view's
+        if o.state.guide.is_some() {
+            // the enable dialog is modal: their keys are the outcomes view's
             return self.outcomes.update(cx, |o, cx| o.on_key(ev, window, cx));
         }
         let bare = !(m.control || m.alt || m.platform || m.shift);
@@ -1103,7 +1103,7 @@ impl Render for SuperAgentView {
                 c.modal(cx)
             })
         });
-        let modals = self.outcomes.update(cx, |o, cx| o.modals(window, cx));
+        let modals = self.outcomes.update(cx, |o, cx| o.modals(cx));
         let picker = self.picker_overlay(cx);
         let side = self.sidebar(window, cx);
         let overlay = f32::from(window.viewport_size().width) < sidebar::OVERLAY_BELOW;

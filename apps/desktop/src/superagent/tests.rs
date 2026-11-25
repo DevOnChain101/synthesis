@@ -516,7 +516,10 @@ fn a_form_with_an_approval_in_flight_keeps_its_frame_and_says_so(cx: &mut TestAp
             cx,
         );
         f.form.stage = crate::superagent::outcomes::form::Stage::Approving(
-            match std::mem::replace(&mut f.form.stage, crate::superagent::outcomes::form::Stage::Edit) {
+            match std::mem::replace(
+                &mut f.form.stage,
+                crate::superagent::outcomes::form::Stage::Edit,
+            ) {
                 crate::superagent::outcomes::form::Stage::Review(r) => r,
                 _ => unreachable!(),
             },

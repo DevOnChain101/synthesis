@@ -23,11 +23,11 @@ use synthesis_view::outcomes::{InspectorContent, MessageRow};
 
 use super::outcome::{AttemptRow, item_finished, item_status, word};
 use crate::live::{ARM_MS, now_ms};
+use crate::superagent::home::{RowSpec, row, section};
+use crate::superagent::kit::{self, ButtonKind, Status};
 use crate::superagent::outcomes::link::{Delivery, UNSETTLED};
 use crate::superagent::outcomes::model::{Screen, State};
 use crate::superagent::outcomes::{MessageSent, OutcomesView};
-use crate::superagent::home::{RowSpec, row, section};
-use crate::superagent::kit::{self, ButtonKind, Status};
 use crate::superagent::tokens::{self as t, hsla};
 
 /// Lines of recent events shown, and the width each is cut to.

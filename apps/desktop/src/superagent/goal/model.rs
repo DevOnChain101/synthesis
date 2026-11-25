@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use synthesis_view::outcomes::WSL2_REFUSAL;
 
-use crate::superagent::outcomes::form::{Form, Stage};
-use crate::superagent::outcomes::model::Screen;
 use crate::superagent::chat::model::ARM;
 use crate::superagent::frames::GoalKind;
+use crate::superagent::outcomes::form::{Form, Stage};
+use crate::superagent::outcomes::model::Screen;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {

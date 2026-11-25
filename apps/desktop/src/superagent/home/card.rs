@@ -12,8 +12,8 @@ use synthesis_view::outcomes::BriefRow;
 use super::data::NeedRow;
 use super::{HomeView, Open};
 use crate::approvals::Popup;
-use crate::superagent::outcomes::render::card_layout;
 use crate::superagent::kit::{self, ButtonKind};
+use crate::superagent::outcomes::render::card_layout;
 use crate::superagent::tokens::{self as t, hsla};
 
 /// The collapsed brief keeps the first field to this much (the same cut as `Popup::first_cut`).

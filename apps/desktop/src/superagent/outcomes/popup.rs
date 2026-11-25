@@ -10,18 +10,12 @@
 //! "Later", dismisses it. Any implicit event (another tab, another outcome, a click elsewhere, the window going to the
 //! background) gives the keys back at once.
 
-use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
-};
-use synthesis_cli_ui_render::theme as t;
+use gpui::{Context, FocusHandle, Window};
 
 use super::OutcomesView;
 use super::model::{CentreTab, Screen};
 use crate::approvals::{self, Ages, Kind, Out, Popup, Row};
 use crate::live::now_ms;
-use crate::theme::hsla;
-use crate::widgets::chrome::{dim, icon, strong, text, with_alpha};
 
 /// Alt+A reached a session that waits for a tool permission: the shell opens it in the TUI view (the answer
 /// is given in the session itself, never here).
@@ -185,18 +179,6 @@ impl OutcomesView {
         self.focus_popup(now, window, cx);
     }
 
-    /// Per frame, before drawing: first-seen ages of what waits, and the card follows the fresh data (a new revision
-    /// or brief hash is a new card with a notice; a card no longer pending closes it).
-    pub(super) fn sync_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.drop_stale_focus(window, cx);
-        self.sync_inner();
-        // the card lost the keys (dismissed, other card, outcome gone) while it still holds GPUI focus, or is gone
-        // with it: the view gets the window's focus back at once, so no key is lost on the way
-        if self.visible && !self.pop.focus && self.pop.handle.is_focused(window) {
-            window.focus(&self.focus, cx);
-        }
-    }
-
     /// The keys are the card's only while it holds the window's own focus and nothing implicit happened since: a
     /// click elsewhere, another centre tab, another outcome. Any of those gives the keys back to the view.
     fn drop_stale_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -223,91 +205,6 @@ impl OutcomesView {
     /// way back in is never read by the card.
     pub fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release_popup_focus(window, cx);
-    }
-
-    fn sync_inner(&mut self) {
-        let now = self.now();
-        let (st, w) = (&self.state, &mut self.pop);
-        let ready = st.screen == Screen::Ready;
-        let pending: Vec<&str> = if ready {
-            st.items
-                .iter()
-                .filter(|i| i.row.needs_you.decisions_pending > 0)
-                .map(|i| i.row.id.as_str())
-                .collect()
-        } else {
-            vec![]
-        };
-        w.ages.observe(pending, now);
-        w.tool_ages.observe(
-            w.tools.iter().chain(&w.chat_asks).map(|(k, _)| k.as_str()),
-            now,
-        );
-        let goal_of = |id: &str| {
-            st.items
-                .iter()
-                .find(|i| i.row.id == id)
-                .map(|i| i.row.goal.clone())
-        };
-        let card = st.cards().iter().find(|c| c.resolvable()).cloned();
-        let Some(shown) = w.shown.take() else {
-            // a decision of the selected outcome is pending and nothing else is up: the card opens by itself, WITHOUT
-            // the keys (the view keeps them); a card the person put off stays off until it changes
-            let sel = st
-                .selected
-                .clone()
-                .filter(|s| st.detail.as_ref().is_some_and(|d| &d.outcome == s));
-            if let (true, Some(o), Some(c)) = (ready, sel, card)
-                && w.dismissed.as_ref() != Some(&card_key(&c))
-                && let Some(goal) = goal_of(&o)
-            {
-                w.shown = Some(Shown::Card(Box::new(Popup::new(o, c, now)), goal));
-            }
-            w.focus = false;
-            return;
-        };
-        let outcome = match &shown {
-            Shown::Loading { outcome, .. } => outcome.clone(),
-            Shown::Card(p, _) => p.outcome.clone(),
-        };
-        let Some(goal) = goal_of(&outcome).filter(|_| ready) else {
-            // the outcome is gone, or the link ended: nothing to answer
-            w.focus = false;
-            return;
-        };
-        let landed = st.selected.as_deref() == Some(outcome.as_str())
-            && st.detail.as_ref().is_some_and(|d| d.outcome == outcome);
-        w.shown = match (shown, landed) {
-            (Shown::Loading { .. }, false) => Some(Shown::Loading { outcome, goal }),
-            // its detail landed: the card, or nothing when nothing is pending any more
-            (Shown::Loading { .. }, true) => {
-                card.map(|c| Shown::Card(Box::new(Popup::new(outcome, c, now)), goal))
-            }
-            // the selection moved to another outcome: its card is not this one (its own opens next frame)
-            (Shown::Card(..), false) => None,
-            (Shown::Card(mut p, _), true) => card.map(|c| {
-                // the reply (`Msg::Answered`, counted by `State::answers`) came back: whatever it said, the choice
-                // is gone and the card may answer again, only after a new choice
-                // (a link that ended also clears the in-flight flag: that ends the wait too)
-                if p.sent_at.is_some_and(|n| st.answers > n || !st.ask.sending) {
-                    p.sent_at = None;
-                    p.ask.answered(st.ask.notice.clone().unwrap_or_default());
-                }
-                if p.card.id != c.id {
-                    // a DIFFERENT card is not what the person was about to answer: the keys go back to the view
-                    // (only a new revision of the same card keeps them)
-                    w.focus = false;
-                    *p = Popup::new(outcome, c, now);
-                } else {
-                    p.update(c, now);
-                }
-                Shown::Card(p, goal)
-            }),
-        };
-        // nothing shown any more (answered, or nothing pending): no focus either
-        if w.shown.is_none() {
-            w.focus = false;
-        }
     }
 
     /// Alt+A: the next row (the oldest first, then around) is opened.
@@ -485,312 +382,31 @@ impl OutcomesView {
         }
         cx.notify();
     }
+}
 
-    // ------------------------------------------------------------------------------------- drawing
-
-    /// Tallest the card may be: about 42% of the window collapsed, 60% expanded, and never less than the answers,
-    /// buttons and hint need (the brief is the part that gives way).
-    fn popup_max_h(&self, expanded: bool) -> f32 {
-        let h = (self.win_h - crate::ui::TITLEBAR_H - 56.).max(300.);
-        (h * if expanded { 0.6 } else { 0.42 }).max(if expanded { 420. } else { 380. })
-    }
-
-    /// The decision card docked under the centre tabs: a cream border (the Synthesis accent), not the amber of a tool
-    /// permission. Full brief in the server's order, nothing preselected, two steps (choose, then Enter).
-    pub(super) fn decision_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if !self.popup_visible() {
-            return None;
-        }
-        let w = &self.pop;
-        let shown = w.shown.as_ref()?;
-        // the keys are in the popup (a bright border) or in the prompt (a dim one): never both, always visible
-        let focused = w.focus && matches!(shown, Shown::Card(..));
-        let card = div()
-            .debug_selector(|| "decision".to_string())
-            .id("decision")
-            .min_h(px(0.))
-            // collapsed: about 40% of the chat column; expanded (Tab): about 60%, the brief scrolls inside and the
-            // answers and buttons stay pinned. Never less than what the pinned parts need.
-            .max_h(px(
-                self.popup_max_h(matches!(shown, Shown::Card(p, _) if p.full))
-            ))
-            .overflow_hidden()
-            .mx(px(12.))
-            .mb(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .px(px(12.))
-            .py(px(8.))
-            .bg(crate::theme::solid(t::SURFACE))
-            .border_2()
-            .border_color(if focused {
-                hsla(t::ACCENT)
-            } else {
-                with_alpha(hsla(t::ACCENT), 0.7)
-            })
-            .rounded(px(10.))
-            // the card holds the window's focus while it has the keys (the prompt does not then)
-            .track_focus(&w.handle)
-            // a press on the card gives it the keys (Enter inert for ARM_MS from then); a press anywhere outside it
-            // gives them back to the prompt (the click that goes to type there)
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    let now = this.now();
-                    this.focus_popup(now, window, cx);
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                this.release_popup_focus(window, cx);
-            }));
-        let head = |goal: &str, sub: String| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(icon("shield", 14., hsla(t::ACCENT)))
-                        .child(
-                            div()
-                                .text_size(px(15.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(strong())
-                                .truncate()
-                                .child(format!("Decision: {goal}")),
-                        ),
-                )
-                .child(div().text_color(dim()).child(sub))
-        };
-        Some(
-            match shown {
-                Shown::Loading { goal, .. } => card
-                    .child(head(goal, "Loading the decision...".into()))
-                    .child(div().text_color(text()).child(
-                        "This outcome is now selected. The decision appears here when it arrives.",
-                    )),
-                Shown::Card(p, goal) => {
-                    let c = &p.card;
-                    let mut card = card.child(head(
-                        goal,
-                        format!(
-                            "{} · revision {} · {}{}",
-                            c.kind,
-                            c.revision,
-                            c.state,
-                            if c.expires_at.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · expires {}", c.expires_at)
-                            }
-                        ),
-                    ));
-                    // Collapsed (the default, also for a new card or revision): only the first field the server lists,
-                    // in two lines at most, and a visible line saying what is not shown. Expanded (Tab, or a click on
-                    // that line): every field in the server's order, scrolling inside its own box so the answers and
-                    // buttons below stay in sight. Nothing is ever only reachable some other way.
-                    let hidden = c.rows.len().saturating_sub(1);
-                    let first_cut = p.first_cut();
-                    let mut brief = div()
-                        .id("decision-brief")
-                        .debug_selector(|| "decision-brief".to_string())
-                        // collapsed it is two lines and never squeezed; expanded it is the part that gives way
-                        .flex_shrink(if p.full { 1. } else { 0. })
-                        .min_h(px(0.))
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap(px(5.));
-                    for (i, r) in
-                        c.rows
-                            .iter()
-                            .enumerate()
-                            .take(if p.full { usize::MAX } else { 1 })
-                    {
-                        brief = brief.child(
-                            div()
-                                .debug_selector(move || format!("decision-field-{i}"))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(dim())
-                                        .child(r.label.clone()),
-                                )
-                                .child({
-                                    let b = div().text_color(text()).child(r.text.clone());
-                                    if p.full { b } else { b.line_clamp(2) }
-                                }),
-                        );
-                    }
-                    card = card.child(brief);
-                    if hidden > 0 || first_cut || p.full {
-                        let toggle = cx.listener(|this, _, window, cx| {
-                            let now = this.now();
-                            this.focus_popup(now, window, cx);
-                            if let Some(Shown::Card(p, _)) = this.pop.shown.as_mut() {
-                                p.toggle_full();
-                            }
-                            cx.notify();
-                        });
-                        card = card.child(
-                            div()
-                                .id("decision-more")
-                                .debug_selector(|| "decision-more".to_string())
-                                .flex_none()
-                                .cursor_pointer()
-                                .text_color(hsla(t::ACCENT_LIGHT))
-                                .on_click(toggle)
-                                .child(if p.full {
-                                    "Tab: show less".to_string()
-                                } else if hidden > 0 {
-                                    format!(
-                                        "{hidden} more section{} not shown: Tab for the full brief",
-                                        if hidden == 1 { "" } else { "s" }
-                                    )
-                                } else {
-                                    "Tab: full brief".to_string()
-                                }),
-                        );
-                    }
-                    match &p.ask.picker {
-                        Some(pk) => {
-                            for (i, o) in pk.options.iter().enumerate() {
-                                let on = pk.cursor() == Some(i);
-                                card = card.child(
-                                    div()
-                                        .id(("decision-opt", i))
-                                        .debug_selector(move || format!("decision-opt-{i}"))
-                                        .flex_none()
-                                        .flex()
-                                        .gap(px(8.))
-                                        .px(px(8.))
-                                        .py(px(0.))
-                                        .rounded(px(6.))
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if on {
-                                            hsla(t::ACCENT)
-                                        } else {
-                                            hsla(t::BORDER)
-                                        })
-                                        .when(on, |d| d.bg(hsla(t::ELEVATED)))
-                                        .hover(|d| d.bg(hsla(t::ELEVATED)))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            let now = this.now();
-                                            this.focus_popup(now, window, cx);
-                                            if let Some(Shown::Card(p, _)) = this.pop.shown.as_mut()
-                                            {
-                                                p.ask.choose(i);
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div()
-                                                .w(px(14.))
-                                                .text_color(hsla(t::ACCENT))
-                                                .child(if on { "›" } else { "" }),
-                                        )
-                                        .child(div().text_color(dim()).child(format!("{}.", i + 1)))
-                                        .child(div().text_color(strong()).child(o.label.clone())),
-                                );
-                            }
-                        }
-                        None => {
-                            card = card.child(div().text_color(hsla(t::WARN)).child(format!(
-                                "This decision is {}: it cannot be answered here.",
-                                c.state
-                            )));
-                        }
-                    }
-                    let send = cx.listener(|this, _, window, cx| {
-                        let now = this.now();
-                        let out = match this.pop.shown.as_mut() {
-                            Some(Shown::Card(p, _)) => p.key("enter", now),
-                            _ => Out::Pass,
-                        };
-                        this.popup_out(out, window, cx);
-                    });
-                    card.child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(
-                                div()
-                                    .id("decision-send")
-                                    .debug_selector(|| "decision-send".to_string())
-                                    .cursor_pointer()
-                                    .px(px(10.))
-                                    .py(px(3.))
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    // dim while the whole brief has not been shown (the line above the answers says why)
-                                    .border_color(if p.send_blocked() {
-                                        hsla(t::BORDER)
-                                    } else {
-                                        hsla(t::ACCENT)
-                                    })
-                                    .text_color(if p.send_blocked() { dim() } else { strong() })
-                                    .on_click(send)
-                                    .child(if p.send_blocked() {
-                                        "Send answer (expand first)"
-                                    } else {
-                                        "Send answer"
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("decision-later")
-                                    .debug_selector(|| "decision-later".to_string())
-                                    .cursor_pointer()
-                                    .px(px(10.))
-                                    .py(px(3.))
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(hsla(t::BORDER))
-                                    .text_color(text())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.dismiss_popup(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child("Later"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            // one line always: a longer hint when the card has the keys must not move the
-                            // answers under the pointer mid-click
-                            .truncate()
-                            .debug_selector(|| "decision-hint".to_string())
-                            .text_color(if focused {
-                                hsla(t::ACCENT_LIGHT)
-                            } else {
-                                dim()
-                            })
-                            .child(if focused {
-                                "1-9 or arrows choose · Enter sends · Tab brief · Esc back"
-                            } else {
-                                "Alt+A to answer"
-                            }),
-                    )
-                    .children(
-                        p.ask
-                            .notice
-                            .clone()
-                            .map(|n| div().text_color(hsla(t::ACCENT_LIGHT)).child(n)),
-                    )
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_tui_view_has_no_answer_path_for_a_decision_any_more() {
+        // the grep test of S0: nothing of the decision card, the approvals list or the answer worker is in the TUI view
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui_view");
+        let banned = [
+            "send_effect",
+            "Effect::Resolve",
+            "outcomes_view",
+            "superagent::outcomes",
+            "crate::approvals",
+            "OpenOutcome",
+            "ChatTab::Outcomes",
+        ];
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                for b in banned {
+                    assert!(!text.contains(b), "{} mentions {b}", p.display());
                 }
             }
-            .into_any_element(),
-        )
+        }
     }
 }

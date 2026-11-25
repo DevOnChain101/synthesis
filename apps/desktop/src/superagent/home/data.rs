@@ -7,9 +7,9 @@ use synthesis_view::outcomes::{NeedsYou, WSL2_REFUSAL};
 
 use crate::approvals::{self, Kind, Row};
 use crate::live::now_ms;
+use crate::superagent::kit::Status;
 use crate::superagent::outcomes::OutcomesView;
 use crate::superagent::outcomes::model::{Effect, Item, Screen, State};
-use crate::superagent::kit::Status;
 
 /// What ships later (approvals-concept A1 queue view model, A4 `resolve_many`): the one-tap recommended button, batch
 /// apply and Undo. The home is built so they slot into a row, and nothing draws them while a gate is false.

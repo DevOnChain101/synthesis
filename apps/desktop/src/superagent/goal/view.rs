@@ -10,10 +10,10 @@ use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 
 use super::model::Field;
 use super::{GoalForm, review};
-use crate::superagent::outcomes::form::Stage;
-use crate::superagent::outcomes::model::Screen;
 use crate::superagent::frames::GoalKind;
 use crate::superagent::kit::{self, ButtonKind, text};
+use crate::superagent::outcomes::form::Stage;
+use crate::superagent::outcomes::model::Screen;
 use crate::superagent::tokens::{self as t, hsla};
 
 /// What the folder field says about a read-only goal: the worker reads the whole folder.
