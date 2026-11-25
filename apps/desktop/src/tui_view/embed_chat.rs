@@ -21,6 +21,35 @@ impl TuiView {
         self.live.as_ref().map(|l| l.prompt.clone())
     }
 
+    /// A key as the window-wide hook delivers it (tests).
+    #[cfg(test)]
+    pub(crate) fn test_key(
+        &mut self,
+        k: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ks = gpui::Keystroke::parse(k).unwrap();
+        self.on_key(&ks, window, cx)
+    }
+
+    /// The Files pane as the tests see it: selected row, text shown, whether text is selected, composer focused.
+    #[cfg(test)]
+    pub(crate) fn test_files(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> (Option<String>, Option<String>, bool, bool) {
+        (
+            self.ts.tree_sel.clone(),
+            self.shown_lines().map(|l| l.join("\n")),
+            self.has_file_sel(),
+            self.live
+                .as_ref()
+                .is_some_and(|l| gpui::Focusable::focus_handle(&l.prompt, cx).is_focused(window)),
+        )
+    }
+
     /// The x on an image chip: the TUI's own unattach.
     pub(crate) fn embed_unattach(&mut self, i: usize, cx: &mut Context<Self>) {
         if let Some(lu) = &mut self.live {

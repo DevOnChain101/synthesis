@@ -704,9 +704,131 @@ mod side {
         finish(&f, &sa, v);
     }
 
+    /// Types `line` into the front session's composer and sends it; what it left behind (a note, a dialog, a queued
+    /// line) is the count of what the frame draws.
+    fn say(
+        sa: &Entity<SuperAgentView>,
+        v: &mut VisualTestContext,
+        line: &str,
+    ) -> ((usize, usize, usize), (usize, usize, usize)) {
+        let view = sa.read_with(v, |s, cx| s.host.read(cx).views().last().cloned().unwrap());
+        let count = |v: &mut VisualTestContext| {
+            view.read_with(v, |t, _| {
+                let l = t.embed_live().unwrap();
+                (l.convo().items.len(), l.dialogs.len(), l.queue.len())
+            })
+        };
+        let before = count(v);
+        let prompt = view.read_with(v, |t, _| t.embed_prompt()).unwrap();
+        prompt.update_in(v, |s, w, cx| s.set_value(line.to_string(), w, cx));
+        view.update_in(v, |t, w, cx| t.embed_submit(w, cx));
+        v.run_until_parked();
+        (before, count(v))
+    }
+
+    /// Every command that answers in the TUI answers in a session frame: a note, a dialog or a queued line, never
+    /// silence (the frame draws the notes and the front dialog of the shared `Live`).
+    #[gpui::test]
+    fn commands_show_a_visible_result_in_a_session_frame(cx: &mut TestAppContext) {
+        let (f, sa, v) = two(cx);
+        for cmd in [
+            "/memory", "/peers", "/resume", "/clean", "/rewind", "/close",
+        ] {
+            // a dialog left by the previous command is closed first
+            let view = sa.read_with(v, |s, cx| s.host.read(cx).views().last().cloned().unwrap());
+            view.update(v, |t, _| t.embed_live().map(|_| ()));
+            let (before, after) = say(&sa, v, cmd);
+            assert_ne!(before, after, "{cmd} is silent in a session frame");
+            view.update_in(v, |t, w, cx| t.test_key("escape", w, cx));
+        }
+        finish(&f, &sa, v);
+    }
+
+    /// The Files pane of a session frame is walked by keys as in the TUI while it holds the focus; the composer
+    /// keeps its keys while it has them; a secret file is refused by the same preview rules.
+    #[gpui::test]
+    fn the_files_pane_takes_the_tui_keys_only_while_it_has_the_focus(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (f, cfg) = super::super::session::host::tests::fx(1);
+        let dir = f.base.join("f0");
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join(".env"), "TOKEN=abc").unwrap();
+        let (sa, v) = open_live(cx, cfg);
+        let req = SessionStart {
+            first_message: "hi".into(),
+            folder: Some(dir.to_string_lossy().into_owned()),
+            model: None,
+            title: None,
+        };
+        start(&sa, v, &req).unwrap();
+        let view = sa.read_with(v, |s, cx| s.host.read(cx).views().last().cloned().unwrap());
+        view.update(v, |t, cx| t.show_tab(ChatTab::Files, None, cx));
+        v.run_until_parked();
+        let key = |v: &mut VisualTestContext, k: &'static str| {
+            view.update_in(v, |t, w, cx| t.test_key(k, w, cx))
+        };
+        // a test window is never the active one, which is what makes a hosted view take keys
+        view.update(v, |t, _| t.active = true);
+        let probe = |v: &mut VisualTestContext| view.update_in(v, |t, w, cx| t.test_files(w, cx));
+        let sel = |v: &mut VisualTestContext| probe(v).0;
+        // the composer has the focus: the keys are not taken
+        let prompt = view.read_with(v, |t, _| t.embed_prompt()).unwrap();
+        prompt.update_in(v, |s, w, cx| s.focus(w, cx));
+        assert!(!key(v, "down") && sel(v).is_none());
+        // the pane has it
+        view.update_in(v, |t, w, cx| {
+            let h = t.files_focus.clone().unwrap();
+            w.focus(&h, cx)
+        });
+        // the scan runs on a worker thread
+        for _ in 0..400 {
+            if view.read_with(v, |t, _| t.tree_loaded()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            v.run_until_parked();
+        }
+        assert!(view.read_with(v, |t, _| t.tree_loaded()));
+        for _ in 0..4 {
+            if sel(v).as_deref() == Some("a.txt") {
+                break;
+            }
+            let took = key(v, "down");
+            assert!(took, "{:?}", probe(v));
+            v.run_until_parked();
+        }
+        assert_eq!(sel(v).as_deref(), Some("a.txt"));
+        assert!(key(v, "enter"));
+        v.run_until_parked();
+        let shown = |v: &mut VisualTestContext| probe(v).1;
+        assert_eq!(shown(v).as_deref(), Some("hello"));
+        assert!(key(v, "cmd-a"));
+        assert!(probe(v).2);
+        // a secret file is never listed, so no key reaches it
+        for _ in 0..4 {
+            key(v, "down");
+            v.run_until_parked();
+            assert_ne!(sel(v).as_deref(), Some(".env"));
+            assert_ne!(shown(v).as_deref(), Some("TOKEN=abc"));
+        }
+        // Esc gives the keys back to the composer
+        assert!(key(v, "escape"));
+        assert!(probe(v).3);
+        finish(&f, &sa, v);
+    }
+
     #[gpui::test]
     fn the_title_bar_icons_follow_the_availability_table(cx: &mut TestAppContext) {
         let (f, sa, v) = two(cx);
+        // Files and Diff have icons too: a click opens their segment
+        for (id, seg) in [
+            ("sa-dock-files", Segment::Files),
+            ("sa-dock-diff", Segment::Diff),
+        ] {
+            let b = v.debug_bounds(id).unwrap();
+            v.simulate_click(b.center(), Modifiers::default());
+            assert_eq!(shown(&sa, v), Some(seg));
+        }
         // a click on the Browser icon opens the sidebar on Browser
         let b = v.debug_bounds("sa-dock-browser").unwrap();
         v.simulate_click(b.center(), Modifiers::default());
@@ -725,6 +847,13 @@ mod side {
         // the home: nothing at all, the icons are dimmed (no click target) and say why
         sa.update(v, |s, cx| s.focus_tab(0, cx));
         v.run_until_parked();
+        sa.update(v, |s, cx| s.toggle_side(Segment::Files, cx));
+        assert_eq!(shown(&sa, v), None);
+        assert!(
+            sa.read_with(v, |s, _| s.notice.clone())
+                .unwrap()
+                .contains("Files")
+        );
         sa.update(v, |s, cx| s.toggle_side(Segment::Details, cx));
         assert_eq!(shown(&sa, v), None);
         assert!(
