@@ -3,7 +3,7 @@ use synthesis_view::outcomes::{DecisionCard, InspectorTab};
 
 use super::*;
 use crate::live::ARM_MS;
-use crate::outcomes_view::{form, sample};
+use crate::superagent::outcomes::{form, sample};
 
 fn k(name: &str) -> Key<'_> {
     Key {

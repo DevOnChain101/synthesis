@@ -15,8 +15,8 @@ use synthesis_view::outcomes::{InspectorContent, MessageRow, MessageState};
 
 use super::outcome::OutcomeFrame;
 use super::worker::WorkerFrame;
-use crate::outcomes_view::OutcomesView;
-use crate::outcomes_view::model::Screen;
+use crate::superagent::outcomes::OutcomesView;
+use crate::superagent::outcomes::model::Screen;
 use crate::superagent::tokens::{self as t, hsla};
 
 /// The panel of the shell (r 12, `--bg`, 1 px stroke) holding a frame.

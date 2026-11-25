@@ -145,13 +145,19 @@ pub const SANDBOX_LIMIT_KEYS: [&str; 7] = [
 /// this crate does not depend on core.
 const ORCH_MAX_PARALLEL: u64 = 16;
 const ORCH_MAX_ATTEMPTS: u64 = 10;
+/// Equal to `synthesis_core::outcome::{HARD_MAX_TURNS, HARD_MAX_TOKENS}` (pinned by a test in
+/// `synthesis-app`).
+pub const ORCH_HARD_MAX_TURNS: u64 = 200;
+pub const ORCH_HARD_MAX_TOKENS: u64 = 20_000_000;
 
 /// Every key `synt.orchestrator` accepts (`attempt` is an object with the two `attempt.*` keys).
-pub const ORCHESTRATOR_KEYS: [&str; 10] = [
+pub const ORCHESTRATOR_KEYS: [&str; 12] = [
     "enabled",
     "max_parallel_workers",
     "max_attempts_per_work_item",
     "max_cost_usd",
+    "max_turns",
+    "max_tokens",
     "attempt",
     "worktree_retention_days",
     "decision_expiry_hours",
@@ -212,6 +218,11 @@ pub struct OrchestratorSettings {
     pub max_cost_usd: Option<f64>,
     pub attempt_max_cost_usd: Option<f64>,
     pub attempt_max_wall_secs: Option<u64>,
+    /// Provider calls per attempt (a turn), 1..=200, never unlimited.
+    /// `None` (unset): 50 for a write attempt, 80 for a read-only one; set: both, read-only at most 80.
+    pub max_turns: Option<u32>,
+    /// Raw total tokens per attempt (provider usage counts, no prices), 1..=20_000_000.
+    pub max_tokens: u64,
     pub worktree_retention_days: u32,
     pub decision_expiry_hours: u32,
     pub idle_exit_minutes: u32,
@@ -230,6 +241,8 @@ impl Default for OrchestratorSettings {
             max_cost_usd: None,
             attempt_max_cost_usd: None,
             attempt_max_wall_secs: None,
+            max_turns: None,
+            max_tokens: 2_000_000,
             worktree_retention_days: 7,
             decision_expiry_hours: 24,
             idle_exit_minutes: 10,
@@ -297,6 +310,20 @@ impl OrchestratorSettings {
                 "max_cost_usd" => match money(v) {
                     Some(n) => self.max_cost_usd = Some(n),
                     None => bad(diags, &mut invalid, what, k, "a positive number"),
+                },
+                "max_turns" => match int(v, 1, ORCH_HARD_MAX_TURNS) {
+                    Some(n) => self.max_turns = Some(n as u32),
+                    None => bad(diags, &mut invalid, what, k, "a whole number from 1 to 200"),
+                },
+                "max_tokens" => match int(v, 1, ORCH_HARD_MAX_TOKENS) {
+                    Some(n) => self.max_tokens = n,
+                    None => bad(
+                        diags,
+                        &mut invalid,
+                        what,
+                        k,
+                        "a whole number from 1 to 20000000",
+                    ),
                 },
                 "worktree_retention_days" => match int(v, 1, 3650) {
                     Some(n) => self.worktree_retention_days = n as u32,

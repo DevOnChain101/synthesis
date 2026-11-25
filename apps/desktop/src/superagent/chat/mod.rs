@@ -40,7 +40,7 @@ use super::chathost;
 use super::kit::{self, ButtonKind, text};
 use super::tokens::{self as t, hsla};
 use crate::engine::{Choice, UiMsg};
-use crate::outcomes_view::model::OFF_LINES;
+use crate::superagent::outcomes::model::OFF_LINES;
 use crate::tui_view::TuiView;
 
 /// How often open cards are checked for expiry.

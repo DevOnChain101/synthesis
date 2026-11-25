@@ -1,5 +1,5 @@
 //! The kind picker as the mock's dialog (w 480, p 8, r 12 opaque): New session, New goal (writes), New goal
-//! (read-only). The model is `outcomes_view::kind_picker` (state in `OutcomesView.state.picker`): nothing is
+//! (read-only). The model is `superagent::outcomes::kind_picker` (state in `OutcomesView.state.picker`): nothing is
 //! preselected, 1 to 3 or the arrows choose, Enter does nothing until a row is chosen, Esc closes.
 
 use gpui::{
@@ -10,7 +10,7 @@ use gpui::{
 use super::frames::{Frame, GoalKind};
 use super::tokens::{self as t, hsla};
 use super::{SuperAgentView, kit};
-use crate::outcomes_view::kind_picker::{Kind, ROWS, refusal};
+use crate::superagent::outcomes::kind_picker::{Kind, ROWS, refusal};
 
 impl SuperAgentView {
     pub(crate) fn picker_open(&self, cx: &gpui::App) -> bool {

@@ -84,9 +84,9 @@ fn main() {
     }
     #[cfg(feature = "shot")]
     if let Some(a) =
-        synthesis_desktop::outcomes_view::shot::parse(&std::env::args().collect::<Vec<_>>())
+        synthesis_desktop::superagent::outcomes::shot::parse(&std::env::args().collect::<Vec<_>>())
     {
-        if let Err(e) = synthesis_desktop::outcomes_view::shot::render(a) {
+        if let Err(e) = synthesis_desktop::superagent::outcomes::shot::render(a) {
             eprintln!("synthesis-desktop: shot: {e}");
             std::process::exit(1);
         }

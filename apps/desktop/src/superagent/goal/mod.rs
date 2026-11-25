@@ -2,7 +2,7 @@
 //! `super-agent-v3` `vNew` and the approve dialog). Two kinds: writes (goal, criteria, checks, scope, budget,
 //! folder with its base commit) and read-only (goal, budget, attempts, any folder, rubric lines).
 //!
-//! The model is `outcomes_view::form`, unchanged: the text becomes a `Contract` checked by `validate_contract`, Send
+//! The model is `superagent::outcomes::form`, unchanged: the text becomes a `Contract` checked by `validate_contract`, Send
 //! stores a DRAFT on the server, the review shows what the server stored (version, hash, its diff), and approving is
 //! a separate, explicit act on exactly that version and hash. Nothing here approves anything by itself: no field is
 //! preselected, a prefill from a conductor card only fills text, and the approve button obeys the decision card's
@@ -32,9 +32,9 @@ use synthesis_harness::sanitize_for_display;
 use self::model::{Field, approve_ok, blocked, field_of, why_not_send};
 use super::chat::model::ARM;
 use super::frames::GoalKind;
-use crate::outcomes_view::form::{Form, FormText, Head, Stage, Submit};
-use crate::outcomes_view::link::{self, FormMsg, Link, Msg, Req};
-use crate::outcomes_view::model::Screen;
+use crate::superagent::outcomes::form::{Form, FormText, Head, Stage, Submit};
+use crate::superagent::outcomes::link::{self, FormMsg, Link, Msg, Req};
+use crate::superagent::outcomes::model::Screen;
 
 /// What the shell does with the frame.
 pub enum GoalEvent {

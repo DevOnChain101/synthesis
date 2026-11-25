@@ -1,6 +1,6 @@
 //! The open frames of the Super Agent view: tabs, the active one, and a browser-like history over frames
 //! (`docs/specs/super-agent-s1.md` section 5.1; DESIGN-NOTES section 10.1). Pure state, no window: the view turns a
-//! `Frame` into a body. Supersedes `outcomes_view/history.rs` (which stays until phase E deletes the old UI).
+//! `Frame` into a body. Supersedes `outcomes/history.rs` (which stays until phase E deletes the old UI).
 
 use std::collections::HashMap;
 

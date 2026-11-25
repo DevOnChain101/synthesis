@@ -1,33 +1,25 @@
-//! The Super Agent view (owner decisions 2026-11-17/18; `docs/specs/desktop.md` "Super Agent tab",
-//! `docs/specs/super-agent.md`, ADR-021): outcomes the orchestrator runs, three columns (list, Goal | Decisions |
-//! History, inspector). The module and its types keep the name `outcomes_view` (the thing is the outcome, ADR-021;
-//! only the tab is called Super Agent). It is a surface in the
-//! sense of ADR-021: it talks to the orchestrator only through `OutcomeClient` on its own worker thread (`link`),
-//! renders only `synthesis_view::outcomes` models, and depends on no orchestrator crate. This is not the
-//! Conductor (`docs/specs/conductor.md`). It also creates an outcome and revises a contract (`form`,
-//! `form_view`); a created or revised contract is approved only by a separate, explicit act after the
-//! server's own diff.
-//!
-//! Everything is on the keyboard (Tab between the columns, arrows, numbers, Enter, Esc); the mouse does the
-//! same things and nothing is mouse-only.
+//! The data and link owner of the Super Agent view (owner decisions 2026-11-17/18, 2026-11-25; `docs/specs/desktop.md`
+//! "Super Agent tab", `docs/specs/super-agent.md`, ADR-021). The module (formerly `outcomes_view`) keeps "outcomes"
+//! (the thing is the outcome; only the tab is called Super Agent). The old three-column outcomes UI is deleted: the
+//! Super Agent frames in `superagent/` draw everything, and this module holds the state (`model`), the worker thread
+//! (`link`, the only way to the orchestrator: a surface in the sense of ADR-021, depending on no orchestrator crate),
+//! the contract form model (`form`), the decision card rules (`ask`, `popup`) and the enable dialog (`guide_view`).
+//! This is not the Conductor (`docs/specs/conductor.md`).
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, ScrollHandle, Styled as _, Task, Window, div, point, px,
+    AnyElement, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, ScrollHandle, Styled as _, Task, Window, div, point, px,
 };
-use gpui_component::input::{InputEvent, InputState, TextareaState};
 use std::ops::Not as _;
 use synthesis_config::Env;
 
 use crate::live::now_ms;
-use form::{FormText, Stage};
 use link::{Link, Msg, Req};
 use model::{Effect, Key, Pane, Screen, State};
 
 pub mod ask;
 pub mod form;
-mod form_view;
 mod guide_view;
 pub mod history;
 pub mod kind_picker;
@@ -52,18 +44,8 @@ pub struct OutcomesView {
     started: bool,
     pump: Option<Task<()>>,
     scroll: [ScrollHandle; 3],
-    /// The inputs of the open form (made when it opens, dropped when it closes; the text lives in them).
-    form_ui: Option<FormUi>,
-    form_scroll: ScrollHandle,
-    /// The form was on its review stage at the last frame (the keys go back to the window when it starts).
-    was_reviewing: bool,
-    /// The review has been drawn at least once: before that nothing can approve it (a held Enter that sent
-    /// the form must not land on the button in the frame the review appears).
-    review_armed: bool,
     /// What waits for the person: the decision card docked under the centre tabs, Alt+A, the title bar's badge.
     pub(crate) pop: popup::Wire,
-    /// Height of the window at the last frame (the card's share of it).
-    win_h: f32,
     /// The list column is shown (the title bar's rail button hides it); kept for this window only.
     pub(crate) rail_open: bool,
     /// The shell shows this view (or Settings over it). While not, it never moves the window's focus.
@@ -84,21 +66,6 @@ pub struct MessageSent {
 }
 
 impl gpui::EventEmitter<MessageSent> for OutcomesView {}
-
-/// The text inputs and the two buttons' focus of the form. Lists are one entry per line.
-struct FormUi {
-    goal: Entity<TextareaState>,
-    criteria: Entity<TextareaState>,
-    checks: Entity<TextareaState>,
-    scope: Entity<TextareaState>,
-    budget: Entity<InputState>,
-    /// Holds the folder (its text is what is sent); typed into only for a remote engine, else the picker fills it.
-    workspace: Entity<InputState>,
-    /// The picker's button on the Tab ring.
-    ws_focus: FocusHandle,
-    confirm: FocusHandle,
-    cancel: FocusHandle,
-}
 
 impl OutcomesView {
     /// The live tab: it connects (and checks the setting) when it is first shown, never at launch.
@@ -129,12 +96,7 @@ impl OutcomesView {
             started: false,
             pump: None,
             scroll: Default::default(),
-            form_ui: None,
-            form_scroll: ScrollHandle::new(),
-            was_reviewing: false,
-            review_armed: false,
             pop: popup::Wire::new(cx),
-            win_h: 0.,
             rail_open: true,
             visible: true,
             hist,
@@ -456,16 +418,10 @@ impl OutcomesView {
         }
     }
 
-    /// The open form and the enable dialog as modals over the Super Agent view; their keys come back here.
-    pub(crate) fn modals(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        self.sync_form_ui(window, cx);
-        let (form, guide) = (self.form_overlay(window, cx), self.guide_overlay(cx));
-        (form.is_some() || guide.is_some())
-            .then(|| {
+    /// The enable dialog as a modal over the Super Agent view; its keys come back here.
+    pub(crate) fn modals(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.guide_overlay(cx)
+            .map(|guide| {
                 div()
                     .id("out-modals")
                     .absolute()
@@ -476,8 +432,7 @@ impl OutcomesView {
                             cx.stop_propagation();
                         }
                     }))
-                    .children(form)
-                    .children(guide)
+                    .child(guide)
                     .into_any_element()
             })
             .into_iter()
@@ -544,9 +499,6 @@ impl OutcomesView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.state.form.is_some() {
-            return self.form_key(ev, window, cx);
-        }
         let k = &ev.keystroke;
         let m = &k.modifiers;
         // a held key (auto-repeat) never acts on the disclosure: one deliberate press does
@@ -595,305 +547,8 @@ fn scroll(h: &ScrollHandle, n: i32) {
     h.set_offset(point(px(0.), px(y)));
 }
 
-// ------------------------------------------------------------------------------------------ the form
-
-impl FormUi {
-    fn new(init: &FormText, window: &mut Window, cx: &mut Context<OutcomesView>) -> Self {
-        let area = |ph: &'static str,
-                    rows: usize,
-                    v: &str,
-                    window: &mut Window,
-                    cx: &mut Context<OutcomesView>| {
-            cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .placeholder(ph)
-                    .auto_grow(rows, rows)
-                    .default_value(v.to_string())
-            })
-        };
-        let line =
-            |ph: &'static str, v: &str, window: &mut Window, cx: &mut Context<OutcomesView>| {
-                cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(ph)
-                        .default_value(v.to_string())
-                })
-            };
-        let workspace = line(
-            "/absolute/path/of/the/repository",
-            &init.workspace,
-            window,
-            cx,
-        );
-        // leaving the folder field reads the base commit again if the folder changed
-        cx.subscribe_in(&workspace, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Blur) {
-                this.workspace_left(cx);
-            }
-        })
-        .detach();
-        Self {
-            goal: area(
-                "What must be true when this is done?",
-                3,
-                &init.goal,
-                window,
-                cx,
-            ),
-            criteria: area(
-                "One acceptance criterion per line",
-                4,
-                &init.criteria,
-                window,
-                cx,
-            ),
-            checks: area(
-                "One verification command per line, for example: cargo test -p auth",
-                3,
-                &init.checks,
-                window,
-                cx,
-            ),
-            scope: area(
-                "One path pattern per line, for example: src/**",
-                2,
-                &init.scope,
-                window,
-                cx,
-            ),
-            budget: line(
-                "Most you accept to spend, in USD (for example 5)",
-                &init.budget,
-                window,
-                cx,
-            ),
-            workspace,
-            ws_focus: cx.focus_handle().tab_stop(true),
-            confirm: cx.focus_handle().tab_stop(true),
-            cancel: cx.focus_handle().tab_stop(true),
-        }
-    }
-}
-
-impl OutcomesView {
-    /// What is typed now.
-    fn form_text(&self, cx: &gpui::App) -> FormText {
-        let Some(ui) = &self.form_ui else {
-            return FormText::default();
-        };
-        let area = |s: &Entity<TextareaState>| s.read(cx).value().to_string();
-        let line = |s: &Entity<InputState>| s.read(cx).value().to_string();
-        FormText {
-            goal: area(&ui.goal),
-            criteria: area(&ui.criteria),
-            checks: area(&ui.checks),
-            budget: line(&ui.budget),
-            scope: area(&ui.scope),
-            workspace: line(&ui.workspace),
-            attempts: String::new(),
-        }
-    }
-
-    /// A folder was picked: it goes into the field, and the base commit is read again if the folder changed.
-    pub(super) fn set_workspace(
-        &mut self,
-        path: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(ui) = &self.form_ui else { return };
-        ui.workspace
-            .update(cx, |s, cx| s.set_value(path.to_string(), window, cx));
-        let e = self.state.pick_workspace(path);
-        self.run(e, cx);
-        cx.notify();
-    }
-
-    /// "Choose folder...": the system dialog (one directory); a cancelled dialog changes nothing.
-    pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.ws_menu = None;
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose the workspace of the outcome".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
-                this.update_in(cx, |t, window, cx| {
-                    t.set_workspace(&p.to_string_lossy(), window, cx)
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
-    /// The list item `i` was chosen (the last one, when the dialog is offered, opens the dialog).
-    pub(super) fn ws_choose(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        match self.state.ws_items().get(i).cloned() {
-            Some(p) => self.set_workspace(&p, window, cx),
-            None => self.choose_folder(window, cx),
-        }
-    }
-
-    /// Keys of the picker: Enter, Space or Down on its button open the list; Up/Down move, Enter chooses, Esc
-    /// closes the list only. True when the key was the picker's.
-    fn ws_key(
-        &mut self,
-        key: &str,
-        held: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(ui) = &self.form_ui else {
-            return false;
-        };
-        let n = self.state.ws_len();
-        match (self.state.ws_menu, key) {
-            (Some(_), "escape") => self.state.ws_menu = None,
-            (Some(i), "up") => self.state.ws_menu = Some(i.saturating_sub(1)),
-            (Some(i), "down") => self.state.ws_menu = Some((i + 1).min(n.saturating_sub(1))),
-            (Some(_), "enter") if held => {}
-            (Some(i), "enter") => self.ws_choose(i, window, cx),
-            (None, "enter" | "space" | "down" | " ") if ui.ws_focus.is_focused(window) && !held => {
-                self.state.ws_menu = Some(0)
-            }
-            _ => return false,
-        }
-        cx.notify();
-        true
-    }
-
-    fn workspace_left(&mut self, cx: &mut Context<Self>) {
-        let t = self.form_text(cx);
-        let e = self.state.workspace_left(&t);
-        self.run(e, cx);
-    }
-
-    /// Enter on the confirm button, or a click on it: sends the edit stage, approves the review stage.
-    pub(super) fn confirm(&mut self, cx: &mut Context<Self>) {
-        let e = match self.state.form.as_ref().map(|f| &f.stage) {
-            Some(Stage::Edit) => {
-                let t = self.form_text(cx);
-                self.state.submit(&t)
-            }
-            Some(Stage::Review(_)) if self.review_armed => self.state.approve(),
-            _ => vec![],
-        };
-        self.run(e, cx);
-    }
-
-    /// Closes the form without sending anything (a request already on its way is not recalled).
-    pub(super) fn close_form(&mut self, cx: &mut Context<Self>) {
-        self.state.close_form();
-        self.form_ui = None;
-        cx.notify();
-    }
-
-    /// The keys of the open form. Tab and Shift+Tab move between the fields and the buttons, Enter does
-    /// something only on a button (in a field it is a new line or nothing), Esc closes without sending.
-    fn form_key(
-        &mut self,
-        ev: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let m = &ev.keystroke.modifiers;
-        if m.control || m.alt || m.platform {
-            return false;
-        }
-        let reviewing = self.state.form_review().is_some();
-        if self.ws_key(ev.keystroke.key.as_str(), ev.is_held, window, cx) {
-            return true;
-        }
-        match ev.keystroke.key.as_str() {
-            "escape" => {
-                self.close_form(cx);
-                window.focus(&self.focus, cx);
-            }
-            "tab" => {
-                if m.shift {
-                    window.focus_prev(cx)
-                } else {
-                    window.focus_next(cx)
-                }
-            }
-            // a held key (auto-repeat) never acts: one deliberate press does
-            "enter" if ev.is_held => {}
-            "enter" => {
-                let (confirm, cancel) = self
-                    .form_ui
-                    .as_ref()
-                    .map(|u| (u.confirm.is_focused(window), u.cancel.is_focused(window)))
-                    .unwrap_or_default();
-                if confirm {
-                    self.confirm(cx);
-                } else if cancel {
-                    self.close_form(cx);
-                    window.focus(&self.focus, cx);
-                }
-            }
-            // the review is read with the keys when no field holds them
-            k @ ("up" | "down" | "pageup" | "pagedown") if reviewing => {
-                scroll(
-                    &self.form_scroll,
-                    match k {
-                        "up" => -1,
-                        "down" => 1,
-                        "pageup" => -12,
-                        _ => 12,
-                    },
-                );
-            }
-            _ => return false,
-        }
-        cx.notify();
-        true
-    }
-
-    /// Makes the inputs when a form has opened and drops them when it closed (called while rendering).
-    fn sync_form_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.state.form.as_ref(), self.form_ui.is_some()) {
-            (Some(f), false) => {
-                let ui = FormUi::new(&f.initial, window, cx);
-                let first = ui.goal.read(cx).focus_handle(cx);
-                let root = self.focus.clone();
-                let edit = matches!(f.stage, Stage::Edit);
-                self.form_ui = Some(ui);
-                // never focus an answer: the first field takes the keys; a review starts on the window
-                window.defer(cx, move |window, cx| {
-                    window.focus(if edit { &first } else { &root }, cx)
-                });
-            }
-            (None, true) => {
-                self.form_ui = None;
-                let root = self.focus.clone();
-                window.defer(cx, move |window, cx| window.focus(&root, cx));
-            }
-            _ => {}
-        }
-        // the review starts with no button focused: approving takes a Tab to it, then Enter, never the
-        // Enter that sent the form
-        let reviewing = self.state.form_review().is_some();
-        self.review_armed = reviewing && self.was_reviewing;
-        if reviewing && !self.was_reviewing {
-            let root = self.focus.clone();
-            window.defer(cx, move |window, cx| window.focus(&root, cx));
-        }
-        self.was_reviewing = reviewing;
-    }
-}
-
 impl Focusable for OutcomesView {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
     }
 }
-
-#[cfg(test)]
-mod popup_tests;
-#[cfg(test)]
-mod tests;
