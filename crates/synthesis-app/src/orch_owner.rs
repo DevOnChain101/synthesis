@@ -83,6 +83,34 @@ fn s<E: ToString>(e: E) -> String {
     e.to_string()
 }
 
+/// Registers the key of every configured provider (the planner and the workers resolve theirs from
+/// the same config, by reference: `{env:}`/`{file:}` are already substituted at load) with the
+/// redactor, so a worker's report cannot carry one into a review. Returns the providers whose key
+/// is NOT protected (unresolved, rejected or no config); pattern redaction stays on for them.
+fn learn_secrets(r: &synthesis_events::Redactor, env: &Env, h: &crate::Homes) -> Vec<String> {
+    let cfg = match crate::load_config(env, h, None, synthesis_config::ProjectTrust::Untrusted) {
+        Ok(c) => c,
+        Err(_) => return vec!["(config)".into()],
+    };
+    let mut open = vec![];
+    for (id, p) in &cfg.providers {
+        if p.is_no_auth() {
+            continue;
+        }
+        match synthesis_config::resolve_credential(id, Some(p), &h.synthesis, env) {
+            Some(c) if r.add_secret_min(&c.secret, 8).is_ok() => {}
+            // no key at all (a built-in nobody configured) has nothing to leak; a reference that
+            // failed to resolve is named by the config warnings, as `resolve_provider` reads them
+            None if !cfg
+                .warnings
+                .iter()
+                .any(|w| w.contains(&format!("provider \"{id}\""))) => {}
+            _ => open.push(id.clone()),
+        }
+    }
+    open
+}
+
 fn log(msg: &str) {
     eprintln!(
         "synt orchestrator: {}",
@@ -1286,6 +1314,7 @@ fn run_loop(
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let mut said: Option<String> = None;
+    let mut unprotected: Vec<String> = vec![];
     while !stop.load(Ordering::SeqCst) {
         let st = settings_of(env, h);
         let orch = &st.synthesis.orchestrator;
@@ -1304,6 +1333,17 @@ fn run_loop(
                 synthesis: h.synthesis.clone(),
             },
         });
+        // names only, said when the set changes
+        let open = learn_secrets(&owner.redactor, env, h);
+        if open != unprotected {
+            if !open.is_empty() {
+                log(&format!(
+                    "the key of provider {} is not resolved: only pattern redaction applies to it in reports",
+                    open.join(", ")
+                ));
+            }
+            unprotected = open;
+        }
         // a job wakes the loop early; the rest of the cycle is the same
         match rx.recv_timeout(TICK) {
             Ok((call, reply)) => {
@@ -1430,6 +1470,35 @@ mod tests {
         for bad in ["", "abc", &"A".repeat(40), &"g".repeat(40), &"a".repeat(41)] {
             assert!(!commit_id(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn provider_keys_are_masked_and_an_unresolved_one_keeps_pattern_redaction() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("synt.json"),
+            r#"{"$schema":"config.json/v1","providers":{"gw":{"type":"openai","baseURL":"http://x/v1","apiKey":"{env:GW_KEY}"},"gone":{"type":"openai","baseURL":"http://x/v1","apiKey":"{env:GONE_KEY}"}}}"#,
+        )
+        .unwrap();
+        let h = crate::Homes {
+            user: home.path().to_path_buf(),
+            synthesis: home.path().to_path_buf(),
+        };
+        // a test-only value that no token pattern matches
+        let key = "zq-plain-owner-key-77";
+        let env = Env::from_pairs([("PATH", "/usr/bin"), ("GW_KEY", key)]);
+        let r = synthesis_events::Redactor::new([]);
+        let ghp = format!("{}_{}", "ghp", "Z".repeat(36));
+        let text = format!("k {key} t {ghp}");
+        assert!(r.redact_str(&text).contains(key));
+        let open = learn_secrets(&r, &env, &h);
+        let shown = r.redact_str(&text);
+        assert!(
+            !shown.contains(key) && !shown.contains(&ghp),
+            "{shown} {open:?}"
+        );
+        // the unresolved reference is named (never a value) and does not switch anything off
+        assert_eq!(open, ["gone"]);
     }
 
     #[test]
