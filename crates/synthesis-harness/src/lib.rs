@@ -70,4 +70,4 @@ pub use sink::{EventSink, Scope};
 pub use toolbox::{ToolBox, ToolSource, validate};
 pub use traits::*;
 pub use user_cmd::{ToolOutcome, user_command_note};
-pub use util::{is_invisible_or_blank, sanitize_for_display};
+pub use util::{is_invisible_or_blank, sanitize_content_line, sanitize_for_display};

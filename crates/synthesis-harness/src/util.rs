@@ -17,11 +17,21 @@ pub use synthesis_config::is_invisible_or_blank;
 /// a command). A run of 16 or more blanks (spaces, any Unicode White_Space, blank glyphs: used
 /// to push the end of a command off screen) is shown as `[N spaces]`.
 pub fn sanitize_for_display(s: &str) -> String {
+    sanitize(s, true)
+}
+
+/// Like [`sanitize_for_display`] for file CONTENT: escapes and blank glyphs are still made visible,
+/// but a run of plain/long blanks (deep indentation) is kept as is instead of `[N spaces]`.
+pub fn sanitize_content_line(s: &str) -> String {
+    sanitize(s, false)
+}
+
+fn sanitize(s: &str, collapse: bool) -> String {
     let mut out = String::with_capacity(s.len());
     let mut run = String::new(); // the blank run as it would be shown
     let mut n = 0usize;
     let flush = |out: &mut String, run: &mut String, n: &mut usize| {
-        if *n >= 16 {
+        if collapse && *n >= 16 {
             out.push_str(&format!("[{n} spaces]"));
         } else {
             out.push_str(run);
@@ -179,6 +189,17 @@ mod tests {
             "echo ok[200 spaces]; rm -rf x"
         );
         assert_eq!(sanitize_for_display("a  b"), "a  b");
+    }
+
+    #[test]
+    fn content_line_keeps_deep_indentation_but_escapes() {
+        let l = format!("{}find: \"./x\"", " ".repeat(18));
+        assert_eq!(sanitize_content_line(&l), l);
+        assert_eq!(
+            sanitize_content_line("  a\x1b[2J\u{202e}"),
+            "  a\\u{1b}[2J\\u{202e}"
+        );
+        assert!(sanitize_for_display(&l).starts_with("[18 spaces]"));
     }
 
     #[test]
