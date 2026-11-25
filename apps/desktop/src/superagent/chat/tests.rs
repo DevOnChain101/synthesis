@@ -686,6 +686,22 @@ fn asks_come_one_at_a_time_in_arrival_order() {
 }
 
 #[test]
+fn a_reused_id_opens_its_modal_again() {
+    let t0 = Instant::now();
+    for leave in 0..3 {
+        let mut q = queue(&["a"], t0);
+        assert!(q.dismiss() && q.front_modal().is_none());
+        match leave {
+            0 => assert!(q.take("a", Choice::Deny, t0).is_some()),
+            1 => q.withdraw("a"),
+            _ => assert_eq!(q.drain(), vec!["a".to_string()]),
+        }
+        assert!(q.push(&ask("a")));
+        assert!(q.front_modal().is_some(), "leave {leave}");
+    }
+}
+
+#[test]
 fn an_ask_is_answered_once_whatever_surface_answers() {
     let t0 = Instant::now();
     let mut q = queue(&["a"], t0);
