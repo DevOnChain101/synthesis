@@ -108,8 +108,13 @@ fn read(git: &Git, guards: &[String], cwd: &Path) -> Result<Scm, String> {
 
 fn parse(st: &[u8], root: &Path) -> Scm {
     let mut s = Scm::default();
-    let mut it = st.split(|c| *c == 0).filter(|p| p.len() > 3);
+    // only EMPTY records are skipped here: a filter on the length would let a rename origin of 1-3 bytes
+    // go unconsumed below and swallow the entry after it
+    let mut it = st.split(|c| *c == 0).filter(|p| !p.is_empty());
     while let Some(e) = it.next() {
+        if e.len() < 4 {
+            continue; // not `XY path`
+        }
         let (x, y) = (e[0] as char, e[1] as char);
         let text = clean_line(&String::from_utf8_lossy(&e[3..]));
         if x == '#' {
@@ -117,7 +122,7 @@ fn parse(st: &[u8], root: &Path) -> Scm {
             continue;
         }
         if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
-            it.next(); // the origin of a rename or copy is an entry of its own
+            it.next(); // the origin of a rename or copy is a record of its own, whatever its length
         }
         if safe_rel(&text).is_err() {
             continue; // not a path that can be acted on
@@ -253,6 +258,104 @@ fn signing_program_in_repo(git: &Git, cwd: &Path) -> Result<(), String> {
     }
 }
 
+/// The paths of `git diff --cached` / `git diff-tree` (`--name-status -z --no-renames`): every record, raw, no cap
+/// and no listing limit. `Ok((secret paths that are not deletions, records that could not be checked, count))`;
+/// `Err` when the answer is missing or cut: what could not be checked is never committed.
+fn name_status(
+    git: &Git,
+    guards: &[String],
+    cwd: &Path,
+    args: &[&str],
+) -> Result<(Vec<String>, usize, usize), String> {
+    let (raw, cut) = git
+        .run_with(cwd, guards, args, 0)
+        .ok_or("git could not list the staged files; nothing was committed")?;
+    if cut {
+        return Err("the list of staged files is too long to check; nothing was committed".into());
+    }
+    let mut it = raw.split(|c| *c == 0).filter(|r| !r.is_empty());
+    let (mut secret, mut skipped, mut n) = (vec![], 0, 0);
+    while let Some(st) = it.next() {
+        n += 1;
+        // `--no-renames`: a status letter, then one path; an odd record is counted and not trusted
+        let Some(path) = it.next() else {
+            skipped += 1;
+            break;
+        };
+        let path = String::from_utf8_lossy(path).to_string();
+        // the secret test runs on EVERY record, before any decision about the path's shape
+        if st != b"D" && secret_in(cwd, &path) {
+            secret.push(clean_line(&path));
+        }
+        if st.len() != 1 || safe_rel(&path).is_err() || path.contains('\u{fffd}') {
+            skipped += 1;
+        }
+    }
+    Ok((secret, skipped, n))
+}
+
+/// The commit gate: reads the index itself (not the capped, parsed lists) and refuses unless every staged path
+/// was checked and none is secret-shaped (a deletion is exempt). `Ok(count)` of staged paths.
+fn commit_gate(git: &Git, guards: &[String], cwd: &Path) -> Result<usize, String> {
+    let (secret, skipped, n) = name_status(
+        git,
+        guards,
+        cwd,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+        ],
+    )?;
+    if n == 0 {
+        return Err("nothing is staged".into());
+    }
+    if !secret.is_empty() {
+        return Err(format!(
+            "a staged file looks like a secret, unstage it first: {}",
+            secret.join(", ")
+        ));
+    }
+    if skipped > 0 {
+        return Err(format!(
+            "{skipped} staged path(s) could not be checked (odd characters in the name); nothing was committed"
+        ));
+    }
+    Ok(n)
+}
+
+/// After a commit: did a secret-shaped path get in anyway? The index is checked before the commit and git then
+/// reads it again, so a process that changes the index in between could slip a file in (accepted residual, see
+/// docs/specs/desktop.md). The commit is never undone here; the note says how.
+fn committed_secrets(git: &Git, guards: &[String], cwd: &Path) -> String {
+    match name_status(
+        git,
+        guards,
+        cwd,
+        &[
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-z",
+            "--no-renames",
+            "HEAD",
+        ],
+    ) {
+        Ok((secret, _, _)) if secret.is_empty() => String::new(),
+        Ok((secret, _, _)) => format!(
+            "committed a secret-shaped file: {}. Undo with `git reset --soft HEAD~1`",
+            secret.join(", ")
+        ),
+        Err(_) => "the committed files could not be checked for secrets".into(),
+    }
+}
+
 /// git's complaint as one short line for the UI: control characters out, secret shapes masked, capped.
 fn note_of(stderr: &[u8], stdout: &[u8], code: Option<i32>) -> String {
     let both = [stderr, stdout].map(String::from_utf8_lossy);
@@ -314,7 +417,8 @@ impl Git {
                 }
                 _ => {
                     synthesis_cli_ui_base::imgclip::kill_tree(&mut child);
-                    return Err("git did not finish in time and was stopped".into());
+                    // never deleted by the app: only the person knows no other git is running
+                    return Err("git did not finish in time and was stopped; a stale .git/index.lock may need removing by hand".into());
                 }
             }
         };
@@ -361,18 +465,28 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
             if e.secret {
                 return Err(format!("{p}: looks like a secret file, not staged"));
             }
+            if e.letter == '!' {
+                return Err(format!(
+                    "{p}: has a merge conflict; resolve it outside the app"
+                ));
+            }
             inside(cwd, p)?;
             add(&[p])?;
             Ok(String::new())
         }
         Act::StageAll => {
-            let (skip, ok): (Vec<_>, Vec<_>) = now.changes.iter().partition(|e| e.secret);
+            let conflicts = now.changes.iter().filter(|e| e.letter == '!').count();
+            let (skip, ok): (Vec<_>, Vec<_>) = now
+                .changes
+                .iter()
+                .filter(|e| e.letter != '!')
+                .partition(|e| e.secret);
             let ok: Vec<&str> = ok
                 .iter()
                 .map(|e| e.path.as_str())
                 .filter(|p| inside(cwd, p).is_ok())
                 .collect();
-            let left = now.changes.len() - skip.len() - ok.len();
+            let left = now.changes.len() - conflicts - skip.len() - ok.len();
             add(&ok)?;
             let mut note = vec![];
             if !skip.is_empty() {
@@ -388,6 +502,11 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
             if left > 0 {
                 note.push(format!("{left} path(s) leaving the project skipped"));
             }
+            if conflicts > 0 {
+                note.push(format!(
+                    "{conflicts} conflicted file(s) skipped: resolve them outside the app"
+                ));
+            }
             Ok(note.join("; "))
         }
         Act::Unstage(p) => {
@@ -400,28 +519,14 @@ pub fn apply(cwd: &Path, env: &Env, trusted: bool, act: &Act) -> Result<String, 
             Ok(String::new())
         }
         Act::Commit(_) => {
-            if now.staged.is_empty() {
-                return Err("nothing is staged".into());
-            }
-            let names: Vec<&str> = now
-                .staged
-                .iter()
-                .filter(|e| e.secret)
-                .map(|e| e.path.as_str())
-                .collect();
-            if !names.is_empty() {
-                return Err(format!(
-                    "a staged file looks like a secret, unstage it first: {}",
-                    names.join(", ")
-                ));
-            }
+            commit_gate(&git, &guards, cwd)?;
             signing_program_in_repo(&git, cwd)?;
             let mut extra = guards.clone();
             extra.extend(["-c".to_string(), "user.useConfigOnly=true".to_string()]);
             let msg = msg.expect("a commit has a message");
             // `--no-verify` is a second lock on the hooks `core.hooksPath` already switched off
             git.write(cwd, &extra, &["commit", "-q", "--no-verify", "-m", &msg])?;
-            Ok(String::new())
+            Ok(committed_secrets(&git, &guards, cwd))
         }
     }
 }
@@ -685,6 +790,123 @@ mod tests {
         let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
         assert!(err.contains(".env"), "{err}");
         apply(d.path(), &e, true, &Act::Unstage(".env".into())).unwrap();
+    }
+
+    #[test]
+    fn a_rename_with_a_short_origin_does_not_hide_the_next_entry() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        std::fs::write(d.path().join("a"), "x\n").unwrap();
+        git(d.path(), &["add", "a"]);
+        git(d.path(), &["commit", "-q", "-m", "a"]);
+        git(d.path(), &["mv", "a", "a-b"]);
+        std::fs::write(d.path().join("id_rsa"), "k\n").unwrap();
+        git(d.path(), &["add", "-f", "id_rsa"]);
+        let s = status(d.path(), &e, true).unwrap();
+        assert!(s.staged.iter().any(|x| x.path == "a-b"), "{:?}", s.staged);
+        assert!(
+            s.staged.iter().any(|x| x.path == "id_rsa" && x.secret),
+            "{:?}",
+            s.staged
+        );
+        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        assert!(err.contains("id_rsa"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_beyond_the_listing_cap_still_blocks_the_commit() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        for i in 0..=MAX_ENTRIES {
+            std::fs::write(d.path().join(format!("f{i:04}")), "x").unwrap();
+        }
+        std::fs::create_dir(d.path().join("server")).unwrap();
+        std::fs::write(d.path().join("server/id_rsa"), "k").unwrap();
+        git(d.path(), &["add", "-f", "."]);
+        let s = status(d.path(), &e, true).unwrap();
+        assert!(
+            s.cut && !s.staged.iter().any(|x| x.secret),
+            "the list hid it"
+        );
+        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        assert!(err.contains("server/id_rsa"), "{err}");
+    }
+
+    #[test]
+    fn a_staged_path_that_cannot_be_checked_is_refused_with_a_count() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        std::fs::write(d.path().join("ok.txt"), "x").unwrap();
+        std::fs::write(d.path().join("tab\there"), "x").unwrap();
+        #[cfg(unix)]
+        std::fs::write(d.path().join("back\\slash"), "x").unwrap();
+        std::fs::write(d.path().join("dot."), "x").unwrap();
+        git(
+            d.path(),
+            &["add", "-f", "--", "ok.txt", "tab\there", "dot."],
+        );
+        #[cfg(unix)]
+        git(d.path(), &["add", "-f", "--", "back\\slash"]);
+        let err = apply(d.path(), &e, true, &Act::Commit("go".into())).unwrap_err();
+        assert!(err.contains("could not be checked"), "{err}");
+        let head = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(d.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "1",
+            "nothing was committed"
+        );
+    }
+
+    #[test]
+    fn deleting_a_secret_from_tracking_is_not_blocked_and_a_conflict_is_not_staged() {
+        let d = repo();
+        let (e, _h) = env_with_identity();
+        std::fs::write(d.path().join("id_rsa"), "k").unwrap();
+        git(d.path(), &["add", "-f", "id_rsa"]);
+        git(d.path(), &["commit", "-q", "-m", "k"]);
+        git(d.path(), &["rm", "-q", "--cached", "id_rsa"]);
+        assert_eq!(
+            apply(d.path(), &e, true, &Act::Commit("untrack".into())).unwrap(),
+            ""
+        );
+        // a conflicted file: refused by Stage, skipped by Stage all
+        git(d.path(), &["checkout", "-q", "-b", "other"]);
+        std::fs::write(d.path().join("a.txt"), "other\n").unwrap();
+        git(d.path(), &["commit", "-qam", "o"]);
+        git(d.path(), &["checkout", "-q", "-"]);
+        std::fs::write(d.path().join("a.txt"), "main\n").unwrap();
+        git(d.path(), &["commit", "-qam", "m"]);
+        let _ = Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(d.path())
+            .output();
+        assert!(st(d.path()).changes.iter().any(|x| x.letter == '!'));
+        let err = apply(d.path(), &e, true, &Act::Stage("a.txt".into())).unwrap_err();
+        assert!(err.contains("conflict"), "{err}");
+        let note = apply(d.path(), &e, true, &Act::StageAll).unwrap();
+        assert!(note.contains("conflicted"), "{note}");
+    }
+
+    #[test]
+    fn a_secret_that_slipped_in_after_the_gate_is_reported_not_undone() {
+        let d = repo();
+        std::fs::write(d.path().join("id_rsa"), "k").unwrap();
+        git(d.path(), &["add", "-f", "id_rsa"]);
+        git(d.path(), &["commit", "-q", "-m", "k"]);
+        let (g, guards) = ready(d.path(), &env(), true).unwrap();
+        let n = committed_secrets(&g, &guards, d.path());
+        assert!(
+            n.contains("id_rsa") && n.contains("git reset --soft HEAD~1"),
+            "{n}"
+        );
+        std::fs::write(d.path().join("b"), "x").unwrap();
+        git(d.path(), &["add", "b"]);
+        git(d.path(), &["commit", "-q", "-m", "b"]);
+        assert_eq!(committed_secrets(&g, &guards, d.path()), "");
     }
 
     #[test]

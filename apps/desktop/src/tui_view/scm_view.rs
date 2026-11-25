@@ -96,18 +96,13 @@ impl TuiView {
         if self.ts.scm.open {
             if self.ts.scm.msg.is_none() {
                 let e = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
-                cx.subscribe_in(
-                    &e,
-                    window,
-                    |this, e, ev: &InputEvent, window, cx| match ev {
-                        InputEvent::Change => cx.notify(),
-                        InputEvent::PressEnter { .. } => {
-                            let m = e.read(cx).value().to_string();
-                            this.scm_act(Act::Commit(m), window, cx);
-                        }
-                        _ => {}
-                    },
-                )
+                // Enter does not commit: the input does not say whether an IME composition is open, and a
+                // commit is not something to trigger by accident; the button is the way
+                cx.subscribe_in(&e, window, |_, _, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        cx.notify();
+                    }
+                })
                 .detach();
                 self.ts.scm.msg = Some(e);
             }
@@ -165,12 +160,13 @@ impl TuiView {
         cx.spawn_in(window, async move |this, cx| {
             let r = job.await;
             this.update_in(cx, |t, window, cx| {
+                t.ts.scm.busy = false; // also when the session or folder changed meanwhile
                 let same =
                     t.tree.epoch == epoch && t.live.as_ref().is_some_and(|l| l.live.cwd == cwd);
                 if !same {
+                    cx.notify();
                     return;
                 }
-                t.ts.scm.busy = false;
                 match r {
                     Ok(n) => {
                         t.ts.scm.note = Some(n).filter(|n| !n.is_empty());
