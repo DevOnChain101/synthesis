@@ -2228,17 +2228,37 @@ async fn allowed_screenshot_masks_fields_and_restores_them_even_when_cancelled()
     let base = serve().await;
     let art = tempfile::tempdir().unwrap();
     let rt = launch(local_opts(art.path()), &env).await;
-    rt.navigate(&format!("{base}/starred"), WaitUntil::Load)
-        .await
-        .unwrap();
+    let go = |page: &'static str| {
+        let url = format!("{base}/{page}");
+        let rt = &rt;
+        async move { rt.navigate(&url, WaitUntil::Load).await.unwrap() }
+    };
+    // The first document of a new browser can rasterize text with other anti-aliasing than every later one
+    // (seen with Linux Chrome: same page, same values, other bytes), so it is loaded and thrown away.
+    go("starred").await;
+    go("starred").await;
     let starred = rt.screenshot(false).await.unwrap().png;
-    rt.navigate(&format!("{base}/mask"), WaitUntil::Load)
-        .await
-        .unwrap();
+    go("mask").await;
     let plain = rt.screenshot(false).await.unwrap().png;
-    assert_ne!(plain, starred);
-    // masked in pixels: the capture looks exactly like the page that really holds `***`
-    assert!(rt.screenshot_allowed(false).await.unwrap().png == starred);
+    assert!(
+        plain != starred,
+        "the reference cannot tell the values apart"
+    );
+    go("starred").await;
+    assert!(
+        rt.screenshot(false).await.unwrap().png == starred,
+        "the renderer is not repeatable, so the comparison below would mean nothing"
+    );
+    go("mask").await;
+    // masked in pixels: the capture looks exactly like the page that really holds `***` (all three fields),
+    // and not like the unmasked page
+    let masked = rt.screenshot_allowed(false).await.unwrap().png;
+    assert!(masked != plain, "nothing was masked in the capture");
+    assert!(masked == starred, "the capture is not the all-`***` page");
+    assert!(
+        rt.screenshot(false).await.unwrap().png == plain,
+        "the page does not look as before after the capture"
+    );
     let restored = || async {
         let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
         assert!(
