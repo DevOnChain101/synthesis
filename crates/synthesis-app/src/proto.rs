@@ -1043,6 +1043,19 @@ mod tests {
                 "{drop}"
             );
         }
+        // `max_turns` is optional in the contract: an old payload is unchanged, a new one round-trips
+        let with = revise.replace(
+            r#""attempt_max_wall_secs":null}"#,
+            r#""attempt_max_wall_secs":null,"max_turns":30}"#,
+        );
+        let r: Request = serde_json::from_str(&with).unwrap();
+        assert_eq!(serde_json::to_string(&r).unwrap(), with);
+        assert!(
+            serde_json::from_str::<Request>(
+                &with.replace(r#""max_turns":30"#, r#""max_turns":"x""#)
+            )
+            .is_err()
+        );
         let start = r#"{"id":1,"method":"outcome.start","params":{"id":"o","expected_revision":3,"idempotency_key":"k","surface":"tui"}}"#;
         let r: Request = serde_json::from_str(start).unwrap();
         assert!(matches!(r.call, Call::OutcomeStart(ref c) if c.expected_revision == Some(3)));

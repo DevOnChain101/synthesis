@@ -19,6 +19,7 @@ pub enum Field {
     Checks,
     Scope,
     Budget,
+    Turns,
     Attempts,
     Folder,
 }
@@ -33,10 +34,21 @@ pub fn field_of(err: &str) -> Option<Field> {
         "Checks" => Field::Checks,
         "Write scope" => Field::Scope,
         "Budget" => Field::Budget,
+        "Turns" => Field::Turns,
         "Attempts" => Field::Attempts,
         "Workspace" | "Folder" | "Base commit" => Field::Folder,
         _ => return None,
     })
+}
+
+/// The turn limit one attempt will get, as shown before approving: the contract's own number, else the setting's
+/// (the store refuses a contract above the setting, so the stored number is what runs).
+pub fn turns_line(stored: Option<u32>, setting: Option<u32>) -> String {
+    match (stored, setting) {
+        (Some(n), _) => format!("{n} per attempt"),
+        (None, Some(n)) => format!("{n} per attempt (Settings)"),
+        (None, None) => "the Settings value (not read here)".to_string(),
+    }
 }
 
 pub const READ_ONLY_SOON: &str = crate::superagent::outcomes::kind_picker::READ_ONLY_SOON;

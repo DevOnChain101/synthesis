@@ -85,6 +85,10 @@ pub enum OutcomeCmd {
         /// Read-only only: a line you will judge the report by (repeatable).
         #[arg(long = "rubric", value_name = "LINE")]
         rubric: Vec<String>,
+        /// Turns (model calls) one attempt may use, 1 to 200; it can only lower the setting
+        /// `synt.orchestrator.max_turns`, and a value above it is refused. Absent: the setting.
+        #[arg(long, value_name = "N")]
+        max_turns: Option<u32>,
         /// Folder (default: the current directory); a git repository for a write goal.
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -114,6 +118,9 @@ pub enum OutcomeCmd {
         /// Apply only if the outcome is still at this revision (default: the revision it has now).
         #[arg(long)]
         expected_revision: Option<i64>,
+        /// Turns one attempt may use (1 to 200); replaces `budgets.max_turns` of the file.
+        #[arg(long, value_name = "N")]
+        max_turns: Option<u32>,
     },
     Start(Cmd),
     Pause(Cmd),
@@ -476,6 +483,17 @@ fn find_card<T: Transport>(
         .ok_or_else(|| format!("no decision {} in this outcome", clean(id)))
 }
 
+/// `--max-turns`: refused out of range with its limits (the server checks the same range).
+fn turns_arg(n: Option<u32>) -> Result<Option<u32>, String> {
+    match n {
+        Some(t) if !(1..=synthesis_core::outcome::HARD_MAX_TURNS).contains(&t) => Err(format!(
+            "--max-turns must be a whole number from 1 to {}",
+            synthesis_core::outcome::HARD_MAX_TURNS
+        )),
+        n => Ok(n),
+    }
+}
+
 /// One command against `c`; `wait` is how long a queued command is followed.
 pub fn dispatch<T: Transport>(
     c: &mut OutcomeClient<T>,
@@ -496,11 +514,13 @@ pub fn dispatch<T: Transport>(
             max_cost_usd,
             max_attempts,
             rubric,
+            max_turns,
             cwd,
         } => {
+            let max_turns = turns_arg(max_turns)?;
             // a read-only goal is the goal and a budget; the other kind needs its definition files
             let read_only = kind == KindArg::ReadOnly;
-            let contract = if read_only {
+            let mut contract = if read_only {
                 if criteria_file.is_some()
                     || envelope_file.is_some()
                     || checks_file.is_some()
@@ -539,6 +559,9 @@ pub fn dispatch<T: Transport>(
                     checks,
                 }
             };
+            if max_turns.is_some() {
+                contract.envelope.budgets.max_turns = max_turns;
+            }
             let base_commit = base_commit.unwrap_or_default();
             if !read_only && base_commit.is_empty() {
                 return Err("a write goal needs --base-commit".into());
@@ -603,13 +626,18 @@ pub fn dispatch<T: Transport>(
             id,
             contract_file,
             expected_revision,
+            max_turns,
         } => {
+            let max_turns = turns_arg(max_turns)?;
             let mut v: Value = read_json(&contract_file, "contract")?;
             if let Some(o) = v.as_object_mut() {
                 o.entry("version").or_insert(json!(1));
             }
-            let contract: Contract = serde_json::from_value(v)
+            let mut contract: Contract = serde_json::from_value(v)
                 .map_err(|x| format!("contract: {}: {x}", contract_file.display()))?;
+            if max_turns.is_some() {
+                contract.envelope.budgets.max_turns = max_turns;
+            }
             let rev = match expected_revision {
                 Some(r) => r,
                 None => c.outcome(&id).map_err(e)?.revision,

@@ -281,6 +281,17 @@ pub fn gate(env: &Env) -> Result<std::path::PathBuf, Screen> {
     Ok(h.synthesis)
 }
 
+/// Turns one attempt gets under `synt.orchestrator.max_turns` (what the form's empty field means); `None`
+/// when the homes cannot be read.
+pub fn turn_ceiling(env: &Env, read_only: bool) -> Option<u32> {
+    let h = synthesis_app::homes(env).ok()?;
+    let st = synthesis_app::outcome_service::settings_of(env, &h);
+    Some(
+        synthesis_app::outcome_policy::outcome_policy(&st.synthesis.orchestrator)
+            .turn_ceiling(read_only),
+    )
+}
+
 fn connect(env: &Env) -> Result<synthesis_app::orch_endpoint::LocalSocket, Screen> {
     let home = gate(env)?;
     let link = connect_started(&home);

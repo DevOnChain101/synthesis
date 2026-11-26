@@ -11,7 +11,7 @@ use gpui::{
 use synthesis_harness::sanitize_for_display;
 use synthesis_view::outcomes::CriteriaView;
 
-use super::model::approve_ok;
+use super::model::{approve_ok, turns_line};
 use super::view::mod_name;
 use super::{Dialog, GoalForm};
 use crate::superagent::frames::GoalKind;
@@ -155,6 +155,13 @@ fn review_body(f: &GoalForm, r: &Review) -> Div {
             .gap(px(t::S4))
             .child(kit::card("sa-goal-stored", false).child(kv(vec![
                 ("Kind", plain(kind_line(f.kind))),
+                (
+                    "Turns",
+                    plain(turns_line(
+                        r.contract.as_ref().ok().and_then(|c| c.max_turns),
+                        f.turn_setting,
+                    )),
+                ),
                 ("Version", plain(r.version.to_string())),
                 ("Hash", mono(r.hash.clone(), t::TEXT_STRONG)),
             ])));
@@ -295,6 +302,13 @@ pub(super) fn dialog(
         (
             "Budget",
             plain(sanitize_for_display(&format!("${}", typed.budget.trim()))),
+        ),
+        (
+            "Turns",
+            plain(turns_line(
+                r.contract.as_ref().ok().and_then(|c| c.max_turns),
+                f.turn_setting,
+            )),
         ),
         (
             "Folder",

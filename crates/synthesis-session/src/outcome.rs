@@ -1228,6 +1228,35 @@ impl OutcomePolicy {
         }
     }
 
+    /// Turns one attempt may use under the settings, before a contract lowers it: the setting
+    /// (default 50), a read-only attempt at most 80; never above the hard ceiling.
+    pub fn turn_ceiling(&self, read_only: bool) -> u32 {
+        use synthesis_core::outcome::{
+            DEFAULT_ATTEMPT_MAX_TURNS, HARD_MAX_TURNS, READ_ONLY_MAX_TURNS,
+        };
+        let n = self
+            .attempt_max_turns
+            .unwrap_or(if read_only {
+                READ_ONLY_MAX_TURNS
+            } else {
+                DEFAULT_ATTEMPT_MAX_TURNS
+            })
+            .clamp(1, HARD_MAX_TURNS);
+        if read_only {
+            n.min(READ_ONLY_MAX_TURNS)
+        } else {
+            n
+        }
+    }
+
+    /// The turn limit an attempt of `c` really gets: the smaller of the contract's and the ceiling.
+    /// After a passed [`check`](Self::check) it equals the contract's own value when it names one.
+    pub fn effective_turns(&self, c: &Contract) -> u32 {
+        let own = c.envelope.budgets.max_turns;
+        self.turn_ceiling(c.kind == ContractKind::ReadOnly)
+            .min(own.map_or(u32::MAX, |t| t.max(1)))
+    }
+
     /// Refuses a contract whose budgets exceed the ceilings (never silently clamps: what the
     /// person approves is what runs).
     pub fn check(&self, c: &Contract) -> Result<()> {
@@ -1252,6 +1281,12 @@ impl OutcomePolicy {
             && !b.attempt_max_wall_secs.is_some_and(|w| w <= m)
         {
             return Err(over("attempt_max_wall_secs"));
+        }
+        // the number the person approves must be the number that runs
+        if b.max_turns
+            .is_some_and(|t| t > self.turn_ceiling(c.kind == ContractKind::ReadOnly))
+        {
+            return Err(over("max_turns"));
         }
         Ok(())
     }
