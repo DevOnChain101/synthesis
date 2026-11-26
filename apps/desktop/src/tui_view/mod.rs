@@ -161,8 +161,6 @@ pub struct TuiView {
     anim_tick: Option<gpui::Task<()>>,
     /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
     live: Option<driver::LiveUi>,
-    /// The Super Agent's sessions, waiting for the lists to be read (see `adopt_handoff`).
-    pending_handoff: Option<crate::handoff::Handoff>,
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
@@ -245,9 +243,6 @@ pub(crate) struct Embed {
     /// The Super Agent's `ChatHost` draws the chat: this view only drives the engine and owns the Terminal and
     /// Browser panes, and its key hook leaves everything but those panes and the dialogs alone.
     pub headless: bool,
-    /// Mode switch: the engine was given back while idle (its transcript is stored): the scope and session id to
-    /// resume on the next send. The session lock is free meanwhile; `None` while an engine holds it.
-    pub released: Option<(crate::handoff::Scope, String)>,
 }
 
 /// A side column of the view.
@@ -300,7 +295,6 @@ impl TuiView {
             topo_tick: None,
             anim_tick: None,
             live: None,
-            pending_handoff: None,
             hidden,
             inset,
             top: 0.,

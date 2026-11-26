@@ -421,23 +421,6 @@ impl SuperAgentView {
         self.host.read(cx).hosted_rows(&self.conductor_owned, cx)
     }
 
-    /// The sessions this view hosts, for the TUI when the person switches to it.
-    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
-    pub(crate) fn handoff(&self, cx: &gpui::App) -> crate::handoff::Handoff {
-        let last = self.frames.last_session();
-        self.host.read(cx).handoff(last, &self.conductor_owned, cx)
-    }
-
-    /// Mode switch to the TUI: idle sessions give their engines back (see `TuiView::release_idle`).
-    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
-    pub(crate) fn release_idle(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Vec<futures::channel::oneshot::Receiver<()>> {
-        let skip = self.conductor_owned.clone();
-        self.host.update(cx, |h, cx| h.release_idle(&skip, cx))
-    }
-
     pub(crate) fn focus_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         self.frames.focus(i);
         self.changed(cx);
