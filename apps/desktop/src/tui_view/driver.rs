@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use gpui::{
     AppContext as _, Context, Entity, FollowMode, Keystroke, ListAlignment, ListState,
-    ScrollHandle, Subscription, Task, WeakEntity, Window,
+    ScrollHandle, Subscription, Task, Window,
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_cli_ui_base::complete::{self, StdFs};
@@ -19,6 +19,9 @@ use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList};
 
+mod swap;
+
+use self::swap::Owner;
 use super::{ChatTab, Embed, TuiView, panels, select, snapshot};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
 use crate::live::{Action, Focus, Live, NoticeKind, Preview, SWITCH_ARM_MS, Submitted, now_ms};
@@ -201,6 +204,12 @@ pub struct LiveUi {
     /// The placeholder shows the busy hint (Enter queue, send now) rather than the idle one.
     busy_hint: bool,
     tick_task: Option<Task<()>>,
+    /// Where this session's tasks report to (see `swap`); `adopt_live` points it at the new view.
+    owner: Owner,
+    /// Detached work of this session (`spawn_owned`): ends with the session, not with a view.
+    bg: Vec<Task<()>>,
+    /// The session was started (tick, keys, quit hook): `adopt_live` binds them again.
+    started: bool,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
     /// `set_live` fed the conversation: no engine is launched.
@@ -285,6 +294,64 @@ fn text_of(s: &Entity<TextareaState>, cx: &gpui::App) -> String {
 }
 
 impl TuiView {
+    /// The prompt box's events (Enter, a change) for this view; re-made when a session is adopted.
+    fn prompt_sub(
+        prompt: &Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            prompt,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                } => this.submit_prompt(false, window, cx),
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false,
+                } => this.submit_prompt(true, window, cx),
+                InputEvent::Change => this.on_prompt_changed(cx),
+                _ => {}
+            },
+        )
+    }
+
+    /// The keyboard interceptor and the quit hook of this view.
+    fn key_and_quit_subs(cx: &mut Context<Self>) -> [Subscription; 2] {
+        let weak = cx.weak_entity();
+        let key_sub = cx.intercept_keystrokes(move |ev, window, cx| {
+            let ks = ev.keystroke.clone();
+            let consumed = weak
+                .update(cx, |t, cx| t.on_key(&ks, window, cx))
+                .unwrap_or(false);
+            if consumed {
+                cx.stop_propagation();
+            }
+        });
+        let quit_sub = cx.on_app_quit(|this, cx| {
+            this.shutdown_engine();
+            this.term_shutdown(cx);
+            async {}
+        });
+        [key_sub, quit_sub]
+    }
+
+    /// The clock and the polled panels.
+    fn spawn_tick(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut n = 0u64;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                n += 1;
+                if this.update(cx, |t, cx| t.tick(n, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
     /// A view on the real engine; call [`TuiView::start`] to launch it.
     pub fn live(
         window: &mut Window,
@@ -299,23 +366,7 @@ impl TuiView {
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
         });
-        let mut subs = vec![];
-        subs.push(cx.subscribe_in(
-            &prompt,
-            window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter {
-                    secondary: false,
-                    shift: false,
-                } => this.submit_prompt(false, window, cx),
-                InputEvent::PressEnter {
-                    secondary: true,
-                    shift: false,
-                } => this.submit_prompt(true, window, cx),
-                InputEvent::Change => this.on_prompt_changed(cx),
-                _ => {}
-            },
-        ));
+        let subs = vec![Self::prompt_sub(&prompt, window, cx)];
         let mut live = Live::new();
         live.active = select::LastActive(crate::last_session::load_active(
             &cfg.synthesis_home,
@@ -353,6 +404,9 @@ impl TuiView {
             hist: None,
             search: None,
             tick_task: None,
+            owner: Owner::new(cx.weak_entity()),
+            bg: vec![],
+            started: false,
             pump_task: None,
             engine_task: None,
             fixture: false,
@@ -818,41 +872,18 @@ impl TuiView {
     ) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| s.focus(window, cx));
-        let weak = cx.weak_entity();
-        let key_sub = cx.intercept_keystrokes(move |ev, window, cx| {
-            let ks = ev.keystroke.clone();
-            let consumed = weak
-                .update(cx, |t, cx| t.on_key(&ks, window, cx))
-                .unwrap_or(false);
-            if consumed {
-                cx.stop_propagation();
-            }
-        });
-        lu.add_sub(key_sub);
-        let quit_sub = cx.on_app_quit(|this, cx| {
-            this.shutdown_engine();
-            this.term_shutdown(cx);
-            async {}
-        });
-        lu.add_sub(quit_sub);
+        for sub in Self::key_and_quit_subs(cx) {
+            lu.add_sub(sub);
+        }
         let cfg = lu.cfg.clone();
-        // the clock and the polled panels
-        let tick = cx.spawn(async move |this, cx| {
-            let mut n = 0u64;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                n += 1;
-                if this.update(cx, |t, cx| t.tick(n, cx)).is_err() {
-                    break;
-                }
-            }
-        });
+        let tick = Self::spawn_tick(cx);
         let resume_args = cfg.args.common.resume.is_some() || cfg.args.common.continue_session;
         let first = {
             let c = cfg.clone();
             (c.project.clone(), resume_args)
         };
         lu.tick_task = Some(tick);
+        lu.started = true;
         match folder {
             Some((f, None)) => self.launch_with(f.clone(), None, Some(Target::New(f)), vec![], cx),
             Some((f, Some(id))) => self.launch_with(f, None, Some(Target::Resume(id)), vec![], cx),
@@ -981,18 +1012,20 @@ impl TuiView {
         });
         // built here, not in the task: a task dropped before its first poll still closes what the thread sent
         let mut slot = EngineRx { rx, got: None };
-        let task = cx.spawn(async move |this, cx| {
+        let owner = lu.owner.clone();
+        let task = cx.spawn(async move |_, cx| {
             let r = (&mut slot.rx)
                 .await
                 .unwrap_or_else(|_| Err("the engine thread ended unexpectedly".into()));
             slot.got = Some(r);
             // when the entity is gone the closure never runs and `slot` closes the engine
-            this.update(cx, |t, cx| {
-                if let Some(r) = slot.got.take() {
-                    t.engine_ready(r, cx)
-                }
-            })
-            .ok();
+            owner
+                .update(cx, |t, cx| {
+                    if let Some(r) = slot.got.take() {
+                        t.engine_ready(r, cx)
+                    }
+                })
+                .ok();
         });
         if let Some(lu) = &mut self.live {
             lu.engine_task = Some(task);
@@ -1088,7 +1121,8 @@ impl TuiView {
                 lu.list_reset = true;
                 lu.stick();
                 let rx = l.rx;
-                let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
+                let owner = lu.owner.clone();
+                let pump = cx.spawn(async move |_, cx| pump(owner, rx, cx).await);
                 lu.pump_task = Some(pump);
                 let (ws, sid) = (lu.live.live_ws_key(), lu.live.sid.clone());
                 self.remember_active(&ws, &sid);
@@ -1128,7 +1162,7 @@ impl TuiView {
             // `synt stop` cancelled the session: end it for real (hooks, store, runtime) off the UI
             // thread, and say what the close found (or that it did not end cleanly)
             let job = cx.background_spawn(async move { engine::close_shared(e) });
-            cx.spawn(async move |this, cx| {
+            lu.spawn_owned(cx, async move |this, cx| {
                 let found = job.await;
                 this.update(cx, |t, cx| {
                     if let Some(lu) = &mut t.live {
@@ -1142,8 +1176,7 @@ impl TuiView {
                     cx.notify();
                 })
                 .ok();
-            })
-            .detach();
+            });
         }
         lu.dirty = true;
         if ended {
@@ -2284,7 +2317,8 @@ impl TuiView {
             }
         }
         reads.extend(ahead.into_iter().flatten());
-        cx.spawn(async move |this, cx| {
+        let Some(lu) = &mut self.live else { return };
+        lu.spawn_owned(cx, async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(select::DEBOUNCE_MS))
                 .await;
@@ -2298,8 +2332,7 @@ impl TuiView {
                 }
             })
             .ok();
-        })
-        .detach();
+        });
         cx.notify();
     }
 
@@ -2352,12 +2385,11 @@ impl TuiView {
                 }
             })
         };
-        cx.spawn(async move |this, cx| {
+        lu.spawn_owned(cx, async move |this, cx| {
             let r = job.await;
             this.update(cx, |t, cx| t.preview_read(id, last, r, cx))
                 .ok();
-        })
-        .detach();
+        });
     }
 
     fn preview_read(
@@ -2643,7 +2675,7 @@ impl TuiView {
                 None => crate::close_ws::close_in_store(&home, &key),
             }
         });
-        cx.spawn(async move |this, cx| {
+        lu.spawn_owned(cx, async move |this, cx| {
             let r = job.await;
             this.update(cx, |t, cx| {
                 let (msg, err) = match r {
@@ -2654,8 +2686,7 @@ impl TuiView {
                 t.refresh_store(cx);
             })
             .ok();
-        })
-        .detach();
+        });
     }
 
     /// The close button of Workspace row `i` (of the snapshot the person saw): asks first.
@@ -2970,14 +3001,13 @@ impl TuiView {
                 let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());
                 let job =
                     cx.background_spawn(async move { crate::models::refresh(&env, &project) });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let (rows, errors) = job.await;
                     this.update(cx, |t, cx| {
                         t.live_do(cx, |l| l.models_refreshed(rows, errors))
                     })
                     .ok();
-                })
-                .detach();
+                });
             }
             Action::SetContext(arg) => {
                 let Some(e) = lu.live.engine.clone() else {
@@ -3059,15 +3089,14 @@ impl TuiView {
                         std::time::Duration::from_secs(5),
                     )
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| match r {
                         Ok(p) => t.open_folder(&p, cx),
                         Err(e) => t.live_do(cx, |l| l.note(e, true)),
                     })
                     .ok();
-                })
-                .detach();
+                });
                 return;
             }
             Action::New => {
@@ -3123,12 +3152,11 @@ impl TuiView {
                 };
                 let addr = to.clone();
                 let job = cx.background_spawn(async move { e.peer_ask(&to, &text) });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.send_done(&addr, r)))
                         .ok();
-                })
-                .detach();
+                });
             }
             a @ (Action::Rewind | Action::RewindPreview(_) | Action::RewindApply(_)) => {
                 return self.run_rewind(a, cx);
@@ -3152,24 +3180,22 @@ impl TuiView {
                         crate::doctor_ui::LIMIT,
                     )
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.doctor_done(r)))
                         .ok();
-                })
-                .detach();
+                });
             }
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
                 };
                 let job = cx.background_spawn(async move { e.peer_rows() });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let rows = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.peers_done(rows)))
                         .ok();
-                })
-                .detach();
+                });
             }
         }
         lu.dirty = true;
@@ -4088,7 +4114,7 @@ pub fn read_store(
 
 /// The message pump: everything that arrived is applied in one go, then at most one redraw per 16 ms.
 async fn pump(
-    this: WeakEntity<TuiView>,
+    this: Owner,
     mut rx: futures::channel::mpsc::UnboundedReceiver<UiMsg>,
     cx: &mut gpui::AsyncApp,
 ) {

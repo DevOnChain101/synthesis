@@ -21,14 +21,13 @@ impl TuiView {
             lu.live.clean_deleting = true;
         }
         let token = lu.live.clean_job_start();
-        cx.spawn(async move |this, cx| {
+        lu.spawn_owned(cx, async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(clean::JOB_TIMEOUT_MS))
                 .await;
             this.update(cx, |t, cx| t.live_do(cx, |l| l.clean_timeout(token)))
                 .ok();
-        })
-        .detach();
+        });
         match a {
             Action::Clean => {
                 let keep = vec![e.sid.clone()];
@@ -38,12 +37,11 @@ impl TuiView {
                         None => clean::plans(&home, &keep),
                     }
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.clean_listed(r)))
                         .ok();
-                })
-                .detach();
+                });
             }
             Action::CleanApply {
                 scope,
@@ -60,15 +58,14 @@ impl TuiView {
                         None => clean::apply(&home, scope, &keep, &ids, backup),
                     }
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| {
                         t.live_do(cx, |l| l.clean_done(r));
                         t.refresh_store(cx);
                     })
                     .ok();
-                })
-                .detach();
+                });
             }
             _ => {}
         }
