@@ -10,6 +10,7 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use synthesis_config::{Config, Env, LoadContext, ProjectTrust, parse_model, resolve_credential};
+use synthesis_core::outcome::{HARD_MAX_TOKENS, HARD_MAX_TURNS};
 use synthesis_core::{AgentSession, BudgetUsage, SessionStatus, WorkspaceContext};
 use synthesis_events::{ArtifactRef, Event, SessionEnd, TaskStatus};
 use synthesis_harness::{
@@ -928,8 +929,12 @@ pub fn expand_file_mentions(
 pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(), String> {
     // An outcome attempt may run with no money cap (custom providers have no reliable prices) when the
     // orchestrator bounds it by turns and tokens (and `--max-wall-secs`, which a governed run always has).
-    let bounded_attempt =
-        c.attempt_session && limits.max_turns.is_some() && limits.max_tokens.is_some();
+    let in_range = |v: Option<u64>, max: u64| v.is_some_and(|v| (1..=max).contains(&v));
+    let bounded_attempt = c.attempt_session
+        && in_range(limits.max_turns.map(u64::from), u64::from(HARD_MAX_TURNS))
+        && in_range(limits.max_tokens, HARD_MAX_TOKENS)
+        // `--max-wall-secs` is optional here (a governed run has a default); when given it has the settings ceiling
+        && limits.max_wall_secs.is_none_or(|w| (1..=7 * 24 * 3600).contains(&w));
     if (governed || c.unattended)
         && limits.max_cost_usd.is_none()
         && !limits.no_cost_cap
@@ -3614,6 +3619,40 @@ mod tests {
         let att = W::parse_from(["x", "--unattended", "--attempt-session", "--resume", "s"]).c;
         assert!(check_governance(&att, &Limits::default(), true).is_err());
         assert!(check_governance(&att, &bounded, true).is_ok());
+        // out-of-range bounds are no bound: zero, above the hard ceilings, a wall above 7 days
+        for bad in [
+            Limits {
+                max_turns: Some(0),
+                ..bounded.clone()
+            },
+            Limits {
+                max_turns: Some(HARD_MAX_TURNS + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_tokens: Some(0),
+                ..bounded.clone()
+            },
+            Limits {
+                max_tokens: Some(HARD_MAX_TOKENS + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_wall_secs: Some(7 * 24 * 3600 + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_wall_secs: Some(0),
+                ..bounded.clone()
+            },
+        ] {
+            assert!(check_governance(&att, &bad, true).is_err());
+        }
+        let ok_wall = Limits {
+            max_wall_secs: Some(1800),
+            ..bounded.clone()
+        };
+        assert!(check_governance(&att, &ok_wall, true).is_ok());
         assert!(
             check_governance(&u, &bounded, true).is_err(),
             "a plain unattended run still needs a cap"

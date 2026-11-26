@@ -3593,13 +3593,18 @@ impl OutcomeTx<'_, '_> {
         }
         self.live_attempt(id, fence)?;
         let o = self.outcome()?;
-        // no money cap in the contract: nothing to reserve against (turns, tokens and wall time bound it)
-        let cap = self
-            .stored_contract(o.contract_version)?
-            .envelope
-            .budgets
-            .max_cost_usd
-            .unwrap_or(f64::INFINITY);
+        // the smaller of the contract's cap and the settings ceiling; none of either: nothing to reserve
+        // against (turns, tokens and wall time bound the attempt)
+        let cap = [
+            self.stored_contract(o.contract_version)?
+                .envelope
+                .budgets
+                .max_cost_usd,
+            self.policy.max_cost_usd,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
         let own: f64 = self.et.tx.query_row(
             "SELECT COALESCE(reserved_usd,0) FROM attempts WHERE id=?1",
             [id.as_str()],
@@ -4817,11 +4822,13 @@ impl OutcomeTx<'_, '_> {
         // the ceilings may have tightened since the contract was approved (as for an attempt)
         let contract = self.stored_contract(o.contract_version)?;
         self.policy.check(&contract)?;
-        let cap = contract
-            .envelope
-            .budgets
-            .max_cost_usd
-            .unwrap_or(f64::INFINITY);
+        let cap = [
+            contract.envelope.budgets.max_cost_usd,
+            self.policy.max_cost_usd,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
         let left = cap - spend(self.et.tx, self.id)?;
         // a NaN spend (a corrupt row) is not "enough left" either
         if left.is_nan() || left < MIN_PLAN_RESERVE_USD {

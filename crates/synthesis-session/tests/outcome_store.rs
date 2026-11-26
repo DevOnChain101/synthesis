@@ -3854,6 +3854,47 @@ fn a_contract_without_a_money_cap_creates_approves_and_reserves_without_a_cap() 
     assert_eq!(hash.len(), 64);
 }
 
+/// No contract cap and a settings ceiling: the store still checks reservations against the ceiling.
+#[test]
+fn with_no_contract_cap_a_settings_ceiling_still_bounds_attempt_and_plan_reservations() {
+    let e = env();
+    let store = e.v5();
+    let mut c = contract();
+    c.envelope.budgets = Budgets::without_cost();
+    let ceiling = with(|p| p.max_cost_usd = Some(3.0));
+    let mut w = new_outcome_with(&e, &store, &c, &ceiling);
+    go(&mut w, OutcomeState::ContractPending);
+    let h = contract_hash(&w);
+    w.approve_contract(1, &h, "user").unwrap();
+    e.child(&store, "p1", w.control_session_id());
+    // a plan run is bounded by the ceiling, not unlimited
+    let r = w.reserve_plan_run("p1", "m", 100.0).unwrap();
+    assert_eq!(r.reserved_usd, 3.0);
+    drop(w);
+    let mut c2 = contract();
+    c2.envelope.budgets = Budgets::without_cost();
+    let (mut w2, items) = {
+        let mut w = new_outcome_with(&e, &store, &c2, &ceiling);
+        go(&mut w, OutcomeState::ContractPending);
+        let h = contract_hash(&w);
+        w.approve_contract(1, &h, "user").unwrap();
+        let items = w.insert_plan(&plan()).unwrap();
+        go(&mut w, OutcomeState::Ready);
+        (w, items)
+    };
+    go(&mut w2, OutcomeState::Running);
+    let it = item(&items, "implement").clone();
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
+        item_to(&mut w2, &it, to).unwrap();
+    }
+    e.child(&store, "att-1", w2.control_session_id());
+    let (a, _) = w2
+        .new_attempt(&it, 1, "att-1", "local-inproc", NONE)
+        .unwrap();
+    assert!(w2.reserve_budget(&a.id, a.fence, 3.5).is_err());
+    w2.reserve_budget(&a.id, a.fence, 3.0).unwrap();
+}
+
 #[test]
 fn a_contract_cost_cap_above_a_settings_ceiling_is_refused_but_none_is_not() {
     let mut c = contract();
