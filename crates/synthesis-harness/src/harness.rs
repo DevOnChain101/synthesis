@@ -264,6 +264,8 @@ pub struct HarnessConfig {
     /// sub-agent models) or a `provider/model` label (a failover target). `None` = `pricing` for
     /// everything.
     pub pricing_for: Option<PriceFn>,
+    /// `synt.browser.screenshots` is `allow`: images stay in the model request while secrets are registered.
+    pub screenshots_allowed: bool,
 }
 
 pub type PriceFn = std::sync::Arc<dyn Fn(&str) -> Option<Pricing> + Send + Sync>;
@@ -339,6 +341,7 @@ impl HarnessConfig {
             auto: crate::classifier::AutoJudge::default(),
             report_sink: None,
             pricing_for: None,
+            screenshots_allowed: false,
         }
     }
 }

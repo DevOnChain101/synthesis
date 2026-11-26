@@ -67,6 +67,7 @@ No display: on Linux without `DISPLAY` and `WAYLAND_DISPLAY` (SSH, CI, container
 | `login_timeout_sec` | 10 to 3600, default 600. |
 | `allow_unsandboxed` | `true` lets the credential tools run when the sandbox is not `enforce`. Default false: they refuse (see "What is and is not protected"). |
 | `allow_with_mcp` | `true` lets the credential tools run while stdio MCP servers are configured (see "What is and is not protected"). Default false: they refuse and name the servers. |
+| `screenshots` | `withhold_when_secrets` (default) or `allow`. USER or managed settings only (managed wins; a project file is ignored with a diagnostic). Default: no screenshot image reaches the model (a text summary instead; refused after a typed secret until the page navigates). `allow`: the image is sent even with a secret registered or a credentialed page, password-like fields are shown as `***` during the capture, and the result says it may show on-screen secrets. This is the one explicit exception to "secrets never reach an LLM": see docs/SECURITY.md for what stays redacted and the residual. Set it in Settings (Execution). |
 | `approved.profiles` | Profile names that need no per-session confirmation (for runs nobody can answer). |
 | `approved.secrets` | `[{ "secret": name, "origin": exact origin }]` pairs that need no first-use confirmation; the secret must exist and be bound to that origin. Without a pre-approval a run with no terminal refuses. |
 
@@ -114,7 +115,7 @@ The `synt.browser` block is read from the user's own settings file only. In proj
 | Page script spoofs the checks (prototype pollution) | The check and write run in an isolated world |
 | Persistent profile or login window on the TCP transport (Windows) | Refused until the pipe transport exists |
 | Chrome stores the typed password (password manager, autofill, save prompt) | Switched off in the profile's Preferences and by `--disable-save-password-bubble` before each launch |
-| Screenshot shows a typed value | `browser_screenshot` is refused until the page is a new document; snapshots too after a value too short to mask. The show-password toggle of a page is not supported/handled: do not press it |
+| Screenshot shows a typed value | By default `browser_screenshot` is refused until the page is a new document; snapshots too after a value too short to mask. The show-password toggle of a page is not supported/handled: do not press it. With `synt.browser.screenshots = allow` the capture is NOT refused: password-like fields are masked as `***` for the capture, a visible username or TOTP is not |
 | Page changes between check and write (TOCTOU) | Check and write are one in-page call |
 | Form submits the value elsewhere (`action`, `formaction`, `form=`) | The form's targets must all be the secret's origins |
 | Invisible, covered, clipped or tiny field | Viewport, `elementFromPoint`, ancestor opacity/clip/overflow and a minimum size are checked |

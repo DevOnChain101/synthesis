@@ -409,6 +409,16 @@ fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Opti
         plan.servers.len(),
         plan.skipped.len()
     );
+    out!(
+        "browser screenshots: {}{}",
+        st.synthesis.screenshots.as_str(),
+        match st.synthesis.screenshots {
+            synthesis_settings::ScreenshotPolicy::Allow =>
+                " (images go to the model even with secrets registered; on-screen secrets are not masked)",
+            synthesis_settings::ScreenshotPolicy::WithholdWhenSecrets =>
+                " (images are not sent to the model)",
+        }
+    );
     {
         let b = synthesis_app::login::parse_settings(&st.synthesis.browser);
         let stdio = synthesis_app::login::stdio_servers(&plan.servers);

@@ -285,6 +285,9 @@ impl SettingsSchema {
                 .def(json!(600)).help("How long a browser login waits for the person."),
             Field::new("synt.browser.headed", Execution, "Show the agent's browser", Bool).def(json!(true))
                 .help("The agent's browser opens a visible window with a cursor and field highlight so you can watch it (needs a display; otherwise it runs headless with a note). Same profile isolation, URL policy and download rules as headless. `synt run` keeps headless unless this is true."),
+            Field::new("synt.browser.screenshots", Execution, "Browser screenshots to the model", Enum(&["withhold_when_secrets", "allow"]))
+                .scope(Scope::UserManaged).def(json!("withhold_when_secrets"))
+                .help("withhold_when_secrets (safe): the model gets no screenshot image, only a text summary of the page. allow: screenshots are sent to the model even when a secret is registered or a login page is open. Pixels cannot be masked: text from the page (DOM, console, network) is still redacted and password fields are shown as ***, but anything else on screen (a username, a visible token, a shown password) can reach the model and the provider. A project file cannot set this."),
             Field::new("synt.browser.allow_unsandboxed", Execution, "Browser without sandbox", Bool).def(json!(false))
                 .shown("turns the browser sandbox off; edit settings.json by hand"),
             Field::new("synt.browser.secrets", Execution, "Browser login secrets", ReadOnly)

@@ -329,6 +329,21 @@ pub struct BrowserRuntime {
 /// The page URL, or `"!"` when the page has a password field (open shadow roots, same-origin frames).
 const CREDENTIALED_JS: &str = r#"(()=>{const q=r=>{if(r.querySelector('input[type=password]'))return true;for(const e of r.querySelectorAll('*'))if(e.shadowRoot&&q(e.shadowRoot))return true;return false};try{if(q(document))return '!';for(const f of document.querySelectorAll('iframe,frame')){let d=null;try{d=f.contentDocument}catch(e){}if(d&&q(d))return '!'}}catch(e){return '!'}return location.href})()"#;
 
+/// Shows password-like fields (`type=password`, `autocomplete` current/new-password/one-time-code, a name or id with
+/// pass/pwd/otp: so a show-password toggle is covered) as `***` for a capture, through the native setter and
+/// without events, and puts the values back (`restore`). Open shadow roots and same-origin frames are walked.
+/// The script is a constant: no secret value ever goes into the page.
+fn mask_fields_js(restore: bool) -> String {
+    format!(
+        r#"(()=>{{const K='__synt_masked',d=document,set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+if({restore}){{const l=d[K];if(l){{for(const [e,v] of l){{try{{set.call(e,v)}}catch(_){{}}}}delete d[K]}}return 0}}
+const l=[],hit=e=>e.value&&(e.type==='password'||/(^|\s)(current-password|new-password|one-time-code)(\s|$)/.test(e.getAttribute('autocomplete')||'')||/pass|pwd|otp/i.test((e.name||'')+' '+(e.id||'')));
+const walk=r=>{{for(const e of r.querySelectorAll('*')){{if(e.tagName==='INPUT'&&hit(e)){{l.push([e,e.value]);try{{set.call(e,'***')}}catch(_){{}}}}if(e.shadowRoot)walk(e.shadowRoot);if(/^I?FRAME$/.test(e.tagName)){{try{{if(e.contentDocument)walk(e.contentDocument)}}catch(_){{}}}}}}}};
+try{{walk(d)}}catch(_){{}}
+Object.defineProperty(d,K,{{value:l,configurable:true}});return l.length}})()"#
+    )
+}
+
 /// `"!"` (a password field) or a URL that carries userinfo or a secret-named query/fragment value.
 fn url_credentialed(url: &str) -> bool {
     url == "!" || redact_url(url) != url
@@ -2089,8 +2104,21 @@ impl BrowserRuntime {
     }
 
     pub async fn screenshot(&self, full_page: bool) -> Result<Screenshot> {
+        self.capture(full_page, false).await
+    }
+
+    /// The person set `synt.browser.screenshots` to `allow`: no secret guard (a typed secret does not refuse
+    /// the capture), but password-like fields are shown as `***` during it (see `MASK_FIELDS_JS`) and
+    /// put back right after. Everything else drawn on the page is in the image as the page shows it.
+    pub async fn screenshot_allowed(&self, full_page: bool) -> Result<Screenshot> {
+        self.capture(full_page, true).await
+    }
+
+    async fn capture(&self, full_page: bool, allow: bool) -> Result<Screenshot> {
         let tab = self.current()?;
-        self.guard_capture(&tab, false).await?;
+        if !allow {
+            self.guard_capture(&tab, false).await?;
+        }
         // The person's pane resizes the viewport of the viewed tab; the agent's screenshots keep the configured
         // size (and the page its layout), so the viewport goes back for the capture and is fitted again after.
         let _no_resize = self.view_lock.lock().await;
@@ -2117,6 +2145,10 @@ impl BrowserRuntime {
         // produced its first frame (seen on loaded macOS runners). It is not a refusal: retry briefly,
         // re-checking the secret guard before every attempt.
         let mut retries = 0;
+        if allow {
+            // best effort: a page that blocks the script, or a closed shadow root, leaves a field unmasked
+            let _ = self.eval(&tab, &mask_fields_js(false)).await;
+        }
         let r = async {
             loop {
                 match self
@@ -2128,13 +2160,18 @@ impl BrowserRuntime {
                     {
                         retries += 1;
                         tokio::time::sleep(Duration::from_millis(200)).await;
-                        self.guard_capture(&tab, false).await?;
+                        if !allow {
+                            self.guard_capture(&tab, false).await?;
+                        }
                     }
                     r => break r,
                 }
             }
         }
         .await;
+        if allow {
+            let _ = self.eval(&tab, &mask_fields_js(true)).await;
+        }
         if let Some((_, m)) = fitted {
             // Fits again and restarts the cast: on a page that does not repaint, Chrome would otherwise keep
             // the frame of the configured viewport as the last one.

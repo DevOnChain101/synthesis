@@ -16,6 +16,7 @@ pub struct SealedRequest {
     req: Request,
     redactions: BTreeMap<String, usize>,
     images_dropped: usize,
+    images_kept: usize,
 }
 
 impl Deref for SealedRequest {
@@ -34,6 +35,12 @@ impl SealedRequest {
     /// Image blocks replaced by `[image]` because secrets are registered.
     pub fn images_dropped(&self) -> usize {
         self.images_dropped
+    }
+
+    /// Image blocks sent although secrets are registered (`synt.browser.screenshots` is `allow`): pixels are not
+    /// masked, so they may show on-screen secrets.
+    pub fn images_kept_with_secrets(&self) -> usize {
+        self.images_kept
     }
 
     /// The same sealed content for another model (failover); the content is not touched.
@@ -66,6 +73,8 @@ impl std::error::Error for Blocked {}
 #[derive(Clone)]
 pub struct SecretGate {
     redactor: Redactor,
+    /// The person chose to send images even when secrets are registered (explicit exception, see docs/SECURITY.md).
+    allow_images: bool,
 }
 
 impl Default for SecretGate {
@@ -77,7 +86,16 @@ impl Default for SecretGate {
 impl SecretGate {
     /// `redactor` is the session's (clones share what it learns).
     pub fn new(redactor: Redactor) -> Self {
-        Self { redactor }
+        Self {
+            redactor,
+            allow_images: false,
+        }
+    }
+
+    /// Keep image blocks while secrets are registered (`synt.browser.screenshots` = `allow`). Text is masked as always.
+    pub fn allow_images(mut self, allow: bool) -> Self {
+        self.allow_images = allow;
+        self
     }
 
     /// Masks every content string of the request (system, messages, tool results, tool schemas,
@@ -97,7 +115,17 @@ impl SecretGate {
         }
         // cloned only to strip images (which happens only when a value is registered)
         let stripped;
-        let (src, images_dropped) = if r.has_secrets() {
+        let images_kept = if r.has_secrets() && self.allow_images {
+            // shortcut: counts on a throwaway clone, only when allow and secrets meet; a counting walk if it shows up in profiles
+            let mut c = req.clone();
+            c.messages
+                .iter_mut()
+                .map(|m| m.content.strip_images())
+                .sum()
+        } else {
+            0
+        };
+        let (src, images_dropped) = if r.has_secrets() && !self.allow_images {
             let mut c = req.clone();
             let n = c
                 .messages
@@ -138,6 +166,7 @@ impl SecretGate {
             req,
             redactions,
             images_dropped,
+            images_kept,
         })
     }
 }
@@ -490,6 +519,24 @@ mod tests {
         let sealed = g.seal(&req_with(format!("a {secret} b"))).unwrap();
         assert!(!serde_json::to_string(&*sealed).unwrap().contains(&secret));
         assert_eq!(sealed.images_dropped(), 1);
+        assert_eq!(sealed.redactions().get("secret"), Some(&4));
+    }
+
+    #[test]
+    fn allow_images_keeps_the_image_but_text_is_still_masked() {
+        let secret = format!("{}-{}", "hunter", "42424242");
+        let r = Redactor::new([]);
+        r.add_secret(&secret);
+        let sealed = SecretGate::new(r)
+            .allow_images(true)
+            .seal(&req_with(format!("a {secret} b")))
+            .unwrap();
+        let out = serde_json::to_string(&*sealed).unwrap();
+        assert!(!out.contains(&secret) && out.contains("AAAA") && !out.contains("[image]"));
+        assert_eq!(
+            (sealed.images_dropped(), sealed.images_kept_with_secrets()),
+            (0, 1)
+        );
         assert_eq!(sealed.redactions().get("secret"), Some(&4));
     }
 

@@ -95,6 +95,34 @@ pub struct Compat {
     pub write_node_transcripts: Option<bool>,
 }
 
+/// `synt.browser.screenshots`. Pixels cannot be redacted, so the person chooses (owner decision
+/// 2026-11-25): the default withholds, `allow` is the explicit exception to "secrets never reach a model".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScreenshotPolicy {
+    /// Withheld while a secret is registered or the page may show credentials.
+    #[default]
+    WithholdWhenSecrets,
+    /// Always sent (when the model takes images); on-screen secrets are not masked.
+    Allow,
+}
+
+impl ScreenshotPolicy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "allow" => Some(Self::Allow),
+            "withhold_when_secrets" => Some(Self::WithholdWhenSecrets),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::WithholdWhenSecrets => "withhold_when_secrets",
+        }
+    }
+}
+
 /// The Rust-only top-level `"synt"` object (config.md §6). Every field optional.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SynthesisSettings {
@@ -106,6 +134,9 @@ pub struct SynthesisSettings {
     /// `browser` (docs/BROWSER-LOGIN.md): secrets, login timeout, profile domains. The user's own
     /// settings file only; interpreted by `synthesis-browser` / `synthesis-app`.
     pub browser: Map<String, Value>,
+    /// `browser.screenshots` (user and managed settings only, managed wins): whether browser
+    /// screenshots may reach the model while a secret is registered or the page is credentialed.
+    pub screenshots: ScreenshotPolicy,
     /// `modelInfo.fetch` (user settings only): `Some(false)` turns the startup model-info fetch off.
     pub model_info_fetch: Option<bool>,
     /// `sandbox.wsl.hide_windows_drives` (user and managed settings only): `Some(false)` keeps the
@@ -1208,10 +1239,29 @@ impl Settings {
         if let Some(b) = n.get("browser").and_then(Value::as_object) {
             if what == "user settings" {
                 self.synthesis.browser.extend(b.clone());
-            } else {
+            } else if b.keys().any(|k| k != "screenshots") {
                 self.diagnostics.push(format!(
                     "{what}: synt.browser is read from user settings only, ignored"
                 ));
+            }
+            // pixels may show secrets: the person's or the organisation's call, never a repository's
+            if let Some(v) = b.get("screenshots") {
+                let managed = what == "managed settings";
+                if !managed && what != "user settings" {
+                    self.diagnostics.push(format!(
+                        "{what}: synt.browser.screenshots is read from user or managed settings only, ignored"
+                    ));
+                } else if let Some(p) = v.as_str().and_then(ScreenshotPolicy::parse) {
+                    self.synthesis.screenshots = p;
+                } else {
+                    self.diagnostics.push(format!(
+                        "{what}: synt.browser.screenshots must be \"allow\" or \"withhold_when_secrets\"; using withhold_when_secrets"
+                    ));
+                    // a managed value that cannot be read must not leave a user's "allow" in force
+                    if managed {
+                        self.synthesis.screenshots = ScreenshotPolicy::WithholdWhenSecrets;
+                    }
+                }
             }
         }
         if let Some(m) = n.get("modelInfo") {
