@@ -21,6 +21,8 @@ pub const HARD_MAX_TURNS: u32 = 200;
 pub const HARD_MAX_TOKENS: u64 = 20_000_000;
 /// Settings defaults of a write attempt.
 pub const DEFAULT_ATTEMPT_MAX_TURNS: u32 = 50;
+/// Turn cap of a read-only attempt when the settings name none; they can only lower it (S1 2.1).
+pub const READ_ONLY_MAX_TURNS: u32 = 80;
 pub const DEFAULT_ATTEMPT_MAX_TOKENS: u64 = 2_000_000;
 /// Defaults of plan D10: 2 workers, 2 retries (so 3 attempts). The cost cap has no default.
 pub const DEFAULT_MAX_PARALLEL_WORKERS: u32 = 2;

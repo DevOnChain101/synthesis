@@ -122,6 +122,7 @@ pub fn render(path: &Path, kind: &str, state: &str, (w, h): (f32, f32)) -> Resul
                     t(&mut g, Field::Checks, "cargo test -p auth", window, cx);
                     t(&mut g, Field::Scope, "auth/**\ntests/**", window, cx);
                     t(&mut g, Field::Budget, "5", window, cx);
+                    t(&mut g, Field::Turns, "30", window, cx);
                 } else {
                     t(
                         &mut g,
@@ -158,7 +159,11 @@ pub fn render(path: &Path, kind: &str, state: &str, (w, h): (f32, f32)) -> Resul
             }
             if state == "review" || state == "dialog" {
                 let r = if writes {
-                    sample::review(false)
+                    let mut r = sample::review(false);
+                    if let Ok(c) = r.contract.as_mut() {
+                        c.max_turns = Some(30);
+                    }
+                    r
                 } else {
                     read_only_review()
                 };

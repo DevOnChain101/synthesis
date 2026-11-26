@@ -819,7 +819,71 @@ fn revise_cmd(f: &std::path::Path, rev: Option<i64>) -> OutcomeCmd {
         id: "o1".into(),
         contract_file: f.to_path_buf(),
         expected_revision: rev,
+        max_turns: None,
     }
+}
+
+#[test]
+fn max_turns_goes_into_the_contract_of_a_revision_and_a_create_and_out_of_range_is_refused() {
+    let (mut c, seen, _d, f) = revise_rig("applied");
+    let OutcomeCmd::Revise {
+        id,
+        contract_file,
+        expected_revision,
+        ..
+    } = revise_cmd(&f, None)
+    else {
+        unreachable!()
+    };
+    let rv = |t| OutcomeCmd::Revise {
+        id: id.clone(),
+        contract_file: contract_file.clone(),
+        expected_revision,
+        max_turns: Some(t),
+    };
+    let (r, _) = run(&mut c, rv(30), false, "", false);
+    assert_eq!(r, Ok(0));
+    assert_eq!(
+        seen.borrow()[1]["params"]["contract"]["envelope"]["budgets"]["max_turns"],
+        30
+    );
+    for bad in [0, 201] {
+        let (r, _) = run(&mut c, rv(bad), false, "", false);
+        assert!(r.unwrap_err().contains("--max-turns must be"), "{bad}");
+    }
+    // create: a read-only goal with the flag; nothing is sent when it is out of range
+    let (mut c, seen) = rig(vec![(
+        "outcome.create",
+        json!({"id": "o1", "state": "draft", "contract_version": 1, "contract_hash": "a".repeat(64)}),
+    )]);
+    let cr = |t| OutcomeCmd::Create {
+        goal: "g".into(),
+        kind: KindArg::ReadOnly,
+        criteria_file: None,
+        envelope_file: None,
+        checks_file: None,
+        base_commit: None,
+        max_cost_usd: Some(1.0),
+        max_attempts: None,
+        rubric: vec![],
+        max_turns: t,
+        cwd: Some(std::env::temp_dir()),
+    };
+    let (r, _) = run(&mut c, cr(Some(500)), false, "", false);
+    assert!(r.unwrap_err().contains("1 to 200") && seen.borrow().is_empty());
+    let (r, _) = run(&mut c, cr(Some(12)), false, "", false);
+    assert_eq!(r, Ok(0));
+    assert_eq!(
+        seen.borrow()[0]["params"]["contract"]["envelope"]["budgets"]["max_turns"],
+        12
+    );
+    // without the flag the field is absent: an old payload is unchanged
+    let (_, _) = run(&mut c, cr(None), false, "", false);
+    assert!(
+        seen.borrow()[1]["params"]["contract"]["envelope"]["budgets"]
+            .get("max_turns")
+            .is_none()
+    );
 }
 
 #[test]

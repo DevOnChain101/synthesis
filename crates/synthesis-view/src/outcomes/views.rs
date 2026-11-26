@@ -403,6 +403,8 @@ pub struct CriteriaView {
     pub criteria: Vec<CriterionView>,
     /// `id: command` of the contract's frozen checks.
     pub checks: Vec<String>,
+    /// Turns per attempt the contract names (`envelope.budgets.max_turns`); `None`: it names none.
+    pub max_turns: Option<u32>,
     pub extra: Vec<BriefRow>,
 }
 
@@ -475,6 +477,7 @@ impl CriteriaView {
             approved: v.get("approved").and_then(Value::as_bool),
             criteria,
             checks,
+            max_turns: turns(c.pointer("/envelope/budgets/max_turns")),
             extra: rest,
         })
     }
@@ -501,6 +504,9 @@ impl CriteriaView {
         }
         for k in &self.checks {
             out.push_str(&format!("check {k}\n"));
+        }
+        if let Some(t) = self.max_turns {
+            out.push_str(&format!("Turns per attempt: {t}\n"));
         }
         push_extra(&mut out, &self.extra);
         out
@@ -830,6 +836,15 @@ pub struct BudgetView {
     pub wall_secs: Amount,
     /// Cost caps reserved for attempts that have no final usage yet: a cap, not a spend.
     pub reserved_usd: Option<f64>,
+    /// Turns (model calls) per attempt the contract names; `None`: it names none, the settings apply.
+    pub max_turns: Option<u32>,
+}
+
+/// `max_turns` as a contract or an `outcome.budget` reply carries it: a whole number from 1; else unknown.
+fn turns(v: Option<&Value>) -> Option<u32> {
+    v.and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
 }
 
 impl BudgetView {
@@ -845,6 +860,7 @@ impl BudgetView {
                 .get("reserved_usd")
                 .and_then(Value::as_f64)
                 .filter(|x| x.is_finite() && *x >= 0.0),
+            max_turns: turns(v.get("max_turns")),
         }
     }
 
@@ -865,6 +881,7 @@ impl BudgetView {
                 limit: n("attempt_max_wall_secs"),
                 ..Amount::default()
             },
+            max_turns: turns(b.and_then(|b| b.get("max_turns"))),
             ..Self::default()
         }
     }
@@ -875,6 +892,8 @@ impl BudgetView {
             self.cost_usd.line("cost_usd"),
             self.wall_secs.line("wall_secs"),
             format!("reserved_usd {}\n", shown(self.reserved_usd)),
+            self.max_turns
+                .map_or_else(String::new, |t| format!("max_turns {t} per attempt\n")),
         ]
         .concat()
     }

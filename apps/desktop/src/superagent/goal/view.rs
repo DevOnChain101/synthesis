@@ -229,6 +229,16 @@ impl GoalForm {
             Field::Budget,
             self.line("sa-goal-budget", &u.budget, Field::Budget, window, cx),
         ));
+        d = d.child(self.labelled(
+            "sa-goal-turns",
+            "Turns per attempt",
+            &match self.turn_setting {
+                Some(n) => format!("model calls, 1 to 200; empty means {n} (Settings)"),
+                None => "model calls, 1 to 200; empty means the setting".to_string(),
+            },
+            Field::Turns,
+            self.line("sa-goal-turns", &u.turns, Field::Turns, window, cx),
+        ));
         if !writes {
             d = d.child(self.labelled(
                 "sa-goal-attempts",

@@ -813,6 +813,33 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
 }
 
 #[test]
+fn a_contract_max_turns_above_what_would_run_is_refused_not_clamped() {
+    let mut c = contract();
+    let set = |n| with(|p| p.attempt_max_turns = n);
+    // unset setting: a write attempt runs 50, a read-only one 80
+    c.envelope.budgets.max_turns = Some(50);
+    assert!(set(None).check(&c).is_ok());
+    c.envelope.budgets.max_turns = Some(51);
+    assert!(
+        set(None)
+            .check(&c)
+            .unwrap_err()
+            .to_string()
+            .contains("max_turns")
+    );
+    assert!(set(Some(60)).check(&c).is_ok());
+    assert!(set(Some(50)).check(&c).is_err());
+    // below the setting is fine, and is what runs
+    c.envelope.budgets.max_turns = Some(20);
+    assert_eq!(set(Some(60)).effective_turns(&c), 20);
+    // not named: the setting runs
+    c.envelope.budgets.max_turns = None;
+    assert!(set(Some(60)).check(&c).is_ok());
+    assert_eq!(set(Some(60)).effective_turns(&c), 60);
+    assert_eq!(set(None).effective_turns(&c), 50);
+}
+
+#[test]
 fn a_tighter_ceiling_applies_when_a_stored_contract_is_approved_and_when_an_attempt_starts() {
     let e = env();
     let store = e.v5();

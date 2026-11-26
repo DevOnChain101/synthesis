@@ -71,6 +71,7 @@ pub(crate) struct Inputs {
     pub checks: Entity<TextareaState>,
     pub scope: Entity<TextareaState>,
     pub budget: Entity<InputState>,
+    pub turns: Entity<InputState>,
     pub attempts: Entity<InputState>,
     pub folder: Entity<InputState>,
 }
@@ -90,6 +91,8 @@ pub struct GoalForm {
     pub(crate) kind: GoalKind,
     pub(crate) form: Form,
     pub(crate) screen: Screen,
+    /// Turns an attempt gets when the field is empty (`synt.orchestrator.max_turns`); `None`: not known.
+    pub(crate) turn_setting: Option<u32>,
     /// The engine advertised `read_only_goal` and `report_review`.
     pub(crate) read_only_goal: bool,
     /// The engine runs on another machine: a local folder dialog would not name its folders.
@@ -135,6 +138,7 @@ impl GoalForm {
             })
         };
         let writes = kind == GoalKind::Writes;
+        let turn_setting = env.as_ref().and_then(|e| link::turn_ceiling(e, !writes));
         let start = if writes { workspace } else { "" };
         let folder = line("/absolute/path/of/the/folder", start, window, cx);
         // leaving the folder field reads the base commit again if the folder changed
@@ -183,6 +187,12 @@ impl GoalForm {
                 window,
                 cx,
             ),
+            turns: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(match turn_setting {
+                    Some(n) => n.to_string(),
+                    None => "the setting".to_string(),
+                })
+            }),
             attempts: line("3", "", window, cx),
             folder,
         };
@@ -209,6 +219,7 @@ impl GoalForm {
             kind,
             form,
             screen: Screen::Ready,
+            turn_setting,
             read_only_goal: true,
             remote: false,
             env: env.clone(),
@@ -373,6 +384,7 @@ impl GoalForm {
             scope: area(&self.ui.scope),
             workspace: line(&self.ui.folder),
             attempts: line(&self.ui.attempts),
+            turns: line(&self.ui.turns),
         }
     }
 
@@ -393,6 +405,7 @@ impl GoalForm {
             Field::Checks => u.checks.update(cx, |s, cx| s.set_value(v, window, cx)),
             Field::Scope => u.scope.update(cx, |s, cx| s.set_value(v, window, cx)),
             Field::Budget => u.budget.update(cx, |s, cx| s.set_value(v, window, cx)),
+            Field::Turns => u.turns.update(cx, |s, cx| s.set_value(v, window, cx)),
             Field::Attempts => u.attempts.update(cx, |s, cx| s.set_value(v, window, cx)),
             Field::Folder => u.folder.update(cx, |s, cx| s.set_value(v, window, cx)),
         }

@@ -235,6 +235,45 @@ fn budget_is_as_given_and_remaining_is_never_computed() {
 }
 
 #[test]
+fn the_turn_limit_of_the_contract_is_shown_and_a_bad_one_is_unknown() {
+    let mut v = contract();
+    assert_eq!(BudgetView::from_contract(&v).max_turns, None);
+    assert!(
+        !BudgetView::from_contract(&v)
+            .render_text()
+            .contains("max_turns")
+    );
+    v["contract"]["envelope"]["budgets"]["max_turns"] = json!(30);
+    let b = BudgetView::from_contract(&v);
+    assert_eq!(b.max_turns, Some(30));
+    assert!(b.render_text().contains("max_turns 30 per attempt"));
+    assert_eq!(
+        BudgetView::from_json(&json!({"max_turns": 7})).max_turns,
+        Some(7)
+    );
+    let c = CriteriaView::from_json(&v).unwrap();
+    assert_eq!(c.max_turns, Some(30));
+    assert!(c.render_text().contains("Turns per attempt: 30"));
+    assert_eq!(
+        CriteriaView::from_json(&contract()).unwrap().max_turns,
+        None
+    );
+    for bad in [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!("x"),
+        json!(null),
+        json!(u64::MAX),
+    ] {
+        assert_eq!(
+            BudgetView::from_json(&json!({"max_turns": bad})).max_turns,
+            None
+        );
+    }
+}
+
+#[test]
 fn the_diff_tab_shows_the_servers_files_printable_and_says_what_was_withheld() {
     let reply = json!({"attempt": "at_1", "base_commit": "b", "commit": "c", "total_files": 5, "truncated": true,
         "files": [
