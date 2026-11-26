@@ -135,12 +135,16 @@ impl OutcomesView {
                 key: key.clone(),
                 kind: Kind::Tool,
                 subject: subject.clone(),
+                ask: None,
             })
             .collect();
-        approvals::merge(
-            tools,
-            approvals::decision_rows(&self.state.items, &w.ages, now),
-        )
+        match &self.state.queue {
+            Some(q) => approvals::queue_rows(tools, &q.queue, now),
+            None => approvals::merge(
+                tools,
+                approvals::decision_rows(&self.state.items, &w.ages, now),
+            ),
+        }
     }
 
     /// The number on the Super Agent button of the title bar.
@@ -212,7 +216,7 @@ impl OutcomesView {
         let Some(i) = approvals::next(&rows, self.pop.cursor.as_deref()) else {
             return;
         };
-        self.pop.cursor = Some(rows[i].key.clone());
+        self.pop.cursor = Some(rows[i].id().to_string());
         self.open_approval(&rows[i], window, cx);
     }
 
@@ -221,19 +225,34 @@ impl OutcomesView {
     fn open_approval(&mut self, row: &Row, window: &mut Window, cx: &mut Context<Self>) {
         match row.kind {
             Kind::Tool => cx.emit(OpenSession(row.key.clone())),
-            Kind::Decision => self.open_decision(&row.key, &row.subject, window, cx),
+            Kind::Decision => {
+                self.open_decision(&row.key, row.decision(), &row.subject, window, cx)
+            }
+            // a contract is read and approved in the outcome itself: select it
+            Kind::Contract => self.select_id(&row.key, cx),
         }
         cx.notify();
     }
 
     /// The card of outcome `id`. When it is not the selected one, it is selected (and the card says so) and shown when
     /// its detail lands: nothing is selected silently.
-    fn open_decision(&mut self, id: &str, goal: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_decision(
+        &mut self,
+        id: &str,
+        decision: Option<&str>,
+        goal: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let now = self.now();
         let st = &self.state;
         let landed = st.selected.as_deref() == Some(id)
             && st.detail.as_ref().is_some_and(|d| d.outcome == id);
-        let card = st.cards().iter().find(|c| c.resolvable()).cloned();
+        let card = st
+            .cards()
+            .iter()
+            .find(|c| c.resolvable() && decision.is_none_or(|d| c.id == d))
+            .cloned();
         // asked for on purpose (Alt+A): the card takes the keys, Enter inert for ARM_MS
         self.pop.dismissed = None;
         self.pop.shown = Some(match (landed, card) {

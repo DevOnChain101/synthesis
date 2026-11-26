@@ -12,6 +12,7 @@ Phase R1 deliverable (design doc §10 Phase 0, §14). Base: `../Synthesis_Soluti
 | [verification.md](verification.md) | `VerificationReport`, status rules, completion gate, self-correction, budgets | reviewed 0.1 |
 | [eval-and-golden.md](eval-and-golden.md) | eval harness, task manifest, 6+2 scenarios, scoring, golden capture plan | reviewed 0.1 |
 | [sandbox.md](sandbox.md) | WSL hardening of the Linux sandbox (interop, `/mnt` writes), what each control covers | draft |
+| [approvals.md](approvals.md) | Needs you queue, risk tiers, one-tap, Undo, batch, auto-decide, blocked-by | proposed (P1 built) |
 
 Status values: draft → reviewed (product owner + one engineer) → frozen (changes need a `v` bump or an ADR).
 

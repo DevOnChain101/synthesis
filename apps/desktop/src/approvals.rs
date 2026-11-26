@@ -3,13 +3,15 @@
 //! inert while outcomes are off or unsupported. Nothing here talks to the orchestrator: a decision is answered
 //! by an `Effect::Resolve` that the Outcomes link sends (the same worker, the same revision and brief hash).
 //!
-//! Age is the time this window first saw the item (the server sends no creation time): it is a lower bound of
-//! the real wait.
+//! With `approvals.queue` (the `approvals_queue` feature) there is one row per decision and per waiting contract,
+//! with the server's tier, order and creation time. A tool ask, and every row of an older orchestrator, is aged from
+//! the time this window first saw it: a lower bound of the real wait.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use synthesis_config::Env;
-use synthesis_view::outcomes::DecisionCard;
+use synthesis_view::outcomes::{DecisionCard, Queue, QueueRow, Source, Tier};
 
 use crate::live::ARM_MS;
 use crate::superagent::outcomes::ask::Ask;
@@ -52,6 +54,8 @@ pub enum Kind {
     Tool,
     /// An outcome decision.
     Decision,
+    /// An outcome whose contract waits for approval.
+    Contract,
 }
 
 impl Kind {
@@ -59,6 +63,7 @@ impl Kind {
         match self {
             Self::Tool => "Tool",
             Self::Decision => "Decision",
+            Self::Contract => "Contract",
         }
     }
 }
@@ -70,8 +75,22 @@ pub struct Row {
     pub key: String,
     pub kind: Kind,
     pub subject: String,
-    /// When it was first seen (ms).
+    /// When it was made (the queue's server time), else when it was first seen (ms).
     pub since: i64,
+    /// The server's queue row behind it; `None` for a tool ask and with an older orchestrator.
+    pub ask: Option<QueueRow>,
+}
+
+impl Row {
+    /// The decision this row is about, when it is about one.
+    pub fn decision(&self) -> Option<&str> {
+        self.ask.as_ref()?.decision_id.as_deref()
+    }
+
+    /// Unique in the list: an outcome can have several rows.
+    pub fn id(&self) -> &str {
+        self.decision().unwrap_or(&self.key)
+    }
 }
 
 /// One row per outcome that has decisions pending (the list only says how many; the cards are read when opened).
@@ -84,6 +103,7 @@ pub fn decision_rows(items: &[Item], ages: &Ages, now: i64) -> Vec<Row> {
             kind: Kind::Decision,
             subject: i.row.goal.clone(),
             since: ages.since(&i.row.id).unwrap_or(now),
+            ask: None,
         })
         .collect()
 }
@@ -95,13 +115,43 @@ pub fn merge(tools: Vec<Row>, decisions: Vec<Row>) -> Vec<Row> {
     all
 }
 
+/// The queue's waiting rows (lapsed ones need no answer) merged with the tool asks, in the server's order: tier
+/// first, then what holds the most work, then the oldest. A tool ask is T2 and holds only itself.
+pub fn queue_rows(tools: Vec<Row>, q: &Queue, now: i64) -> Vec<Row> {
+    let asks = q
+        .rows
+        .iter()
+        .filter(|r| r.source != Source::Lapsed)
+        .map(|r| Row {
+            key: r.outcome.clone(),
+            kind: if r.source == Source::Contract {
+                Kind::Contract
+            } else {
+                Kind::Decision
+            },
+            subject: r.goal.clone(),
+            since: r.created_ms.unwrap_or(now),
+            ask: Some(r.clone()),
+        });
+    let mut all: Vec<Row> = asks.chain(tools).collect();
+    // a stable sort: the server's order stands between equals
+    all.sort_by_key(|r| {
+        let (tier, weight) = r
+            .ask
+            .as_ref()
+            .map_or((Tier::T2, 1), |a| (a.tier, a.waiting_on_it + 1));
+        (Reverse(tier), Reverse(weight), r.since)
+    });
+    all
+}
+
 /// The row after `current` (wrapping), or the oldest when `current` is not in the list. Alt+A.
 pub fn next(rows: &[Row], current: Option<&str>) -> Option<usize> {
     if rows.is_empty() {
         return None;
     }
     Some(
-        match current.and_then(|c| rows.iter().position(|r| r.key == c)) {
+        match current.and_then(|c| rows.iter().position(|r| r.id() == c)) {
             Some(i) => (i + 1) % rows.len(),
             None => 0,
         },
@@ -258,6 +308,7 @@ mod tests {
             kind,
             subject: key.into(),
             since,
+            ask: None,
         }
     }
 

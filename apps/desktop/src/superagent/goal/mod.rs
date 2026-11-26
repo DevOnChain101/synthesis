@@ -289,7 +289,8 @@ impl GoalForm {
             | Msg::Answered(_)
             | Msg::Enabled(..)
             | Msg::AttemptMessage(_)
-            | Msg::Sent { .. } => {}
+            | Msg::Sent { .. }
+            | Msg::Queue(_) => {}
         }
         cx.notify();
     }

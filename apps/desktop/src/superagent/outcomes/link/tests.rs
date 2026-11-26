@@ -177,6 +177,13 @@ impl Transport for Fake {
                 }
                 w
             }
+            "approvals.queue" => json!({"rows": []}),
+            "approvals.history" => {
+                let first = p["outcome"] == "o_auth" && p["after_event_id"] == 0;
+                json!({"records": if first { vec![json!({"event_id": 3, "ts": "2026-11-17T07:00:00Z",
+                    "type": "decision.resolved", "payload": {"choice": "retry"}})] } else { vec![] },
+                    "next_event_id": if p["outcome"] == "o_auth" { 3 } else { 0 }})
+            }
             "evidence.get" => json!({"evidence": sample::evidence()}),
             "attempt.diff" => sample::diff(),
             "decision.resolve" => {
@@ -206,7 +213,7 @@ fn run(f: &Fake, reqs: Vec<Req>) -> Vec<Msg> {
     }
     drop(tx);
     let (out, mut orx) = unbounded();
-    let r = serve(&mut client(f), &rx, &out, Duration::ZERO, &ok_head);
+    let r = serve(&mut client(f), &rx, &out, Duration::ZERO, false, &ok_head);
     assert_eq!(r, Ok(()));
     drop(out);
     std::iter::from_fn(|| orx.try_recv().ok()).collect()
@@ -372,6 +379,7 @@ fn a_failed_link_ends_the_loop_with_its_text() {
         &rx,
         &out,
         Duration::ZERO,
+        false,
         &ok_head,
     );
     assert_eq!(r, Err("the orchestrator closed the link".into()));
@@ -384,7 +392,7 @@ fn a_flood_of_hints_is_one_refetch_not_one_per_hint() {
     let (tx, rx) = channel::<Req>();
     *f.end.borrow_mut() = Some(tx);
     let (out, _orx) = unbounded();
-    serve(&mut client(&f), &rx, &out, Duration::ZERO, &ok_head).unwrap();
+    serve(&mut client(&f), &rx, &out, Duration::ZERO, false, &ok_head).unwrap();
     let lists = f
         .log
         .borrow()
@@ -514,7 +522,7 @@ fn a_create_whose_reply_was_lost_is_retried_with_the_same_key_and_makes_one_draf
     tx.send(create("create-k1")).unwrap();
     drop(tx);
     let (out, mut orx) = unbounded();
-    let r = serve(&mut client(&f), &rx, &out, Duration::ZERO, &ok_head);
+    let r = serve(&mut client(&f), &rx, &out, Duration::ZERO, false, &ok_head);
     assert!(r.is_err(), "the link failure ends the worker with its text");
     drop(out);
     let first: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
@@ -563,6 +571,7 @@ fn a_refused_create_is_a_spent_key_and_the_workers_keep_going() {
             &rx,
             &out,
             Duration::ZERO,
+            false,
             &ok_head,
         ),
         Ok(())
@@ -743,7 +752,7 @@ fn a_base_commit_that_moved_stops_the_create_and_shows_the_new_one() {
     let (out, mut orx) = unbounded();
     let moved = |_: &str| Ok("b".repeat(40));
     assert_eq!(
-        serve(&mut client(&f), &rx, &out, Duration::ZERO, &moved),
+        serve(&mut client(&f), &rx, &out, Duration::ZERO, false, &moved),
         Ok(())
     );
     drop(out);
@@ -764,7 +773,7 @@ fn a_base_commit_that_moved_stops_the_create_and_shows_the_new_one() {
     drop(tx);
     let (out, mut orx) = unbounded();
     let bad = |_: &str| Err("is not the top folder".to_string());
-    serve(&mut client(&f), &rx, &out, Duration::ZERO, &bad).unwrap();
+    serve(&mut client(&f), &rx, &out, Duration::ZERO, false, &bad).unwrap();
     drop(out);
     let msgs: Vec<Msg> = std::iter::from_fn(|| orx.try_recv().ok()).collect();
     assert!(f.drafts.borrow().is_empty());
@@ -1035,7 +1044,7 @@ fn a_read_only_create_reads_no_head_and_sends_an_empty_base_commit() {
     // the folder is not a git repository: reading HEAD would fail, and must not be asked
     let no_git = |_: &str| -> Result<String, String> { Err("not a git repository".into()) };
     assert_eq!(
-        serve(&mut client(&f), &rx, &out, Duration::ZERO, &no_git),
+        serve(&mut client(&f), &rx, &out, Duration::ZERO, false, &no_git),
         Ok(())
     );
     drop(out);
@@ -1182,4 +1191,27 @@ fn the_engines_features_say_whether_a_worker_may_be_messaged() {
         &json!({"features": ["read_only_goal", "report_review"]}),
         "attempt_message"
     ));
+}
+
+#[test]
+fn the_queue_is_read_only_when_the_engine_has_it_and_history_resumes_at_its_cursor() {
+    let f = fake();
+    run(&f, vec![]);
+    assert!(!f.log.borrow().iter().any(|m| m.starts_with("approvals.")));
+    let (tx, rx) = channel();
+    tx.send(Req::Refresh).unwrap();
+    drop(tx);
+    let (out, mut orx) = unbounded();
+    serve(&mut client(&f), &rx, &out, Duration::ZERO, true, &ok_head).unwrap();
+    drop(out);
+    let reads: Vec<_> = std::iter::from_fn(|| orx.try_recv().ok())
+        .filter_map(|m| match m {
+            Msg::Queue(q) => q,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads.len(), 2, "the first look and the refresh");
+    // the second read asked after the cursor and still holds the record of the first
+    assert_eq!(reads[1].answered.len(), 1);
+    assert_eq!(reads[1].answered[0].0, "o_auth");
 }

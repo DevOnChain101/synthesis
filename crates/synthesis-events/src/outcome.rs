@@ -18,6 +18,9 @@ pub const PLAN_APPROVED: &str = "plan.approved";
 pub const ATTEMPT_STARTED: &str = "attempt.started";
 pub const DECISION_CREATED: &str = "decision.created";
 pub const DECISION_RESOLVED: &str = "decision.resolved";
+/// Reserved by docs/specs/approvals.md 5.2 (nothing writes them yet); `approvals.history` reads them.
+pub const APPROVAL_REVERTED: &str = "approval.reverted";
+pub const APPROVAL_AUTO_DECIDED: &str = "approval.auto_decided";
 /// A `request_evidence` answer closed a decision and the orchestrator stored its successor (`supersedes`).
 pub const DECISION_REBRIEFED: &str = "decision.rebriefed";
 pub const GRANT_CREATED: &str = "grant.created";

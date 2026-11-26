@@ -9,6 +9,7 @@
 //! pushes by itself (`python deploy.py`), is for the sandbox (network denied) and `text_hits` on
 //! agent-written files; upgrade by adding the tool here.
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -801,9 +802,14 @@ fn unwrap_more(u: &Words) -> Option<Words> {
 /// Total recipe / script lines one scan reads (a bigger one cannot be inspected: it asks).
 const MAX_LINES: usize = 5000;
 
+/// Largest recipe or script file read.
+const MAX_FILE: u64 = 256 * 1024;
+
 /// What one `scan` has already read: a (file, target) is scanned once, however many ways reach it.
 #[derive(Default)]
 struct Ctx {
+    /// [`scan_no_fs`]: no file is opened; a recipe runner is a hit of its own.
+    no_fs: bool,
     seen: std::collections::HashSet<String>,
     lines: usize,
 }
@@ -901,11 +907,18 @@ fn project_scripts(
     cwd: &Path,
     ctx: &mut Ctx,
 ) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
+    // a regular file only (a FIFO blocks, a device never ends), and never more than the limit
     let read = |p: &Path| {
         std::fs::metadata(p)
             .ok()
-            .filter(|m| m.len() <= 256 * 1024)
-            .and_then(|_| std::fs::read_to_string(p).ok())
+            .filter(|m| m.is_file() && m.len() <= MAX_FILE)?;
+        let mut text = String::new();
+        std::fs::File::open(p)
+            .ok()?
+            .take(MAX_FILE + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        (text.len() as u64 <= MAX_FILE).then_some(text)
     };
     let mut out = vec![];
     match first {
@@ -1084,6 +1097,19 @@ pub fn scan(cmd: &str, worktree: bool, cwd: &Path) -> Vec<Hit> {
     out
 }
 
+/// [`scan`] for text nobody may be trusted to point at a file: nothing on disk is read. Any recipe
+/// runner reached (`make`, `just`, `npm`, `pnpm`, `yarn`, `bun`) is a hit, since what it would run
+/// is unknown.
+pub fn scan_no_fs(cmd: &str, worktree: bool) -> Vec<Hit> {
+    let mut out = Vec::new();
+    let mut ctx = Ctx {
+        no_fs: true,
+        ..Ctx::default()
+    };
+    scan_into(cmd, worktree, Path::new(""), 0, &mut ctx, &mut out);
+    out
+}
+
 fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, ctx: &mut Ctx, out: &mut Vec<Hit>) {
     if depth > 3 {
         out.push(hit("nested scripts", "scripts nest too deeply to read"));
@@ -1196,6 +1222,12 @@ fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, ctx: &mut Ctx, ou
                         ));
                     }
                 }
+                "make" | "gmake" | "just" | "npm" | "pnpm" | "yarn" | "bun" if ctx.no_fs => {
+                    out.push(hit(
+                        "project scripts",
+                        "runs a project's recipes or scripts, which were not read",
+                    ));
+                }
                 "make" | "gmake" | "just" | "npm" | "pnpm" | "yarn" | "bun" => {
                     match project_scripts(name, args, cwd, ctx) {
                         Ok(lines) => {
@@ -1305,5 +1337,65 @@ fn name_key(n: &str) -> &'static str {
         "mosh" => "mosh",
         "ssh-copy-id" => "ssh-copy-id",
         _ => "ssh",
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    fn keys(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|h| h.key).collect()
+    }
+
+    #[test]
+    fn the_scan_without_files_reads_no_recipe_and_flags_the_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Makefile"), "all:\n\tgit push\n").unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"git push"}}"#,
+        )
+        .unwrap();
+        let d = dir.path().display();
+        for cmd in [
+            format!("make -C {d}"),
+            format!("x'\\make' -f {d}/Makefile"),
+            format!("npm --prefix {d} test"),
+            format!("sh -c 'just -f {d}/Makefile'"),
+        ] {
+            let hits = scan_no_fs(&cmd, false);
+            assert!(keys(&hits).contains(&"project scripts"), "{cmd}: {hits:?}");
+            assert!(!keys(&hits).contains(&"git push"), "read a file: {cmd}");
+        }
+        // the engine's own scan still reads them
+        let hits = scan(&format!("make -C {d}"), false, dir.path());
+        assert!(keys(&hits).contains(&"git push"), "{hits:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_a_device_named_as_a_recipe_file_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("Makefile");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("package.json")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            for cmd in ["make -f Makefile", "npm test"] {
+                scan(cmd, false, &cwd);
+                scan_no_fs(&format!("{cmd} -C {}", cwd.display()), false);
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the scan blocked on a special file");
     }
 }

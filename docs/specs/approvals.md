@@ -1,6 +1,6 @@
 # Spec: Approvals A1/A4 (risk tiers, Needs you queue, one-tap, batch, Undo, auto-decide, blocks-wN)
 
-Status: Proposed (2026-11-26). Implementation spec for backlog item F ("Approvals A1/A4") and the owner direction of 2026-11-26 ("allow several approval mechanisms").
+Status: Proposed (2026-11-26); P1 built (section 15 records where the code differs from the first draft). Implementation spec for backlog item F ("Approvals A1/A4") and the owner direction of 2026-11-26 ("allow several approval mechanisms").
 Builds on `docs/specs/approvals-concept.md` (the concept; its tier idea, threat list and classifier rules stay) and replaces its delivery rows A1, A4 (the mechanism part) and A6 with the slices of section 12. The concept's A2 (brief fields), A3 (non-blocking asks inside an attempt), A4-provisional (T1 `assumption_review` with checkpoints) and A7 (deferred asks in own sessions) are NOT in this spec; section 14 says how they plug in later.
 Owner principle: HANDOFF 7bl (2026-11-18); owner Q1 2026-11-18 (HANDOFF 7bq); home decision D10 2026-11-21 (`super-agent-s1.md` 5.5); 2026-11-26 "several mechanisms".
 Related: ADR-016, ADR-019, ADR-021 (protocol, `needs_you`, brief rules), `docs/specs/super-agent-s1.md` 5.5 and 6, `docs/specs/permissions.md`, `docs/specs/conductor.md` 3.2, `docs/specs/config.md` 6.1, `docs/specs/events.md` 7.
@@ -46,7 +46,7 @@ Markers: **[E]** exists in code (path:line from main 5b2328a6), **[N]** new here
 |---|---|
 | R1 | Every `pending` outcome decision, every outcome in `contract_pending`, and every decision that expired or was invalidated in the last 24 h appears in `approvals.queue` until answered or aged out; owner and desktop restarts lose none (the queue is a read of store rows). |
 | R2 | Every queue row carries `tier`, `kind`, `created_at` (server time), `expires_at`, `blocks` (work items) and `waiting_on_it` (transitive dependents in the current plan). `plan.get` and `work_item.get` items carry `blocked_by` (open decision ids). |
-| R3 | `tier` is the output of one pure function `synthesis_orchestrator::tier::classify`; an unknown kind is T2; no input lowers it below the kind's floor; a hint can only raise it (property test). |
+| R3 | `tier` is the output of one pure function `synthesis_orchestrator::tier::classify`; an unknown kind is T3; no input lowers it below the kind's floor; a hint can only raise it (property test). |
 | R4 | Ordering is tier (T3 first), then `waiting_on_it + 1` descending, then age; T3 rows are never folded behind "Show more"; counts per tier and per outcome are shown. |
 | R5 | One-tap exists only where the server sets `one_tap: true` (tier <= T1, a server `recommended` exists, `synt.approvals.one_tap` on). The owner re-checks at apply: `mechanism: one_tap` with a choice other than its own recommendation, or a tier above T1, is `denied`. |
 | R6 | Batch (`decision.resolve_many`) accepts 1..=`batch_max` items (default 10, ceiling 20), every item T1 with `choice == recommended` at apply time; otherwise the whole command is `denied`; an item that went stale is reported per item while the rest apply. |
@@ -129,12 +129,12 @@ Deviation from the brief I was given: it described T2 as "needs one tap". One-ta
 | 12-14 | Run, payment, trust/MCP/mode/enable | unchanged dialogs | - | - | not queue rows |
 | 15, 16 | Waiver, folder consent | T3 when built | | none | |
 | 17 | `assumption_review` | T1 when built | | the stored default | plugs into one-tap/batch unchanged |
-| - | Any other decision kind | T2 | | none | fail safe |
+| - | Any other decision kind | T3 | | none | fail closed: an unknown kind gets the highest tier |
 | - | Expired / invalidated (last 24 h) | T0 | | - | "Lapsed" rows |
 
 Rules:
-- `classify(kind, brief, action, item) -> Tier` and `recommended(kind, brief, tier) -> Option<AltId>` live in `crates/synthesis-orchestrator/src/tier.rs` [N], pure, with `CLASSIFIER_VERSION: u32 = 1`. They read typed fields only: `kind`, the brief's `alternatives[].id`, the stored `action` JSON, the item's `retries_used` and the contract's retry budget. Labels, `why`, `delta` and every other free text are never read.
-- `tier = max(floor(kind), raises(action, item), hint)`. `hint` is a future brief field `tier_hint` (none exists today); it participates only through `max`.
+- `classify(kind, action, item) -> Tier` and `recommended(kind, brief, tier) -> Option<(AltId, label)>` live in `crates/synthesis-orchestrator/src/tier.rs` [N], pure, with `CLASSIFIER_VERSION: u32 = 1`. They read typed fields only: `kind`, the brief's `alternatives[].id`, the stored `action` JSON, the item's `retries_used` and the contract's retry budget. Labels, `why`, `delta` and every other free text are never read.
+- `tier = max(floor(kind), raises(action, item))`. No tier or hint an agent wrote is read; if a `tier_hint` field is ever added it may only participate through `max`.
 - `recommended` is `None` unless `tier <= T1`. It must be an id the brief offers (`offers` rule, `outcome.rs:4081`).
 - The function runs twice: in `outcome_service` for `approvals.queue` (what the surface shows) and in `commands.rs` when the owner applies (what counts). A surface never computes either (ADR-021 dependency rule, `surface_deps.rs`).
 - Unit table test per row; property test: for random briefs, actions and hints, `classify >= floor(kind)` and `recommended.is_some() => tier <= T1`.
@@ -306,7 +306,7 @@ PROTOCOL stays 5 (`proto.rs:22`, exact match). Everything is additive and announ
 ```
 Rows are server-built and ordered (R4); at most 1000; strings cleaned and capped like the other view models. `goal` and `label` are cleaned text (shown as data, never as instructions). A contract row has `source: contract`, `version`, `hash`, no `decision_id`. `policy` is the effective setting the owner applies (so a surface never reads `synt.approvals` itself).
 
-`approvals.history {outcome, after_event_id}` [N, P1] -> `{"records": [...], "next_event_id": N}`: the control session's `decision.resolved`, `approval.reverted`, `approval.auto_decided` events after the cursor, 200 per page, payloads as 5.2.
+`approvals.history {outcome, after_event_id}` [N, P1] -> `{"records": [{"event_id", "ts", "type", "payload"}], "next_event_id": N}`: the control session's `decision.resolved`, `approval.reverted`, `approval.auto_decided` events after the cursor, 200 per page (one call reads at most 20000 events), payloads as 5.2. `next_event_id` is the last event read: a cursor that did not move is the end.
 
 `plan.get`, `work_item.get`: each item gains `blocked_by: [decision ids]` [N, P1]. `outcome.get` gains `repo_root` [N, P2] (for the approve dialog's Folder row, 7.4).
 
@@ -486,7 +486,7 @@ What the security reviewer must check (P1 classifier, P2-P5):
 
 | Layer | Test | Slice |
 |---|---|---|
-| Unit | `tier.rs`: one case per row of 3.3; unknown kind T2; property test (random brief/action/hint/policy) `tier >= floor`, `recommended => tier <= T1` | P1 |
+| Unit | `tier.rs`: one case per row of 3.3; unknown kind T3; table over every kind, action and item fact: `tier >= floor`, `recommended => tier <= T1` | P1 |
 | Unit | `blocks`/`waiting_on_it`/`blocked_by` on a diamond and a chain plan; 1000-item bound | P1 |
 | Unit | view model `queue.rs`: cleans text, caps, refuses `recommended` on T2/T3 (no button), keeps server order | P1 |
 | Store | `resolve_decision` writes `audit` into `decision.resolved`; approval MAC unchanged (old vector test still passes) | P1 |
@@ -547,3 +547,28 @@ Rollback per slice: P1 is reads plus an additive event field (revert the PR; old
 6. [A] The numbers (10 s Undo, 30 s ceiling, batch 10/20, snooze 1 h/4 h, 24 h Lapsed) are proposals, not measured; P1-P3 events give the first data.
 7. Later, outside this spec: concept A3 (attempts continue after a refused call) for true in-attempt non-blocking; concept A4-provisional `assumption_review` (T1 with checkpoints; it plugs into one-tap, batch and Undo unchanged); A7 deferred asks in own sessions; `message_worker` card; read-only consent (Q3).
 8. Docs to update in the slices: `docs/specs/README.md` (list this spec), ADR-021 (P2), `docs/specs/events.md` (P1, P3, P5), `docs/specs/config.md` (P2, P3, P5), `super-agent-s1.md` 5.5 (gate lifted per slice), `approvals-concept.md` section 11 (point A1/A4/A6 here).
+
+---
+
+## 15. P1 as built (where the code differed from the draft)
+
+| Draft | Code |
+|---|---|
+| Unknown kind T2 | **T3** (fail closed, P1 instruction). `assumption_review` is unknown until built |
+| `classify(kind, brief, action, item)` plus a `hint` | `classify(kind, action, item)`: the brief decides no tier; no hint exists |
+| [V] retry budget: `retries_used` equals the budget | A `blocked` retry is refused by the attempt ordinal (`new_attempt`: next ordinal <= `max_attempts_per_work_item`); `retries_used` counts only retryable failures (limit budget - 1). T2 when either is spent, or the facts cannot be read. The contract's budget is used, not the settings ceiling |
+| [V] `irreversible::scan` on the stored calls | `scan` reads recipe files of `make`, `just`, `npm`, `pnpm`, `yarn`, `bun` from folders the command names. The classifier reads no such file: those runners are T3 without scanning; commands over 16 KiB, a shell call without a command, and any bare, prefix or wildcard shell rule (`Bash`, `Bash(*)`, `Bash(git:*)`) are T3. It uses `irreversible::scan_no_fs`, where reaching a recipe runner is itself a hit |
+| T3 raises | also: a missing or unverifiable stored action, an unreadable shape; tools `SendMessage`, `browser_*`, `mcp__*` count as network; `Write`/`Edit` content is checked with `text_hits` |
+| `Resolution.audit`: no other caller changes | every `Resolution { .. }` literal in tests gained the field |
+| Lapsed: expired or invalidated in the last 24 h | an invalidated row has no time of its own: both are listed while `expires_at` is within the last 24 h or later |
+| `policy` = effective settings, `one_tap`/`batchable` per row | P1 offers no mechanism: `{"one_tap": false, "batch_max": 0, "undo_seconds": 0}`, both row flags false (the settings come in P2) |
+| Queue row of a contract revision (row 8) | not listed: R1 covers `contract_pending` only; a revision of a blocked outcome is reached through the outcome as before |
+| T0 "dismiss only" | no dismiss in P1; Lapsed rows age out |
+| 4.7 outcome frame work item rows say "waits for your decision" | not in P1: the home's Running row says it; `blocked_by` is served on every item |
+| Contract row opens the goal review | opens the outcome |
+| Tool asks get a blocked-by line (1.2) | they get the T2 chip only: a session ask holds no work item |
+| [V] 6.5 the CLI event printer and unknown event types | holds: `synt outcome events` prints seq, type and the whole record |
+| Command text judged as written | also judged with line continuations, quotes and backslashes removed (and lowercased); either one raises. Network programs (`curl`, `wget`, `ssh`, `gh`, cloud CLIs, `npx`, `pip`, PowerShell `iwr`/`irm` ...), recipe runners anywhere in the command, secret wildcards (`.env*`) and `git push/fetch/pull/clone/ls-remote/remote/submodule` are T3 whatever the case |
+| T3 raises name Write/Edit content | also `MultiEdit` `edits[].new_string`, `NotebookEdit` `new_source`, `Grep`/`Glob` `pattern` and `glob` naming a secret, and an action with no call and no needed rule |
+| `blocked` is T1 unless the budget is spent | also T2 when the stored action is absent or holds anything but harmless `Read`, `Grep`, `Glob` or `ExitPlanMode` calls (P5 would retry a T1 without a person) |
+| 6.1 rows capped at 1000; counts cover every row | waiting asks are kept before lapsed ones, newest first, and cut before the per-row reads; `counts.t0..t3` count listed rows, `counts.waiting` every ask, `counts.omitted` the cut ones. `blocks` names at most 20 items, `blocks_total` counts them. An outcome that cannot be read is listed in `unreadable` and the rest of the queue is served (a row that makes `list_outcomes` itself fail still fails the read) |

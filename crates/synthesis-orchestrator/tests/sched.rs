@@ -1931,6 +1931,7 @@ fn a_grant_the_profile_refuses_is_not_burned_by_the_failed_start() {
             approver: "user:cli".into(),
             choice: "grant_once".into(),
             brief_sha256: d.brief_sha256.clone(),
+            audit: Default::default(),
         },
         &d.binding,
     )

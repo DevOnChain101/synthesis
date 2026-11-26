@@ -10,7 +10,7 @@
 use synthesis_core::outcome::Contract;
 use synthesis_view::outcomes::{
     ActivityTab, BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab,
-    MessageRow, OutcomeRow,
+    MessageRow, OutcomeRow, Queue, Record,
 };
 
 use super::ask::Ask;
@@ -110,6 +110,13 @@ pub struct Item {
     pub budget: BudgetView,
 }
 
+/// The `approvals.queue` read and the newest recorded answers, as `(outcome, record)`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueueData {
+    pub queue: Queue,
+    pub answered: Vec<(String, Record)>,
+}
+
 /// What the centre tabs show for the selected outcome. A part the server refused is its error text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Detail {
@@ -133,6 +140,8 @@ pub struct State {
     pub read_only_goal: bool,
     /// The engine advertised `attempt_message` (the person may message a worker).
     pub attempt_message: bool,
+    /// `None`: the engine has no `approvals_queue` (or the read failed): one row per outcome, as before.
+    pub queue: Option<QueueData>,
     pub items: Vec<Item>,
     pub selected: Option<String>,
     pub detail: Option<Detail>,
@@ -199,6 +208,7 @@ impl State {
             screen,
             read_only_goal: false,
             attempt_message: false,
+            queue: None,
             items: vec![],
             selected: None,
             detail: None,

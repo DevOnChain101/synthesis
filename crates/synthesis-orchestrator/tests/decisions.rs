@@ -126,6 +126,7 @@ fn answer(w: &mut OutcomeWriter, d: &DecisionRecord, choice: &str) {
             approver: "user:cli".into(),
             choice: choice.into(),
             brief_sha256: d.brief_sha256.clone(),
+            audit: Default::default(),
         },
         &d.binding,
     )
@@ -224,6 +225,7 @@ fn ac09_a_moved_binding_invalidates_a_pending_decision_and_leaves_the_others() {
                 approver: "user:cli".into(),
                 choice: "grant_once".into(),
                 brief_sha256: policy.brief_sha256.clone(),
+                audit: Default::default(),
             },
             &policy.binding,
         )
@@ -275,6 +277,7 @@ fn expiry_moves_a_pending_decision_to_hold_and_never_to_approved() {
                 approver: "user:cli".into(),
                 choice: "grant_once".into(),
                 brief_sha256: d.brief_sha256.clone(),
+                audit: Default::default(),
             },
             &d.binding,
         )
@@ -631,6 +634,7 @@ fn rebrief_keeps_action_hash_and_grant_rules() {
                 approver: "user:cli".into(),
                 choice: "grant_once".into(),
                 brief_sha256: d.brief_sha256.clone(),
+                audit: Default::default(),
             },
             &d.binding,
         )
@@ -726,6 +730,7 @@ fn request_evidence_is_bounded_and_the_last_card_must_be_answered() {
             approver: "user:cli".into(),
             choice: "request_evidence".into(),
             brief_sha256: d.brief_sha256.clone(),
+            audit: Default::default(),
         },
         &d.binding,
     );

@@ -35,7 +35,7 @@ impl Render for Frame {
 
 type Err = Box<dyn std::error::Error + Send + Sync>;
 
-/// `state`: normal, card, empty, loading, error.
+/// `state`: normal, queue, card, empty, loading, error.
 pub fn render(path: &Path, state: &str, (w, h): (f32, f32)) -> Result<(), Err> {
     let text = gpui_platform::current_platform(true).text_system();
     let mut cx = HeadlessAppContext::with_platform(
@@ -52,8 +52,11 @@ pub fn render(path: &Path, state: &str, (w, h): (f32, f32)) -> Result<(), Err> {
         let o = cx.new(OutcomesView::sample);
         o.update(cx, |o, cx| {
             o.sample_clock();
-            if state == "normal" {
+            if state == "normal" || state == "queue" {
                 o.set_waiting_tools(vec![("s1".into(), "Fix the flaky login test".into())], cx);
+            }
+            if state == "queue" {
+                o.state.queue = Some(crate::superagent::outcomes::sample::queue());
             }
             match state {
                 "empty" => o.state.items.clear(),
@@ -67,6 +70,10 @@ pub fn render(path: &Path, state: &str, (w, h): (f32, f32)) -> Result<(), Err> {
             v.shown(window, cx);
             if state == "card" {
                 v.review("o_auth", cx);
+            }
+            if state == "queue" {
+                v.show_lapsed = true;
+                v.show_answered = true;
             }
             v
         });

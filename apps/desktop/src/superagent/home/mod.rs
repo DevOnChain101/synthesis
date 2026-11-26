@@ -49,6 +49,8 @@ const FIRST: usize = 5;
 /// The decision opened in place of its row. The card exists once the outcome's detail has landed.
 pub(crate) struct Open {
     pub outcome: String,
+    /// The row's own decision; `None` (an older orchestrator): the outcome's first open one.
+    pub decision: Option<String>,
     pub popup: Option<Popup>,
     /// When the card got the keys: they act 400 ms later (the engagement guard).
     pub since: i64,
@@ -61,6 +63,9 @@ pub struct HomeView {
     pub(crate) cursor: Option<usize>,
     pub(crate) open: Option<Open>,
     show_all: bool,
+    /// The "Lapsed" and "Answered, recorded" sections are collapsed until asked for.
+    show_lapsed: bool,
+    show_answered: bool,
     /// The row Alt+A went to last.
     alt_a: Option<String>,
     gates: Gates,
@@ -99,6 +104,8 @@ impl HomeView {
             cursor: None,
             open: None,
             show_all: false,
+            show_lapsed: false,
+            show_answered: false,
             alt_a: None,
             gates: Gates::SHIPPED,
             conversation: None,
@@ -127,9 +134,14 @@ impl HomeView {
 
     /// Review: the decision card opens in place of the row once its brief has been read; it has the keys from now.
     pub fn review(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.review_decision(key, None, cx);
+    }
+
+    fn review_decision(&mut self, key: &str, decision: Option<String>, cx: &mut Context<Self>) {
         let now = self.now(cx);
         self.open = Some(Open {
             outcome: key.into(),
+            decision,
             popup: None,
             since: now,
         });
@@ -140,7 +152,7 @@ impl HomeView {
     /// Alt+A: the next waiting thing (the oldest first, then around). A decision opens inline, a session is shown.
     pub fn next_decision(&mut self, cx: &mut Context<Self>) {
         let m = self.model(cx);
-        let keys: Vec<_> = m.needs.iter().map(|r| r.key.clone()).collect();
+        let keys: Vec<_> = m.needs.iter().map(|r| r.id().to_string()).collect();
         let i = match self
             .alt_a
             .as_ref()
@@ -162,7 +174,11 @@ impl HomeView {
                 Some(r) if r.kind == crate::approvals::Kind::Tool => {
                     cx.emit(HomeEvent::OpenSession(r.key.clone()))
                 }
-                Some(r) => self.review(&r.key, cx),
+                // a contract is read and approved in the outcome's own frame
+                Some(r) if r.kind == crate::approvals::Kind::Contract => {
+                    cx.emit(HomeEvent::OpenOutcome(r.key.clone()))
+                }
+                Some(r) => self.review_decision(&r.key, r.decision.clone(), cx),
                 None => {}
             },
             Target::Run(i) => {
@@ -230,7 +246,9 @@ impl HomeView {
         if !landed {
             return;
         }
-        let Some(c) = st.cards().iter().find(|c| c.resolvable()).cloned() else {
+        let wanted = |id: &str| open.decision.as_deref().is_none_or(|d| d == id);
+        let found = st.cards().iter().find(|c| c.resolvable() && wanted(&c.id));
+        let Some(c) = found.cloned() else {
             self.open = None;
             return;
         };
@@ -545,6 +563,8 @@ pub(in crate::superagent) fn row(
             div()
                 .flex()
                 .gap_x(px(t::S4))
+                // a note that does not fit goes to the next line, never cut
+                .flex_wrap()
                 .overflow_hidden()
                 .children(
                     s.meta
@@ -615,11 +635,11 @@ pub fn render(
     } else if centred {
         vec![]
     } else {
-        vec![
-            home.needs(&m, cx),
-            home.running(&m, cx),
-            home.finished(&m, cx),
-        ]
+        vec![home.needs(&m, cx)]
+            .into_iter()
+            .chain(home.logs(&m, cx))
+            .chain([home.running(&m, cx), home.finished(&m, cx)])
+            .collect()
     };
     div()
         .id("sa-home")

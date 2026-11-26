@@ -17,7 +17,7 @@ use synthesis_core::outcome::{Contract, DecisionState, OutcomeState, WorkItemId}
 use synthesis_events::Record;
 use synthesis_session::Error as StoreError;
 use synthesis_session::outcome::{
-    CommandRecord, CommandState, Effects, NewMessage, OutcomeWriter, Resolution, Sent,
+    CommandRecord, CommandState, Effects, NewMessage, OutcomeWriter, Resolution, Sent, Surface,
 };
 use time::OffsetDateTime;
 
@@ -145,7 +145,7 @@ fn deny(
 }
 
 fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, StoreError> {
-    let r = match Resolution::from_command(c) {
+    let mut r = match Resolution::from_command(c) {
         Ok(r) => r,
         Err(e) => return deny(w, c, e),
     };
@@ -180,6 +180,16 @@ fn resolve(w: &mut OutcomeWriter, c: &CommandRecord) -> Result<CommandRecord, St
         };
         current
     };
+    // the record of the answer: what the owner itself rates the decision at the time it applies it
+    let rated = crate::tier::assess(w, &w.get_outcome(w.id())?, &d);
+    r.audit = json!({
+        "mechanism": if c.from_surface == Surface::Cli { "cli" } else { "card" },
+        "tier": rated.tier.as_str(),
+        "classifier_version": crate::tier::CLASSIFIER_VERSION,
+        "recommended": rated.recommended.map(|(id, _)| id),
+        "batch_id": null,
+        "held_until": null,
+    });
     let run = w.apply_command(&c.idempotency_key, |tx, _| {
         audit_in(tx, c)?;
         let to = tx.resolve_decision(&r, &current)?;

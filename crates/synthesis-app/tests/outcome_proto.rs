@@ -9,13 +9,14 @@ use std::rc::Rc;
 
 use serde_json::{Value, json};
 use synthesis_app::outcome_client::{ClientError, InProc, OutcomeClient, Stdio, Transport};
+use synthesis_app::outcome_cmd::{Io, OutcomeCmd, dispatch};
 use synthesis_app::outcome_service::Service;
 use synthesis_app::proto::{Call, PROTOCOL, VERSION};
 use synthesis_core::WorkspaceContext;
 use synthesis_core::outcome::*;
 use synthesis_orchestrator::{apply_queued, compile_envelope, decision_binding};
 use synthesis_session::outcome::*;
-use synthesis_session::{SCHEMA_VERSION_OUTCOMES, Store, StoreOptions};
+use synthesis_session::{Reader, SCHEMA_VERSION_OUTCOMES, Store, StoreOptions};
 use time::OffsetDateTime;
 
 struct Rig {
@@ -230,6 +231,7 @@ fn off_by_default_every_method_but_status_is_refused_and_nothing_is_created() {
     if !cfg!(windows) {
         features.push("attempt_message");
     }
+    features.push("approvals_queue");
     assert_eq!(st["features"], json!(features));
     assert!(matches!(c.outcomes(None), Err(ClientError::Refused(e)) if e.contains("off")));
     assert!(
@@ -454,6 +456,7 @@ fn proto_request_evidence_closes_the_old_card_and_a_new_one_supersedes_it() {
                 approver: "user:cli".into(),
                 choice: "REST".into(),
                 brief_sha256: od.brief_sha256.clone(),
+                audit: Default::default(),
             },
             &od.binding,
         )
@@ -1025,4 +1028,330 @@ fn proto_revise_is_idempotent_and_a_second_request_under_the_same_key_is_refused
     let s = c2.command_status(&r2.outcome, "k").unwrap();
     assert_eq!(s.state, CommandState::Denied, "{s:?}");
     assert!(r2.w().get_contract(r2.w().id(), 2).is_err());
+}
+
+fn run_cli(c: &mut OutcomeClient<InProc>, cmd: OutcomeCmd) -> String {
+    let (mut out, mut input) = (Vec::new(), Cursor::new(Vec::new()));
+    let mut io = Io {
+        out: &mut out,
+        input: &mut input,
+        interactive: false,
+    };
+    assert_eq!(
+        dispatch(c, cmd, false, &mut io, std::time::Duration::ZERO),
+        Ok(0)
+    );
+    String::from_utf8(out).unwrap()
+}
+
+// ---- approvals P1 (docs/specs/approvals.md): the queue, the history and blocked_by -------------
+
+/// A pending decision of `kind` on the rig's item; the brief claims a tier and safety, which the
+/// server must ignore.
+fn open_kind(r: &mut Rig, kind: &str, action: Option<Value>) -> String {
+    let o = r.w().get_outcome(r.w().id()).unwrap();
+    let (c, ..) = r.w().get_contract(r.w().id(), 1).unwrap();
+    let policy = compile_envelope(&c.envelope, &[]).unwrap().policy_hash();
+    let b = decision_binding(1, o.plan_version.unwrap(), None, &policy, "", 0, &r.item);
+    let (d, _) = r
+        .wm()
+        .new_decision(&NewDecision {
+            kind: kind.into(),
+            dedupe_key: kind.into(),
+            brief: json!({"why": "safe, one tap", "tier": "T0", "tier_hint": "T1",
+                "alternatives": [{"id": "retry", "label": "run the work item again"}],
+                "unknowns": [], "safe_default": "HOLD"}),
+            binding: b,
+            expires_at: stamp(2),
+            action,
+        })
+        .unwrap();
+    r.wm()
+        .transition_decision(
+            &d.id,
+            1,
+            DecisionState::Pending,
+            &d.binding,
+            &Effects::default(),
+        )
+        .unwrap();
+    d.id.to_string()
+}
+
+#[test]
+fn proto_approvals_queue_golden_and_blocked_by() {
+    let mut r = rig();
+    let quiet = || Some(json!({"needed": [], "calls": [], "grant_rules": []}));
+    let low = open_kind(&mut r, "blocked", quiet());
+    let push = json!({"needed": [], "grant_rules": [], "tier": "T1",
+        "calls": [{"tool": "Bash", "input": {"command": "git push origin main"}}]});
+    let high = open_kind(&mut r, "approval_needed", Some(push));
+    // a second outcome whose contract waits
+    let waiting = {
+        let tmp = r.home.parent().unwrap().join("repo");
+        let ws = WorkspaceContext::open("w", &tmp, &tmp, &[], r.home.join("c2"), "pg").unwrap();
+        let mut w = r
+            .store
+            .create_outcome(NewOutcome {
+                workspace: &ws,
+                base_commit: "c0ffee".into(),
+                contract: &contract(),
+                policy: &OutcomePolicy::new(true, 16, 10, 24),
+            })
+            .unwrap();
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(
+            rev,
+            OutcomeState::ContractPending,
+            None,
+            &Effects::default(),
+        )
+        .unwrap();
+        w.id().to_string()
+    };
+    // the wire form, on the read-only link
+    let req: synthesis_app::proto::Request =
+        serde_json::from_str(r#"{"id":1,"method":"approvals.queue","params":{}}"#).unwrap();
+    assert!(req.call.is_outcome() && req.call.action().is_none() && req.call.surface().is_none());
+    let engine = Service::read_only(&r.home, true);
+    let q = engine.handle(req.call).unwrap();
+    assert_eq!(q["classifier_version"], 1);
+    assert_eq!(
+        q["policy"],
+        json!({"one_tap": false, "batch_max": 0, "undo_seconds": 0})
+    );
+    assert_eq!(
+        q["counts"],
+        json!({"t0": 0, "t1": 1, "t2": 0, "t3": 2, "waiting": 3, "omitted": 0})
+    );
+    assert_eq!(q["unreadable"], json!([]));
+    let rows = q["rows"].as_array().unwrap();
+    // highest tier first; among equals, what holds the most work
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["tier"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["T3", "T3", "T1"]
+    );
+    let by = |k: &str, v: &str| rows.iter().find(|r| r[k] == v).unwrap().clone();
+    let t1 = by("decision_id", &low);
+    let plan = r.client(Surface::Cli).plan(&r.outcome).unwrap();
+    let one = plan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "one")
+        .unwrap()
+        .clone();
+    let stored = r.w().list_decisions(r.w().id()).unwrap();
+    let d = stored.iter().find(|d| d.id.to_string() == low).unwrap();
+    assert_eq!(
+        t1,
+        json!({"outcome": r.outcome, "goal": "goal", "source": "decision", "decision_id": low,
+            "kind": "blocked", "state": "pending", "tier": "T1", "revision": 2,
+            "brief_sha256": d.brief_sha256, "created_at": d.created_at, "expires_at": d.expires_at,
+            "recommended": {"id": "retry", "label": "run the work item again"},
+            "one_tap": false, "batchable": false,
+            "blocks": [{"id": one["id"], "key": "one"}], "blocks_total": 1, "waiting_on_it": 1})
+    );
+    let t3 = by("decision_id", &high);
+    assert_eq!(t3["tier"], "T3");
+    assert_eq!(t3.get("recommended"), None);
+    let contract_row = by("outcome", &waiting);
+    let hash = Reader::open(&r.home)
+        .unwrap()
+        .get_contract(&OutcomeId::parse(&waiting).unwrap(), 1)
+        .unwrap()
+        .1;
+    assert_eq!(
+        (
+            &contract_row["source"],
+            &contract_row["version"],
+            &contract_row["hash"],
+            &contract_row["blocks"]
+        ),
+        (&json!("contract"), &json!(1), &json!(hash), &json!([]))
+    );
+    assert_eq!(contract_row.get("decision_id"), None);
+    assert_eq!(q["per_outcome"].as_array().unwrap().len(), 2);
+    synthesis_view::outcomes::Queue::from_json(&q).unwrap();
+    // another workspace sees nothing
+    let none = engine
+        .handle(Call::ApprovalsQueue {
+            workspace: Some("elsewhere".into()),
+        })
+        .unwrap();
+    assert_eq!(none["rows"], json!([]));
+    // blocked_by on plan.get and work_item.get
+    let mut held = one["blocked_by"].as_array().unwrap().clone();
+    held.sort_by_key(|v| v.to_string());
+    let mut want = vec![json!(low), json!(high)];
+    want.sort_by_key(|v| v.to_string());
+    assert_eq!(held, want);
+    let other = plan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "test")
+        .unwrap();
+    assert_eq!(other["blocked_by"], json!([]));
+    let item = r
+        .client(Surface::Cli)
+        .work_item(&r.outcome, one["id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(item["blocked_by"].as_array().unwrap().len(), 2);
+    let out = run_cli(
+        &mut r.client(Surface::Cli),
+        OutcomeCmd::Queue {
+            workspace: None,
+            history: None,
+        },
+    );
+    assert!(
+        out.contains(&format!(
+            "synt outcome resolve {} {low} --revision 2",
+            r.outcome
+        )) && out.contains("--choice CHOICE")
+            && out.contains("blocks one \u{b7} 1 waiting on it")
+            && out.contains(&format!("synt outcome approve {waiting} --version 1")),
+        "{out}"
+    );
+    // nothing about the old calls changed: the card still parses and still has no recommendation
+    let cards = r.client(Surface::Cli).decisions(&r.outcome).unwrap();
+    assert_eq!(cards.len(), 2);
+}
+
+#[test]
+fn proto_approvals_history_records_the_answer_and_lapsed_rows_are_info() {
+    let mut r = rig();
+    let quiet = json!({"needed": [], "calls": [], "grant_rules": []});
+    let id = open_kind(&mut r, "blocked", Some(quiet));
+    r.decide("gone", 1, |_| {});
+    let mut c = r.client(Surface::Superagent);
+    let card = c
+        .decisions(&r.outcome)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap();
+    // the request has the shape of before this slice
+    c.resolve(&r.outcome, &card, "retry", "k", None).unwrap();
+    r.owner();
+    r.set_clock(later);
+    apply_queued(r.wm(), later()).unwrap();
+    let engine = Service::read_only(&r.home, true);
+    let call: Call = serde_json::from_value(
+        json!({"method": "approvals.history", "params": {"outcome": r.outcome}}),
+    )
+    .unwrap();
+    let h = engine.handle(call).unwrap();
+    let records = h["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "{h}");
+    assert_eq!(records[0]["type"], "decision.resolved");
+    assert_eq!(
+        records[0]["payload"]["audit"],
+        json!({"mechanism": "card", "tier": "T1", "classifier_version": 1,
+               "recommended": "retry", "batch_id": null, "held_until": null})
+    );
+    assert_eq!(records[0]["payload"]["approver"], "user:superagent");
+    let (page, next) = c.approvals_history(&r.outcome, 0).unwrap();
+    assert_eq!(page.len(), 1);
+    let (empty, same) = c.approvals_history(&r.outcome, next).unwrap();
+    assert!(empty.is_empty() && same == next);
+    let q = c.approvals_queue(None).unwrap();
+    assert_eq!(
+        q["counts"],
+        json!({"t0": 1, "t1": 0, "t2": 0, "t3": 0, "waiting": 0, "omitted": 0})
+    );
+    assert_eq!(q["rows"][0]["source"], "lapsed");
+    assert_eq!(q["rows"][0]["state"], "expired");
+    assert_eq!(q["per_outcome"], json!([]));
+    // `synt outcome queue`: the rows and the history in words, over the same reads
+    let mut cli = r.client(Surface::Cli);
+    let out = run_cli(
+        &mut cli,
+        OutcomeCmd::Queue {
+            workspace: None,
+            history: None,
+        },
+    );
+    assert!(
+        out.contains("info  ambiguity") && out.contains("0 waiting"),
+        "{out}"
+    );
+    let out = run_cli(
+        &mut cli,
+        OutcomeCmd::Queue {
+            workspace: None,
+            history: Some(r.outcome.clone()),
+        },
+    );
+    assert!(
+        out.contains("answered \u{b7} \"retry\" \u{b7} card \u{b7} T1"),
+        "{out}"
+    );
+}
+
+#[test]
+fn proto_approvals_queue_skips_an_outcome_it_cannot_read_and_says_so() {
+    let mut r = rig();
+    let quiet = json!({"needed": [], "calls": [], "grant_rules": []});
+    open_kind(&mut r, "blocked", Some(quiet));
+    let broken = {
+        let repo = r.home.parent().unwrap().join("repo");
+        let ws = WorkspaceContext::open("w", &repo, &repo, &[], r.home.join("c2"), "pg").unwrap();
+        let mut w = r
+            .store
+            .create_outcome(NewOutcome {
+                workspace: &ws,
+                base_commit: "c0ffee".into(),
+                contract: &contract(),
+                policy: &OutcomePolicy::new(true, 16, 10, 24),
+            })
+            .unwrap();
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(
+            rev,
+            OutcomeState::ContractPending,
+            None,
+            &Effects::default(),
+        )
+        .unwrap();
+        w.id().to_string()
+    };
+    // the stored contract of the second outcome is damaged (its triggers forbid it, so drop them)
+    let db = rusqlite::Connection::open(r.home.join("synt.db")).unwrap();
+    let triggers: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='contracts'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for t in triggers {
+        db.execute_batch(&format!("DROP TRIGGER {t}")).unwrap();
+    }
+    assert_eq!(
+        db.execute(
+            "UPDATE contracts SET body='{}' WHERE outcome_id=?1",
+            [&broken]
+        )
+        .unwrap(),
+        1
+    );
+    let q = r.client(Surface::Cli).approvals_queue(None).unwrap();
+    assert_eq!(q["unreadable"], json!([broken]));
+    assert_eq!(q["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(q["rows"][0]["outcome"], json!(r.outcome));
+    let out = run_cli(
+        &mut r.client(Surface::Cli),
+        OutcomeCmd::Queue {
+            workspace: None,
+            history: None,
+        },
+    );
+    assert!(
+        out.contains("1 outcome(s) could not be read") && out.contains("2 waiting"),
+        "{out}"
+    );
 }

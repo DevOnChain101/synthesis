@@ -339,6 +339,7 @@ fn ro_goal_is_created_in_a_folder_that_is_not_a_git_repository_and_the_kinds_nev
     if !cfg!(windows) {
         features.push("attempt_message");
     }
+    features.push("approvals_queue");
     assert_eq!(c.status().unwrap()["features"], serde_json::json!(features));
     let ro = Contract::read_only(
         "review it".into(),

@@ -4,11 +4,12 @@
 
 use serde_json::{Value, json};
 use synthesis_view::outcomes::{
-    BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab, OutcomeRow, OverviewTab,
+    BudgetView, CriteriaView, DecisionCard, InspectorContent, InspectorTab, OutcomeRow,
+    OverviewTab, Queue, Record,
 };
 
 use super::form::{DiffView, Review};
-use super::model::{Detail, Item, Screen, State};
+use super::model::{Detail, Item, QueueData, Screen, State};
 
 /// The sample's workspace: an absolute path on the OS it runs on.
 pub fn workspace() -> String {
@@ -183,6 +184,45 @@ pub fn cards() -> Vec<DecisionCard> {
         .iter()
         .map(|c| DecisionCard::from_json(c).expect("sample card"))
         .collect()
+}
+
+/// An `approvals.queue` reply and a recorded answer, for the home's shot and tests. It is not part of [`state`]:
+/// the other views' samples keep one row per outcome.
+pub fn queue() -> QueueData {
+    let row = |outcome: &str,
+               goal: &str,
+               source: &str,
+               id: &str,
+               kind: &str,
+               tier: &str,
+               at: &str,
+               held: &[&str],
+               waiting: u64| {
+        json!({"outcome": outcome, "goal": goal, "source": source, "decision_id": id, "kind": kind,
+            "state": if source == "lapsed" { "expired" } else { "pending" }, "tier": tier, "revision": 2,
+            "brief_sha256": HASH_V2, "hash": HASH_V2, "version": 2, "created_at": at,
+            "expires_at": (source != "contract").then_some("2023-11-15T21:00:00.000Z"), "one_tap": false, "batchable": false,
+            "blocks": held.iter().map(|k| json!({"id": k, "key": k})).collect::<Vec<_>>(),
+            "waiting_on_it": waiting})
+    };
+    let auth = "Migrate auth to OIDC and keep the old API answering";
+    // the sample clock (`SAMPLE_NOW`) is 2023-11-14T22:13:20Z
+    let rows = json!({"rows": [
+        row("o_cfg", "Rename config keys", "contract", "", "contract", "T3", "2023-11-14T21:10:00.000Z", &[], 0),
+        row("o_auth", auth, "decision", "d_7f3a", "approval_needed", "T2", "2023-11-14T22:04:20.000Z", &["w3"], 2),
+        row("o_auth", auth, "decision", "d_91bc", "blocked", "T1", "2023-11-14T22:01:20.000Z", &["w5"], 0),
+        row("o_ci", "Speed up the CI cache", "lapsed", "d_0a11", "ambiguity", "T0", "2023-11-13T09:00:00.000Z", &[], 0),
+    ]});
+    let record = json!({"event_id": 9, "ts": "2023-11-14T20:13:20.000Z", "type": "decision.resolved",
+        "payload": {"decision_id": "d_44e0", "choice": "retry", "approver": "user:cli",
+                    "audit": {"mechanism": "cli", "tier": "T1"}}});
+    QueueData {
+        queue: Queue::from_json(&rows).expect("sample queue"),
+        answered: Record::from_json(&record)
+            .into_iter()
+            .map(|r| ("o_auth".to_string(), r))
+            .collect(),
+    }
 }
 
 pub(super) fn plan() -> Value {

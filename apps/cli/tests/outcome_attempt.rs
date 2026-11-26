@@ -1214,6 +1214,7 @@ fn a_person_grants_one_refused_write_and_only_the_next_attempt_may_make_it() {
         approver: "user:cli".into(),
         choice: choice.into(),
         brief_sha256: brief.into(),
+        audit: Default::default(),
     };
     assert!(
         w.resolve_decision(&res("yes please", &d.brief_sha256), &current)

@@ -12,6 +12,7 @@
 //! Off by default: while `synt.orchestrator.enabled` is false every method but
 //! `orchestrator.status` is refused and nothing is opened, created or written.
 
+use crate::approvals_queue;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -176,10 +177,11 @@ impl Service {
                 let r = Reader::open(&self.home).map_err(s)?;
                 let id = outcome_id(&id)?;
                 let o = r.get_outcome(&id).map_err(s)?;
+                let by = approvals_queue::blocked_by(&r, &o)?;
                 let mut items = vec![];
                 for i in r.list_work_items(&id).map_err(s)? {
                     if Some(i.plan_version) == o.plan_version {
-                        items.push(item_json(&r, &i)?);
+                        items.push(item_json(&r, &i, &by)?);
                     }
                 }
                 Ok(json!({"plan_version": o.plan_version, "items": items}))
@@ -189,8 +191,11 @@ impl Service {
                 let item = r
                     .get_work_item(&WorkItemId::parse(&id).map_err(s)?)
                     .map_err(s)?;
-                owned(&r, &outcome_id(&outcome)?, &item.id)?;
-                let mut v = item_json(&r, &item)?;
+                let outcome = outcome_id(&outcome)?;
+                owned(&r, &outcome, &item.id)?;
+                let o = r.get_outcome(&outcome).map_err(s)?;
+                let by = approvals_queue::blocked_by(&r, &o)?;
+                let mut v = item_json(&r, &item, &by)?;
                 v["attempts"] = attempts_json(&r, &item.id)?;
                 Ok(v)
             }
@@ -299,6 +304,18 @@ impl Service {
                     .find(|d| d.id == id)
                     .map(|d| decision_json(&r, d))
                     .ok_or_else(|| format!("no decision {id} in this outcome"))
+            }
+            Call::ApprovalsQueue { workspace } => {
+                let r = Reader::open(&self.home).map_err(s)?;
+                approvals_queue::queue(&r, workspace.as_deref())
+            }
+            Call::ApprovalsHistory {
+                outcome,
+                after_event_id,
+            } => {
+                let r = Reader::open(&self.home).map_err(s)?;
+                let o = r.get_outcome(&outcome_id(&outcome)?).map_err(s)?;
+                approvals_queue::history(&r, &o, after_event_id)
             }
             Call::EvidenceGet { outcome } => {
                 let r = Reader::open(&self.home).map_err(s)?;
@@ -512,10 +529,15 @@ fn outcome_json(
     )
 }
 
-fn item_json(r: &Reader, i: &synthesis_session::outcome::WorkItemRecord) -> Result<Value, String> {
+fn item_json(
+    r: &Reader,
+    i: &synthesis_session::outcome::WorkItemRecord,
+    blocked_by: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<Value, String> {
     Ok(
         json!({"id": i.id, "key": i.key, "kind": i.kind, "state": i.state, "revision": i.revision,
-        "retries_used": i.retries_used, "requires": r.work_item_deps(&i.id).map_err(s)?}),
+        "retries_used": i.retries_used, "requires": r.work_item_deps(&i.id).map_err(s)?,
+        "blocked_by": blocked_by.get(i.id.as_str()).cloned().unwrap_or_default()}),
     )
 }
 
