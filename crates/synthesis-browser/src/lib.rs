@@ -336,7 +336,7 @@ const CREDENTIALED_JS: &str = r#"(()=>{const q=r=>{if(r.querySelector('input[typ
 /// after a re-render. `restore` puts back what is still masked. Open shadow roots and same-origin frames are walked.
 /// The script is a constant: no secret value ever goes into the page.
 const MASKER_JS: &str = r#"(()=>{const saved=new Map();
-const hit=e=>e.value&&!/^(checkbox|radio|submit|button|reset|file|image|hidden|range|color)$/.test(e.type)&&(e.type==='password'||/(^|\s)(current-password|new-password|one-time-code)(\s|$)/.test(e.getAttribute('autocomplete')||'')||/pass|pwd|otp/i.test((e.getAttribute('name')||'')+' '+(e.getAttribute('id')||'')));
+const hit=e=>e.value&&!/^(checkbox|radio|submit|button|reset|file|image|hidden|range|color)$/.test(e.type)&&(e.type==='password'||/(^|\s)(current-password|new-password|one-time-code)(\s|$)/i.test(e.getAttribute('autocomplete')||'')||/pass|pwd|otp/i.test((e.getAttribute('name')||'')+' '+(e.getAttribute('id')||'')));
 const walk=r=>{for(const e of r.querySelectorAll('*')){if(/^(INPUT|TEXTAREA)$/i.test(e.tagName)&&hit(e)){const s=saved.get(e);if(!s||e.value!==s[1]){const v=e.value;try{e.value='***';saved.set(e,[v,e.value])}catch(_){}}}if(e.shadowRoot)walk(e.shadowRoot);if(/^I?FRAME$/i.test(e.tagName)){try{if(e.contentDocument)walk(e.contentDocument)}catch(_){}}}};
 return {mask(){walk(document)},restore(){for(const [e,[v,m]] of saved){try{if(e.value===m)e.value=v}catch(_){}}saved.clear()}}})()"#;
 
@@ -2238,6 +2238,10 @@ impl BrowserRuntime {
             && m.call("mask").await.is_ok()
         {
             return Ok(());
+        }
+        // restored here, in order: its drop-spawned restore could run after the new mask and unmask the capture
+        if let Some(old) = masker.take() {
+            old.restore().await;
         }
         let failed = || BrowserError::Page("masking the page's fields failed".into());
         let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
