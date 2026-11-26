@@ -64,7 +64,6 @@ pub fn refusal(kind: Kind, screen: &Screen, read_only_goal: bool) -> Option<&'st
 
 impl State {
     pub fn open_picker(&mut self) {
-        self.ws_menu = None;
         self.picker = Some(Picker::default());
     }
 
@@ -90,7 +89,8 @@ impl State {
         self.picker = None;
         match kind {
             Kind::Session => vec![Effect::NewSession],
-            _ => self.open_new(),
+            // a goal row: the shell opens its frame (`SuperAgentView::picker_activate`)
+            _ => vec![],
         }
     }
 

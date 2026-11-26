@@ -2,7 +2,7 @@
 //! [--mode super-agent|tui] [--badge] [--tools N] [--rail-hidden] [--popup decision|decision-focus|decision-expanded]
 //! [--screen ready|off|windows|unreachable|notready] [--guide] [--focus cancel|confirm] [--centre goal|decisions|history]
 //! [--inspector overview|workers|activity|diff|evidence] [--pane list|centre|inspector] [--outcome ID|none]
-//! [--card N] [--choose N] [--form new|new-picker|new-errors|revise|review-new|review-revise|stale]` draws the whole shell with the
+//! [--card N] [--choose N]` draws the whole shell with the
 //! Super Agent view on its sample data, offscreen (no window server), and writes the frame to a PNG. Nothing is read or
 //! sent. `--mode tui` draws the TUI view's window instead (its title bar with the badge, `--badge`); `--popup` shows the
 //! docked decision card (it needs a centre tab other than Decisions, so it implies `--centre goal`).
@@ -12,8 +12,6 @@ use std::{path::PathBuf, sync::Arc};
 use gpui::{AppContext as _, HeadlessAppContext, px, size};
 use synthesis_view::outcomes::InspectorTab;
 
-use super::form::FormText;
-use super::link::{FormMsg, STALE};
 use super::model::{CentreTab, Pane, Screen};
 use crate::tui_view::{TuiView, layout::Hidden};
 
@@ -28,7 +26,6 @@ pub struct Args {
     outcome: Option<String>,
     card: usize,
     choose: Option<usize>,
-    form: Option<String>,
     /// `--frame new-goal|new-ro-goal`: that New goal frame is open (the form of the Super Agent tab).
     frame: Option<String>,
     /// The disclosure of the Off / not-migrated screen is open.
@@ -80,7 +77,6 @@ pub fn parse(args: &[String]) -> Option<Args> {
         outcome: val("--outcome").cloned(),
         card: val("--card").and_then(|n| n.parse().ok()).unwrap_or(0),
         choose: val("--choose").and_then(|n| n.parse().ok()),
-        form: val("--form").cloned(),
         frame: val("--frame").cloned(),
         guide: args.iter().any(|a| a == "--guide"),
         focus: val("--focus").cloned(),
@@ -151,9 +147,6 @@ pub fn render(a: Args) -> Result<(), Err> {
                 if let Some(c) = a.choose {
                     st.choose(c);
                 }
-                if let Some(kind) = a.form.as_deref() {
-                    form_state(st, kind);
-                }
                 if a.guide {
                     st.open_guide();
                     if let Some(g) = st.guide.as_mut() {
@@ -202,41 +195,4 @@ pub fn render(a: Args) -> Result<(), Err> {
         img.height()
     );
     Ok(())
-}
-
-/// The form in the state `kind` names (the inputs are made when the view draws; they start with the form's text).
-fn form_state(st: &mut super::model::State, kind: &str) {
-    let revise = kind.contains("revise") || kind == "stale";
-    if revise {
-        st.open_revise();
-    } else {
-        st.open_new();
-        if let Some(f) = st.form.as_mut() {
-            f.head_known(&st.workspace, Ok(super::sample::COMMIT.into()));
-        }
-    }
-    match kind {
-        "new-errors" => {
-            let t = FormText {
-                workspace: st.workspace.clone(),
-                ..Default::default()
-            };
-            st.submit(&t);
-        }
-        "new-picker" => {
-            st.known = vec![
-                "/Users/dev/Vibe/api-gateway".into(),
-                "/Users/dev/work/docs-site".into(),
-            ];
-            st.ws_menu = Some(1);
-        }
-        "review-new" | "review-revise" => {
-            st.apply_form(FormMsg::Review(Box::new(super::sample::review(revise))));
-        }
-        "stale" => st.apply_form(FormMsg::Failed {
-            text: STALE.into(),
-            spent: true,
-        }),
-        _ => {}
-    }
 }

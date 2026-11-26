@@ -14,8 +14,6 @@ use synthesis_view::outcomes::{
 };
 
 use super::ask::Ask;
-use super::form::{Form, FormText, Review, Stage, Submit};
-use super::link::FormMsg;
 
 /// What the Off screen says above its button. It is opt-in and nothing happens before two explicit confirms.
 pub const OFF_LINES: [&str; 3] = [
@@ -150,16 +148,10 @@ pub struct State {
     pub answers: u64,
     /// The folder a new outcome works in by default (the app's workspace).
     pub workspace: String,
-    /// Folders the app already knows (the TUI view's workspaces, newest first): what the form's picker lists.
-    pub known: Vec<String>,
     /// The engine is on another machine: a local folder dialog would name a path it cannot use.
     pub remote: bool,
-    /// The picker's list is open, with the cursor on an item (`ws_items().len()` is "Choose folder...").
-    pub ws_menu: Option<usize>,
     /// The open kind picker (`+ new`, `n`).
     pub picker: Option<super::kind_picker::Picker>,
-    /// The open "New outcome" or "Revise contract" form.
-    pub form: Option<Form>,
     /// The open disclosure of the Off / not-migrated screens.
     pub guide: Option<Guide>,
     /// Why this build cannot turn Super Agent on (the enable gate is closed): the guide then shows it instead of the confirm.
@@ -194,17 +186,6 @@ pub enum Effect {
     Scroll(i32),
     /// A new session: the view makes its folder (a scratch one, or the person's choice) and the shell opens it.
     NewSession,
-    /// Read `HEAD` of this folder (the form's base commit).
-    Head(String),
-    Submit(Submit),
-    Approve {
-        outcome: String,
-        version: u32,
-        hash: String,
-        key: String,
-    },
-    /// Read the stored, unapproved contract of this outcome for review.
-    Review(String),
     /// The person confirmed the disclosure: write `synt.orchestrator.enabled` (user settings).
     EnableSetting,
     /// The person confirmed the disclosure: migrate the store (`OutcomeClient::enable`); the number tags the
@@ -229,11 +210,8 @@ impl State {
             ask: Ask::default(),
             answers: 0,
             workspace: String::new(),
-            known: vec![],
             remote: false,
-            ws_menu: None,
             picker: None,
-            form: None,
             guide: None,
             gate_refusal: synthesis_app::outcome_policy::gate_refusal().map(String::from),
             migrations: 0,
@@ -340,159 +318,6 @@ impl State {
             self.ask.forget();
             self.ask.notice = None;
             self.sync_picker(now);
-        }
-    }
-
-    // ------------------------------------------------------------------------------ the form
-
-    /// "New outcome": the form with the app's workspace; its base commit is read at once.
-    pub fn open_new(&mut self) -> Vec<Effect> {
-        self.ws_menu = None;
-        let mut f = Form::new_outcome(&self.workspace);
-        let ws = self.workspace.trim().to_string();
-        let eff = (!ws.is_empty()).then(|| {
-            f.resolving(&ws);
-            Effect::Head(ws)
-        });
-        self.form = Some(f);
-        eff.into_iter().collect()
-    }
-
-    /// "Revise contract" of the selected outcome, from its current contract and the revision shown now.
-    pub fn open_revise(&mut self) -> Vec<Effect> {
-        let cur = self
-            .detail
-            .as_ref()
-            .filter(|d| Some(&d.outcome) == self.selected.as_ref());
-        let (Some(item), Some(prev)) = (self.selected_item(), cur.and_then(|d| d.current.clone()))
-        else {
-            self.ask.notice = Some(
-                "The contract is not loaded, or is not one this window can read in full, so it cannot be revised here."
-                    .into(),
-            );
-            return vec![];
-        };
-        self.form = Some(Form::revise(&item.row.id.clone(), item.row.revision, prev));
-        vec![]
-    }
-
-    /// "Review and approve": reads the stored contract of an outcome whose contract is not approved yet.
-    pub fn review_draft(&mut self) -> Vec<Effect> {
-        let waiting = matches!(
-            self.detail.as_ref().map(|d| &d.contract),
-            Some(Ok(c)) if c.approved == Some(false)
-        );
-        match (&self.selected, waiting) {
-            (Some(id), true) => {
-                self.form = Some(Form::reading(id));
-                vec![Effect::Review(id.clone())]
-            }
-            _ => {
-                self.ask.notice =
-                    Some("The contract of this outcome is not waiting for approval.".into());
-                vec![]
-            }
-        }
-    }
-
-    pub fn close_form(&mut self) {
-        self.ws_menu = None;
-        self.form = None;
-    }
-
-    /// The picker's folders: the app's workspace (the default) first, then the other known ones, no repeats.
-    pub fn ws_items(&self) -> Vec<String> {
-        let mut v: Vec<String> = Some(self.workspace.trim())
-            .filter(|w| !w.is_empty())
-            .map(String::from)
-            .into_iter()
-            .collect();
-        for k in &self.known {
-            if !v.contains(k) {
-                v.push(k.clone());
-            }
-        }
-        v
-    }
-
-    /// Items the open list has: the folders, then "Choose folder..." (not for a remote engine).
-    pub fn ws_len(&self) -> usize {
-        self.ws_items().len() + usize::from(!self.remote)
-    }
-
-    /// A folder was picked (from the list or the native dialog): the list closes and the base commit of the new
-    /// folder is read; the owner process still validates the path when the form is sent.
-    pub fn pick_workspace(&mut self, path: &str) -> Vec<Effect> {
-        self.ws_menu = None;
-        self.workspace_left(&FormText {
-            workspace: path.to_string(),
-            ..Default::default()
-        })
-    }
-
-    /// The workspace field was left: the base commit is read again when the folder changed.
-    pub fn workspace_left(&mut self, t: &FormText) -> Vec<Effect> {
-        let Some(f) = self.form.as_mut() else {
-            return vec![];
-        };
-        match f.needs_head(t) {
-            Some(ws) => {
-                f.resolving(&ws);
-                vec![Effect::Head(ws)]
-            }
-            None => vec![],
-        }
-    }
-
-    /// Confirm on the edit stage: the request, or the errors inline.
-    pub fn submit(&mut self, t: &FormText) -> Vec<Effect> {
-        if let Some(o) = self.form.as_mut().and_then(Form::retry_read) {
-            return vec![Effect::Review(o)];
-        }
-        match self.form.as_mut().and_then(|f| f.submit(t)) {
-            Some(s) => vec![Effect::Submit(s)],
-            None => vec![],
-        }
-    }
-
-    /// Confirm on the review stage: approves the version and hash the server reported (never others).
-    pub fn approve(&mut self) -> Vec<Effect> {
-        match self.form.as_mut().and_then(Form::approve) {
-            Some((outcome, version, hash, key)) => vec![Effect::Approve {
-                outcome,
-                version,
-                hash,
-                key,
-            }],
-            None => vec![],
-        }
-    }
-
-    /// What the worker said about the form. A reply for a form that was closed is dropped (the list refresh
-    /// that follows a created outcome still shows it).
-    pub fn apply_form(&mut self, m: FormMsg) {
-        match m {
-            FormMsg::Approved(note) => {
-                self.form = None;
-                self.ask.notice = Some(note);
-            }
-            m => {
-                let Some(f) = self.form.as_mut() else { return };
-                match m {
-                    FormMsg::Head { ws, result } => f.head_known(&ws, result),
-                    FormMsg::Failed { text, spent } => f.failed(text, spent),
-                    FormMsg::BaseMoved { ws, commit, text } => f.base_moved(&ws, commit, text),
-                    FormMsg::Review(r) => f.reviewing(*r),
-                    FormMsg::Approved(_) => {}
-                }
-            }
-        }
-    }
-
-    pub fn form_review(&self) -> Option<&Review> {
-        match self.form.as_ref().map(|f| &f.stage) {
-            Some(Stage::Review(r) | Stage::Approving(r)) => Some(r),
-            _ => None,
         }
     }
 
@@ -646,7 +471,7 @@ impl State {
 
     /// A key. `None`: not ours (the window may use it).
     pub fn key(&mut self, k: &Key, now: i64) -> Option<Vec<Effect>> {
-        if k.other_mod || self.form.is_some() {
+        if k.other_mod {
             return None;
         }
         if self.guide.is_some() {
@@ -681,8 +506,6 @@ impl State {
                 self.open_picker();
                 return Some(vec![]);
             }
-            "v" if !k.shift => return Some(self.open_revise()),
-            "a" if !k.shift => return Some(self.review_draft()),
             _ => {}
         }
         let digit = k.name.parse::<usize>().ok().filter(|n| (1..=9).contains(n));

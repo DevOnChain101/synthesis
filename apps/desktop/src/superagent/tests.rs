@@ -464,10 +464,6 @@ fn the_pickers_goal_rows_open_the_new_form_not_the_modal_and_read_only_needs_the
     press(v, &sa, "enter", none());
     assert_eq!(active(v, &sa), Frame::NewGoal(GoalKind::Writes));
     assert!(v.debug_bounds("sa-goal").is_some());
-    assert!(
-        o.read_with(v, |o, _| o.state.form.is_none()),
-        "not the old modal"
-    );
     assert_eq!(sa.read_with(v, |s, _| s.goals.len()), 2);
 }
 

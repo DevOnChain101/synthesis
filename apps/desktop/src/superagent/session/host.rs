@@ -399,46 +399,6 @@ impl SessionHost {
         self.views.iter().map(|(_, v)| v.clone()).collect()
     }
 
-    /// Every hosted session that has a store id, with `last` (a frame id) as the focused one. Engines that
-    /// have not reported a session yet are left out (nothing stored to list).
-    pub fn handoff(
-        &self,
-        last: Option<&str>,
-        skip: &[String],
-        cx: &App,
-    ) -> crate::handoff::Handoff {
-        let mut h = crate::handoff::Handoff::default();
-        for (id, v) in self.views.iter().filter(|(i, _)| !skip.contains(i)) {
-            if let Some(s) = v.read(cx).embed_handoff() {
-                if last == Some(id.as_str()) {
-                    h.focused = Some((s.scope.clone(), s.sid.clone()));
-                }
-                h.sessions.push(s);
-            }
-        }
-        h
-    }
-
-    /// Mode switch: every idle hosted session gives its engine (and the session lock) back; a session that runs a
-    /// turn or waits for an approval keeps it. Each receiver fires when one lock is free.
-    pub fn release_idle(
-        &mut self,
-        skip: &[String],
-        cx: &mut Context<Self>,
-    ) -> Vec<futures::channel::oneshot::Receiver<()>> {
-        // a conductor-owned session is never handed to the TUI: it keeps its engine
-        let views: Vec<_> = self
-            .views
-            .iter()
-            .filter(|(i, _)| !skip.contains(i))
-            .map(|(_, v)| v.clone())
-            .collect();
-        views
-            .iter()
-            .filter_map(|v| v.update(cx, |t, cx| t.release_idle(cx)))
-            .collect()
-    }
-
     /// The ids of the hosted sessions, oldest first.
     pub fn ids(&self) -> Vec<String> {
         self.views.iter().map(|(i, _)| i.clone()).collect()
@@ -823,93 +783,6 @@ pub(crate) mod tests {
         wait_free(&f.home);
     }
 
-    /// Mode switch: an idle session with a stored message gives its engine and lock back and resumes on the next
-    /// send (same id, one writer); a running turn is never released; an id of another scope is never matched.
-    #[gpui::test]
-    fn an_idle_session_is_released_and_resumed_a_running_one_never_closed(cx: &mut TestAppContext) {
-        let (f, cfg) = fx(1);
-        cx.executor().allow_parking();
-        let a = f.base.join("f0");
-        let (h, v) = host(cx, Some(cfg));
-        assert!(open(&h, v, &a));
-        let view = h.read_with(v, |h, _| h.views[0].1.clone());
-        let wait = |v: &mut VisualTestContext, ok: &dyn Fn(&TuiView) -> bool, what: &str| {
-            for _ in 0..1200 {
-                v.executor()
-                    .advance_clock(std::time::Duration::from_millis(100));
-                v.run_until_parked();
-                if view.read_with(v, |t, _| ok(t)) {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            panic!("the engine did not get there: {what}");
-        };
-        let users = |t: &TuiView| {
-            t.embed_live().map_or(0, |l| {
-                l.convo()
-                    .items
-                    .iter()
-                    .filter(|i| matches!(i, synthesis_view::convo::Item::User(_)))
-                    .count()
-            })
-        };
-        let say = |v: &mut VisualTestContext, text: &str| {
-            view.update_in(v, |t, w, cx| {
-                let p = t.embed_prompt().unwrap();
-                p.update(cx, |s, cx| s.set_value(text.to_string(), w, cx));
-                t.embed_submit(w, cx)
-            })
-        };
-        wait(v, &|t| t.embed_handoff().is_some(), "started");
-        say(v, "hello");
-        wait(v, &|t| users(t) == 1 && !t.embed_info().1, "first turn");
-        let before = view.read_with(v, |t, _| t.embed_handoff().unwrap());
-        // a running turn is never closed
-        view.update(v, |t, _| t.test_set_busy(true));
-        assert!(view.update(v, |t, cx| t.release_idle(cx)).is_none());
-        view.update(v, |t, _| t.test_set_busy(false));
-        assert!(view.read_with(v, |t, _| t.embed_live().unwrap().engine.is_some()));
-        // another scope's id is not this engine's session
-        let other = crate::handoff::Handoff {
-            sessions: vec![crate::handoff::Hosted {
-                scope: crate::handoff::Scope::Wsl("Ubuntu".into()),
-                ..before.clone()
-            }],
-            focused: None,
-        };
-        assert!(
-            view.update(v, |t, cx| t.release_if_hosted(&other, cx))
-                .is_none()
-        );
-        // idle: released, the lock is free, the session is still handed over with its scope
-        let rx = view.update(v, |t, cx| t.release_idle(cx)).expect("idle");
-        assert!(futures::executor::block_on(rx).is_ok());
-        assert!(locks_all_free(&f.home), "the store lock is free");
-        assert_eq!(
-            view.read_with(v, |t, _| t.embed_handoff()),
-            Some(before.clone())
-        );
-        // resumed on the next send: the same session id, the earlier message kept
-        say(v, "again");
-        wait(
-            v,
-            &|t| {
-                users(t) == 2
-                    && !t.embed_info().1
-                    && t.embed_live()
-                        .is_some_and(|l| l.engine.is_some() && l.sid == before.sid)
-            },
-            "resumed",
-        );
-        assert!(view.read_with(v, |t, _| t.embed.as_ref().unwrap().released.is_none()));
-        let id = a.to_string_lossy().into_owned();
-        h.update(v, |h, cx| h.close(&id, cx));
-        drop(view);
-        v.run_until_parked();
-        wait_free(&f.home);
-    }
-
     /// A stored session opens in a frame of its own (same id, same folder, its message replayed) once its lock is
     /// free; while another host holds the lock, or from another scope, it is refused with a reason and nothing is
     /// hosted (so exactly one host has a session id at a time).
@@ -953,15 +826,6 @@ pub(crate) mod tests {
         };
         wait(v, &|t| users(t) == 1 && !t.embed_info().1, "first turn");
         let held = view.read_with(v, |t, _| t.embed_handoff().unwrap());
-        // a conductor-owned frame is left out of the handoff and keeps its engine on a mode switch
-        let skip = vec![a.to_string_lossy().into_owned()];
-        assert!(
-            h.read_with(v, |h, cx| h.handoff(None, &skip, cx))
-                .sessions
-                .is_empty()
-        );
-        assert!(h.update(v, |h, cx| h.release_idle(&skip, cx)).is_empty());
-        assert!(!locks_all_free(&f.home), "still held");
         // the engine of frame "a" holds the lock: refused with the lock's reason, nothing hosted
         let why = h
             .update_in(v, |h, w, cx| {
