@@ -22,14 +22,13 @@ impl TuiView {
         let sid = e.sid.clone();
         // every step is a background job; one that never answers frees the prompt after a while
         let token = lu.live.rewind_job_start();
-        cx.spawn(async move |this, cx| {
+        lu.spawn_owned(cx, async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(rewind::JOB_TIMEOUT_MS))
                 .await;
             this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_timeout(token)))
                 .ok();
-        })
-        .detach();
+        });
         match a {
             Action::Rewind => {
                 let job = cx.background_spawn(async move {
@@ -38,12 +37,11 @@ impl TuiView {
                         None => rewind::list(&home, &sid),
                     }
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_listed(r)))
                         .ok();
-                })
-                .detach();
+                });
             }
             Action::RewindPreview(cp) => {
                 let job = cx.background_spawn(async move {
@@ -52,12 +50,11 @@ impl TuiView {
                         None => rewind::preview(&home, &sid, cp),
                     }
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_previewed(r)))
                         .ok();
-                })
-                .detach();
+                });
             }
             Action::RewindApply(p) => {
                 lu.live.rewinding = true;
@@ -71,7 +68,7 @@ impl TuiView {
                         None => rewind::apply(&home, &sid, &p),
                     }
                 });
-                cx.spawn(async move |this, cx| {
+                lu.spawn_owned(cx, async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| {
                         t.live_do(cx, |l| l.rewind_done(r));
@@ -80,8 +77,7 @@ impl TuiView {
                         t.request_scan(cx);
                     })
                     .ok();
-                })
-                .detach();
+                });
             }
             _ => {}
         }
