@@ -8,6 +8,7 @@
 //! from that view's `Live` (the `Convo` of `synthesis-view`, already redacted for display) and is cleaned again
 //! with `sanitize_for_display` or the inert markdown of the conductor chat, so no text reaches the screen another way.
 
+mod ctx;
 pub mod model;
 #[cfg(feature = "shot")]
 pub mod shot;
@@ -421,7 +422,6 @@ impl ChatHost {
             pill("sa-chat-model", &model_name).into_any_element(),
             pill("sa-chat-mode", &mode)
                 .cursor_pointer()
-                .hover(|d| d.bg(t::hover()))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.tui.update(cx, |t, cx| t.embed_cycle_mode(cx))
                 }))
@@ -439,6 +439,15 @@ impl ChatHost {
                 cx.listener(|this, _, window, cx| this.send(window, cx)),
             )
         };
+        // the context ring sits in the footer just before the round button (there is no room above it)
+        let (used, window_tokens) = live.view.status.context.numbers();
+        let action = div()
+            .flex()
+            .items_center()
+            .gap(px(t::S3))
+            .children(ctx::gauge(used, window_tokens).map(|g| ctx::ring(&g)))
+            .child(action)
+            .into_any_element();
         let card = composer_card(input, left, action, focused);
         // the attached images (the TUI's chips); `/images clear` and the x drop them
         let chips = (!live.images.is_empty()).then(|| {
@@ -555,15 +564,18 @@ pub(crate) fn user_bubble(at: usize, line: &str) -> AnyElement {
         .into_any_element()
 }
 
-/// A quiet ghost label of the composer footer (the model and the mode, the orchestrator's target): no outline, no
-/// fill; a faint ground on hover.
+/// A quiet chip of the composer footer (the model and the mode, the orchestrator's target): the card's hairline,
+/// no fill; a faint ground on hover.
 pub(crate) fn pill(id: &'static str, label: &str) -> gpui::Stateful<gpui::Div> {
     text(t::T2, t::W_REGULAR, t::TEXT)
         .id(id)
         .debug_selector(move || id.to_string())
-        .px(px(t::S2))
-        .py(px(t::S1))
-        .rounded(px(t::R_CONTROL))
+        .px(px(t::S3))
+        .py(px(2.))
+        .rounded(px(t::R_PILL))
+        .border_1()
+        .border_color(t::alpha(t::TEXT_STRONG, 0.09))
+        .hover(|d| d.bg(t::hover()))
         .max_w(px(260.))
         .truncate()
         .child(label.to_string())
@@ -665,7 +677,7 @@ pub(crate) fn composer_card(
                         .flex()
                         .items_center()
                         .gap(px(t::S2))
-                        .ml(px(6.))
+                        .ml(px(14.))
                         .min_w(px(0.))
                         .children(left),
                 )
