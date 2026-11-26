@@ -222,7 +222,10 @@ pub fn build(st: &State, rows: Vec<Row>, now: i64) -> Model {
                     }
                 }),
                 blocks: ask.and_then(|a| a.blocks_line()),
-                tier: ask.map(|a| a.tier),
+                // a live tool ask is T2 by definition (spec 3.3 rows 9 and 10), once tiers are shown at all
+                tier: ask
+                    .map(|a| a.tier)
+                    .or_else(|| (r.kind == Kind::Tool && st.queue.is_some()).then_some(Tier::T2)),
                 recommended: ask
                     .and_then(|a| a.recommended.as_ref())
                     .map(|a| a.label.clone()),

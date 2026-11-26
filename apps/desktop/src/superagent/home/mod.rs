@@ -563,6 +563,8 @@ pub(in crate::superagent) fn row(
             div()
                 .flex()
                 .gap_x(px(t::S4))
+                // a note that does not fit goes to the next line, never cut
+                .flex_wrap()
                 .overflow_hidden()
                 .children(
                     s.meta

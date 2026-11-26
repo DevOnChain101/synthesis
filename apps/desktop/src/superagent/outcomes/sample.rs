@@ -201,7 +201,7 @@ pub fn queue() -> QueueData {
         json!({"outcome": outcome, "goal": goal, "source": source, "decision_id": id, "kind": kind,
             "state": if source == "lapsed" { "expired" } else { "pending" }, "tier": tier, "revision": 2,
             "brief_sha256": HASH_V2, "hash": HASH_V2, "version": 2, "created_at": at,
-            "expires_at": "2023-11-15T21:00:00.000Z", "one_tap": false, "batchable": false,
+            "expires_at": (source != "contract").then_some("2023-11-15T21:00:00.000Z"), "one_tap": false, "batchable": false,
             "blocks": held.iter().map(|k| json!({"id": k, "key": k})).collect::<Vec<_>>(),
             "waiting_on_it": waiting})
     };

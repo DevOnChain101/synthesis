@@ -108,6 +108,7 @@ fn dangerous(action: &Value) -> bool {
         };
         let text = |k: &str| input.get(k).and_then(Value::as_str);
         network(tool)
+            || (shell(tool) && text("command").is_none())
             || text("command").is_some_and(acts_outside)
             || ["file_path", "notebook_path", "path"]
                 .iter()
@@ -122,10 +123,15 @@ fn dangerous(action: &Value) -> bool {
         let spec = spec.strip_suffix(":*").unwrap_or(spec);
         network(tool)
             || match tool {
-                "Bash" | "PowerShell" => acts_outside(spec),
+                // a bare shell rule allows any command
+                t if shell(t) => spec.is_empty() || acts_outside(spec),
                 _ => is_secret_shaped(Path::new(spec)),
             }
     })
+}
+
+fn shell(tool: &str) -> bool {
+    matches!(tool, "Bash" | "PowerShell")
 }
 
 fn network(tool: &str) -> bool {
@@ -267,6 +273,8 @@ mod tests {
             json!({"calls": [], "needed": ["Read(/home/u/.ssh/**)"]}),
             json!({"calls": [{"tool": "Bash"}], "needed": []}),
             json!({"calls": [], "needed": [7]}),
+            json!({"calls": [], "needed": ["Bash"]}),
+            json!({"calls": [{"tool": "Bash", "input": {}}], "needed": []}),
             json!({"about": ""}),
         ] {
             assert_eq!(t(&a), Tier::T3, "{a}");

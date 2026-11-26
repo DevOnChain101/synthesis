@@ -557,7 +557,7 @@ Rollback per slice: P1 is reads plus an additive event field (revert the PR; old
 | Unknown kind T2 | **T3** (fail closed, P1 instruction). `assumption_review` is unknown until built |
 | `classify(kind, brief, action, item)` plus a `hint` | `classify(kind, action, item)`: the brief decides no tier; no hint exists |
 | [V] retry budget: `retries_used` equals the budget | A `blocked` retry is refused by the attempt ordinal (`new_attempt`: next ordinal <= `max_attempts_per_work_item`); `retries_used` counts only retryable failures (limit budget - 1). T2 when either is spent, or the facts cannot be read. The contract's budget is used, not the settings ceiling |
-| [V] `irreversible::scan` on the stored calls | `scan` reads recipe files of `make`, `just`, `npm`, `pnpm`, `yarn`, `bun` from folders the command names. The classifier reads no such file: those runners are T3 without scanning; commands over 16 KiB are T3 |
+| [V] `irreversible::scan` on the stored calls | `scan` reads recipe files of `make`, `just`, `npm`, `pnpm`, `yarn`, `bun` from folders the command names. The classifier reads no such file: those runners are T3 without scanning; commands over 16 KiB, a shell call without a command and a bare `Bash` rule are T3 |
 | T3 raises | also: a missing or unverifiable stored action, an unreadable shape; tools `SendMessage`, `browser_*`, `mcp__*` count as network; `Write`/`Edit` content is checked with `text_hits` |
 | `Resolution.audit`: no other caller changes | every `Resolution { .. }` literal in tests gained the field |
 | Lapsed: expired or invalidated in the last 24 h | an invalidated row has no time of its own: both are listed while `expires_at` is within the last 24 h or later |
@@ -566,4 +566,5 @@ Rollback per slice: P1 is reads plus an additive event field (revert the PR; old
 | T0 "dismiss only" | no dismiss in P1; Lapsed rows age out |
 | 4.7 outcome frame work item rows say "waits for your decision" | not in P1: the home's Running row says it; `blocked_by` is served on every item |
 | Contract row opens the goal review | opens the outcome |
-
+| Tool asks get a blocked-by line (1.2) | they get the T2 chip only: a session ask holds no work item |
+| [V] 6.5 the CLI event printer and unknown event types | holds: `synt outcome events` prints seq, type and the whole record |
