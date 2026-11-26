@@ -230,6 +230,11 @@ impl gpui::EventEmitter<WantPane> for TuiView {}
 pub(crate) struct WantStored(pub String);
 impl gpui::EventEmitter<WantStored> for TuiView {}
 
+/// The TUI view was asked to open a session the Super Agent hosts hidden (a Running row): the frame's id. The shell
+/// brings that session into this view; nothing is relaunched.
+pub(crate) struct WantHosted(pub String);
+impl gpui::EventEmitter<WantHosted> for TuiView {}
+
 /// A `TuiView` embedded as ONE plain-session chat frame: it draws only the chat pane, and its Terminal or
 /// Browser pane (`side`) is drawn by the owner in its right sidebar through [`TuiView::embed_pane`].
 #[derive(Clone, Debug, Default)]

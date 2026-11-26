@@ -183,7 +183,18 @@ impl SessionHost {
             view.update(cx, |t, cx| t.close_embedded(cx));
             return r;
         }
-        // the owner's tab, rail and conductor snapshot follow the chat
+        self.host_view(id, view, window, cx);
+        Ok(())
+    }
+
+    /// Hosts a view as frame `id`: the owner's tab, rail and conductor snapshot follow its chat.
+    fn host_view(
+        &mut self,
+        id: &str,
+        view: Entity<TuiView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         let fid = id.to_string();
         cx.subscribe(&view, move |_, _, _: &crate::tui_view::WantTerminal, cx| {
@@ -202,7 +213,82 @@ impl SessionHost {
         let chat = cx.new(|cx| ChatHost::new(view.clone(), window, cx));
         self.chats.push((id.to_string(), chat));
         self.views.push((id.to_string(), view));
+        cx.notify();
+    }
+
+    /// Mode switch: hosts a running session (its engine, lock, turn and asks as they are) as frame `id`.
+    /// `Err` hands the session back untouched (the sample hosts none).
+    pub fn adopt(
+        &mut self,
+        id: &str,
+        lu: crate::tui_view::driver::LiveUi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Box<(crate::tui_view::driver::LiveUi, String)>> {
+        let Some(cfg) = self.cfg.clone() else {
+            return Err(Box::new((lu, "sessions need a live app".into())));
+        };
+        let view = cx.new(|cx| TuiView::live(window, cx, cfg, Default::default(), 0.));
+        let folder = std::path::PathBuf::from(&lu.live.cwd);
+        view.update(cx, |t, cx| {
+            t.embed_empty(folder);
+            // the view's own empty session has no engine: nothing is closed by dropping it
+            drop(t.put_live(lu, window, cx));
+        });
+        self.host_view(id, view, window, cx);
         Ok(())
+    }
+
+    /// Mode switch: gives the session of frame `id` away with its engine open (the frame ends, the session
+    /// does not). `None`: no such frame.
+    pub fn take(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::tui_view::driver::LiveUi> {
+        let i = self.views.iter().position(|(v, _)| v == id)?;
+        let (_, view) = self.views.remove(i);
+        self.stored.retain(|(f, _)| f != id);
+        self.chats.retain(|(c, _)| c != id);
+        if self.front.as_deref() == Some(id) {
+            self.front = None;
+        }
+        cx.notify();
+        view.update(cx, |t, cx| {
+            (t.shown, t.active) = (false, false);
+            t.take_live(cx)
+        })
+    }
+
+    /// Hosted sessions as the TUI lists them (`skip`: frame ids that are not plain sessions).
+    pub fn hosted_rows(&self, skip: &[String], cx: &App) -> Vec<crate::live::HostedRow> {
+        self.views
+            .iter()
+            .filter(|(i, _)| !skip.contains(i))
+            .filter_map(|(id, v)| {
+                let t = v.read(cx);
+                let h = t.embed_handoff()?;
+                let info = self.info(id, cx)?;
+                Some(crate::live::HostedRow {
+                    frame: id.clone(),
+                    sid: h.sid,
+                    title: info.title,
+                    folder: h.folder.to_string_lossy().into_owned(),
+                    busy: info.busy,
+                    needs: info.needs,
+                })
+            })
+            .collect()
+    }
+
+    /// `(frame id, stamp)` of every hosted session that has an engine, minus `skip`.
+    pub fn activity(&self, skip: &[String], cx: &App) -> Vec<(String, u64)> {
+        self.views
+            .iter()
+            .filter(|(i, _)| !skip.contains(i))
+            .filter(|(_, v)| v.read(cx).has_session())
+            .map(|(i, v)| (i.clone(), v.read(cx).activity()))
+            .collect()
     }
 
     /// The frames or the visible view changed: sessions whose tab is gone end (engine, shells, browser), the

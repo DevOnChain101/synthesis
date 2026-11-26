@@ -21,6 +21,8 @@ use synthesis_view::workspaces::{LoadOpts, WorkspaceList};
 
 mod swap;
 
+pub(crate) use self::swap::close_live;
+
 use self::swap::Owner;
 use super::{ChatTab, Embed, TuiView, panels, select, snapshot};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
@@ -41,6 +43,12 @@ pub struct LiveCfg {
     pub tz_min: i32,
     /// `synt.tui` of the user settings (panels, thinking, verbose, expanded output).
     pub tui: synthesis_settings::UiSettings,
+}
+
+/// A strictly increasing stamp (no ties): the order sessions were last given a task or answered in.
+pub(super) fn stamp() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 /// Where a relaunch goes.
@@ -210,6 +218,9 @@ pub struct LiveUi {
     bg: Vec<Task<()>>,
     /// The session was started (tick, keys, quit hook): `adopt_live` binds them again.
     started: bool,
+    /// When the person last gave this session a task, or the orchestrator did or answered (`stamp`): the mode
+    /// switch focuses the session with the highest. 0: never.
+    activity: std::cell::Cell<u64>,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
     /// `set_live` fed the conversation: no engine is launched.
@@ -360,6 +371,22 @@ impl TuiView {
         hidden: super::layout::Hidden,
         inset: f32,
     ) -> Self {
+        // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
+        // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
+        let hidden = super::layout::Hidden::from_ui(&cfg.tui).or(hidden);
+        let lu = Self::fresh_live_ui(window, cx, cfg);
+        let mut me = Self::new(inset, hidden);
+        me.live = Some(lu);
+        me
+    }
+
+    /// The state of one session's view with no engine yet (a new view, or the empty one a mode switch leaves in the
+    /// TUI view when its session moved to a Super Agent frame).
+    pub(super) fn fresh_live_ui(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cfg: LiveCfg,
+    ) -> LiveUi {
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask Synthesis anything... (Ctrl+R for history)")
@@ -374,11 +401,7 @@ impl TuiView {
         ));
         live.show_thinking = cfg.tui.show_thinking;
         live.verbose = cfg.tui.verbose;
-        // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
-        // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
-        let hidden = super::layout::Hidden::from_ui(&cfg.tui).or(hidden);
-        let mut me = Self::new(inset, hidden);
-        me.live = Some(LiveUi {
+        LiveUi {
             live,
             cfg: Arc::new(cfg),
             prompt,
@@ -425,8 +448,8 @@ impl TuiView {
             busy_hint: false,
             blink: Default::default(),
             _subs: subs,
-        });
-        me
+            activity: Default::default(),
+        }
     }
 
     /// Replaces the live state wholesale (offscreen shots and tests feed a conversation this way).
@@ -657,6 +680,7 @@ impl TuiView {
 
     /// The TUI's open session is one the Super Agent hosts (same scope, same id): it is released when idle, so the
     /// Super Agent tab can resume it.
+    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
     pub(crate) fn release_if_hosted(
         &mut self,
         h: &crate::handoff::Handoff,
@@ -674,6 +698,7 @@ impl TuiView {
     /// Mode switch to the Super Agent: the TUI's open session, when the Super Agent does not host it already, is
     /// given back while idle so a Super Agent frame can open it (one host at a time). `None`: nothing to hand over;
     /// `Err`: it stays here (a turn runs or an ask waits), the reason is for the Super Agent view's notice.
+    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
     pub(crate) fn hand_to_sa(
         &mut self,
         h: &crate::handoff::Handoff,
@@ -843,6 +868,9 @@ impl TuiView {
     ) -> Result<(), String> {
         let e = self.live.as_ref().and_then(|l| l.live.engine.clone());
         let e = e.ok_or("the session has no engine yet")?;
+        if let Some(lu) = &self.live {
+            lu.activity.set(stamp());
+        }
         e.send_via_conductor(text, Some(approval))
             .map_err(str::to_string)
     }
@@ -1180,6 +1208,8 @@ impl TuiView {
         }
         lu.dirty = true;
         if ended {
+            // a turn that ends is the session's answer: it counts as activity
+            lu.activity.set(stamp());
             self.after_task(cx);
         }
         crate::perf::notify();
@@ -1217,6 +1247,7 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
+        lu.activity.set(stamp());
         let (ws, sid) = (lu.live.live_ws_key(), lu.live.sid.clone());
         self.remember_active(&ws, &sid);
         self.save_active(cx);
@@ -2501,6 +2532,16 @@ impl TuiView {
             return;
         }
         let Some(lu) = &mut self.live else { return };
+        // a row of a hidden hosted session: one click brings it in
+        if let Some(h) = self
+            .snap
+            .running
+            .get(i)
+            .and_then(|r| lu.live.hosted.iter().find(|h| h.sid == r.id))
+        {
+            cx.emit(super::WantHosted(h.frame.clone()));
+            return;
+        }
         // the row is selected and the session's chat gets the keys (cursor visible, typing works at once); the
         // conversation shows at once and the engine starts with the first line (or Enter)
         // the highlighted session is entered by a click (the composer takes the keys); any other row is only selected
@@ -2562,6 +2603,14 @@ impl TuiView {
     fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
         let project = self.switch_project(&target);
         let Some(lu) = &mut self.live else { return };
+        // a session the Super Agent hosts hidden is brought in as it is (engine, turn and asks), never resumed
+        if self.embed.is_none()
+            && let Target::Resume(id) = &target
+            && let Some(h) = lu.live.hosted.iter().find(|h| h.sid == *id)
+        {
+            cx.emit(super::WantHosted(h.frame.clone()));
+            return;
+        }
         // an embedded frame is one session in one folder (its tab is named by it): no other one is opened here
         // (its own released session is the exception: the resume after a mode switch)
         let own_release = matches!(&target, Target::Resume(id)

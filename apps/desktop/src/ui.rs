@@ -109,6 +109,8 @@ pub struct Shell {
     /// The Super Agent button counts what waits for the person: only a live app (never the sample), and the count is
     /// 0 while the orchestrator is off, unsupported or not connected.
     count_waiting: bool,
+    /// The sessions waiting for a tool permission last pushed to the outcomes view (`refresh_hosted`).
+    pushed_tools: Vec<(String, String)>,
     /// The timer of the next frame of the title bar's blinking red (see `chrome::next_frame`).
     anim_tick: Option<gpui::Task<()>>,
 }
@@ -143,18 +145,6 @@ impl Shell {
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
-        // a goal, outcome, worker or conductor frame is never handed to the TUI, whichever way the switch comes
-        let in_sa = self.view == View::SuperAgent
-            || (self.view == View::Settings && self.back == View::SuperAgent);
-        if v == View::Tui && in_sa && !self.sa.read(cx).tui_switch_allowed() {
-            self.sa.update(cx, |s, cx| {
-                s.set_notice(
-                    "the TUI is offered from the home or a plain session, not from a goal, outcome or worker".into(),
-                    cx,
-                )
-            });
-            return;
-        }
         if self.view == View::Settings && v != View::Settings {
             // whichever way Settings is left, a slider drag never released does not stay on the window
             self.settings
@@ -172,29 +162,12 @@ impl Shell {
             || (self.view == View::Settings && self.back == View::SuperAgent);
         let from_tui =
             self.view == View::Tui || (self.view == View::Settings && self.back == View::Tui);
-        // the mode being left gives back the engine of each idle session (running ones keep theirs), so the mode
-        // entered can resume the same session; the lists are read again once the locks are free
-        let mut closing = Vec::new();
-        let mut to_open = None;
+        // the sessions move with the switch, running turns and open asks included (one engine each, never closed)
         if v == View::Tui && from_sa {
-            closing = self.sa.update(cx, |s, cx| s.release_idle(cx));
+            self.sessions_to_tui(window, cx);
         } else if v == View::SuperAgent && from_tui {
-            let hosted = self.sa.read(cx).handoff(cx);
-            closing = self.tui.update(cx, |t, cx| {
-                t.release_if_hosted(&hosted, cx).into_iter().collect()
-            });
-            // a TUI session no frame hosts yet is given back idle and opened as a frame once its lock is free
-            match self.tui.update(cx, |t, cx| t.hand_to_sa(&hosted, cx)) {
-                Some(Ok((h, rx))) => {
-                    closing.push(rx);
-                    to_open = Some(h);
-                }
-                Some(Err(why)) => self.sa.update(cx, |s, cx| s.set_notice(why, cx)),
-                None => {}
-            }
+            self.sessions_to_sa(window, cx);
         }
-        let handoff = (v == View::Tui && from_sa).then(|| self.sa.read(cx).handoff(cx));
-        let has_handoff = handoff.is_some();
         self.view = v;
         // the card's keys never outlive the view: a hidden view must not take the window's focus back later
         let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
@@ -222,32 +195,109 @@ impl Shell {
             let was = t.active;
             t.active = tui_on;
             t.shown = v == View::Tui;
-            if tui_on && !was && !has_handoff {
+            if tui_on && !was {
                 t.focus_prompt(window, cx);
             }
         });
-        if let Some(h) = handoff {
-            self.tui.update(cx, |t, cx| t.adopt_handoff(h, cx));
-        }
-        if !closing.is_empty() {
-            cx.spawn_in(window, async move |this, cx| {
-                for r in closing {
-                    let _ = r.await;
-                }
-                this.update_in(cx, |s, window, cx| {
-                    s.tui.update(cx, |t, cx| t.refresh_store(cx));
-                    if let Some(h) = to_open {
-                        // the lock is free now; a refusal is the Super Agent view's notice
-                        s.sa.update(cx, |v, cx| {
-                            let _ = v.open_stored_session(&h.scope, &h.sid, window, cx);
-                        });
-                    }
-                })
-                .ok();
-            })
-            .detach();
-        }
         cx.notify();
+    }
+
+    /// Mode switch to the TUI: the plain session most recently given a task (or that answered) comes into the TUI
+    /// view; the one the TUI held, if any, becomes a tab. Nothing is closed or waited for.
+    fn sessions_to_tui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // the sample TUI view (tests, shots) has no session state to hold one
+        if self.tui.read(cx).live_cfg().is_none() {
+            return;
+        }
+        let best = self
+            .sa
+            .read(cx)
+            .plain_activity(cx)
+            .into_iter()
+            .max_by_key(|(_, a)| *a);
+        let Some((id, a)) = best else { return };
+        // a session the TUI already holds that is newer stays in front
+        let t = self.tui.read(cx);
+        if t.has_session() && t.activity() >= a {
+            return;
+        }
+        self.bring_in(&id, window, cx);
+    }
+
+    /// Mode switch to the Super Agent: the TUI's session becomes a tab (the TUI keeps an empty view), then the
+    /// plain session most recently given a task (or that answered) is in front; with no activity anywhere the
+    /// session the person came from is.
+    fn sessions_to_sa(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let moved = self
+            .tui
+            .update(cx, |t, cx| t.hand_over_session(window, cx))
+            .and_then(|lu| self.host_session(lu, window, cx));
+        let best = self
+            .sa
+            .read(cx)
+            .plain_activity(cx)
+            .into_iter()
+            .max_by_key(|(i, a)| (*a, Some(i) == moved.as_ref()));
+        if let Some((id, a)) = best
+            && (a > 0 || Some(&id) == moved.as_ref())
+        {
+            self.sa.update(cx, |s, cx| {
+                s.open(crate::superagent::frames::Frame::Session(id), cx)
+            });
+        }
+    }
+
+    /// `lu` becomes a tab of the Super Agent view. Without a host it is closed the usual way, never dropped open.
+    fn host_session(
+        &mut self,
+        lu: crate::tui_view::driver::LiveUi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        match self.sa.update(cx, |s, cx| s.adopt_plain(lu, window, cx)) {
+            Ok(id) => Some(id),
+            Err(b) => {
+                let (lu, why) = *b;
+                crate::tui_view::driver::close_live(lu);
+                self.sa.update(cx, |s, cx| s.set_notice(why, cx));
+                None
+            }
+        }
+    }
+
+    /// Tab `id` of the Super Agent view comes into the TUI view; the session the TUI held, if it has one, takes
+    /// its place as a tab.
+    fn bring_in(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lu) = self.sa.update(cx, |s, cx| s.take_plain(id, cx)) else {
+            return;
+        };
+        if let Some(old) = self.tui.update(cx, |t, cx| t.put_live(lu, window, cx))
+            && old.carries_session()
+        {
+            self.host_session(old, window, cx);
+        }
+        self.tui.update(cx, |t, cx| t.focus_prompt(window, cx));
+    }
+
+    /// The hidden sessions the Super Agent hosts are listed in the TUI's Running panel; the ones that wait for a
+    /// tool permission also count for the Super Agent view's Needs you and badge.
+    fn refresh_hosted(&mut self, cx: &mut Context<Self>) {
+        let rows = self.sa.read(cx).hosted_rows(cx);
+        if self.count_waiting {
+            let mut tools = self.tui.read(cx).waiting_tools();
+            for r in rows.iter().filter(|r| r.needs > 0) {
+                if !tools.iter().any(|(k, _)| *k == r.sid) {
+                    tools.push((r.sid.clone(), r.title.clone()));
+                }
+            }
+            // only a change is pushed: the outcomes view keeps what else was set on it
+            if tools != self.pushed_tools {
+                self.pushed_tools = tools.clone();
+                self.outcomes
+                    .update(cx, |o, cx| o.set_waiting_tools(tools, cx));
+            }
+        }
+        self.tui.update(cx, |t, cx| t.set_hosted(rows, cx));
     }
 
     /// A session that waits for a tool permission is answered in the TUI view, in that session.
@@ -256,20 +306,18 @@ impl Shell {
         if id.starts_with(crate::superagent::chat::asks::KEY) {
             return self.go(View::SuperAgent, window, cx);
         }
-        // a session a Super Agent frame hosts holds its lock (it is not idle): its question is answered in that frame
+        // a session a Super Agent frame hosts is answered where it is: in its tab, or in the TUI when that is open
         let frame = self.sa.read(cx).host.read(cx).frame_of(id, cx);
         if let Some(f) = frame {
-            self.go(View::SuperAgent, window, cx);
-            self.sa.update(cx, |s, cx| {
-                s.open(crate::superagent::frames::Frame::Session(f), cx)
-            });
+            if self.view == View::Tui {
+                self.bring_in(&f, window, cx);
+            } else {
+                self.go(View::SuperAgent, window, cx);
+                self.sa.update(cx, |s, cx| {
+                    s.open(crate::superagent::frames::Frame::Session(f), cx)
+                });
+            }
             return;
-        }
-        // the question waits in the TUI: leave a frame that may not switch for the home first
-        if !self.sa.read(cx).tui_switch_allowed() {
-            self.sa.update(cx, |s, cx| {
-                s.open(crate::superagent::frames::Frame::Home, cx)
-            });
         }
         self.go(View::Tui, window, cx);
         if !id.starts_with('#') {
@@ -761,6 +809,7 @@ impl Shell {
             outcomes.update(cx, |o, cx| o.connect(cx));
         }
         let host = cx.new(|cx| SessionHost::new(host_cfg, window, cx));
+        let hosted_host = host.clone();
         let conductor = outcomes_env
             .as_ref()
             .map(|(env, ws)| (env.clone(), std::path::PathBuf::from(ws)));
@@ -799,6 +848,22 @@ impl Shell {
             },
         )
         .detach();
+        // a click on a hidden session of the Running panel brings it into the TUI view
+        cx.subscribe_in(
+            &tui,
+            window,
+            |s: &mut Shell, _, e: &crate::tui_view::WantHosted, window, cx| {
+                if s.view == View::Tui {
+                    s.bring_in(&e.0, window, cx);
+                }
+            },
+        )
+        .detach();
+        // the hidden sessions' live status follows the host (and the conductor's ownership, the view)
+        cx.observe(&hosted_host, |s: &mut Shell, _, cx| s.refresh_hosted(cx))
+            .detach();
+        cx.observe(&sa, |s: &mut Shell, _, cx| s.refresh_hosted(cx))
+            .detach();
         cx.subscribe_in(
             &outcomes,
             window,
@@ -849,14 +914,8 @@ impl Shell {
         )
         .detach();
         // sessions waiting for a tool permission count for the badge and Alt+A of the Super Agent view
-        cx.observe(&tui, |s: &mut Shell, tui, cx| {
-            if s.count_waiting {
-                let tools = tui.read(cx).waiting_tools();
-                s.outcomes
-                    .update(cx, |o, cx| o.set_waiting_tools(tools, cx));
-            }
-        })
-        .detach();
+        cx.observe(&tui, |s: &mut Shell, _, cx| s.refresh_hosted(cx))
+            .detach();
         // a task that ends while the popup is open enables the button
         cx.observe(&tui, |s: &mut Shell, tui, cx| {
             if s.view == View::Settings {
@@ -886,6 +945,7 @@ impl Shell {
             restarting: false,
             count_waiting: live_outcomes,
             anim_tick: None,
+            pushed_tools: Vec::new(),
         }
     }
 }
@@ -914,10 +974,10 @@ mod tests {
             .map(|b| (f32::from(b.origin.y), f32::from(b.size.height)))
     }
 
-    /// Every way into `go(Tui)` (a key, a button, a link) is refused from a frame that may not switch, from
-    /// Settings over it too; the home and a plain session may.
+    /// The TUI is reachable from every frame (the switch moves plain sessions only); a question waiting in the TUI
+    /// gets there from a goal frame too.
     #[gpui::test]
-    fn go_refuses_the_tui_from_goal_frames_by_any_route(cx: &mut TestAppContext) {
+    fn go_offers_the_tui_from_every_frame(cx: &mut TestAppContext) {
         use crate::superagent::frames::Frame;
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1000., 800.);
@@ -925,18 +985,14 @@ mod tests {
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         sa.update(v, |s, cx| s.open(Frame::Outcome("o1".into()), cx));
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
-        assert_eq!(shell.read_with(v, |s, _| s.view), View::SuperAgent);
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Tui);
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
         shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
         shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
-        assert_eq!(shell.read_with(v, |s, _| s.view), View::Settings);
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Tui);
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
-        // a question waiting in the TUI still gets there: the frame goes to the home first
         shell.update_in(v, |s, window, cx| s.open_waiting_session("#x", window, cx));
         assert_eq!(shell.read_with(v, |s, _| s.view), View::Tui);
-        assert_eq!(
-            sa.read_with(v, |s, _| s.frames.active().clone()),
-            Frame::Home
-        );
     }
 
     /// A waiting question of a session a Super Agent frame hosts is answered in that frame: the TUI would only
@@ -1588,5 +1644,232 @@ mod tests {
         assert!(!o.read_with(v, |o, _| o.can_back() || o.can_forward()));
         o.update(v, |o, cx| o.nav(true, cx));
         assert_eq!(o.read_with(v, |o, _| o.state.selected.clone()), sel);
+    }
+
+    // ---- the mode switch moves live sessions (no engine is closed, no turn waits) ----
+
+    /// `(session id, engine address, (tasks, subscriptions), in the TUI view)` of every live session of the shell.
+    fn sessions(
+        shell: &Entity<Shell>,
+        v: &mut gpui::VisualTestContext,
+    ) -> Vec<(String, usize, (usize, usize), bool)> {
+        shell.read_with(v, |s, cx| {
+            let mut out: Vec<_> = s
+                .tui
+                .read(cx)
+                .session_probe()
+                .map(|(a, b, c)| (a, b, c, true))
+                .into_iter()
+                .collect();
+            for h in s.sa.read(cx).host.read(cx).views() {
+                out.extend(h.read(cx).session_probe().map(|(a, b, c)| (a, b, c, false)));
+            }
+            out
+        })
+    }
+
+    /// The view that shows session `sid` now.
+    fn view_of(
+        shell: &Entity<Shell>,
+        v: &mut gpui::VisualTestContext,
+        sid: &str,
+    ) -> Entity<TuiView> {
+        shell.read_with(v, |s, cx| {
+            let mut all = vec![s.tui.clone()];
+            all.extend(s.sa.read(cx).host.read(cx).views());
+            all.into_iter()
+                .find(|t| t.read(cx).session_probe().is_some_and(|p| p.0 == sid))
+                .expect("a session is in one place")
+        })
+    }
+
+    fn wait(
+        v: &mut gpui::VisualTestContext,
+        what: &str,
+        ok: impl Fn(&mut gpui::VisualTestContext) -> bool,
+    ) {
+        for _ in 0..1200 {
+            v.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            v.run_until_parked();
+            if ok(v) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("not reached: {what}");
+    }
+
+    /// `(user lines, answers, a turn runs)` of a view.
+    fn said(v: &mut gpui::VisualTestContext, t: &Entity<TuiView>) -> (usize, usize, bool) {
+        use synthesis_view::convo::Item;
+        t.read_with(v, |t, _| {
+            let c = t.embed_live().unwrap().convo();
+            (
+                c.items
+                    .iter()
+                    .filter(|i| matches!(i, Item::User(_)))
+                    .count(),
+                c.items
+                    .iter()
+                    .filter(|i| matches!(i, Item::Assistant { .. }))
+                    .count(),
+                t.embed_info().1,
+            )
+        })
+    }
+
+    fn say(v: &mut gpui::VisualTestContext, t: &Entity<TuiView>, text: &str) {
+        t.update_in(v, |t, w, cx| {
+            let p = t.embed_prompt().unwrap();
+            p.update(cx, |s, cx| s.set_value(text.to_string(), w, cx));
+            t.embed_submit(w, cx)
+        });
+    }
+
+    /// Three sessions in mixed states through the real `Shell::go`: the TUI's own, and two tabs. Running turns
+    /// finish across switches, an ask in a hidden session shows in the TUI's list, the focus follows the last
+    /// activity, and ten round trips lose no engine, lock or task.
+    #[gpui::test]
+    fn the_mode_switch_carries_every_plain_session_live(cx: &mut TestAppContext) {
+        use crate::superagent::frames::Frame;
+        use crate::superagent::session::host::tests::{fx, wait_free};
+        let _g = theme::opacity_guard();
+        let (f, cfg) = fx(3);
+        std::fs::write(
+            f.base.join("script.json"),
+            r#"[{"text":"ok"},{"text":"ok"},{"text":"ok"},{"text":"ok"}]"#,
+        )
+        .unwrap();
+        cx.executor().allow_parking();
+        cx.update(gpui_component::init);
+        let (shell, v) = cx.add_window_view(|window, cx| {
+            Shell::new(
+                window,
+                cx,
+                Some(cfg),
+                Default::default(),
+                Err("test".into()),
+            )
+        });
+        v.simulate_resize(size(px(1400.), px(900.)));
+        let sa = shell.read_with(v, |s, _| s.sa.clone());
+        for d in ["f1", "f2"] {
+            let p = f.base.join(d);
+            shell.update_in(v, |s, window, cx| {
+                s.sa.update(cx, |sa, cx| {
+                    let _ = sa.open_session_folder(&p, window, cx);
+                })
+            });
+        }
+        wait(v, "three engines", |v| sessions(&shell, v).len() == 3);
+        let base = sessions(&shell, v);
+        assert!(
+            base[0].3 && !base[1].3 && !base[2].3,
+            "the TUI's own session and two tabs"
+        );
+        let (t_sid, a_sid, b_sid) = (base[0].0.clone(), base[1].0.clone(), base[2].0.clone());
+        let held = |f: &crate::superagent::session::host::tests::Fx, ids: &[&String]| {
+            ids.iter()
+                .all(|i| !synthesis_app::peers::session_lock_free(&f.home, i))
+        };
+        // to Super Agent: the TUI's session becomes a tab and nothing is closed; nothing was asked yet, so the
+        // session the person came from is in front
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        let at = sessions(&shell, v);
+        assert!(at.iter().all(|s| !s.3), "all three are tabs now");
+        assert_eq!(at.len(), 3);
+        assert!(held(&f, &[&t_sid, &a_sid, &b_sid]));
+        let front = sa.read_with(v, |s, _| s.frames.active().clone());
+        let tab_of_t = {
+            let tv = view_of(&shell, v, &t_sid);
+            sa.read_with(v, |s, cx| {
+                s.host
+                    .read(cx)
+                    .ids()
+                    .into_iter()
+                    .find(|i| s.host.read(cx).view_of(i).as_ref() == Some(&tv))
+                    .unwrap()
+            })
+        };
+        assert_eq!(front, Frame::Session(tab_of_t));
+        // a asks something; the turn is running when the person goes to the TUI and back at once
+        let a_view = view_of(&shell, v, &a_sid);
+        say(v, &a_view, "hello");
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        let tv = shell.read_with(v, |s, _| s.tui.clone());
+        assert_eq!(
+            tv.read_with(v, |t, _| t.session_probe().unwrap().0),
+            a_sid,
+            "the session given the last task is the one in the TUI"
+        );
+        shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+        wait(v, "the turn that ran through two switches", |v| {
+            let w = view_of(&shell, v, &a_sid);
+            said(v, &w) == (1, 1, false)
+        });
+        // the answer ended the turn: a is the most recent, so it is in front of Super Agent
+        let a_tab = {
+            let w = view_of(&shell, v, &a_sid);
+            sa.read_with(v, |s, cx| {
+                s.host
+                    .read(cx)
+                    .ids()
+                    .into_iter()
+                    .find(|i| s.host.read(cx).view_of(i).as_ref() == Some(&w))
+                    .unwrap()
+            })
+        };
+        assert_eq!(
+            sa.read_with(v, |s, _| s.frames.active().clone()),
+            Frame::Session(a_tab)
+        );
+        // an ask in a hidden session: the TUI lists it with its state and the Super Agent count has it
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        let b_view = view_of(&shell, v, &b_sid);
+        b_view.update(v, |t, cx| t.push_test_question(cx));
+        v.run_until_parked();
+        let rows = tv.read_with(v, |t, _| t.live_hosted());
+        assert!(rows.iter().any(|r| r.sid == b_sid && r.needs == 1));
+        assert!(
+            rows.iter()
+                .any(|r| r.sid == t_sid && r.needs == 0 && !r.busy)
+        );
+        assert_eq!(shell.read_with(v, |s, cx| s.sa.read(cx).waiting(cx)), 1);
+        // answered: the row is quiet again
+        b_view.update(v, |t, cx| t.test_clear_questions(cx));
+        v.run_until_parked();
+        assert!(
+            tv.read_with(v, |t, _| t.live_hosted())
+                .iter()
+                .all(|r| r.needs == 0)
+        );
+        // a click on a hidden session of the Running panel brings it in; the one it replaces becomes a tab
+        tv.update(v, |t, cx| t.open_session(&t_sid, cx));
+        v.run_until_parked();
+        assert_eq!(tv.read_with(v, |t, _| t.session_probe().unwrap().0), t_sid);
+        assert_eq!(sessions(&shell, v).len(), 3);
+        // ten round trips: every session keeps its engine, its lock and exactly one pump and one clock
+        let before = sessions(&shell, v);
+        for _ in 0..10 {
+            shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
+            shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        }
+        let after = sessions(&shell, v);
+        assert_eq!(after.len(), 3);
+        for (sid, eng, (tasks, subs), in_tui) in &after {
+            let b = before.iter().find(|b| b.0 == *sid).unwrap();
+            assert_eq!(b.1, *eng, "the same engine");
+            assert_eq!(*tasks, 2, "one pump and one clock");
+            assert_eq!(*subs, 3 + usize::from(!in_tui));
+        }
+        assert!(held(&f, &[&t_sid, &a_sid, &b_sid]));
+        // end: every engine closes through the usual path
+        for sid in [&t_sid, &a_sid, &b_sid] {
+            let w = view_of(&shell, v, sid);
+            w.update(v, |t, cx| t.close_embedded(cx));
+        }
+        v.run_until_parked();
+        wait_free(&f.home);
     }
 }

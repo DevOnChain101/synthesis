@@ -301,6 +301,20 @@ pub(super) fn ws_sessions(
             },
         );
     }
+    // a session the Super Agent hosts hidden is a row of its folder's workspace even before it has a stored message
+    for h in &l.hosted {
+        if l.key_of(&h.folder) == ws.key && !h.sid.is_empty() && !rows.iter().any(|r| r.id == h.sid)
+        {
+            rows.push(SessionRow {
+                id: h.sid.clone(),
+                title: h.title.clone(),
+                status: synthesis_core::SessionStatus::Idle,
+                updated_at: String::new(),
+                mtime: now,
+                is_live: true,
+            });
+        }
+    }
     Some((ws, rows))
 }
 
@@ -317,8 +331,16 @@ pub(super) fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Runnin
             // the open session is known first-hand, the others by their status column in the store; a stored
             // "running" or "waiting approval" counts only while a process holds the session (a dead one leaves it behind)
             let open = r.id == l.sid;
+            let hosted = l.hosted.iter().find(|h| h.sid == r.id);
             let state = if open {
                 run_state_of_live(l)
+            } else if let Some(h) = hosted {
+                // known first-hand: the hidden session's own view, not the store's status column
+                match (h.needs > 0, h.busy) {
+                    (true, _) => RunState::Approval,
+                    (_, true) => RunState::Running,
+                    _ => RunState::Idle,
+                }
             } else {
                 match run_state_of_status(r.status) {
                     RunState::Running | RunState::Approval if !r.is_live => RunState::Idle,
@@ -347,6 +369,13 @@ pub(super) fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Runnin
                 state,
                 status: if open {
                     activity_word(l)
+                } else if hosted.is_some() {
+                    match state {
+                        RunState::Approval => "waiting approval",
+                        RunState::Running => "running",
+                        _ => "idle",
+                    }
+                    .to_string()
                 } else {
                     status_word(r.status).to_string()
                 },
@@ -1090,6 +1119,48 @@ mod tests {
             ("old-proj", ""),
             "no git: no branch"
         );
+    }
+
+    /// A session the Super Agent hosts hidden is a row of its folder's workspace (before any stored message too) and
+    /// shows its own live state, not the store's column.
+    #[test]
+    fn hosted_sessions_are_rows_with_their_live_state() {
+        use synthesis_view::workspaces::{WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/p".into();
+        l.sid = "open".into();
+        l.view.workspaces.workspaces = vec![WorkspaceRow {
+            root: "/w/p".into(),
+            key: fold_dir("/w/p"),
+            label: "p".into(),
+            sessions: vec![],
+            available: true,
+            changes: None,
+        }];
+        l.ws_key = fold_dir("/w/p");
+        let h = |sid: &str, busy, needs| crate::live::HostedRow {
+            frame: "s1".into(),
+            sid: sid.into(),
+            title: format!("t-{sid}"),
+            folder: "/w/p".into(),
+            busy,
+            needs,
+        };
+        l.hosted = vec![h("run", true, 0), h("ask", true, 1), h("idle", false, 0)];
+        let s = build(&l, 0, 0, None);
+        let st = |id: &str| {
+            s.running
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| (r.state, r.status.clone()))
+        };
+        assert_eq!(st("run"), Some((RunState::Running, "running".into())));
+        assert_eq!(
+            st("ask"),
+            Some((RunState::Approval, "waiting approval".into()))
+        );
+        assert_eq!(st("idle"), Some((RunState::Idle, "idle".into())));
     }
 
     /// Rows keep a fixed place: a session going running <-> idle, or its last activity changing, never moves a row.
