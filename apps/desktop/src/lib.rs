@@ -21,6 +21,7 @@ pub mod remote;
 pub mod reveal;
 pub mod rewind;
 pub mod send_pick;
+pub mod session_warn;
 pub mod settings_view;
 pub mod superagent;
 pub mod term;

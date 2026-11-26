@@ -596,7 +596,9 @@ fn resolve_resume(
     let id = match &c.resume {
         Some(p) if !p.trim().is_empty() => {
             // another workspace's conversation would enter this one's context: opt-in only
-            let all = r.list_sessions(None).map_err(|e| e.to_string())?;
+            let all = r
+                .list_sessions_with_workers(None)
+                .map_err(|e| e.to_string())?;
             let hits: Vec<_> = all
                 .iter()
                 .filter(|s| c.resume_any_workspace || is_here(s, cwd))

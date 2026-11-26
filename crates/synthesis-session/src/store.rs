@@ -60,8 +60,9 @@ pub(crate) fn chat_only(conn: &Connection, alias: &str) -> Result<String> {
     })
 }
 
-/// [`chat_only`] for the cleaners: also keeps the session of an attempt, which `attempts` and the
-/// evidence artifacts point at (deleting it would orphan them). Empty below v5.
+/// [`chat_only`] for the listers and the cleaners: also keeps the session of an attempt (the
+/// worker, marked by its `attempts` row), which the orchestrator owns: `attempts` and the evidence
+/// artifacts point at it (deleting it would orphan them). Empty below v5.
 pub(crate) fn cleanable_only(conn: &Connection, alias: &str) -> Result<String> {
     let chat = chat_only(conn, alias)?;
     Ok(if chat.is_empty() {
@@ -1509,9 +1510,21 @@ impl Reader {
             .unwrap_or(false))
     }
 
-    /// Newest first; `cwd` filters by the persisted working directory.
+    /// Newest first; `cwd` filters by the persisted working directory. Outcome control and worker
+    /// sessions are not listed (resume by id still finds the rows for the orchestrator).
     pub fn list_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let chat = cleanable_only(&self.conn, "sessions")?;
+        self.list_chats(cwd, &chat)
+    }
+
+    /// [`Self::list_sessions`] plus the workers' sessions, for lookups by id (`--resume ID` of the
+    /// orchestrator's re-run of a blocked attempt); never for a list the person sees.
+    pub fn list_sessions_with_workers(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
         let chat = chat_only(&self.conn, "sessions")?;
+        self.list_chats(cwd, &chat)
+    }
+
+    fn list_chats(&self, cwd: Option<&str>, chat: &str) -> Result<Vec<SessionRecord>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} ORDER BY updated_at DESC, id"
         ))?;
@@ -1522,7 +1535,7 @@ impl Reader {
     /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
     /// every launch leaves behind when nothing was typed) and the closed ones.
     pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
-        let chat = chat_only(&self.conn, "sessions")?;
+        let chat = cleanable_only(&self.conn, "sessions")?;
         let mut st = self.conn.prepare(&format!(
             "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1){chat} \
              AND closed_at IS NULL \

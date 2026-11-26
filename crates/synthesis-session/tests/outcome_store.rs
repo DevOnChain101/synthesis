@@ -669,6 +669,35 @@ fn an_attempt_session_survives_the_cleaners() {
 }
 
 #[test]
+fn a_worker_session_is_not_listed_but_chats_and_get_by_id_are() {
+    let e = env();
+    let store = e.v5();
+    let (mut w, items) = ready_outcome(&e, &store);
+    go(&mut w, OutcomeState::Running);
+    run_agent(&e, &store, &mut w, item(&items, "inspect"), "att-1", "c1");
+    e.session(&store, "chat", true);
+    let r = store.reader().unwrap();
+    for list in [
+        r.list_sessions(None).unwrap(),
+        r.list_used_sessions(None).unwrap(),
+    ] {
+        let ids: Vec<_> = list.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["chat"], "the worker is not a user session");
+    }
+    assert_eq!(r.get_session("att-1").unwrap().id, "att-1");
+    // the lookup by id (`--resume ID` of a re-run attempt) still sees the worker, not the control session
+    let ids: Vec<_> = r
+        .list_sessions_with_workers(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(
+        ids.contains(&"att-1".to_string()) && ids.contains(&"chat".to_string()) && ids.len() == 2
+    );
+}
+
+#[test]
 fn outcome_events_are_hash_chained_and_a_tampered_one_is_found() {
     let e = env();
     let store = e.v5();
