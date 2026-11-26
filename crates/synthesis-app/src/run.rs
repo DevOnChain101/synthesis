@@ -1261,8 +1261,11 @@ pub fn prepare(
         (Err(e), None) => return Err(e),
     };
 
-    // `synt.browser` comes from the user's own settings file only (the loader enforces it)
+    // `synt.browser` comes from the user's own settings file only (the loader enforces it); `screenshots` also from managed
     let browser = crate::login::parse_settings(&settings.synthesis.browser);
+    // an unattended outcome attempt and the conductor have no browser and never take the person's `allow`
+    let screenshots_allowed = !(c.confined() || conductor)
+        && settings.synthesis.screenshots == synthesis_settings::ScreenshotPolicy::Allow;
     for w in &browser.warnings {
         eprintln!("synt: warning: {}", sanitize_for_display(w));
     }
@@ -2011,6 +2014,7 @@ pub fn prepare(
     });
     hcfg.env = child_env;
     hcfg.pricing = price;
+    hcfg.screenshots_allowed = screenshots_allowed;
     let (auto_compact, diag) = crate::ctx::read_auto_compact(&h.synthesis.join("settings.json"));
     for d in &diag {
         eprintln!("synt: warning: {d}");
@@ -2480,10 +2484,15 @@ pub fn prepare(
         registry
     } else {
         let cfg = browser.config(
-            synthesis_tools::BrowserConfig {
-                view: browser_view,
-                ..Default::default()
-            },
+            // images reach the model only when the person chose `allow` (docs/SECURITY.md)
+            synthesis_harness::browser_config(
+                synthesis_tools::BrowserConfig {
+                    view: browser_view,
+                    ..Default::default()
+                },
+                &res.provider.capabilities(&res.model),
+                screenshots_allowed,
+            ),
             &h.synthesis,
             env,
             browser_host,

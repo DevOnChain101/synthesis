@@ -99,6 +99,9 @@ pub struct BrowserConfig {
     pub no_sandbox: bool,
     /// The provider accepts image blocks in tool results: `browser_screenshot` returns the PNG.
     pub supports_images: bool,
+    /// `synt.browser.screenshots` is `allow`: the PNG goes to the model even when the page may show
+    /// credentials. Pixels cannot be masked, so the result text says so.
+    pub allow_screenshots: bool,
     /// Synthesis home: login profiles live in `<home>/browser-profiles`. `None` disables
     /// `browser_login` and the `profile` option.
     pub home: Option<PathBuf>,
@@ -1348,18 +1351,33 @@ fn png_size(png: &[u8]) -> (u32, u32) {
     }
 }
 
+/// One line for the person reading the tool row (it is also in the model's view of the result).
+const SHOT_ALLOWED_NOTE: &str = "; screenshot sent to the model, it may show on-screen secrets (synt.browser.screenshots is allow)";
+
 async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
     if input.get("ref").is_some() {
         return Err("element screenshots (ref) are not supported yet.".into());
     }
-    let s = rt.screenshot(input["full_page"] == true).await?;
+    let full = input["full_page"] == true;
+    let allow = lock(&sh.browser_cfg).allow_screenshots;
+    let s = if allow {
+        rt.screenshot_allowed(full).await?
+    } else {
+        rt.screenshot(full).await?
+    };
     let path = s.path.display().to_string();
     let (w, h) = png_size(&s.png);
     let frame = json!({"url": rt.page_origin().await.unwrap_or_default(), "w": w, "h": h, "bytes": s.png.len()});
     let meta = json!({"artifact_path": path, "frame": frame});
-    // pixels cannot be masked: a page that may show credentials goes to the model as text only
-    let credentialed = rt.page_credentialed().await;
-    if lock(&sh.browser_cfg).supports_images && !credentialed {
+    // pixels cannot be masked: unless the person chose `allow`, a page that may show credentials goes to the
+    // model as text only
+    let (supports_images, allow) = {
+        let c = lock(&sh.browser_cfg);
+        (c.supports_images, c.allow_screenshots)
+    };
+    let credentialed = !allow && rt.page_credentialed().await;
+    if supports_images && !credentialed {
+        let note = if allow { SHOT_ALLOWED_NOTE } else { "" };
         return Ok(ToolOutput {
             content: Content::Blocks(vec![
                 Block::Image {
@@ -1369,7 +1387,7 @@ async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
                     },
                 },
                 Block::Text {
-                    text: format!("Screenshot saved as artifact {path}"),
+                    text: format!("Screenshot saved as artifact {path}{note}"),
                 },
             ]),
             is_error: false,
@@ -1383,7 +1401,7 @@ async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
         if credentialed {
             "the image is withheld from the model: the page may show credentials"
         } else {
-            "images are not supported by this model"
+            "images are not sent to this model: it takes none, or synt.browser.screenshots is not allow"
         },
         untrusted(format!("{}\n\n{}", page_text(&t.page), t.tree.expose()))
     ))

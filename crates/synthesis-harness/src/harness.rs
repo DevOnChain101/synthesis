@@ -264,6 +264,9 @@ pub struct HarnessConfig {
     /// sub-agent models) or a `provider/model` label (a failover target). `None` = `pricing` for
     /// everything.
     pub pricing_for: Option<PriceFn>,
+    /// `synt.browser.screenshots` is `allow`: browser screenshots (no other image) stay in the model request while
+    /// secrets are registered.
+    pub screenshots_allowed: bool,
 }
 
 pub type PriceFn = std::sync::Arc<dyn Fn(&str) -> Option<Pricing> + Send + Sync>;
@@ -309,14 +312,16 @@ impl std::fmt::Debug for HarnessConfig {
     }
 }
 
-/// Browser tool settings for this provider/model: screenshots are returned as images only when
-/// the model accepts image blocks in tool results (`ProviderCapabilities.images`).
+/// Browser tool settings for this provider/model and the screenshot policy: screenshots are returned as images only
+/// when the policy is `allow` and the model accepts image blocks in tool results (`ProviderCapabilities.images`).
 pub fn browser_config(
     base: synthesis_tools::BrowserConfig,
     caps: &ProviderCapabilities,
+    screenshots_allowed: bool,
 ) -> synthesis_tools::BrowserConfig {
     synthesis_tools::BrowserConfig {
-        supports_images: caps.images,
+        supports_images: screenshots_allowed && caps.images,
+        allow_screenshots: screenshots_allowed,
         ..base
     }
 }
@@ -339,6 +344,7 @@ impl HarnessConfig {
             auto: crate::classifier::AutoJudge::default(),
             report_sink: None,
             pricing_for: None,
+            screenshots_allowed: false,
         }
     }
 }
@@ -603,6 +609,8 @@ pub struct Harness {
     /// An image entered this session (the person's attachment or a tool result) and no human answer has cleared
     /// it since: it outlives a compaction that drops the image block but keeps what was read from it.
     pub(crate) image_taint: AtomicBool,
+    /// The images the built-in `browser_screenshot` returned: what `allow` lets through the secret gate.
+    pub(crate) browser_shots: synthesis_providers::BrowserShots,
     /// Gate check commands the person approved as a set; valid for the whole session.
     /// Called with the allow rules a person accepted with "allow always" (to persist them).
     pub(crate) rule_store: Option<RuleStore>,
@@ -662,6 +670,7 @@ impl Harness {
             compact_wanted: Mutex::default(),
             reasoning_effort: Mutex::default(),
             image_taint: AtomicBool::new(false),
+            browser_shots: Default::default(),
             window_noted: AtomicBool::new(false),
             conductor: false,
             verify_ok: Mutex::default(),
