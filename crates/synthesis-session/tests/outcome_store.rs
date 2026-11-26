@@ -986,6 +986,30 @@ fn a_forged_contract_approval_does_not_open_ready() {
 }
 
 #[test]
+fn the_approval_covers_max_turns() {
+    let e = env();
+    let store = e.v5();
+    let mut c = contract();
+    c.envelope.budgets.max_turns = Some(10);
+    let mut w = new_outcome_with(&e, &store, &c, &policy());
+    go(&mut w, OutcomeState::ContractPending);
+    let h = contract_hash(&w);
+    w.approve_contract(1, &h, "user").unwrap();
+    assert!(w.contract_is_approved(w.id(), 1).unwrap());
+    let db = e.db();
+    db.execute("DROP TRIGGER contracts_immutable", []).unwrap();
+    db.execute(
+        "UPDATE contracts SET body=replace(body,'\"max_turns\":10','\"max_turns\":200')",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        w.contract_is_approved(w.id(), 1),
+        Err(Error::Tampered(_))
+    ));
+}
+
+#[test]
 fn an_approval_for_another_contract_body_or_outcome_does_not_verify() {
     let e = env();
     let store = e.v5();

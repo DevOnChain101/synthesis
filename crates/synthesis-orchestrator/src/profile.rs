@@ -186,7 +186,15 @@ impl Profile {
                 (false, n) => n
                     .unwrap_or(DEFAULT_ATTEMPT_MAX_TURNS)
                     .clamp(1, HARD_MAX_TURNS),
-            },
+            }
+            // the contract can only lower it, never raise the setting
+            .min(
+                contract
+                    .envelope
+                    .budgets
+                    .max_turns
+                    .map_or(HARD_MAX_TURNS, |t| t.clamp(1, HARD_MAX_TURNS)),
+            ),
             max_tokens: policy.attempt_max_tokens.clamp(1, HARD_MAX_TOKENS),
             contract_version: contract.version,
             envelope: contract.envelope.clone(),

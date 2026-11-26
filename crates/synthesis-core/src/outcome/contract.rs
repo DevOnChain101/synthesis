@@ -137,6 +137,10 @@ pub struct Budgets {
     pub attempt_max_cost_usd: Option<f64>,
     #[serde(default)]
     pub attempt_max_wall_secs: Option<u64>,
+    /// Provider calls per attempt (1..=`HARD_MAX_TURNS`); the settings value still applies, the
+    /// smaller wins. Absent from the stored JSON when unset (older contracts keep their hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 impl Budgets {
@@ -147,6 +151,7 @@ impl Budgets {
             max_attempts_per_work_item: DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM,
             attempt_max_cost_usd: None,
             attempt_max_wall_secs: None,
+            max_turns: None,
         }
     }
 
@@ -188,6 +193,12 @@ impl Budgets {
             return Err(EnvelopeError::Budget(
                 "attempt_max_wall_secs must be positive",
             ));
+        }
+        if self
+            .max_turns
+            .is_some_and(|t| !(1..=HARD_MAX_TURNS).contains(&t))
+        {
+            return Err(EnvelopeError::Budget("max_turns is out of range"));
         }
         Ok(())
     }
@@ -960,6 +971,39 @@ mod tests {
         k.criteria[1].required_trust = TrustClass::HumanReview;
         assert_eq!(validate_contract(&k), Ok(()));
         assert!(TrustClass::ClaimedByWorker < TrustClass::IndependentCheck);
+    }
+
+    /// Stored before `max_turns` existed (budgets with the two legacy `null` caps): it must still
+    /// parse, re-serialize byte for byte and keep its sha256 (the approval MAC covers that hash).
+    #[test]
+    fn a_contract_stored_before_max_turns_keeps_its_bytes_and_hash() {
+        use sha2::{Digest, Sha256};
+        const OLD: &str = r#"{"version":1,"goal":"g","criteria":[],"envelope":{"allowed_paths":["src/**"],"denied_paths":[],"capabilities":{"repo.read":"allow"},"budgets":{"max_cost_usd":5.0,"max_parallel_workers":2,"max_attempts_per_work_item":3,"attempt_max_cost_usd":null,"attempt_max_wall_secs":null},"quality_gates":[]}}"#;
+        const OLD_SHA: &str = "f34f33b18f96cd899d0f380ca9521435a90aaedb123833e13c5270bfdefc45fe";
+        let c: Contract = serde_json::from_str(OLD).unwrap();
+        assert_eq!(c.envelope.budgets.max_turns, None);
+        let back = serde_json::to_string(&c).unwrap();
+        assert_eq!(back, OLD);
+        assert_eq!(format!("{:x}", Sha256::digest(back.as_bytes())), OLD_SHA);
+        // setting it changes the bytes, so the hash and the MAC over it
+        let mut d = c;
+        d.envelope.budgets.max_turns = Some(20);
+        let j = serde_json::to_string(&d).unwrap();
+        assert!(j.contains(r#""max_turns":20"#));
+        assert_ne!(format!("{:x}", Sha256::digest(j.as_bytes())), OLD_SHA);
+    }
+
+    #[test]
+    fn max_turns_is_bounded_by_the_hard_ceiling() {
+        let ok = |t| {
+            let mut c = contract(&["c1"]);
+            c.envelope.budgets.max_turns = Some(t);
+            validate_contract(&c)
+        };
+        assert_eq!(ok(1), Ok(()));
+        assert_eq!(ok(HARD_MAX_TURNS), Ok(()));
+        assert!(ok(0).is_err());
+        assert!(ok(HARD_MAX_TURNS + 1).is_err());
     }
 
     #[test]

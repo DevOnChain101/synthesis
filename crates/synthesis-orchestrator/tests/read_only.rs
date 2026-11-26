@@ -496,3 +496,40 @@ fn turns_unset_or_set_apply_to_read_only_and_write_attempts() {
         ("80".into(), "120".into())
     );
 }
+
+#[test]
+fn a_contract_max_turns_only_lowers_the_setting() {
+    let r = rig();
+    let root = folder(&r);
+    let (mut w, it) = ro_outcome(&r, &root, &contract_ro());
+    let env = r
+        .allocator()
+        .allocate_in_place(&mut w, &spec(&it, &root), now())
+        .unwrap();
+    let ro = w.get_contract(w.id(), 1).unwrap().0;
+    let turns = |c: &Contract, set: Option<u32>| {
+        let mut p = policy();
+        p.attempt_max_turns = set;
+        let a = Profile::build(PathBuf::from("synt"), &env, c, &p, 0.0, "x".into())
+            .unwrap()
+            .argv();
+        a[a.iter().position(|x| x == "--max-turns").unwrap() + 1]
+            .to_string_lossy()
+            .into_owned()
+    };
+    let with = |c: &Contract, t: u32| {
+        let mut c = c.clone();
+        c.envelope.budgets.max_turns = Some(t);
+        c
+    };
+    let wr = contract();
+    // lower than the setting (or the default): the contract wins
+    assert_eq!(turns(&with(&wr, 10), Some(30)), "10");
+    assert_eq!(turns(&with(&wr, 10), None), "10");
+    assert_eq!(turns(&with(&ro, 10), None), "10");
+    // higher than the setting, the default or the read-only 80: it is not raised
+    assert_eq!(turns(&with(&wr, 120), Some(30)), "30");
+    assert_eq!(turns(&with(&wr, 120), None), "50");
+    assert_eq!(turns(&with(&ro, 120), None), "80");
+    assert_eq!(turns(&with(&wr, 200), Some(u32::MAX)), "200");
+}
