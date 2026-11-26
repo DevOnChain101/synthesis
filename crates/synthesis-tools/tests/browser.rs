@@ -1193,6 +1193,100 @@ async fn a_short_secret_blocks_snapshots_and_screenshots_until_the_page_navigate
     reg.close_session("short1");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn allowed_screenshots_are_sent_with_a_notice_text_stays_masked_and_the_field_is_restored() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_secret(None).await;
+    let d = tempfile::tempdir().unwrap();
+    let (secrets, _) = synthesis_browser::secret::parse_secrets(
+        json!({"pw": {"source": format!("{{env:{PW_VAR}}}"), "origins": [&base], "field_kind": "password"}})
+            .as_object()
+            .unwrap(),
+    );
+    let mk = |allow: bool| {
+        Registry::unsandboxed_for_tests()
+            .with_new_tools()
+            .with_browser(BrowserConfig {
+                policy: UrlPolicy {
+                    allow_private_network: true,
+                    ..Default::default()
+                },
+                no_sandbox: no_sandbox(),
+                secrets: secrets.clone(),
+                process_env: Some(proc_env(&[(PW_VAR, PW)])),
+                allow_unsandboxed: true,
+                host: Some(person(true)),
+                supports_images: true,
+                allow_screenshots: allow,
+                ..Default::default()
+            })
+    };
+    let (reg, c) = (mk(true), ctx(d.path(), "shot-allow"));
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    let o = reg
+        .execute(
+            "browser_fill_secret",
+            json!({"ref": pw, "secret": "pw"}),
+            &c,
+        )
+        .await;
+    assert!(!o.is_error, "{o:?}");
+    // allow: the image goes out although a secret was just typed, and the result says it may show secrets
+    let o = reg.execute("browser_screenshot", json!({}), &c).await;
+    assert!(!o.is_error, "{o:?}");
+    let Content::Blocks(b) = &o.content else {
+        panic!("{o:?}")
+    };
+    assert!(
+        b.iter().any(|b| format!("{b:?}").starts_with("Image")),
+        "{o:?}"
+    );
+    assert!(
+        format!("{b:?}").contains("may show on-screen secrets"),
+        "{o:?}"
+    );
+    // the field was shown as *** during the capture and has its value back: the page echoes the real one (masked in text)
+    reg.execute("browser_click", json!({"role": "button", "name": "Go"}), &c)
+        .await;
+    reg.execute("browser_wait_for", json!({"text": "echo:"}), &c)
+        .await;
+    let snap = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    assert!(
+        snap.contains("echo:[REDACTED:secret]") && !snap.contains(PW),
+        "{snap}"
+    );
+    reg.close_session("shot-allow");
+    // the default (withhold) refuses the same capture
+    let (reg, c) = (mk(false), ctx(d.path(), "shot-default"));
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    reg.execute(
+        "browser_fill_secret",
+        json!({"ref": pw, "secret": "pw"}),
+        &c,
+    )
+    .await;
+    let o = reg.execute("browser_screenshot", json!({}), &c).await;
+    assert!(
+        o.is_error && text(&o).contains("until the page navigates"),
+        "{o:?}"
+    );
+    reg.close_session("shot-default");
+}
+
 const USER_VAR: &str = "SYNT_TEST_USER_TOKEN";
 
 /// Two secrets on one origin: a SHORT username (unmaskable) and the long password.

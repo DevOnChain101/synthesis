@@ -990,6 +990,123 @@ fn network_allowed_hosts_is_user_or_managed_only_and_managed_wins() {
 }
 
 #[test]
+fn browser_screenshots_default_withholds_user_and_managed_set_it_project_cannot() {
+    use ScreenshotPolicy::{Allow, WithholdWhenSecrets};
+    let f = fx();
+    assert_eq!(
+        f.load(ProjectTrust::Trusted).synthesis.screenshots,
+        WithholdWhenSecrets
+    );
+    // user allows
+    f.user(json!({"synt":{"browser":{"screenshots":"allow"}}}));
+    assert_eq!(f.load(ProjectTrust::Trusted).synthesis.screenshots, Allow);
+    // a project file cannot change it, trusted or not, and says so
+    let f = fx();
+    f.project(json!({"synt":{"browser":{"screenshots":"allow"}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.screenshots, WithholdWhenSecrets);
+    assert!(
+        s.diagnostics.iter().any(|d| d
+            .contains("project settings: synt.browser.screenshots is read from user or managed")),
+        "{:?}",
+        s.diagnostics
+    );
+    assert_eq!(
+        f.load(ProjectTrust::Untrusted).synthesis.screenshots,
+        WithholdWhenSecrets
+    );
+    // managed wins over the user, both ways, and a bad managed value locks the safe default
+    let f = fx();
+    f.user(json!({"synt":{"browser":{"screenshots":"allow"}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"browser":{"screenshots":"withhold_when_secrets"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.screenshots, WithholdWhenSecrets);
+    assert!(
+        !s.diagnostics
+            .iter()
+            .any(|d| d.contains("user settings only")),
+        "{:?}",
+        s.diagnostics
+    );
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"browser":{"screenshots":"yes"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.screenshots, WithholdWhenSecrets);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("must be \"allow\""))
+    );
+    let f = fx();
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"browser":{"screenshots":"allow"}}}),
+    );
+    f.user(json!({"synt":{"browser":{"screenshots":"withhold_when_secrets"}}}));
+    assert_eq!(f.load(ProjectTrust::Trusted).synthesis.screenshots, Allow);
+    // an invalid user value keeps the safe default, with a diagnostic
+    let f = fx();
+    f.user(json!({"synt":{"browser":{"screenshots":true}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.screenshots, WithholdWhenSecrets);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("synt.browser.screenshots must be"))
+    );
+}
+
+#[test]
+fn a_managed_file_with_unknown_intent_forces_screenshots_withheld() {
+    // each case: the user says allow, the managed file cannot be understood
+    for (name, managed) in [
+        (
+            "newer version",
+            Some(r#"{"synt":{"version":99,"browser":{"screenshots":"allow"}}}"#),
+        ),
+        ("malformed", Some("{,")),
+        ("synt not an object", Some(r#"{"synt":"x"}"#)),
+        ("browser not an object", Some(r#"{"synt":{"browser":"x"}}"#)),
+        ("unreadable", None),
+    ] {
+        let f = fx();
+        f.user(json!({"synt":{"browser":{"screenshots":"allow"}}}));
+        let m = f.home.path().join("managed.json");
+        match managed {
+            Some(t) => fs::write(&m, t).unwrap(),
+            None => fs::create_dir(&m).unwrap(), // a directory cannot be read as a file
+        }
+        let s = f.load(ProjectTrust::Trusted);
+        assert_eq!(
+            s.synthesis.screenshots,
+            ScreenshotPolicy::WithholdWhenSecrets,
+            "{name}"
+        );
+        assert!(
+            s.diagnostics.iter().any(|d| d.contains("screenshots")),
+            "{name}: {:?}",
+            s.diagnostics
+        );
+    }
+    // a managed file that is fine but omits the key leaves the user's value (key by key)
+    let f = fx();
+    f.user(json!({"synt":{"browser":{"screenshots":"allow"}}}));
+    write(f.home.path(), "managed.json", json!({"synt":{}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted).synthesis.screenshots,
+        ScreenshotPolicy::Allow
+    );
+}
+
+#[test]
 fn orchestrator_is_off_by_default_with_the_plan_defaults() {
     let f = fx();
     let o = f.load(ProjectTrust::Trusted).synthesis.orchestrator;

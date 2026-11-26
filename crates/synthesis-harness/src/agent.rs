@@ -854,7 +854,13 @@ impl Harness {
             );
 
             // the last step before the send: nothing leaves without passing the secret gate
-            let sealed = match synthesis_providers::SecretGate::new(self.sink.redactor()).seal(&req)
+            let sealed = match synthesis_providers::SecretGate::new(self.sink.redactor())
+                .allow_images(
+                    self.config
+                        .screenshots_allowed
+                        .then(|| self.browser_shots.clone()),
+                )
+                .seal(&req)
             {
                 Ok(s) => s,
                 Err(b) => {
@@ -875,13 +881,21 @@ impl Harness {
                     .map(|(k, n)| format!("{k}:{n}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                if sealed.images_dropped() > 0 {
-                    format!("; {} image(s) withheld", sealed.images_dropped())
-                } else {
-                    String::new()
-                }
+                [
+                    (sealed.images_dropped() > 0)
+                        .then(|| format!("; {} image(s) withheld", sealed.images_dropped())),
+                    (sealed.images_kept_with_secrets() > 0).then(|| format!(
+                        "; {} browser screenshot(s) sent, they may show on-screen secrets (synt.browser.screenshots is allow)",
+                        sealed.images_kept_with_secrets()
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<String>()
             );
-            if (!sealed.redactions().is_empty() || sealed.images_dropped() > 0)
+            if (!sealed.redactions().is_empty()
+                || sealed.images_dropped() > 0
+                || sealed.images_kept_with_secrets() > 0)
                 && st.gate_note != note
             {
                 self.notice(task, "warning", note.clone());
