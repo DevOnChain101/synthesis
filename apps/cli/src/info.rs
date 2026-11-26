@@ -414,9 +414,9 @@ fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Opti
         st.synthesis.screenshots.as_str(),
         match st.synthesis.screenshots {
             synthesis_settings::ScreenshotPolicy::Allow =>
-                " (images go to the model even with secrets registered; on-screen secrets are not masked)",
+                " (browser screenshots only: sent to the model even with secrets registered, on-screen secrets may show; other images are still withheld then)",
             synthesis_settings::ScreenshotPolicy::WithholdWhenSecrets =>
-                " (images are not sent to the model)",
+                " (browser screenshots only: not sent to the model)",
         }
     );
     {

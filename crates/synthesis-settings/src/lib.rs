@@ -691,6 +691,7 @@ pub fn load_settings_layers(
                         "cannot be read (the managed file is unusable)",
                         &mut s.diagnostics,
                     );
+                    s.lock_screenshots(what, "the managed file is unusable");
                 }
             }
         }
@@ -1207,12 +1208,21 @@ impl Settings {
         }
     }
 
+    /// A managed file whose intent is unknown must not leave a user's `allow` in force.
+    fn lock_screenshots(&mut self, what: &str, why: &str) {
+        self.synthesis.screenshots = ScreenshotPolicy::WithholdWhenSecrets;
+        self.diagnostics.push(format!(
+            "{what}: {why}: browser screenshots stay withheld (synt.browser.screenshots)"
+        ));
+    }
+
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
         let Some(n) = raw.get("synt").and_then(Value::as_object) else {
             if raw.get("synt").is_some() && what == "managed settings" {
                 // a managed `synt` this build cannot read may carry limits it would then not apply
                 let o = &mut self.synthesis.orchestrator;
                 o.lock_off(what, "synt section is not an object", &mut self.diagnostics);
+                self.lock_screenshots(what, "synt section is not an object");
             }
             return;
         };
@@ -1228,6 +1238,7 @@ impl Settings {
                     "synt section is from a newer build",
                     &mut self.diagnostics,
                 );
+                self.lock_screenshots(what, "synt section is from a newer build");
             }
             return;
         }
@@ -1236,6 +1247,9 @@ impl Settings {
         }
         // Secrets and the domains a login may browse are the person's alone: not a repository's,
         // not even the organisation's managed file.
+        if what == "managed settings" && n.get("browser").is_some_and(|b| !b.is_object()) {
+            self.lock_screenshots(what, "synt.browser is not an object");
+        }
         if let Some(b) = n.get("browser").and_then(Value::as_object) {
             if what == "user settings" {
                 self.synthesis.browser.extend(b.clone());

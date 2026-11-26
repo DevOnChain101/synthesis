@@ -112,6 +112,13 @@ async fn dead_port(taken: u16) -> u16 {
     panic!("no refused loopback port found");
 }
 
+/// A shown-password style text field, a textarea and a password input.
+fn mask_page(otp: &str, note: &str, pw: &str) -> String {
+    format!(
+        "<title>Mask</title><input id=otp aria-label=Code value='{otp}'><br><textarea name=pwd aria-label=Note>{note}</textarea><br><input type=password aria-label=Pw value='{pw}'>"
+    )
+}
+
 async fn serve() -> String {
     // The server binds first so the dead port can be chosen distinct from it.
     let l = bind_loopback().await;
@@ -181,6 +188,8 @@ async fn serve() -> String {
                     "/anim" => ("200 OK", "", "text/html", ANIM.to_owned()),
                     "/input" => ("200 OK", "", "text/html", INPUT.to_owned()),
                     "/solid" => ("200 OK", "", "text/html", SOLID.to_owned()),
+                    "/mask" => ("200 OK", "", "text/html", mask_page("111222", "abcdef", "x")),
+                    "/starred" => ("200 OK", "", "text/html", mask_page("***", "***", "***")),
                     "/flood" => ("200 OK", "", "text/html", FLOOD.to_owned()),
                     "/api/login" => (
                         "422 Unprocessable Entity",
@@ -2210,5 +2219,39 @@ async fn input_body() {
     assert!(matches!(r, Err(BrowserError::Refused(_))), "{r:?}");
     click(150., 520.).await;
     has("Contact").await.unwrap();
+    rt.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allowed_screenshot_masks_fields_and_restores_them_even_when_cancelled() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    rt.navigate(&format!("{base}/starred"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let starred = rt.screenshot(false).await.unwrap().png;
+    rt.navigate(&format!("{base}/mask"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let plain = rt.screenshot(false).await.unwrap().png;
+    assert_ne!(plain, starred);
+    // masked in pixels: the capture looks exactly like the page that really holds `***`
+    assert!(rt.screenshot_allowed(false).await.unwrap().png == starred);
+    let restored = || async {
+        let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
+        assert!(
+            tree.contains("111222") && tree.contains("abcdef") && !tree.contains("***"),
+            "{tree}"
+        );
+    };
+    restored().await;
+    // dropped at various points (before, between and after mask and restore): the fields come back
+    for ms in [1, 3, 6, 10, 20, 35, 60, 100] {
+        let _ = tokio::time::timeout(Duration::from_millis(ms), rt.screenshot_allowed(false)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        restored().await;
+    }
     rt.close().await.unwrap();
 }

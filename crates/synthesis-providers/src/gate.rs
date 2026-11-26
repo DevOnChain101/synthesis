@@ -2,13 +2,34 @@
 //! a model, so this is deterministic code that fails closed (no classifier, no "approve and send").
 //! [`SealedRequest`] has a private constructor; `ModelProvider::stream` accepts nothing else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::{BuildHasher, RandomState};
 use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use synthesis_events::Redactor;
 
 use crate::types::Request;
+
+/// Provenance of images: the screenshots the built-in browser tool took in this session, by a keyed hash of
+/// their data. Only the harness adds to it (never from tool output metadata), so a pasted image, a `Read` file
+/// or an MCP result is not in it. Clones share the set. A resumed session starts empty (fail closed).
+#[derive(Clone, Default)]
+pub struct BrowserShots(Arc<Mutex<(RandomState, HashSet<u64>)>>);
+
+impl BrowserShots {
+    pub fn add(&self, data: &str) {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let h = s.0.hash_one(data);
+        s.1.insert(h);
+    }
+
+    fn contains(&self, data: &str) -> bool {
+        let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.1.contains(&s.0.hash_one(data))
+    }
+}
 
 /// A request that passed [`SecretGate::seal`].
 #[derive(Debug, Clone, PartialEq)]
@@ -37,8 +58,8 @@ impl SealedRequest {
         self.images_dropped
     }
 
-    /// Image blocks sent although secrets are registered (`synt.browser.screenshots` is `allow`): pixels are not
-    /// masked, so they may show on-screen secrets.
+    /// Browser screenshots sent although secrets are registered (`synt.browser.screenshots` is `allow`): pixels
+    /// are not redacted, so they may show on-screen secrets.
     pub fn images_kept_with_secrets(&self) -> usize {
         self.images_kept
     }
@@ -73,8 +94,9 @@ impl std::error::Error for Blocked {}
 #[derive(Clone)]
 pub struct SecretGate {
     redactor: Redactor,
-    /// The person chose to send images even when secrets are registered (explicit exception, see docs/SECURITY.md).
-    allow_images: bool,
+    /// Set when the person chose `allow`: these browser screenshots (and no other image) are sent even when
+    /// secrets are registered (explicit exception, see docs/SECURITY.md).
+    allowed_shots: Option<BrowserShots>,
 }
 
 impl Default for SecretGate {
@@ -88,13 +110,14 @@ impl SecretGate {
     pub fn new(redactor: Redactor) -> Self {
         Self {
             redactor,
-            allow_images: false,
+            allowed_shots: None,
         }
     }
 
-    /// Keep image blocks while secrets are registered (`synt.browser.screenshots` = `allow`). Text is masked as always.
-    pub fn allow_images(mut self, allow: bool) -> Self {
-        self.allow_images = allow;
+    /// Keep the images in `shots` while secrets are registered (`synt.browser.screenshots` = `allow`); every other
+    /// image is still dropped. Text is masked as always.
+    pub fn allow_images(mut self, shots: Option<BrowserShots>) -> Self {
+        self.allowed_shots = shots;
         self
     }
 
@@ -115,22 +138,21 @@ impl SecretGate {
         }
         // cloned only to strip images (which happens only when a value is registered)
         let stripped;
-        let images_kept = if r.has_secrets() && self.allow_images {
-            // shortcut: counts on a throwaway clone, only when allow and secrets meet; a counting walk if it shows up in profiles
+        let mut images_kept = 0;
+        let (src, images_dropped) = if r.has_secrets() {
             let mut c = req.clone();
-            c.messages
-                .iter_mut()
-                .map(|m| m.content.strip_images())
-                .sum()
-        } else {
-            0
-        };
-        let (src, images_dropped) = if r.has_secrets() && !self.allow_images {
-            let mut c = req.clone();
+            let mut keep = |data: &str| {
+                let kept = self
+                    .allowed_shots
+                    .as_ref()
+                    .is_some_and(|s| s.contains(data));
+                images_kept += usize::from(kept);
+                kept
+            };
             let n = c
                 .messages
                 .iter_mut()
-                .map(|m| m.content.strip_images())
+                .map(|m| m.content.strip_images_unless(&mut keep))
                 .sum();
             stripped = c;
             (&stripped, n)
@@ -523,21 +545,57 @@ mod tests {
     }
 
     #[test]
-    fn allow_images_keeps_the_image_but_text_is_still_masked() {
+    fn only_browser_screenshots_are_kept_when_allowed_and_text_is_still_masked() {
         let secret = format!("{}-{}", "hunter", "42424242");
         let r = Redactor::new([]);
         r.add_secret(&secret);
-        let sealed = SecretGate::new(r)
-            .allow_images(true)
-            .seal(&req_with(format!("a {secret} b")))
+        let image = |data: &str| Block::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: data.into(),
+            },
+        };
+        let tool_image = |data: &str| Block::ToolResult {
+            tool_use_id: data.into(),
+            content: Some(
+                json!([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}]),
+            ),
+            is_error: None,
+        };
+        let mut req = req_with(format!("a {secret} b"));
+        // a browser screenshot, a pasted image (user block), and the results of Read and of an MCP tool
+        req.messages[1].content = Content::Blocks(vec![
+            tool_image("SHOT"),
+            image("PASTED"),
+            tool_image("READ"),
+            tool_image("MCP0"),
+        ]);
+        let shots = BrowserShots::default();
+        shots.add("SHOT");
+        let sealed = SecretGate::new(r.clone())
+            .allow_images(Some(shots.clone()))
+            .seal(&req)
             .unwrap();
         let out = serde_json::to_string(&*sealed).unwrap();
-        assert!(!out.contains(&secret) && out.contains("AAAA") && !out.contains("[image]"));
+        assert!(!out.contains(&secret) && out.contains("SHOT"), "{out}");
+        for gone in ["PASTED", "\"data\":\"READ", "\"data\":\"MCP0"] {
+            assert!(!out.contains(gone), "{gone}: {out}");
+        }
         assert_eq!(
             (sealed.images_dropped(), sealed.images_kept_with_secrets()),
-            (0, 1)
+            (3, 1)
         );
-        assert_eq!(sealed.redactions().get("secret"), Some(&4));
+        // without `allow` the screenshot goes too
+        let sealed = SecretGate::new(r).seal(&req).unwrap();
+        assert!(
+            !serde_json::to_string(&*sealed)
+                .unwrap()
+                .contains("\"data\":\"SHOT")
+        );
+        assert_eq!(
+            (sealed.images_dropped(), sealed.images_kept_with_secrets()),
+            (4, 0)
+        );
     }
 
     #[test]

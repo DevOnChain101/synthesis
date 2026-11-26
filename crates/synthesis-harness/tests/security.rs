@@ -619,15 +619,20 @@ async fn event_sink_failure_fails_the_task() {
 fn screenshot_images_follow_provider_capabilities() {
     let mut caps =
         synthesis_providers::ProviderCapabilities::defaults(synthesis_config::Protocol::Anthropic);
-    for (images, ask) in [(true, true), (false, false)] {
+    for (images, allow, ask) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+    ] {
         caps.images = images;
         let base = synthesis_tools::BrowserConfig {
             supports_images: !images, // the flag is derived, whatever the base says
             no_sandbox: true,
             ..Default::default()
         };
-        let c = browser_config(base, &caps);
+        let c = browser_config(base, &caps, allow);
         assert_eq!(c.supports_images, ask);
+        assert_eq!(c.allow_screenshots, allow);
         assert!(c.no_sandbox);
     }
     let _ = Mode::Default;

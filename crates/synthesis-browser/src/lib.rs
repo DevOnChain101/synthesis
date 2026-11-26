@@ -329,19 +329,61 @@ pub struct BrowserRuntime {
 /// The page URL, or `"!"` when the page has a password field (open shadow roots, same-origin frames).
 const CREDENTIALED_JS: &str = r#"(()=>{const q=r=>{if(r.querySelector('input[type=password]'))return true;for(const e of r.querySelectorAll('*'))if(e.shadowRoot&&q(e.shadowRoot))return true;return false};try{if(q(document))return '!';for(const f of document.querySelectorAll('iframe,frame')){let d=null;try{d=f.contentDocument}catch(e){}if(d&&q(d))return '!'}}catch(e){return '!'}return location.href})()"#;
 
-/// Shows password-like fields (`type=password`, `autocomplete` current/new-password/one-time-code, a name or id with
-/// pass/pwd/otp: so a show-password toggle is covered) as `***` for a capture, through the native setter and
-/// without events, and puts the values back (`restore`). Open shadow roots and same-origin frames are walked.
+/// Evaluates to `{mask, restore}`, run in an ISOLATED world (the page's scripts see neither it nor the saved
+/// values, which live only in this closure, and cannot have replaced the DOM getters it uses). `mask` shows
+/// password-like inputs and textareas (`type=password`, `autocomplete` current/new-password/one-time-code, a name
+/// or id with pass/pwd/otp: so a show-password toggle is covered) as `***`, without events; it can be called again
+/// after a re-render. `restore` puts back what is still masked. Open shadow roots and same-origin frames are walked.
 /// The script is a constant: no secret value ever goes into the page.
-fn mask_fields_js(restore: bool) -> String {
-    format!(
-        r#"(()=>{{const K='__synt_masked',d=document,set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-if({restore}){{const l=d[K];if(l){{for(const [e,v] of l){{try{{set.call(e,v)}}catch(_){{}}}}delete d[K]}}return 0}}
-const l=[],hit=e=>e.value&&(e.type==='password'||/(^|\s)(current-password|new-password|one-time-code)(\s|$)/.test(e.getAttribute('autocomplete')||'')||/pass|pwd|otp/i.test((e.name||'')+' '+(e.id||'')));
-const walk=r=>{{for(const e of r.querySelectorAll('*')){{if(e.tagName==='INPUT'&&hit(e)){{l.push([e,e.value]);try{{set.call(e,'***')}}catch(_){{}}}}if(e.shadowRoot)walk(e.shadowRoot);if(/^I?FRAME$/.test(e.tagName)){{try{{if(e.contentDocument)walk(e.contentDocument)}}catch(_){{}}}}}}}};
-try{{walk(d)}}catch(_){{}}
-Object.defineProperty(d,K,{{value:l,configurable:true}});return l.length}})()"#
-    )
+const MASKER_JS: &str = r#"(()=>{const saved=new Map();
+const hit=e=>e.value&&!/^(checkbox|radio|submit|button|reset|file|image|hidden|range|color)$/.test(e.type)&&(e.type==='password'||/(^|\s)(current-password|new-password|one-time-code)(\s|$)/.test(e.getAttribute('autocomplete')||'')||/pass|pwd|otp/i.test((e.getAttribute('name')||'')+' '+(e.getAttribute('id')||'')));
+const walk=r=>{for(const e of r.querySelectorAll('*')){if(/^(INPUT|TEXTAREA)$/i.test(e.tagName)&&hit(e)){const s=saved.get(e);if(!s||e.value!==s[1]){const v=e.value;try{e.value='***';saved.set(e,[v,e.value])}catch(_){}}}if(e.shadowRoot)walk(e.shadowRoot);if(/^I?FRAME$/i.test(e.tagName)){try{if(e.contentDocument)walk(e.contentDocument)}catch(_){}}}};
+return {mask(){walk(document)},restore(){for(const [e,[v,m]] of saved){try{if(e.value===m)e.value=v}catch(_){}}saved.clear()}}})()"#;
+
+/// A masker installed in a page. Dropped while still armed (the tool call was cancelled or timed out), it
+/// restores the fields on a task of its own.
+struct Masker {
+    cdp: Arc<Cdp>,
+    session: String,
+    object: String,
+    armed: bool,
+}
+
+impl Masker {
+    fn call(&self, method: &str) -> impl Future<Output = Result<()>> + Send + 'static {
+        let (cdp, session) = (self.cdp.clone(), self.session.clone());
+        let params = json!({
+            "objectId": self.object,
+            "functionDeclaration": format!("function(){{this.{method}()}}"),
+        });
+        async move {
+            let r = cdp
+                .send(Some(&session), "Runtime.callFunctionOn", params)
+                .await?;
+            match r.get("exceptionDetails") {
+                Some(_) => Err(BrowserError::Page(
+                    "masking the page's fields failed".into(),
+                )),
+                None => Ok(()),
+            }
+        }
+    }
+
+    async fn restore(mut self) {
+        // a document that is gone has nothing left to restore
+        let _ = self.call("restore").await;
+        self.armed = false;
+    }
+}
+
+impl Drop for Masker {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            rt.spawn(self.call("restore"));
+        }
+    }
 }
 
 /// `"!"` (a password field) or a URL that carries userinfo or a secret-named query/fragment value.
@@ -2108,7 +2150,7 @@ impl BrowserRuntime {
     }
 
     /// The person set `synt.browser.screenshots` to `allow`: no secret guard (a typed secret does not refuse
-    /// the capture), but password-like fields are shown as `***` during it (see `MASK_FIELDS_JS`) and
+    /// the capture), but password-like fields are shown as `***` during it (see `MASKER_JS`) and
     /// put back right after. Everything else drawn on the page is in the image as the page shows it.
     pub async fn screenshot_allowed(&self, full_page: bool) -> Result<Screenshot> {
         self.capture(full_page, true).await
@@ -2145,12 +2187,13 @@ impl BrowserRuntime {
         // produced its first frame (seen on loaded macOS runners). It is not a refusal: retry briefly,
         // re-checking the secret guard before every attempt.
         let mut retries = 0;
-        if allow {
-            // best effort: a page that blocks the script, or a closed shadow root, leaves a field unmasked
-            let _ = self.eval(&tab, &mask_fields_js(false)).await;
-        }
+        let mut masker = None;
         let r = async {
             loop {
+                if allow {
+                    // again before every attempt: a re-render may have put a value back
+                    self.mask_fields(&tab, &mut masker).await?;
+                }
                 match self
                     .call(&tab, "Page.captureScreenshot", params.clone())
                     .await
@@ -2169,8 +2212,8 @@ impl BrowserRuntime {
             }
         }
         .await;
-        if allow {
-            let _ = self.eval(&tab, &mask_fields_js(true)).await;
+        if let Some(m) = masker {
+            m.restore().await;
         }
         if let Some((_, m)) = fitted {
             // Fits again and restarts the cast: on a page that does not repaint, Chrome would otherwise keep
@@ -2186,6 +2229,44 @@ impl BrowserRuntime {
         let path = self.opts.artifact_dir.join(format!("screenshot-{n}.png"));
         write_private(&self.opts.artifact_dir, &path, &png)?;
         Ok(Screenshot { png, path })
+    }
+
+    /// Masks the password-like fields of `tab`, installing the masker first (or anew when its document is
+    /// gone). An error means nothing was proven masked: no capture.
+    async fn mask_fields(&self, tab: &Tab, masker: &mut Option<Masker>) -> Result<()> {
+        if let Some(m) = masker
+            && m.call("mask").await.is_ok()
+        {
+            return Ok(());
+        }
+        let failed = || BrowserError::Page("masking the page's fields failed".into());
+        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or_else(failed)?;
+        let world = self
+            .call(
+                tab,
+                "Page.createIsolatedWorld",
+                json!({"frameId": frame, "worldName": "synthesis-mask"}),
+            )
+            .await?;
+        let o = self
+            .call(
+                tab,
+                "Runtime.evaluate",
+                json!({"expression": MASKER_JS, "contextId": world["executionContextId"].as_i64().ok_or_else(failed)?}),
+            )
+            .await?;
+        let object = o["result"]["objectId"].as_str().ok_or_else(failed)?;
+        // armed before the first `mask` is sent, so a cancelled call cannot leave fields masked
+        let m = masker.insert(Masker {
+            cdp: self.cdp.clone(),
+            session: tab.session.clone(),
+            object: object.to_owned(),
+            armed: true,
+        });
+        m.call("mask").await
     }
 
     /// Console messages from `cursor`, optionally one level. Returns the next cursor.

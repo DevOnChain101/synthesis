@@ -25,7 +25,7 @@ pub use accumulator::{AssistantMessage, InvalidToolInput, MessageBuilder};
 pub use capabilities::{CapabilityRegistry, ProviderCapabilities};
 pub use error::{ErrorKind, ProviderError, Redaction};
 pub use failover::{FailoverProvider, Fallback, OnFailover};
-pub use gate::{Blocked, SealedRequest, SecretGate};
+pub use gate::{Blocked, BrowserShots, SealedRequest, SecretGate};
 pub use http::{EventStream, NetSettings, build_client};
 pub use provider::{
     Auth, ModelInfo, ModelProvider, ProviderSpec, Secret, anthropic_uses_bearer, normalize_model,

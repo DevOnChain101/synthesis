@@ -1261,8 +1261,9 @@ pub fn prepare(
 
     // `synt.browser` comes from the user's own settings file only (the loader enforces it); `screenshots` also from managed
     let browser = crate::login::parse_settings(&settings.synthesis.browser);
-    let screenshots_allowed =
-        settings.synthesis.screenshots == synthesis_settings::ScreenshotPolicy::Allow;
+    // an unattended outcome attempt and the conductor have no browser and never take the person's `allow`
+    let screenshots_allowed = !(c.confined() || conductor)
+        && settings.synthesis.screenshots == synthesis_settings::ScreenshotPolicy::Allow;
     for w in &browser.warnings {
         eprintln!("synt: warning: {}", sanitize_for_display(w));
     }
@@ -2481,14 +2482,15 @@ pub fn prepare(
         registry
     } else {
         let cfg = browser.config(
-            synthesis_tools::BrowserConfig {
-                view: browser_view,
-                // images reach the model only when the person chose `allow` (docs/SECURITY.md)
-                supports_images: screenshots_allowed
-                    && res.provider.capabilities(&res.model).images,
-                allow_screenshots: screenshots_allowed,
-                ..Default::default()
-            },
+            // images reach the model only when the person chose `allow` (docs/SECURITY.md)
+            synthesis_harness::browser_config(
+                synthesis_tools::BrowserConfig {
+                    view: browser_view,
+                    ..Default::default()
+                },
+                &res.provider.capabilities(&res.model),
+                screenshots_allowed,
+            ),
             &h.synthesis,
             env,
             browser_host,

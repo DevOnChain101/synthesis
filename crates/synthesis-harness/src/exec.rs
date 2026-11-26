@@ -1453,6 +1453,20 @@ impl Harness {
             }
             _ => {}
         }
+        // provenance for the secret gate: by tool NAME of the built-in (an MCP tool is `mcp__...`)
+        if name == "browser_screenshot"
+            && !out.is_error
+            && let ToolContent::Blocks(blocks) = &out.content
+        {
+            for b in blocks {
+                if let ToolBlock::Image {
+                    source: synthesis_tools::ImageSource::Base64 { data, .. },
+                } = b
+                {
+                    self.browser_shots.add(data);
+                }
+            }
+        }
         if name == "browser_screenshot"
             && let (Some(path), Some(f)) = (
                 out.meta.get("artifact_path").and_then(Value::as_str),

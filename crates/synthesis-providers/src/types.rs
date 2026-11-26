@@ -77,14 +77,19 @@ pub struct Message {
 }
 
 /// Replaces every `{"type":"image",...}` object, at any depth, by `{"type":"text","text":"[image]"}`.
-fn strip_value(v: &mut Value) -> usize {
+/// `keep` gets the base64 data of an image; an image without such data (a URL) is never kept.
+fn strip_value(v: &mut Value, keep: &mut dyn FnMut(&str) -> bool) -> usize {
     match v {
         Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+            let data = o.get("source").and_then(|s| s.get("data"));
+            if data.and_then(Value::as_str).is_some_and(keep) {
+                return 0;
+            }
             *v = serde_json::json!({"type": "text", "text": "[image]"});
             1
         }
-        Value::Object(o) => o.values_mut().map(strip_value).sum(),
-        Value::Array(a) => a.iter_mut().map(strip_value).sum(),
+        Value::Object(o) => o.values_mut().map(|v| strip_value(v, keep)).sum(),
+        Value::Array(a) => a.iter_mut().map(|v| strip_value(v, keep)).sum(),
         _ => 0,
     }
 }
@@ -94,10 +99,18 @@ impl Content {
     /// tool results (a screenshot a tool returned), however deeply nested. Returns how many.
     /// `tool_use` input is not touched (it is not content the model reads as an image).
     pub fn strip_images(&mut self) -> usize {
+        self.strip_images_unless(&mut |_| false)
+    }
+
+    /// [`Content::strip_images`] that leaves an image whose base64 data `keep` accepts.
+    pub fn strip_images_unless(&mut self, keep: &mut dyn FnMut(&str) -> bool) -> usize {
         let Content::Blocks(bs) = self else { return 0 };
         let mut n = 0;
         for b in bs {
             match b {
+                Block::Image {
+                    source: ImageSource::Base64 { data, .. },
+                } if keep(data) => {}
                 Block::Image { .. } => {
                     *b = Block::Text {
                         text: "[image]".into(),
@@ -106,7 +119,7 @@ impl Content {
                 }
                 Block::ToolResult {
                     content: Some(c), ..
-                } => n += strip_value(c),
+                } => n += strip_value(c, keep),
                 _ => {}
             }
         }

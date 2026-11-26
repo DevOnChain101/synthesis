@@ -855,7 +855,11 @@ impl Harness {
 
             // the last step before the send: nothing leaves without passing the secret gate
             let sealed = match synthesis_providers::SecretGate::new(self.sink.redactor())
-                .allow_images(self.config.screenshots_allowed)
+                .allow_images(
+                    self.config
+                        .screenshots_allowed
+                        .then(|| self.browser_shots.clone()),
+                )
                 .seal(&req)
             {
                 Ok(s) => s,
@@ -877,16 +881,17 @@ impl Harness {
                     .map(|(k, n)| format!("{k}:{n}"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                if sealed.images_dropped() > 0 {
-                    format!("; {} image(s) withheld", sealed.images_dropped())
-                } else if sealed.images_kept_with_secrets() > 0 {
-                    format!(
-                        "; {} image(s) sent, they may show on-screen secrets (synt.browser.screenshots is allow)",
+                [
+                    (sealed.images_dropped() > 0)
+                        .then(|| format!("; {} image(s) withheld", sealed.images_dropped())),
+                    (sealed.images_kept_with_secrets() > 0).then(|| format!(
+                        "; {} browser screenshot(s) sent, they may show on-screen secrets (synt.browser.screenshots is allow)",
                         sealed.images_kept_with_secrets()
-                    )
-                } else {
-                    String::new()
-                }
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<String>()
             );
             if (!sealed.redactions().is_empty()
                 || sealed.images_dropped() > 0
