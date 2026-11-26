@@ -737,10 +737,11 @@ impl<'a> Owner<'a> {
             b.max_attempts_per_work_item
                 .min(pol.max_attempts_per_work_item),
         );
-        cfg.max_cost_usd = Some(
-            pol.max_cost_usd
-                .map_or(b.max_cost_usd, |c| c.min(b.max_cost_usd)),
-        );
+        // a legacy money cap (contract and/or the settings ceiling) keeps gating new workers; none: no gate
+        cfg.max_cost_usd = [b.max_cost_usd, pol.max_cost_usd]
+            .into_iter()
+            .flatten()
+            .reduce(f64::min);
         let grace = Duration::from_secs(10);
         cfg.unknown_after = Some(Duration::from_secs(wall_secs(&contract, pol)) + grace);
         let mut runner = Runner::new(

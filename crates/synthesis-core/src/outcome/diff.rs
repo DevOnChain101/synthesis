@@ -260,7 +260,14 @@ pub fn diff_contracts(old: &Contract, new: &Contract) -> ContractDiff {
             }
         };
     let s = |v: &dyn std::fmt::Display| Some(v.to_string());
-    budget(&mut d, "max_cost_usd", s(oco), s(nco), nco > oco);
+    // a legacy money cap: removing it (None is no cap) gives more room, like raising it
+    budget(
+        &mut d,
+        "max_cost_usd",
+        oco.map(|v| v.to_string()),
+        nco.map(|v| v.to_string()),
+        limit_up(*oco, *nco),
+    );
     budget(&mut d, "max_parallel_workers", s(opw), s(npw), npw > opw);
     budget(
         &mut d,
@@ -363,7 +370,7 @@ mod tests {
         b.envelope
             .capabilities
             .insert(Capability::NetworkOutbound, CapabilityMode::Allow);
-        b.envelope.budgets.max_cost_usd = 9.0;
+        b.envelope.budgets.max_cost_usd = Some(9.0);
         let d = diff_contracts(&a, &b);
         for w in [
             "allowed_paths: docs/** added",
@@ -381,6 +388,23 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_legacy_money_cap_widens_and_adding_one_does_not() {
+        let capped = contract(&["c1"]);
+        assert!(capped.envelope.budgets.max_cost_usd.is_some());
+        let mut free = capped.clone();
+        free.envelope.budgets.max_cost_usd = None;
+        let d = diff_contracts(&capped, &free);
+        assert!(
+            d.widens.iter().any(|x| x.contains("max_cost_usd")),
+            "{:?}",
+            d.widens
+        );
+        let d = diff_contracts(&free, &capped);
+        assert!(d.widens.is_empty(), "{:?}", d.widens);
+        assert!(diff_contracts(&free, &free).changes.is_empty());
+    }
+
+    #[test]
     fn narrowing_is_not_flagged_but_is_listed() {
         let a = contract(&["c1"]);
         let mut b = a.clone();
@@ -389,7 +413,7 @@ mod tests {
         b.envelope
             .capabilities
             .insert(Capability::RepoWrite, CapabilityMode::ApprovalRequired);
-        b.envelope.budgets.max_cost_usd = 1.0;
+        b.envelope.budgets.max_cost_usd = Some(1.0);
         b.envelope.budgets.attempt_max_cost_usd = Some(0.5);
         let d = diff_contracts(&a, &b);
         assert!(d.widens.is_empty(), "{:?}", d.widens);

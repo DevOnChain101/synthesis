@@ -742,7 +742,7 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
             .map(drop)
     };
     let mut c = contract();
-    c.envelope.budgets.max_cost_usd = 50.0;
+    c.envelope.budgets.max_cost_usd = Some(50.0);
     let cap = with(|p| p.max_cost_usd = Some(10.0));
     assert!(
         create(&c, &cap)
@@ -750,7 +750,7 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
             .to_string()
             .contains("max_cost_usd")
     );
-    c.envelope.budgets.max_cost_usd = 5.0;
+    c.envelope.budgets.max_cost_usd = Some(5.0);
     c.envelope.budgets.max_parallel_workers = 8;
     let workers = with(|p| p.max_parallel_workers = 2);
     assert!(
@@ -768,12 +768,14 @@ fn the_store_refuses_when_the_settings_turn_outcomes_off_or_the_contract_exceeds
             .to_string()
             .contains("max_attempts")
     );
-    // a ceiling on the per-attempt cap makes the contract name one
+    // a ceiling on the per-attempt cap is not demanded of the contract any more (money is legacy): a contract
+    // that names none passes this check and the ceiling caps the attempt; one above the ceiling is refused
     c.envelope.budgets.max_attempts_per_work_item = 3;
     let per = with(|p| {
         p.attempt_max_cost_usd = Some(1.0);
         p.attempt_max_wall_secs = Some(60);
     });
+    c.envelope.budgets.attempt_max_cost_usd = Some(2.0);
     assert!(
         create(&c, &per)
             .unwrap_err()
@@ -3608,7 +3610,7 @@ fn a_contract_is_revised_only_while_blocked_with_no_live_attempt_and_rebinds_onl
     e.child(&store, "s1", w.control_session_id());
     let (a, _) = w.new_attempt(&it, 1, "s1", "local-inproc", NONE).unwrap();
     let mut wide = contract();
-    wide.envelope.budgets.max_cost_usd = 99.0;
+    wide.envelope.budgets.max_cost_usd = Some(99.0);
     let revise = |w: &mut OutcomeWriter| {
         let rev = w.get_outcome(w.id()).unwrap().revision;
         let c = wide.clone();
@@ -3668,7 +3670,7 @@ fn dec_contract_mutate_after_approve_a_bare_new_version_never_runs() {
     );
     let mut wide = contract();
     wide.version = 2;
-    wide.envelope.budgets.max_cost_usd = 99.0;
+    wide.envelope.budgets.max_cost_usd = Some(99.0);
     let body = serde_json::to_value(&wide).unwrap().to_string();
     let hash = Sha256::digest(body.as_bytes())
         .iter()
@@ -3821,6 +3823,52 @@ fn attempt_reservations_and_plan_runs_share_one_cap_in_either_order() {
     // the other way round: the next attempt is sized from this spend (cap minus spend), which
     // now holds the plan run, so nothing is left for another reservation
     assert_eq!(5.0 - w.outcome_spend(&id).unwrap(), 0.0);
+}
+
+/// Slice D: a contract that names no money is created, approved and started like any other; nothing is
+/// capped by it (the attempt's reservation is just recorded), while an old contract's cap still binds.
+#[test]
+fn a_contract_without_a_money_cap_creates_approves_and_reserves_without_a_cap() {
+    let e = env();
+    let store = e.v5();
+    let mut c = contract();
+    c.envelope.budgets = Budgets::without_cost();
+    let (mut w, items) = ready_outcome_with(&e, &store, &c);
+    go(&mut w, OutcomeState::Running);
+    let it = item(&items, "implement").clone();
+    for to in [WorkItemState::Ready, WorkItemState::Leased] {
+        item_to(&mut w, &it, to).unwrap();
+    }
+    e.child(&store, "att-1", w.control_session_id());
+    e.child(&store, "p1", w.control_session_id());
+    let (a, _) = w
+        .new_attempt(&it, 1, "att-1", "local-inproc", NONE)
+        .unwrap();
+    // no cap in the contract: any positive reservation is recorded, spend counts it
+    w.reserve_budget(&a.id, a.fence, 1000.0).unwrap();
+    assert_eq!(w.outcome_spend(&w.id().clone()).unwrap(), 1000.0);
+    assert!(w.reserve_budget(&a.id, a.fence, -1.0).is_err());
+    // the approved contract (its MAC is verified on read) comes back without the key
+    let (back, hash, _) = w.get_contract(w.id(), 1).unwrap();
+    assert_eq!(back.envelope.budgets.max_cost_usd, None);
+    assert_eq!(hash.len(), 64);
+}
+
+#[test]
+fn a_contract_cost_cap_above_a_settings_ceiling_is_refused_but_none_is_not() {
+    let mut c = contract();
+    let ceiling = with(|p| {
+        p.max_cost_usd = Some(10.0);
+        p.attempt_max_cost_usd = Some(1.0);
+    });
+    c.envelope.budgets.max_cost_usd = Some(50.0);
+    assert!(ceiling.check(&c).is_err());
+    c.envelope.budgets.max_cost_usd = Some(5.0);
+    c.envelope.budgets.attempt_max_cost_usd = Some(2.0);
+    assert!(ceiling.check(&c).is_err());
+    // no money named: allowed, the ceiling still caps every attempt (profile and scheduler)
+    c.envelope.budgets = Budgets::without_cost();
+    assert!(ceiling.check(&c).is_ok());
 }
 
 #[test]
@@ -4073,7 +4121,7 @@ fn ro_revise_kind_refused_in_both_directions_and_for_a_bare_row() {
         go(&mut w, OutcomeState::Blocked);
         let rev = w.get_outcome(w.id()).unwrap().revision;
         let mut next = other.clone();
-        next.envelope.budgets.max_cost_usd = 9.0;
+        next.envelope.budgets.max_cost_usd = Some(9.0);
         let err = w
             .atomically(|tx| tx.revise_contract(rev, next.clone()))
             .unwrap_err();

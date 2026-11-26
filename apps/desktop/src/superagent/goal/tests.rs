@@ -90,7 +90,6 @@ fn fill_writes(v: &mut VisualTestContext, f: &Entity<GoalForm>) {
         (Field::Criteria, "Login works with the test IdP"),
         (Field::Checks, "cargo test -p auth"),
         (Field::Scope, "auth/**"),
-        (Field::Budget, "5"),
     ] {
         type_in(v, f, k, t);
     }
@@ -99,7 +98,6 @@ fn fill_writes(v: &mut VisualTestContext, f: &Entity<GoalForm>) {
 fn fill_read_only(v: &mut VisualTestContext, f: &Entity<GoalForm>) {
     type_in(v, f, Field::Goal, "Which modules use the old logger?");
     type_in(v, f, Field::Criteria, "Names every module");
-    type_in(v, f, Field::Budget, "2");
     type_in(v, f, Field::Folder, &dir());
 }
 
@@ -193,7 +191,6 @@ fn each_error_of_the_form_shows_under_its_own_field_and_the_text_is_kept(cx: &mu
         (Field::Criteria, "sa-goal-criteria-error"),
         (Field::Checks, "sa-goal-checks-error"),
         (Field::Scope, "sa-goal-scope-error"),
-        (Field::Budget, "sa-goal-budget-error"),
         (Field::Folder, "sa-goal-folder-error"),
     ] {
         assert!(
@@ -220,7 +217,6 @@ fn the_read_only_form_has_its_own_fields_and_sends_a_read_only_contract_without_
     for id in [
         "sa-goal-goal",
         "sa-goal-criteria",
-        "sa-goal-budget",
         "sa-goal-turns",
         "sa-goal-attempts",
         "sa-goal-folder",
@@ -253,11 +249,10 @@ fn the_read_only_form_has_its_own_fields_and_sends_a_read_only_contract_without_
 }
 
 #[gpui::test]
-fn a_read_only_goal_needs_an_absolute_folder_and_a_budget(cx: &mut TestAppContext) {
+fn a_read_only_goal_needs_an_absolute_folder(cx: &mut TestAppContext) {
     let (f, v, _) = open(cx, GoalKind::ReadOnly);
     type_in(v, &f, Field::Goal, "Review the module");
     f.update(v, |f, cx| f.send(cx));
-    assert!(!f.read_with(v, |f, _| f.errors_of(Field::Budget).is_empty()));
     assert!(!f.read_with(v, |f, _| f.errors_of(Field::Folder).is_empty()));
     assert!(creates(&f, v).is_empty());
 }

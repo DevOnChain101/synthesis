@@ -223,13 +223,6 @@ impl GoalForm {
                 ));
         }
         d = d.child(self.labelled(
-            "sa-goal-budget",
-            "Budget (USD)",
-            "the most you accept to spend; no default",
-            Field::Budget,
-            self.line("sa-goal-budget", &u.budget, Field::Budget, window, cx),
-        ));
-        d = d.child(self.labelled(
             "sa-goal-turns",
             "Turns per attempt",
             &match self.turn_setting {

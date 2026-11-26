@@ -49,7 +49,7 @@ fn read_only_review() -> Review {
             "Names every module".into(),
             "Gives a file and line for each".into(),
         ],
-        Budgets::new(2.0),
+        Budgets::without_cost(),
     );
     Review {
         outcome: "o_logger".into(),
@@ -121,7 +121,6 @@ pub fn render(path: &Path, kind: &str, state: &str, (w, h): (f32, f32)) -> Resul
                     );
                     t(&mut g, Field::Checks, "cargo test -p auth", window, cx);
                     t(&mut g, Field::Scope, "auth/**\ntests/**", window, cx);
-                    t(&mut g, Field::Budget, "5", window, cx);
                     t(&mut g, Field::Turns, "30", window, cx);
                 } else {
                     t(
@@ -138,7 +137,6 @@ pub fn render(path: &Path, kind: &str, state: &str, (w, h): (f32, f32)) -> Resul
                         window,
                         cx,
                     );
-                    t(&mut g, Field::Budget, "2", window, cx);
                     t(
                         &mut g,
                         Field::Folder,
@@ -150,7 +148,6 @@ pub fn render(path: &Path, kind: &str, state: &str, (w, h): (f32, f32)) -> Resul
             }
             if state == "errors" {
                 // a half-filled form sent: the errors show under their fields
-                g.set_text(Field::Budget, "", window, cx);
                 g.set_text(Field::Criteria, "", window, cx);
                 if writes {
                     g.set_text(Field::Checks, "", window, cx);

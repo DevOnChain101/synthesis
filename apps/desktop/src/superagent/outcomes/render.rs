@@ -51,16 +51,26 @@ fn money(a: Option<f64>) -> String {
     a.map_or_else(|| "unknown".into(), |v| format!("${v:.2}"))
 }
 
-/// "$1.20 of $5.00", or "budget unknown" when the server gave neither (the list's line, here and in the TUI view),
-/// then the turn limit when the contract names one.
+/// The limits of an outcome on one line: the turn limit the contract names, then a money cap only when an old
+/// contract carries one ("legacy cost cap"), or the cost reported so far; no price is ever computed here.
 pub(crate) fn budget_line(b: &BudgetView) -> String {
-    let cost = match (b.cost_usd.spent, b.cost_usd.limit) {
-        (None, None) => "budget unknown".to_string(),
-        (s, l) => format!("{} of {}", money(s), money(l)),
-    };
-    match b.max_turns {
-        Some(t) => format!("{cost} \u{b7} {t} turns per attempt"),
-        None => cost,
+    let mut parts = vec![];
+    match (b.cost_usd.spent, b.cost_usd.limit) {
+        (s, Some(l)) => parts.push(format!(
+            "{} of {} (legacy cost cap)",
+            money(s),
+            money(Some(l))
+        )),
+        (Some(s), None) if s > 0.0 => parts.push(format!("{} spent", money(Some(s)))),
+        _ => {}
+    }
+    if let Some(t) = b.max_turns {
+        parts.push(format!("{t} turns per attempt"));
+    }
+    if parts.is_empty() {
+        "turn limit from Settings".to_string()
+    } else {
+        parts.join(" \u{b7} ")
     }
 }
 
@@ -73,12 +83,19 @@ mod tests {
     #[test]
     fn the_budget_line_shows_the_turn_limit_beside_the_cost_cap_only_when_the_contract_names_one() {
         let mut b = BudgetView::from_json(&json!({"cost_usd": {"spent": 1.2, "limit": 5.0}}));
-        assert_eq!(budget_line(&b), "$1.20 of $5.00");
+        assert_eq!(budget_line(&b), "$1.20 of $5.00 (legacy cost cap)");
         b.max_turns = Some(30);
         assert_eq!(
             budget_line(&b),
-            "$1.20 of $5.00 \u{b7} 30 turns per attempt"
+            "$1.20 of $5.00 (legacy cost cap) \u{b7} 30 turns per attempt"
         );
+        // a new contract names no money: turns only, reported cost when there is some, else the setting
+        let mut n = BudgetView::default();
+        assert_eq!(budget_line(&n), "turn limit from Settings");
+        n.max_turns = Some(30);
+        assert_eq!(budget_line(&n), "30 turns per attempt");
+        n.cost_usd.spent = Some(0.5);
+        assert_eq!(budget_line(&n), "$0.50 spent \u{b7} 30 turns per attempt");
     }
 
     fn briefs() -> Vec<Value> {

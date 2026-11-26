@@ -128,8 +128,11 @@ fn default_attempts() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
-    /// Required, no default: the person names the money they accept to spend (D10).
-    pub max_cost_usd: f64,
+    /// Legacy money cap (D10), optional since the turn limit replaced it (owner decision 2026-11-25, no
+    /// prices are known for custom providers). Absent from the stored JSON when unset; a contract that names
+    /// one keeps its bytes, hash and approval MAC, and the cap stays enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
     #[serde(default = "default_parallel")]
     pub max_parallel_workers: u32,
     /// Attempts per work item, the first included.
@@ -146,9 +149,18 @@ pub struct Budgets {
 }
 
 impl Budgets {
+    /// Budgets with a (legacy) money cap.
     pub fn new(max_cost_usd: f64) -> Self {
         Self {
-            max_cost_usd,
+            max_cost_usd: Some(max_cost_usd),
+            ..Self::without_cost()
+        }
+    }
+
+    /// Budgets with no money cap: an attempt is bounded by turns, tokens and wall time.
+    pub fn without_cost() -> Self {
+        Self {
+            max_cost_usd: None,
             max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
             max_attempts_per_work_item: DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM,
             attempt_max_cost_usd: None,
@@ -162,14 +174,14 @@ impl Budgets {
         self.max_attempts_per_work_item.saturating_sub(1)
     }
 
-    /// True when `spent` reached the outcome cap. Not-a-number counts as reached.
+    /// True when `spent` reached the outcome cap (none: only a not-a-number spend). Not-a-number counts as reached.
     pub fn cost_exhausted(&self, spent_usd: f64) -> bool {
-        spent_usd.is_nan() || spent_usd >= self.max_cost_usd
+        spent_usd.is_nan() || self.max_cost_usd.is_some_and(|m| spent_usd >= m)
     }
 
     pub fn validate(&self) -> Result<(), EnvelopeError> {
         let money = |v: f64| v.is_finite() && v > 0.0;
-        if !money(self.max_cost_usd) {
+        if self.max_cost_usd.is_some_and(|m| !money(m)) {
             return Err(EnvelopeError::Budget(
                 "max_cost_usd must be a positive number",
             ));
@@ -185,7 +197,7 @@ impl Budgets {
             ));
         }
         if let Some(c) = self.attempt_max_cost_usd
-            && !(money(c) && c <= self.max_cost_usd)
+            && !(money(c) && self.max_cost_usd.is_none_or(|m| c <= m))
         {
             return Err(EnvelopeError::Budget(
                 "attempt_max_cost_usd must be positive and not above max_cost_usd",
@@ -772,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn serde_defaults_follow_d10_and_the_cost_cap_is_required() {
+    fn serde_defaults_follow_d10_and_the_cost_cap_is_optional() {
         let e: Envelope = serde_json::from_str(r#"{"budgets":{"max_cost_usd":3}}"#).unwrap();
         assert_eq!(e.budgets.max_parallel_workers, 2);
         assert_eq!(e.budgets.max_attempts_per_work_item, 3);
@@ -782,7 +794,9 @@ mod tests {
             CapabilityMode::Deny,
             "unlisted = deny"
         );
-        assert!(serde_json::from_str::<Envelope>(r#"{"budgets":{}}"#).is_err());
+        // the money cap is legacy: a contract may name none (turns, tokens and wall time bound an attempt)
+        let free: Envelope = serde_json::from_str(r#"{"budgets":{}}"#).unwrap();
+        assert_eq!(free.budgets.max_cost_usd, None);
         assert!(serde_json::from_str::<Envelope>(r#"{}"#).is_err());
         // unknown fields and unknown capabilities are errors, never silently dropped
         assert!(
@@ -895,10 +909,10 @@ mod tests {
                 "{b:?}"
             );
         };
-        bad(|b| b.max_cost_usd = 0.0);
-        bad(|b| b.max_cost_usd = -1.0);
-        bad(|b| b.max_cost_usd = f64::NAN);
-        bad(|b| b.max_cost_usd = f64::INFINITY);
+        bad(|b| b.max_cost_usd = Some(0.0));
+        bad(|b| b.max_cost_usd = Some(-1.0));
+        bad(|b| b.max_cost_usd = Some(f64::NAN));
+        bad(|b| b.max_cost_usd = Some(f64::INFINITY));
         bad(|b| b.max_parallel_workers = 0);
         bad(|b| b.max_parallel_workers = MAX_PARALLEL_WORKERS + 1);
         bad(|b| b.max_attempts_per_work_item = 0);
@@ -993,6 +1007,26 @@ mod tests {
         let j = serde_json::to_string(&d).unwrap();
         assert!(j.contains(r#""max_turns":20"#));
         assert_ne!(format!("{:x}", Sha256::digest(j.as_bytes())), OLD_SHA);
+    }
+
+    /// Slice D: the money cap became optional. A contract that names none stores no key (so its bytes are the
+    /// ones a build with the key would never have made), one that names it keeps bytes and hash (above).
+    #[test]
+    fn a_contract_without_a_money_cap_stores_no_key_and_validates() {
+        let mut c = contract(&["c1"]);
+        c.envelope.budgets = Budgets::without_cost();
+        assert_eq!(validate_contract(&c), Ok(()));
+        let j = serde_json::to_string(&c).unwrap();
+        assert!(!j.contains(r#""max_cost_usd""#), "{j}");
+        assert_eq!(serde_json::from_str::<Contract>(&j).unwrap(), c);
+        // a per-attempt cap alone is allowed; a bad one still is not
+        c.envelope.budgets.attempt_max_cost_usd = Some(0.5);
+        assert_eq!(validate_contract(&c), Ok(()));
+        c.envelope.budgets.attempt_max_cost_usd = Some(0.0);
+        assert!(validate_contract(&c).is_err());
+        // exhaustion: no cap, never; not-a-number, always
+        let b = Budgets::without_cost();
+        assert!(!b.cost_exhausted(1e9) && b.cost_exhausted(f64::NAN));
     }
 
     #[test]

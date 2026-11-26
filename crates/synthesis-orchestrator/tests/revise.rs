@@ -128,13 +128,13 @@ fn revision(w: &OutcomeWriter) -> i64 {
 fn widened() -> Contract {
     let mut c = contract();
     c.envelope.allowed_paths.push("docs/**".into());
-    c.envelope.budgets.max_cost_usd = 9.0;
+    c.envelope.budgets.max_cost_usd = Some(9.0);
     c
 }
 
 fn narrowed() -> Contract {
     let mut c = contract();
-    c.envelope.budgets.max_cost_usd = 1.0;
+    c.envelope.budgets.max_cost_usd = Some(1.0);
     c
 }
 
@@ -561,7 +561,7 @@ fn unapproved_revisions_are_capped_per_outcome() {
     let mut b = blocked(&r);
     for i in 0..20 {
         let mut c = contract();
-        c.envelope.budgets.max_cost_usd = 6.0 + f64::from(i);
+        c.envelope.budgets.max_cost_usd = Some(6.0 + f64::from(i));
         assert_eq!(
             revise(&r, &mut b.w, &format!("rev-{i}"), &c).state,
             CommandState::Applied,
@@ -569,7 +569,7 @@ fn unapproved_revisions_are_capped_per_outcome() {
         );
     }
     let mut c = contract();
-    c.envelope.budgets.max_cost_usd = 99.0;
+    c.envelope.budgets.max_cost_usd = Some(99.0);
     let d = revise(&r, &mut b.w, "rev-over", &c);
     assert_eq!(d.state, CommandState::Denied);
     assert!(

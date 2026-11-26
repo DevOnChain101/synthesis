@@ -37,7 +37,7 @@ pub fn wall_secs(contract: &Contract, policy: &OutcomePolicy) -> u64 {
 
 #[derive(Debug)]
 pub enum ProfileError {
-    /// No usable cost cap (the contract always names one; this guards a hand-built value).
+    /// A cost cap that is not a positive number (a hand-built value; no cap at all is allowed).
     NoCostCap,
     /// The earlier attempts of the outcome already spent its whole cap.
     BudgetExhausted { spent: f64, cap: f64 },
@@ -92,7 +92,8 @@ pub struct Profile {
     cwd: PathBuf,
     session_id: String,
     prompt: String,
-    max_cost_usd: f64,
+    /// `None`: no money cap; turns, tokens and wall time bound the attempt.
+    max_cost_usd: Option<f64>,
     max_wall_secs: u64,
     /// Provider calls and raw total tokens of the attempt: from the settings, never above the
     /// hard ceilings (the settings validation and `OutcomePolicy` keep them there; `min` here too).
@@ -139,12 +140,13 @@ impl Profile {
     ) -> Result<Self, ProfileError> {
         let b = &contract.envelope.budgets;
         // earlier attempts already spent part of the outcome's cap; this one gets what is left
-        let outcome_cap = [Some(b.max_cost_usd), policy.max_cost_usd]
+        let outcome_cap = [b.max_cost_usd, policy.max_cost_usd]
             .into_iter()
             .flatten()
             .fold(f64::INFINITY, f64::min);
         // a spend that is not a number is not "nothing spent": the budget is treated as used up
         let spent = if spent_usd < 0.0 { 0.0 } else { spent_usd };
+        // no cap anywhere: `left` is infinite and the attempt gets no `--max-cost-usd`
         let left = outcome_cap - spent;
         if !spent.is_finite() || left <= 0.0 {
             return Err(ProfileError::BudgetExhausted {
@@ -160,9 +162,11 @@ impl Profile {
         .into_iter()
         .flatten()
         .fold(f64::INFINITY, f64::min);
-        if !cap.is_finite() || cap <= 0.0 {
+        // a cap that is not a positive number is a hand-built value; no cap at all is the normal case
+        if cap <= 0.0 || cap.is_nan() {
             return Err(ProfileError::NoCostCap);
         }
+        let cap = cap.is_finite().then_some(cap);
         let wall = wall_secs(contract, policy);
         let compiled = compile_envelope(&contract.envelope, &[]).map_err(ProfileError::Envelope)?;
         Ok(Self {
@@ -269,7 +273,7 @@ impl Profile {
         self.max_wall_secs
     }
 
-    pub fn max_cost_usd(&self) -> f64 {
+    pub fn max_cost_usd(&self) -> Option<f64> {
         self.max_cost_usd
     }
 
@@ -297,10 +301,9 @@ impl Profile {
             self.session_id.clone().into(),
             "--attempt-session".into(),
         ]);
-        v.extend([
-            "--max-cost-usd".into(),
-            format!("{}", self.max_cost_usd).into(),
-        ]);
+        if let Some(c) = self.max_cost_usd {
+            v.extend(["--max-cost-usd".into(), format!("{c}").into()]);
+        }
         v.extend([
             "--max-wall-secs".into(),
             self.max_wall_secs.to_string().into(),

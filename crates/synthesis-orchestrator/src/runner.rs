@@ -403,7 +403,9 @@ impl Runner<'_> {
         }
         // the cost cap this attempt may spend counts against the outcome from now on, whatever
         // happens to the worker (a killed or crashed one never records a usage)
-        if let Err(e) = w.reserve_budget(&env.attempt.id, env.attempt.fence, profile.max_cost_usd())
+        // (an attempt with no money cap reserves nothing)
+        if let Some(usd) = profile.max_cost_usd()
+            && let Err(e) = w.reserve_budget(&env.attempt.id, env.attempt.fence, usd)
         {
             if !matches!(e, StoreError::Stale(_)) {
                 let _ = self.settle(w, &env.attempt, env.git.as_ref(), WorkerEnd::Failed);

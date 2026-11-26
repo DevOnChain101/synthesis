@@ -505,7 +505,7 @@ pub struct Native {
     pub browser_view: Option<Arc<synthesis_tools::BrowserTap>>,
     /// Set: the conductor role (super-agent-s1.md 4.1). The session's only tools are the host's
     /// read-only `conductor_*` tools; no project instructions, memory, MCP, peers or browser; a cost
-    /// cap (`Limits::max_cost_usd`) is required.
+    /// cap (`Limits::max_cost_usd`) is optional (legacy).
     pub host_tools: Option<Arc<dyn crate::host_tools::HostTools>>,
 }
 
@@ -926,7 +926,15 @@ pub fn expand_file_mentions(
 
 /// Refusals of the governed (headless / engine) runs and of `--unattended`; `Err` is the exit-2 text.
 pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(), String> {
-    if (governed || c.unattended) && limits.max_cost_usd.is_none() && !limits.no_cost_cap {
+    // An outcome attempt may run with no money cap (custom providers have no reliable prices) when the
+    // orchestrator bounds it by turns and tokens (and `--max-wall-secs`, which a governed run always has).
+    let bounded_attempt =
+        c.attempt_session && limits.max_turns.is_some() && limits.max_tokens.is_some();
+    if (governed || c.unattended)
+        && limits.max_cost_usd.is_none()
+        && !limits.no_cost_cap
+        && !bounded_attempt
+    {
         return Err("an unattended run needs a cost cap: pass --max-cost-usd N (the model needs a price, see docs/UNATTENDED.md) or --no-cost-cap to accept spending without one".into());
     }
     if c.unattended {
@@ -1034,13 +1042,16 @@ pub fn prepare(
     if let Some(h) = &host_tools {
         cli_allow.extend(h.specs().into_iter().map(|s| s.name));
     }
-    // its own budget, capped: never the outcomes' and never unbounded (an unpriced model is refused under a cap)
+    // its own budget, never the outcomes': a legacy `synt.conductor.max_cost_usd` still caps it (and then needs a
+    // price); without one the engine's per-task turn limit (50 by default) bounds it
     if conductor
         && limits
             .max_cost_usd
-            .is_none_or(|v| !v.is_finite() || v <= 0.0)
+            .is_some_and(|v| !v.is_finite() || v <= 0.0)
     {
-        return Err("a conductor session needs a cost cap (max_cost_usd > 0)".into());
+        return Err(
+            "a conductor session's cost cap (max_cost_usd) must be a positive number".into(),
+        );
     }
     // The conductor never takes the project's trust: project settings, hooks, provider config and MCP load as for
     // an untrusted folder (user and managed settings only), whatever the host's start flags say.
@@ -3593,6 +3604,23 @@ mod tests {
         assert!(
             check_governance(&u, &free, true).is_err(),
             "no cap is not allowed"
+        );
+        // an outcome attempt may run with no money cap when turns and tokens bound it; nothing else may
+        let bounded = Limits {
+            max_turns: Some(50),
+            max_tokens: Some(2_000_000),
+            ..Limits::default()
+        };
+        let att = W::parse_from(["x", "--unattended", "--attempt-session", "--resume", "s"]).c;
+        assert!(check_governance(&att, &Limits::default(), true).is_err());
+        assert!(check_governance(&att, &bounded, true).is_ok());
+        assert!(
+            check_governance(&u, &bounded, true).is_err(),
+            "a plain unattended run still needs a cap"
+        );
+        assert!(
+            check_governance(&att, &free, true).is_err(),
+            "--no-cost-cap stays refused"
         );
         // strictly tighter than allow: hosts through the proxy are accepted, but the list must come
         // from settings, not from --allow-host
