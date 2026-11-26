@@ -223,7 +223,8 @@ impl OutcomesView {
                     self.state.apply_inspector(&outcome, content)
                 }
                 Msg::Answered(note) => self.state.answered(note),
-                Msg::Form(m) => self.state.apply_form(m),
+                // only a New goal frame's own link asks the form's questions
+                Msg::Form(_) => {}
                 Msg::Enabled(n, r) => self.state.enabled(n, r),
             }
         }
@@ -247,48 +248,6 @@ impl OutcomesView {
                     }],
                     n,
                 ),
-                // the sample answers locally and sends nothing
-                (Effect::Head(ws), None) => {
-                    if let Some(f) = self.state.form.as_mut() {
-                        f.head_known(&ws, Ok(sample::COMMIT.into()));
-                    }
-                }
-                (Effect::Submit(_) | Effect::Approve { .. }, None) => {
-                    if let Some(f) = self.state.form.as_mut() {
-                        f.failed("Sample data: nothing was sent.".into(), true);
-                    }
-                }
-                (Effect::Review(_), None) => {
-                    if let Some(f) = self.state.form.as_mut() {
-                        f.reviewing(sample::review(false));
-                    }
-                }
-                (Effect::Head(ws), Some(l)) => l.head(ws),
-                (Effect::Review(id), Some(l)) => {
-                    self.reconnect_first(l);
-                    l.send(Req::Review(id));
-                }
-                (Effect::Submit(s), Some(l)) => {
-                    self.reconnect_first(l);
-                    l.send(Req::Submit(s));
-                }
-                (
-                    Effect::Approve {
-                        outcome,
-                        version,
-                        hash,
-                        key,
-                    },
-                    Some(l),
-                ) => {
-                    self.reconnect_first(l);
-                    l.send(Req::Approve {
-                        outcome,
-                        version,
-                        hash,
-                        key,
-                    });
-                }
                 (Effect::Resolve { .. }, None) => {
                     self.state.answered("Sample data: nothing was sent.".into());
                 }
@@ -355,9 +314,9 @@ impl OutcomesView {
         }
     }
 
-    /// A form or the disclosure is open: history keys and buttons do nothing.
+    /// The kind picker or the disclosure is open: history keys and buttons do nothing.
     fn modal(&self) -> bool {
-        self.state.form.is_some() || self.state.guide.is_some() || self.state.picker.is_some()
+        self.state.guide.is_some() || self.state.picker.is_some()
     }
 
     pub fn can_back(&self) -> bool {
@@ -485,14 +444,6 @@ impl OutcomesView {
             }
         })
         .detach();
-    }
-
-    /// A request after a failed link goes after a retry: the worker that ended waits for one, and the
-    /// request stays queued behind it (the form's text and key are kept either way).
-    fn reconnect_first(&self, l: &Link) {
-        if self.state.screen != Screen::Ready {
-            l.send(Req::Retry);
-        }
     }
 
     pub(crate) fn on_key(

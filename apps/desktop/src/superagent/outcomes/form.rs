@@ -496,38 +496,6 @@ impl Form {
         }
     }
 
-    pub fn revise(outcome: &str, revision: i64, prev: Contract) -> Self {
-        Self {
-            mode: Mode::Revise {
-                outcome: outcome.to_string(),
-                revision,
-            },
-            initial: text_of(&prev),
-            prev: Some(prev),
-            head: None,
-            stage: Stage::Edit,
-            read_only: false,
-            errors: vec![],
-            sent: None,
-        }
-    }
-
-    /// "Review and approve" of a draft: the worker reads the stored contract.
-    pub fn reading(outcome: &str) -> Self {
-        Self {
-            mode: Mode::Draft {
-                outcome: outcome.to_string(),
-            },
-            prev: None,
-            initial: FormText::default(),
-            head: None,
-            stage: Stage::Sending,
-            read_only: false,
-            errors: vec![],
-            sent: None,
-        }
-    }
-
     pub fn is_new(&self) -> bool {
         self.mode == Mode::New
     }
@@ -672,17 +640,6 @@ impl Form {
         self.sent = None;
         self.stage = Stage::Edit;
         self.errors = vec![text];
-    }
-
-    /// A draft whose read failed: ask again (`Some(outcome)`).
-    pub fn retry_read(&mut self) -> Option<String> {
-        let (Mode::Draft { outcome }, Stage::Edit) = (&self.mode, &self.stage) else {
-            return None;
-        };
-        let outcome = outcome.clone();
-        self.stage = Stage::Sending;
-        self.errors.clear();
-        Some(outcome)
     }
 
     /// The server stored the contract; the person reads it before approving.

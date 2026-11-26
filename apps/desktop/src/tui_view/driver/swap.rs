@@ -1,7 +1,7 @@
 //! Moving a session's `LiveUi` between views (mode switch, "option H"): the session keeps running, only the
 //! window that shows it changes. `Shell::go` moves sessions with `take_live`/`put_live` (through the Super Agent
-//! host's `take`/`adopt`); `swap_live` and `where_is` are the same moves for two views and a lookup, kept for the
-//! tests (hence the `allow(dead_code)`).
+//! host's `take`/`adopt`); `swap_live` and `where_is` are the same moves for two views and a lookup, test-only
+//! (`cfg(test)`).
 //!
 //! Invariants: a session is in exactly one place; a swap never drops a `LiveUi` (its engine, session lock,
 //! pending approvals and event stream stay as they are); no task is duplicated or left behind.
@@ -25,7 +25,9 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
 
-use gpui::{App, AsyncApp, Context, Entity, WeakEntity, Window};
+#[cfg(test)]
+use gpui::{App, Entity};
+use gpui::{AsyncApp, Context, WeakEntity, Window};
 
 use super::{LiveUi, TuiView};
 
@@ -88,7 +90,7 @@ impl LiveUi {
 
 /// Where a session is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // see `swap_live`
+#[cfg(test)]
 pub enum Place {
     /// The TUI view.
     Tui,
@@ -226,7 +228,7 @@ impl TuiView {
     }
 
     /// The store id of the session shown here (empty until its engine reported one).
-    #[allow(dead_code)] // the swap primitives of slice 2: the shell moves sessions with take/put; tests use these
+    #[cfg(test)]
     fn shown_sid(&self) -> Option<&str> {
         self.live
             .as_ref()
@@ -244,7 +246,7 @@ pub(crate) fn close_live(mut lu: LiveUi) {
 }
 
 /// Exchanges the sessions of two views (either may be empty: then it is a move). Neither session is dropped.
-#[allow(dead_code)] // the swap primitives of slice 2: the shell moves sessions with take/put; tests use these
+#[cfg(test)]
 pub(crate) fn swap_live(
     a: &Entity<TuiView>,
     b: &Entity<TuiView>,
@@ -265,7 +267,7 @@ pub(crate) fn swap_live(
 }
 
 /// Where the session `sid` is shown, among the TUI view and the frame views (`None`: nowhere).
-#[allow(dead_code)] // the swap primitives of slice 2: the shell moves sessions with take/put; tests use these
+#[cfg(test)]
 pub(crate) fn where_is(sid: &str, places: &[(Place, Entity<TuiView>)], cx: &App) -> Option<Place> {
     places
         .iter()

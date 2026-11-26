@@ -173,9 +173,8 @@ impl Shell {
         let sa = v == View::SuperAgent || (v == View::Settings && self.back == View::SuperAgent);
         self.outcomes.update(cx, |o, _| o.set_visible(sa));
         if v == View::SuperAgent {
-            let (known, remote) = self.tui.read(cx).known_folders();
+            let remote = self.tui.read(cx).is_remote();
             self.outcomes.update(cx, |o, cx| {
-                o.state.known = known;
                 o.state.remote = remote;
                 o.shown(window, cx)
             });
@@ -1628,7 +1627,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_buttons_do_nothing_while_a_form_is_open(cx: &mut TestAppContext) {
+    fn history_buttons_do_nothing_while_the_kind_picker_is_open(cx: &mut TestAppContext) {
         let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 900.);
         shell.update_in(v, |s, window, cx| s.go(View::SuperAgent, window, cx));
@@ -1638,7 +1637,7 @@ mod tests {
         assert!(o.read_with(v, |o, _| o.can_back()));
         let sel = o.read_with(v, |o, _| o.state.selected.clone());
         o.update(v, |o, cx| {
-            o.state.open_new();
+            o.state.open_picker();
             cx.notify();
         });
         assert!(!o.read_with(v, |o, _| o.can_back() || o.can_forward()));

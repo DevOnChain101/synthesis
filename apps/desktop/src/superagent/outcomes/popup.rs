@@ -152,12 +152,11 @@ impl OutcomesView {
         self.approval_rows().len()
     }
 
-    /// The card is on screen: there is one, the screen is the list, no form or disclosure is open, and the centre
+    /// The card is on screen: there is one, the screen is the list, no disclosure is open, and the centre
     /// is not the Decisions tab (that tab draws the card itself).
     pub(super) fn popup_visible(&self) -> bool {
         self.pop.shown.is_some()
             && self.state.screen == Screen::Ready
-            && self.state.form.is_none()
             && self.state.guide.is_none()
             && self.state.centre != CentreTab::Decisions
     }
