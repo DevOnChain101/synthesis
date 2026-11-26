@@ -20,6 +20,7 @@ fn text() -> FormText {
         scope: "auth/**\ntests/**".into(),
         workspace: ws("app"),
         attempts: String::new(),
+        turns: String::new(),
     }
 }
 
@@ -391,4 +392,59 @@ fn a_read_only_form_needs_no_commit_and_sends_an_empty_base() {
     assert_eq!(f.approve(), None);
     f.reviewing(sample::review(false));
     assert!(f.approve().is_some());
+}
+
+#[test]
+fn turns_per_attempt_is_empty_for_none_or_a_whole_number_in_range_and_a_revision_starts_from_the_stored_one()
+ {
+    // empty: the contract names none (the old bytes), for a write and a read-only goal
+    assert_eq!(
+        build(&text(), None).unwrap().envelope.budgets.max_turns,
+        None
+    );
+    let mut t = text();
+    t.turns = " 30 ".into();
+    assert_eq!(
+        build(&t, None).unwrap().envelope.budgets.max_turns,
+        Some(30)
+    );
+    let mut r = FormText {
+        goal: "g".into(),
+        budget: "2".into(),
+        ..Default::default()
+    };
+    r.turns = "200".into();
+    assert_eq!(
+        build_read_only(&r).unwrap().envelope.budgets.max_turns,
+        Some(200)
+    );
+    for bad in ["0", "201", "-1", "1.5", "many"] {
+        t.turns = bad.into();
+        r.turns = bad.into();
+        for e in [
+            build(&t, None).unwrap_err(),
+            build_read_only(&r).unwrap_err(),
+        ] {
+            assert!(
+                e.iter()
+                    .any(|l| l.starts_with("Turns: a whole number from 1 to 200")),
+                "{bad}: {e:?}"
+            );
+        }
+    }
+    // a revision shows the stored number and, emptied, removes it (the server's diff calls that widening)
+    let mut p = prev();
+    p.envelope.budgets.max_turns = Some(20);
+    let mut t = text_of(&p);
+    assert_eq!(t.turns, "20");
+    t.workspace = ws("app");
+    assert_eq!(
+        build(&t, Some(&p)).unwrap().envelope.budgets.max_turns,
+        Some(20)
+    );
+    t.turns.clear();
+    assert_eq!(
+        build(&t, Some(&p)).unwrap().envelope.budgets.max_turns,
+        None
+    );
 }

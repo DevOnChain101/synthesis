@@ -51,11 +51,16 @@ fn money(a: Option<f64>) -> String {
     a.map_or_else(|| "unknown".into(), |v| format!("${v:.2}"))
 }
 
-/// "$1.20 of $5.00", or "budget unknown" when the server gave neither (the list's line, here and in the TUI view).
+/// "$1.20 of $5.00", or "budget unknown" when the server gave neither (the list's line, here and in the TUI view),
+/// then the turn limit when the contract names one.
 pub(crate) fn budget_line(b: &BudgetView) -> String {
-    match (b.cost_usd.spent, b.cost_usd.limit) {
+    let cost = match (b.cost_usd.spent, b.cost_usd.limit) {
         (None, None) => "budget unknown".to_string(),
         (s, l) => format!("{} of {}", money(s), money(l)),
+    };
+    match b.max_turns {
+        Some(t) => format!("{cost} \u{b7} {t} turns per attempt"),
+        None => cost,
     }
 }
 
@@ -64,6 +69,17 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use synthesis_view::outcomes::uncovered;
+
+    #[test]
+    fn the_budget_line_shows_the_turn_limit_beside_the_cost_cap_only_when_the_contract_names_one() {
+        let mut b = BudgetView::from_json(&json!({"cost_usd": {"spent": 1.2, "limit": 5.0}}));
+        assert_eq!(budget_line(&b), "$1.20 of $5.00");
+        b.max_turns = Some(30);
+        assert_eq!(
+            budget_line(&b),
+            "$1.20 of $5.00 \u{b7} 30 turns per attempt"
+        );
+    }
 
     fn briefs() -> Vec<Value> {
         vec![

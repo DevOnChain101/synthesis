@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use synthesis_core::outcome::{
     Budgets, Capability, CapabilityMode, Contract, ContractCheck, ContractCriterion,
-    DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM, Envelope, MAX_ATTEMPTS_PER_WORK_ITEM, TrustClass,
-    validate_contract,
+    DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM, Envelope, HARD_MAX_TURNS, MAX_ATTEMPTS_PER_WORK_ITEM,
+    TrustClass, validate_contract,
 };
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_view::outcomes::CriteriaView;
@@ -27,6 +27,8 @@ pub struct FormText {
     pub workspace: String,
     /// Read-only goals only: attempts per work item (empty: the core's default).
     pub attempts: String,
+    /// Turns (model calls) per attempt (empty: none named, the setting applies).
+    pub turns: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +66,28 @@ pub fn text_of(c: &Contract) -> FormText {
         scope: c.envelope.allowed_paths.join("\n"),
         workspace: String::new(),
         attempts: String::new(),
+        turns: c
+            .envelope
+            .budgets
+            .max_turns
+            .map_or_else(String::new, |t| t.to_string()),
+    }
+}
+
+/// The turn limit typed: empty names none (the setting applies), else a whole number in the core's range.
+fn turns_of(t: &FormText) -> Result<Option<u32>, String> {
+    match t.turns.trim() {
+        "" => Ok(None),
+        n => n
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=HARD_MAX_TURNS).contains(n))
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "Turns: a whole number from 1 to {HARD_MAX_TURNS}, or leave it empty for the setting."
+                )
+            }),
     }
 }
 
@@ -138,7 +162,11 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
                 .to_string(),
         );
     }
-    let (true, Some(budget)) = (errs.is_empty(), budget) else {
+    let turns = turns_of(t);
+    if let Err(e) = &turns {
+        errs.push(e.clone());
+    }
+    let (true, Some(budget), Ok(turns)) = (errs.is_empty(), budget, turns) else {
         return Err(errs);
     };
 
@@ -219,6 +247,7 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
     let mut envelope = prev.map_or_else(default_envelope, |p| p.envelope.clone());
     envelope.allowed_paths = scope;
     envelope.budgets.max_cost_usd = budget;
+    envelope.budgets.max_turns = turns;
     let c = Contract {
         version: prev.map_or(1, |p| p.version),
         kind: prev.map_or_else(Default::default, |p| p.kind),
@@ -258,11 +287,18 @@ pub fn build_read_only(t: &FormText) -> Result<Contract, Vec<String>> {
             "Attempts: a whole number from 1 to {MAX_ATTEMPTS_PER_WORK_ITEM}, or leave it empty for {DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM}."
         ));
     }
-    let (true, Some(budget), Some(attempts)) = (errs.is_empty(), budget, attempts) else {
+    let turns = turns_of(t);
+    if let Err(e) = &turns {
+        errs.push(e.clone());
+    }
+    let (true, Some(budget), Some(attempts), Ok(turns)) =
+        (errs.is_empty(), budget, attempts, turns)
+    else {
         return Err(errs);
     };
     let mut budgets = Budgets::new(budget);
     budgets.max_attempts_per_work_item = attempts;
+    budgets.max_turns = turns;
     let c = Contract::read_only(goal, &lines(&t.criteria), budgets);
     validate_contract(&c).map_err(|e| vec![e.to_string()])?;
     Ok(c)

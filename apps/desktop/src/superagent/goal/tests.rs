@@ -221,6 +221,7 @@ fn the_read_only_form_has_its_own_fields_and_sends_a_read_only_contract_without_
         "sa-goal-goal",
         "sa-goal-criteria",
         "sa-goal-budget",
+        "sa-goal-turns",
         "sa-goal-attempts",
         "sa-goal-folder",
     ] {
@@ -512,4 +513,32 @@ fn the_dialog_of_a_read_only_goal_carries_the_folder_warning(cx: &mut TestAppCon
     f.update_in(v, |f, w, cx| f.open_dialog(w, cx));
     v.run_until_parked();
     assert!(v.debug_bounds("sa-goal-dialog-note").is_some());
+}
+
+#[gpui::test]
+fn the_turn_limit_is_typed_in_its_own_field_reaches_the_contract_and_a_bad_one_is_named_on_that_field(
+    cx: &mut TestAppContext,
+) {
+    let (f, v, _) = open(cx, GoalKind::Writes);
+    assert!(v.debug_bounds("sa-goal-turns").is_some());
+    head_known(v, &f);
+    fill_writes(v, &f);
+    type_in(v, &f, Field::Turns, "0");
+    f.update(v, |f, cx| f.send(cx));
+    assert!(creates(&f, v).is_empty());
+    assert!(!f.read_with(v, |f, _| f.errors_of(Field::Turns).is_empty()));
+    type_in(v, &f, Field::Turns, "12");
+    f.update(v, |f, cx| f.send(cx));
+    let Some(Out::Submit(Submit::Create { contract, .. })) = creates(&f, v).first().cloned() else {
+        panic!("{:?}", f.read_with(v, |f, _| f.form.errors.clone()))
+    };
+    assert_eq!(contract.envelope.budgets.max_turns, Some(12));
+}
+
+#[test]
+fn the_turn_limit_shown_before_approving_is_the_stored_one_else_the_setting() {
+    use super::model::turns_line;
+    assert_eq!(turns_line(Some(12), Some(50)), "12 per attempt");
+    assert_eq!(turns_line(None, Some(50)), "50 per attempt (Settings)");
+    assert!(turns_line(None, None).contains("Settings"));
 }

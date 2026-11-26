@@ -10,18 +10,13 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use synthesis_core::outcome::{
-    Contract, ContractKind, DEFAULT_ATTEMPT_MAX_TURNS, Envelope, HARD_MAX_TOKENS, HARD_MAX_TURNS,
-};
+use synthesis_core::outcome::{Contract, ContractKind, Envelope, HARD_MAX_TOKENS};
 use synthesis_session::outcome::OutcomePolicy;
 
 use crate::{AttemptEnv, CompileError, CompiledEnvelope, compile_envelope};
 
 /// Default wall cap of an attempt when neither the contract nor the settings name one.
 pub const DEFAULT_WALL_SECS: u64 = 1800;
-
-/// Turn cap of a read-only attempt (S1 section 2.1).
-pub const READ_ONLY_MAX_TURNS: u32 = 80;
 
 /// The rules of a read-only attempt's system prompt. Guidance only: what the worker CAN do is the
 /// tool set and the sandbox, which no text here changes.
@@ -177,24 +172,7 @@ impl Profile {
             prompt,
             max_cost_usd: cap,
             max_wall_secs: wall,
-            max_turns: match (
-                contract.kind == ContractKind::ReadOnly,
-                policy.attempt_max_turns,
-            ) {
-                (true, None) => READ_ONLY_MAX_TURNS,
-                (true, Some(n)) => n.clamp(1, HARD_MAX_TURNS).min(READ_ONLY_MAX_TURNS),
-                (false, n) => n
-                    .unwrap_or(DEFAULT_ATTEMPT_MAX_TURNS)
-                    .clamp(1, HARD_MAX_TURNS),
-            }
-            // the contract can only lower it, never raise the setting
-            .min(
-                contract
-                    .envelope
-                    .budgets
-                    .max_turns
-                    .map_or(HARD_MAX_TURNS, |t| t.clamp(1, HARD_MAX_TURNS)),
-            ),
+            max_turns: policy.effective_turns(contract),
             max_tokens: policy.attempt_max_tokens.clamp(1, HARD_MAX_TOKENS),
             contract_version: contract.version,
             envelope: contract.envelope.clone(),
