@@ -246,6 +246,23 @@ fn a_session_frame_draws_turns_and_a_composer_and_never_the_tui_view(cx: &mut Te
 }
 
 #[gpui::test]
+fn the_send_button_is_a_square_icon_and_the_frame_border_is_neutral(cx: &mut TestAppContext) {
+    let c = chat(cx, vec![Item::User("hi".into())], vec![], false);
+    let b = c.v.debug_bounds("sa-chat-send").unwrap();
+    assert!(
+        b.size.width <= px(40.) && b.size.width == b.size.height,
+        "{b:?}"
+    );
+    // the frame uses the hairline, never the TUI accent (amber)
+    let tui = crate::theme::hsla(synthesis_cli_ui_render::theme::ACCENT);
+    assert_ne!(crate::superagent::tokens::stroke(), tui);
+    assert_ne!(
+        crate::superagent::tokens::hsla(crate::superagent::tokens::BORDER),
+        tui
+    );
+}
+
+#[gpui::test]
 fn a_running_turn_shows_stop_and_a_status_line(cx: &mut TestAppContext) {
     let c = chat(cx, vec![Item::User("go".into())], vec![], true);
     assert!(c.v.debug_bounds("sa-chat-stop").is_some());

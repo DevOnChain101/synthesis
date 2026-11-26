@@ -8,6 +8,7 @@
 //! from that view's `Live` (the `Convo` of `synthesis-view`, already redacted for display) and is cleaned again
 //! with `sanitize_for_display` or the inert markdown of the conductor chat, so no text reaches the screen another way.
 
+mod ctx;
 pub mod model;
 #[cfg(feature = "shot")]
 pub mod shot;
@@ -28,7 +29,7 @@ use synthesis_view::convo::{ApprovalState, Item};
 use synthesis_view::toolview::{self, Card, Glyph, Tone};
 
 use super::chat::md;
-use super::kit::{self, ButtonKind, text};
+use super::kit::text;
 use super::tokens::{self as t, hsla};
 use crate::live::Live;
 use crate::tui_view::TuiView;
@@ -392,7 +393,7 @@ impl ChatHost {
         )
     }
 
-    fn composer_el(&self, live: &Live, cx: &Context<Self>) -> AnyElement {
+    fn composer_el(&self, live: &Live, window: &Window, cx: &Context<Self>) -> AnyElement {
         let running = live.busy || live.convo().running;
         let model_name = {
             let m = sanitize_for_display(&live.view.status.model);
@@ -403,10 +404,12 @@ impl ChatHost {
             format!("{} mode", if m.is_empty() { "default" } else { &m })
         };
         let starting = live.starting;
-        let input = self
-            .tui
-            .read(cx)
-            .embed_prompt()
+        let prompt = self.tui.read(cx).embed_prompt();
+        let focused = prompt
+            .as_ref()
+            .is_some_and(|p| p.focus_handle(cx).contains_focused(window, cx));
+        let input = prompt
+            .clone()
             .map(|p| {
                 Textarea::new(&p)
                     .appearance(false)
@@ -419,36 +422,33 @@ impl ChatHost {
             pill("sa-chat-model", &model_name).into_any_element(),
             pill("sa-chat-mode", &mode)
                 .cursor_pointer()
-                .hover(|d| d.bg(t::hover()))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.tui.update(cx, |t, cx| t.embed_cycle_mode(cx))
                 }))
                 .into_any_element(),
         ];
+        let has_text = prompt
+            .as_ref()
+            .is_some_and(|p| !p.read(cx).value().trim().is_empty());
         let action = if running {
-            kit::button(
-                "sa-chat-stop",
-                "Stop",
-                ButtonKind::Secondary,
-                false,
-                Some(Box::new(cx.listener(|this, _, _, cx| this.stop(cx)))),
-            )
+            stop_button(cx.listener(|this, _, _, cx| this.stop(cx)))
         } else {
-            kit::button(
-                "sa-chat-send",
-                "Send",
-                if starting {
-                    ButtonKind::Disabled
-                } else {
-                    ButtonKind::Primary
-                },
-                false,
-                Some(Box::new(
-                    cx.listener(|this, _, window, cx| this.send(window, cx)),
-                )),
+            send_button(
+                has_text,
+                !starting,
+                cx.listener(|this, _, window, cx| this.send(window, cx)),
             )
         };
-        let card = composer_card(input, left, action.into_any_element());
+        // the context ring sits in the footer just before the round button (there is no room above it)
+        let (used, window_tokens) = live.view.status.context.numbers();
+        let action = div()
+            .flex()
+            .items_center()
+            .gap(px(t::S3))
+            .children(ctx::gauge(used, window_tokens).map(|g| ctx::ring(&g)))
+            .child(action)
+            .into_any_element();
+        let card = composer_card(input, left, action, focused);
         // the attached images (the TUI's chips); `/images clear` and the x drop them
         let chips = (!live.images.is_empty()).then(|| {
             div()
@@ -564,7 +564,8 @@ pub(crate) fn user_bubble(at: usize, line: &str) -> AnyElement {
         .into_any_element()
 }
 
-/// A small outlined pill (the model and the mode of the composer, the orchestrator's target).
+/// A quiet chip of the composer footer (the model and the mode, the orchestrator's target): the card's hairline,
+/// no fill; a faint ground on hover.
 pub(crate) fn pill(id: &'static str, label: &str) -> gpui::Stateful<gpui::Div> {
     text(t::T2, t::W_REGULAR, t::TEXT)
         .id(id)
@@ -573,10 +574,70 @@ pub(crate) fn pill(id: &'static str, label: &str) -> gpui::Stateful<gpui::Div> {
         .py(px(2.))
         .rounded(px(t::R_PILL))
         .border_1()
-        .border_color(t::stroke())
+        .border_color(t::alpha(t::TEXT_STRONG, 0.09))
+        .hover(|d| d.bg(t::hover()))
         .max_w(px(260.))
         .truncate()
         .child(label.to_string())
+}
+
+/// The round send button (28 px): a light disc with a dark arrow when there is text to send, a faint disc and a
+/// dim arrow when not. `clickable` is false while the chat starts.
+pub(crate) fn send_button(
+    ready: bool,
+    clickable: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (bg, fg) = if ready && clickable {
+        (hsla(t::ACCENT), hsla(t::BG))
+    } else {
+        (t::alpha(t::TEXT_STRONG, 0.06), hsla(t::TEXT).opacity(0.6))
+    };
+    round_button(
+        "sa-chat-send",
+        "Send",
+        bg,
+        crate::widgets::chrome::icon("arrow-up", 16., fg),
+    )
+    .when(clickable, |d| d.cursor_pointer().on_click(on_click))
+    .into_any_element()
+}
+
+/// The round stop button, in the place of send while a turn runs.
+pub(crate) fn stop_button(
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let glyph = div().size(px(10.)).rounded(px(2.)).bg(hsla(t::TEXT_STRONG));
+    round_button(
+        "sa-chat-stop",
+        "Stop",
+        t::alpha(t::TEXT_STRONG, 0.10),
+        glyph.into_any_element(),
+    )
+    .cursor_pointer()
+    .hover(|d| d.bg(t::alpha(t::TEXT_STRONG, 0.16)))
+    .on_click(on_click)
+    .into_any_element()
+}
+
+fn round_button(
+    id: &'static str,
+    tip: &'static str,
+    bg: gpui::Hsla,
+    glyph: AnyElement,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_string())
+        .flex_none()
+        .size(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(t::R_PILL))
+        .bg(bg)
+        .tooltip(move |_, cx| -> gpui::AnyView { cx.new(|_| crate::ui::Tip(tip.into())).into() })
+        .child(glyph)
 }
 
 /// The composer: the text box over a bar with the pills on the left and the send or stop button on the right.
@@ -584,18 +645,27 @@ pub(crate) fn composer_card(
     input: AnyElement,
     left: Vec<AnyElement>,
     action: AnyElement,
+    focused: bool,
 ) -> AnyElement {
     div()
         .debug_selector(|| "sa-chat-composer".to_string())
         .flex()
         .flex_col()
-        .gap(px(t::S2))
-        .p(px(t::S3))
+        .gap(px(t::S3))
+        .p(px(t::S4))
         .rounded(px(t::R_FLOAT))
-        .bg(hsla(t::ELEVATED))
+        // barely lifted over the canvas (translucent, so it follows the window), a hairline, no shadow; the
+        // hairline is a notch brighter while the box has focus (never the TUI's accent, no ring)
+        .bg(t::alpha(t::TEXT_STRONG, 0.035))
         .border_1()
-        .border_color(t::stroke())
-        .child(div().px(px(t::S1)).child(input))
+        .border_color(t::alpha(t::TEXT_STRONG, if focused { 0.16 } else { 0.09 }))
+        .child(
+            div()
+                .px(px(t::S1))
+                .text_size(px(t::T3.0))
+                .line_height(px(t::T3.1))
+                .child(input),
+        )
         .child(
             div()
                 .flex()
@@ -607,6 +677,7 @@ pub(crate) fn composer_card(
                         .flex()
                         .items_center()
                         .gap(px(t::S2))
+                        .ml(px(14.))
                         .min_w(px(0.))
                         .children(left),
                 )
@@ -659,7 +730,7 @@ impl Render for ChatHost {
             self.scroll.scroll_to_bottom();
         }
         self.seen = sig;
-        let composer = self.composer_el(live, cx);
+        let composer = self.composer_el(live, window, cx);
         let dialog = self.dialog(window, cx);
         let empty = rows.is_empty();
         div()

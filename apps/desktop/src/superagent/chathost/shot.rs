@@ -60,6 +60,11 @@ fn sample(idle: bool) -> Live {
     l.busy = !idle;
     l.view.status.model = "anthropic/claude-sonnet-5-5".into();
     l.view.status.mode = "default".into();
+    // 42 % of the window when idle, 90 % (the amber ring) while a turn runs
+    l.view
+        .status
+        .context
+        .on_usage(if idle { 84_000 } else { 180_000 }, 200_000, None, false);
     let diff = json!({"path": "crates/cli/src/status.rs", "added": 3, "removed": 1, "hunks": [{"lines": [
         {"tag": "-", "text": "    println!(\"{}\", report);"},
         {"tag": "+", "text": "    if args.json {"},
