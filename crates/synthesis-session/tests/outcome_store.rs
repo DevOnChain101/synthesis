@@ -685,6 +685,16 @@ fn a_worker_session_is_not_listed_but_chats_and_get_by_id_are() {
         assert_eq!(ids, ["chat"], "the worker is not a user session");
     }
     assert_eq!(r.get_session("att-1").unwrap().id, "att-1");
+    // the lookup by id (`--resume ID` of a re-run attempt) still sees the worker, not the control session
+    let ids: Vec<_> = r
+        .list_sessions_with_workers(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(
+        ids.contains(&"att-1".to_string()) && ids.contains(&"chat".to_string()) && ids.len() == 2
+    );
 }
 
 #[test]
