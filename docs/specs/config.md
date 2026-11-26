@@ -99,6 +99,9 @@ Safety bounds on what a provider returns: a model id with a control, bidi, zero-
 
 Cache: `$SYNT_HOME/cache/models/<id>-<hash>.json` (`<id>` with unsafe characters replaced by `_`, a Windows device name prefixed `p-`, `<hash>` the first 8 hex digits of sha256 of the raw provider id), mode 0600, written atomically, no secrets: `{schema_version, base_url, protocol, fetched_at, models: {id: {context_window, max_output, vision, effort_tiers?, raw_capabilities?}}}`. Younger than 24 h = fresh (no network at start). A changed `baseURL` or protocol, an unknown `schema_version` or a corrupt file is ignored. `/model` restarts the session on the new `(provider, model)`, which reads its own entry. `synt models --refresh` ignores freshness and rewrites the cache.
 
+### 6.3 `synt.desktop.sessions.warn_at` [new]
+USER file only, read by the desktop app (not by `synthesis-settings`): integer >= 1, default 6 (anything else keeps the default). Starting a new session while that many or more are open shows a notice and still starts it; sessions are never limited (owner decision 2026-11-25). Listed in the Settings UI under Interface (`synthesis-settings-ui` schema).
+
 ## 7. Ported vs changed
 | Area | Status |
 |---|---|

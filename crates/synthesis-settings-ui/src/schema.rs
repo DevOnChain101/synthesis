@@ -410,6 +410,11 @@ impl SettingsSchema {
             .help("Opaque is the default. Glass (translucent rail, title bar and sidebar over the blurred desktop) needs macOS 27 or later and is off when the system asks for reduced transparency. Read when the app starts. The TUI and Settings views never change."),
         );
         f.push(
+            Field::new("synt.desktop.sessions.warn_at", Interface, "Warn at this many open sessions", Int { min: 1, max: 1000 })
+                .def(json!(6))
+                .help("Starting a new session when this many are already open shows a notice (each keeps an engine running). Sessions are never limited. Read when a session is started."),
+        );
+        f.push(
             Field::new(
                 "synt.tui.logo",
                 Interface,
