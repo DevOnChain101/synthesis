@@ -2528,6 +2528,17 @@ impl TuiView {
     }
 
     fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
+        self.switch_with(target, key, vec![], cx)
+    }
+
+    /// [`Self::switch`] with `notes` shown at the start of the new chat.
+    fn switch_with(
+        &mut self,
+        target: Target,
+        key: String,
+        notes: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let project = self.switch_project(&target);
         let Some(lu) = &mut self.live else { return };
         // an embedded frame is one session in one folder (its tab is named by it): no other one is opened here
@@ -2598,7 +2609,7 @@ impl TuiView {
         lu.live.queue.clear();
         lu.live.dialogs.clear();
         lu.live.busy = false;
-        self.launch_with(project, prior, Some(target), vec![], cx);
+        self.launch_with(project, prior, Some(target), notes, cx);
     }
 
     /// The confirmation of `/close-workspace` was answered yes. The open folder goes through the
@@ -3084,7 +3095,21 @@ impl TuiView {
                     &l.ws_key,
                     live.as_ref().map(|(k, r)| (k.as_str(), r.as_str())),
                 ) {
-                    Ok(root) => return self.switch(Target::New(root), "new".into(), cx),
+                    Ok(root) => {
+                        let live = l
+                            .view
+                            .workspaces
+                            .workspaces
+                            .iter()
+                            .flat_map(|w| &w.sessions)
+                            .filter(|s| s.is_live)
+                            .count();
+                        let at = crate::session_warn::read_warn_at(&lu.cfg.synthesis_home);
+                        let notes = crate::session_warn::new_session_warning(live, at)
+                            .into_iter()
+                            .collect();
+                        return self.switch_with(Target::New(root), "new".into(), notes, cx);
+                    }
                     Err(why) => lu.live.note(why, true),
                 }
             }

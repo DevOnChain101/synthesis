@@ -459,6 +459,7 @@ impl SuperAgentView {
             return Ok((id, false));
         }
         let id = format!("s{}", self.next_session);
+        let warn = self.new_session_warning(hosted.len());
         let opened = self.host.update(cx, |h, cx| h.open(&id, p, window, cx));
         if let Err(why) = opened {
             self.notice = Some(why.clone());
@@ -467,6 +468,10 @@ impl SuperAgentView {
         }
         self.register_session(&id, &canon);
         self.open(Frame::Session(id.clone()), cx);
+        // after `open`, which clears the notice; the session is made either way
+        if warn.is_some() {
+            self.notice = warn;
+        }
         Ok((id, true))
     }
 
@@ -502,6 +507,15 @@ impl SuperAgentView {
                 Err(why)
             }
         }
+    }
+
+    /// The soft warning for a new session while `live` are open (`synt.desktop.sessions.warn_at`); never a block.
+    fn new_session_warning(&self, live: usize) -> Option<String> {
+        let at = self.synt_home.as_deref().map_or(
+            crate::session_warn::DEFAULT_WARN_AT,
+            crate::session_warn::read_warn_at,
+        );
+        crate::session_warn::new_session_warning(live, at)
     }
 
     pub(crate) fn set_notice(&mut self, why: String, cx: &mut Context<Self>) {
