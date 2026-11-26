@@ -261,7 +261,21 @@ impl SuperAgentView {
     /// embedded chats (the rail, the mode button).
     pub(crate) fn waiting(&self, cx: &App) -> usize {
         if self.count_waiting {
-            self.outcomes.read(cx).waiting_count() + self.host.read(cx).needs_total(cx)
+            let o = self.outcomes.read(cx);
+            // a hosted session that asks is a row of Needs you (one) and has its questions counted by the host
+            // (all): the row is not counted twice
+            let asking: Vec<_> = self
+                .hosted_rows(cx)
+                .into_iter()
+                .filter(|r| r.needs > 0)
+                .map(|r| r.sid)
+                .collect();
+            let dup = o
+                .approval_rows()
+                .iter()
+                .filter(|r| asking.contains(&r.key))
+                .count();
+            o.waiting_count() + self.host.read(cx).needs_total(cx) - dup
         } else {
             0
         }
@@ -355,13 +369,67 @@ impl SuperAgentView {
         self.changed(cx);
     }
 
+    /// Mode switch to the Super Agent: hosts the TUI's running session as a tab (engine, lock, turn and asks as
+    /// they are). `Err` hands it back untouched.
+    pub(crate) fn adopt_plain(
+        &mut self,
+        lu: crate::tui_view::driver::LiveUi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, Box<(crate::tui_view::driver::LiveUi, String)>> {
+        let id = format!("s{}", self.next_session);
+        let folder = std::path::PathBuf::from(&lu.live.cwd);
+        self.host.update(cx, |h, cx| h.adopt(&id, lu, window, cx))?;
+        self.register_session(&id, &folder);
+        self.open(Frame::Session(id.clone()), cx);
+        Ok(id)
+    }
+
+    /// Mode switch to the TUI: gives the session of tab `id` away with its engine open; the tab ends with it.
+    pub(crate) fn take_plain(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::tui_view::driver::LiveUi> {
+        if self.conductor_owned.iter().any(|c| c == id) {
+            return None;
+        }
+        let lu = self.host.update(cx, |h, cx| h.take(id, cx))?;
+        self.sessions.retain(|(i, _)| i != id);
+        self.folders.retain(|(i, _)| i != id);
+        if let Some(i) = self
+            .frames
+            .tabs()
+            .iter()
+            .position(|f| *f == Frame::Session(id.to_string()))
+        {
+            self.drop_tab(i, cx);
+        } else {
+            self.changed(cx);
+        }
+        Some(lu)
+    }
+
+    /// `(tab id, stamp of its last task or answer)` of the plain sessions this view hosts (the conductor's are
+    /// never moved to the TUI).
+    pub(crate) fn plain_activity(&self, cx: &gpui::App) -> Vec<(String, u64)> {
+        self.host.read(cx).activity(&self.conductor_owned, cx)
+    }
+
+    /// The hidden plain sessions as the TUI's Running panel lists them.
+    pub(crate) fn hosted_rows(&self, cx: &gpui::App) -> Vec<crate::live::HostedRow> {
+        self.host.read(cx).hosted_rows(&self.conductor_owned, cx)
+    }
+
     /// The sessions this view hosts, for the TUI when the person switches to it.
+    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
     pub(crate) fn handoff(&self, cx: &gpui::App) -> crate::handoff::Handoff {
         let last = self.frames.last_session();
         self.host.read(cx).handoff(last, &self.conductor_owned, cx)
     }
 
     /// Mode switch to the TUI: idle sessions give their engines back (see `TuiView::release_idle`).
+    #[allow(dead_code)] // release/handoff path replaced by the live swap; removed in slice 5
     pub(crate) fn release_idle(
         &mut self,
         cx: &mut Context<Self>,
@@ -507,16 +575,6 @@ impl SuperAgentView {
     pub(crate) fn set_notice(&mut self, why: String, cx: &mut Context<Self>) {
         self.notice = Some(why);
         cx.notify();
-    }
-
-    /// The TUI is offered only from a plain session or the home: never from a goal form, an outcome or a worker,
-    /// nor from a session the conductor started.
-    pub(crate) fn tui_switch_allowed(&self) -> bool {
-        match self.frames.active() {
-            Frame::Home | Frame::Picker => true,
-            Frame::Session(id) => !self.conductor_owned.contains(id),
-            Frame::Outcome(_) | Frame::Worker(..) | Frame::NewGoal(_) => false,
-        }
     }
 
     /// The rail row of a hosted session; its id is the conductor's handle.

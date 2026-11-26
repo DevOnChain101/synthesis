@@ -632,6 +632,20 @@ pub enum NoticeKind {
     Bookkeeping,
 }
 
+/// A session the Super Agent hosts hidden (mode switch): listed in the Running panel with its live status; a click
+/// brings it into this view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedRow {
+    /// The Super Agent frame that holds it.
+    pub frame: String,
+    pub sid: String,
+    pub title: String,
+    pub folder: String,
+    pub busy: bool,
+    /// Questions and permission asks waiting for the person.
+    pub needs: usize,
+}
+
 /// A stored session (or the empty welcome of a `new ...` row) shown read-only in the chat while the engine
 /// stays on its own session: selecting a row starts nothing.
 #[derive(Clone)]
@@ -709,6 +723,8 @@ pub struct Live {
     pub mcp: Vec<McpInfo>,
     /// Rows of the peers listing (polled).
     pub peer_rows: Vec<Value>,
+    /// Sessions hosted hidden by the Super Agent (see [`HostedRow`]).
+    pub hosted: Vec<HostedRow>,
     /// When each listed peer was last active, as the polls saw it.
     peer_seen: Seen,
     /// The open `/send` picker's rows and filter.
@@ -817,6 +833,7 @@ impl Live {
             history: vec![],
             mcp: vec![],
             peer_rows: vec![],
+            hosted: vec![],
             peer_seen: Seen::default(),
             send_pick: None,
             send_to: None,

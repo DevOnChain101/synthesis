@@ -1156,10 +1156,10 @@ fn a_closed_worker_tab_keeps_its_draft_for_when_it_is_opened_again(cx: &mut Test
     assert_eq!(w.read_with(v, |w, cx| w.draft(cx)), "ab");
 }
 
-/// The TUI button is offered from the home and from a plain session; never from a goal form, an outcome, a worker,
-/// or a session the conductor started.
+/// The TUI button is offered from every frame (the switch moves plain sessions only; goals, outcomes, workers and the
+/// conductor's sessions stay in this view).
 #[gpui::test]
-fn the_tui_switch_is_hidden_for_goal_outcome_worker_and_conductor_frames(cx: &mut TestAppContext) {
+fn the_tui_switch_is_offered_from_every_frame(cx: &mut TestAppContext) {
     let (sa, v) = open(cx);
     let shown = |v: &mut VisualTestContext| v.debug_bounds("sa-mode-tui").is_some();
     assert!(shown(v), "the home");
@@ -1173,8 +1173,7 @@ fn the_tui_switch_is_hidden_for_goal_outcome_worker_and_conductor_frames(cx: &mu
     ] {
         sa.update(v, |s, cx| s.open(f.clone(), cx));
         v.run_until_parked();
-        assert!(!shown(v), "{f:?}");
-        assert!(!sa.read_with(v, |s, _| s.tui_switch_allowed()));
+        assert!(shown(v), "{f:?}");
     }
     sa.update(v, |s, cx| {
         session_tab(s, "/w/b", cx);
@@ -1183,5 +1182,5 @@ fn the_tui_switch_is_hidden_for_goal_outcome_worker_and_conductor_frames(cx: &mu
         cx.notify();
     });
     v.run_until_parked();
-    assert!(!shown(v), "a conductor-owned session");
+    assert!(shown(v), "a conductor-owned session");
 }

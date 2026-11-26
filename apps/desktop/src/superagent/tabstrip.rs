@@ -254,15 +254,13 @@ impl SuperAgentView {
             .bg(t::well())
             .border_1()
             .border_color(t::stroke())
-            .children(self.tui_switch_allowed().then(|| {
-                self.mode_button(
-                    View::Tui,
-                    "sa-mode-tui",
-                    "tui",
-                    format!("TUI  ({mod_key}1)"),
-                    cx,
-                )
-            }))
+            .child(self.mode_button(
+                View::Tui,
+                "sa-mode-tui",
+                "tui",
+                format!("TUI  ({mod_key}1)"),
+                cx,
+            ))
             .child(self.mode_button(
                 View::SuperAgent,
                 "sa-mode-super-agent",
