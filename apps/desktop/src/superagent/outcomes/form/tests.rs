@@ -16,7 +16,7 @@ fn text() -> FormText {
         goal: "Move login to OIDC".into(),
         criteria: "Login works with the test IdP\n\nThe old API still answers 200\n".into(),
         checks: "cargo test -p auth\ncargo clippy -p auth -- -D warnings".into(),
-        budget: "5".into(),
+        budget: String::new(),
         scope: "auth/**\ntests/**".into(),
         workspace: ws("app"),
         attempts: String::new(),
@@ -49,7 +49,10 @@ fn the_text_becomes_a_contract_the_core_accepts_with_independent_checks_for_ever
         && k.required_trust == TrustClass::IndependentCheck
         && k.check_ids == ["t1", "t2"]));
     assert_eq!(c.envelope.allowed_paths, ["auth/**", "tests/**"]);
-    assert_eq!(c.envelope.budgets.max_cost_usd, 5.0);
+    assert_eq!(
+        c.envelope.budgets.max_cost_usd, None,
+        "a new goal names no money"
+    );
     // reversible capabilities only: nothing irreversible is allowed by a form
     assert_eq!(
         c.envelope.mode(Capability::RepoWrite),
@@ -62,13 +65,7 @@ fn the_text_becomes_a_contract_the_core_accepts_with_independent_checks_for_ever
 #[test]
 fn an_empty_goal_checks_scope_or_budget_is_refused_with_a_line_each() {
     let e = build(&FormText::default(), None).unwrap_err();
-    for want in [
-        "Goal",
-        "Acceptance criteria",
-        "Checks",
-        "Write scope",
-        "Budget",
-    ] {
+    for want in ["Goal", "Acceptance criteria", "Checks", "Write scope"] {
         assert!(e.iter().any(|l| l.starts_with(want)), "{want}: {e:?}");
     }
     let mut t = text();
@@ -86,7 +83,7 @@ fn the_cores_own_validation_speaks_for_what_the_form_does_not_check() {
     assert!(e[0].contains("path pattern"), "{e:?}");
     let mut t = text();
     t.budget = "-3".into();
-    assert!(build(&t, None).unwrap_err()[0].contains("budget"));
+    assert!(build(&t, None).unwrap_err()[0].starts_with("Budget"));
     t.budget = "inf".into();
     assert!(build(&t, None).is_err());
     let mut t = text();
@@ -142,7 +139,7 @@ fn a_revision_matches_lines_by_exact_text_so_deleting_one_never_shifts_flags() {
     assert_eq!(c.checks[0].id, "t1");
     assert_eq!(c.criteria[1].check_ids, ["t1"]);
     assert_eq!(c.envelope.budgets.attempt_max_wall_secs, Some(1200));
-    assert_eq!(c.envelope.budgets.max_cost_usd, 6.0);
+    assert_eq!(c.envelope.budgets.max_cost_usd, Some(6.0));
     // exactly one check edited: it keeps its id, so the criteria keep naming it
     let mut t6 = t.clone();
     t6.checks = t6
@@ -307,7 +304,6 @@ fn ro_text() -> FormText {
     FormText {
         goal: "Which modules still use the old logger?".into(),
         criteria: "Names every module\n\nGives a file and line for each\n".into(),
-        budget: "2".into(),
         workspace: ws("notes"),
         ..Default::default()
     }
@@ -322,7 +318,7 @@ fn a_read_only_text_becomes_a_read_only_contract_the_core_accepts() {
     assert_eq!(ids, ["report", "r1", "r2"]);
     assert!(c.criteria.iter().all(|k| k.manual && k.mandatory));
     assert!(c.checks.is_empty() && c.envelope.allowed_paths.is_empty());
-    assert_eq!(c.envelope.budgets.max_cost_usd, 2.0);
+    assert_eq!(c.envelope.budgets.max_cost_usd, None);
     assert_eq!(c.envelope.budgets.max_attempts_per_work_item, 3);
     // the rubric is optional
     let mut t = ro_text();
@@ -336,20 +332,21 @@ fn a_read_only_text_becomes_a_read_only_contract_the_core_accepts() {
 #[test]
 fn a_read_only_goal_needs_a_goal_a_budget_and_attempts_in_range_with_a_line_each() {
     let errs = build_read_only(&FormText::default()).unwrap_err();
-    assert!(
-        errs.iter().any(|e| e.starts_with("Goal")) && errs.iter().any(|e| e.starts_with("Budget"))
-    );
+    assert!(errs.iter().any(|e| e.starts_with("Goal")));
     for bad in ["0", "11", "two", "-1"] {
         let mut t = ro_text();
         t.attempts = bad.into();
         let errs = build_read_only(&t).unwrap_err();
         assert!(errs[0].starts_with("Attempts"), "{bad}: {errs:?}");
     }
+    // a legacy money cap is optional; when typed it is a positive number
     let mut t = ro_text();
     t.budget = "0".into();
-    assert!(
-        build_read_only(&t).is_err(),
-        "the core refuses a zero budget"
+    assert!(build_read_only(&t).is_err());
+    t.budget = "2".into();
+    assert_eq!(
+        build_read_only(&t).unwrap().envelope.budgets.max_cost_usd,
+        Some(2.0)
     );
 }
 

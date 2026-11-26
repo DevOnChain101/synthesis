@@ -405,6 +405,8 @@ pub struct CriteriaView {
     pub checks: Vec<String>,
     /// Turns per attempt the contract names (`envelope.budgets.max_turns`); `None`: it names none.
     pub max_turns: Option<u32>,
+    /// The legacy money cap of a contract that names one (new contracts have none).
+    pub max_cost_usd: Option<f64>,
     pub extra: Vec<BriefRow>,
 }
 
@@ -478,6 +480,10 @@ impl CriteriaView {
             criteria,
             checks,
             max_turns: turns(c.pointer("/envelope/budgets/max_turns")),
+            max_cost_usd: c
+                .pointer("/envelope/budgets/max_cost_usd")
+                .and_then(Value::as_f64)
+                .filter(|x| x.is_finite() && *x > 0.0),
             extra: rest,
         })
     }
@@ -507,6 +513,9 @@ impl CriteriaView {
         }
         if let Some(t) = self.max_turns {
             out.push_str(&format!("Turns per attempt: {t}\n"));
+        }
+        if let Some(m) = self.max_cost_usd {
+            out.push_str(&format!("Cost cap (legacy): {m}\n"));
         }
         push_extra(&mut out, &self.extra);
         out

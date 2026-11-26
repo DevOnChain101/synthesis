@@ -22,6 +22,8 @@ pub struct FormText {
     pub goal: String,
     pub criteria: String,
     pub checks: String,
+    /// Legacy money cap in USD (empty: none). The new-goal form has no such field; a revision shows the cap
+    /// the contract being revised carries, and keeps it unless the text is emptied.
     pub budget: String,
     pub scope: String,
     pub workspace: String,
@@ -62,7 +64,11 @@ pub fn text_of(c: &Contract) -> FormText {
             .map(|k| flat(&k.command))
             .collect::<Vec<_>>()
             .join("\n"),
-        budget: c.envelope.budgets.max_cost_usd.to_string(),
+        budget: c
+            .envelope
+            .budgets
+            .max_cost_usd
+            .map_or_else(String::new, |m| m.to_string()),
         scope: c.envelope.allowed_paths.join("\n"),
         workspace: String::new(),
         attempts: String::new(),
@@ -71,6 +77,22 @@ pub fn text_of(c: &Contract) -> FormText {
             .budgets
             .max_turns
             .map_or_else(String::new, |t| t.to_string()),
+    }
+}
+
+/// The legacy money cap typed: empty names none, else a positive number.
+fn budget_of(t: &FormText) -> Result<Option<f64>, String> {
+    match t.budget.trim() {
+        "" => Ok(None),
+        n => n
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .map(Some)
+            .ok_or_else(|| {
+                "Budget: the legacy cost cap is a positive number of USD, or empty for none."
+                    .to_string()
+            }),
     }
 }
 
@@ -124,7 +146,7 @@ fn default_envelope() -> Envelope {
             (Capability::RepoWrite, CapabilityMode::Allow),
             (Capability::TestsRun, CapabilityMode::Allow),
         ]),
-        budgets: Budgets::new(0.0),
+        budgets: Budgets::without_cost(),
         quality_gates: vec![],
     }
 }
@@ -155,18 +177,15 @@ pub fn build(t: &FormText, prev: Option<&Contract>) -> Result<Contract, Vec<Stri
                 .to_string(),
         );
     }
-    let budget = t.budget.trim().parse::<f64>().ok();
-    if budget.is_none() {
-        errs.push(
-            "Budget: enter the most you accept to spend, in USD (for example 5); there is no default."
-                .to_string(),
-        );
+    let budget = budget_of(t);
+    if let Err(e) = &budget {
+        errs.push(e.clone());
     }
     let turns = turns_of(t);
     if let Err(e) = &turns {
         errs.push(e.clone());
     }
-    let (true, Some(budget), Ok(turns)) = (errs.is_empty(), budget, turns) else {
+    let (true, Ok(budget), Ok(turns)) = (errs.is_empty(), budget, turns) else {
         return Err(errs);
     };
 
@@ -268,12 +287,9 @@ pub fn build_read_only(t: &FormText) -> Result<Contract, Vec<String>> {
     if goal.is_empty() {
         errs.push("Goal: say what the goal must check or find out.".to_string());
     }
-    let budget = t.budget.trim().parse::<f64>().ok();
-    if budget.is_none() {
-        errs.push(
-            "Budget: enter the most you accept to spend, in USD (for example 2); there is no default."
-                .to_string(),
-        );
+    let budget = budget_of(t);
+    if let Err(e) = &budget {
+        errs.push(e.clone());
     }
     let attempts = match t.attempts.trim() {
         "" => Some(DEFAULT_MAX_ATTEMPTS_PER_WORK_ITEM),
@@ -291,12 +307,12 @@ pub fn build_read_only(t: &FormText) -> Result<Contract, Vec<String>> {
     if let Err(e) = &turns {
         errs.push(e.clone());
     }
-    let (true, Some(budget), Some(attempts), Ok(turns)) =
-        (errs.is_empty(), budget, attempts, turns)
+    let (true, Ok(budget), Some(attempts), Ok(turns)) = (errs.is_empty(), budget, attempts, turns)
     else {
         return Err(errs);
     };
-    let mut budgets = Budgets::new(budget);
+    let mut budgets = Budgets::without_cost();
+    budgets.max_cost_usd = budget;
     budgets.max_attempts_per_work_item = attempts;
     budgets.max_turns = turns;
     let c = Contract::read_only(goal, &lines(&t.criteria), budgets);

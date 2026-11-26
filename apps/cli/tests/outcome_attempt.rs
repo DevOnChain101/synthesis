@@ -242,6 +242,17 @@ fn run(r: &Rig, script: serde_json::Value) -> Ran {
 }
 
 fn run_with(r: &Rig, contract: &Contract, prompt: &str, script: serde_json::Value) -> Ran {
+    run_with_policy(r, contract, prompt, script, |_| {})
+}
+
+/// [`run_with`] with the settings policy adjusted first (for example a turn limit).
+fn run_with_policy(
+    r: &Rig,
+    contract: &Contract,
+    prompt: &str,
+    script: serde_json::Value,
+    tweak: impl FnOnce(&mut OutcomePolicy),
+) -> Ran {
     let (mut w, it) = leased_item_with(r, contract);
     let alloc = Allocator {
         store: &r.store,
@@ -267,6 +278,7 @@ fn run_with(r: &Rig, contract: &Contract, prompt: &str, script: serde_json::Valu
     std::fs::write(&script_path, script.to_string()).unwrap();
     let mut policy = OutcomePolicy::new(true, 16, 10, 24);
     policy.attempt_max_wall_secs = Some(120);
+    tweak(&mut policy);
     let profile = Profile::build(
         PathBuf::from(env!("CARGO_BIN_EXE_synt")),
         &env,
@@ -357,6 +369,72 @@ fn the_worker_runs_in_the_attempts_worktree_under_the_unattended_profile() {
         .read_events(&env.session_id, 0, 1000)
         .unwrap();
     assert!(!evs.is_empty(), "the session has the worker's events");
+}
+
+/// Slice D: a contract with no money cap and an unpriced model. The worker gets no `--max-cost-usd` (the
+/// orchestrator bounds it by turns, tokens and wall time) and still runs to the end.
+#[test]
+fn an_attempt_with_no_money_cap_runs_and_finishes_without_a_cost_flag() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let mut c = contract();
+    c.envelope.budgets = Budgets::without_cost();
+    let hello = json!([{"text": "writing", "tools": [{"id": "w1", "name": "Write", "input": {"file_path": "hello.txt", "content": "hi\n"}}]}, {"text": "done"}, {"text": "done"}, {"text": "done"}]);
+    let (w, it, env, settled) = run_with(&r, &c, "write hello.txt", hello);
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert!(
+        matches!(s.end, WorkerEnd::Completed | WorkerEnd::Unverified),
+        "{log}"
+    );
+    assert_eq!(s.item, WorkItemState::Verifying, "{log}");
+    assert!(
+        env.git
+            .as_ref()
+            .unwrap()
+            .worktree
+            .join("hello.txt")
+            .exists()
+    );
+    // nothing was reserved: there is no cap to count it against
+    let a = w.list_attempts(&it).unwrap().remove(0);
+    assert!(
+        a.reserved_usd.is_none_or(|u| u == 0.0),
+        "{:?}",
+        a.reserved_usd
+    );
+}
+
+/// A worker that reaches `--max-turns` stops by itself and the attempt settles as a failed one (the
+/// scheduler then retries within `max_attempts_per_work_item`), with no money cap in play.
+#[test]
+fn a_worker_at_its_turn_limit_ends_the_attempt_failed_with_budget_exceeded() {
+    let r = rig();
+    if !host_confines(&r.home) {
+        no_sandbox_is_ok("the attempt cannot run");
+        return;
+    }
+    let mut c = contract();
+    c.envelope.budgets = Budgets::without_cost();
+    let read = |n: &str| json!({"tools": [{"id": n, "name": "Read", "input": {"file_path": "README.md"}}]});
+    let script = json!([read("r1"), read("r2"), read("r3"), {"text": "done"}]);
+    let (_, _, env, settled) = run_with_policy(&r, &c, "read a lot", script, |p| {
+        p.attempt_max_turns = Some(1)
+    });
+    let log = std::fs::read_to_string(r.dir.path().join("worker.log")).unwrap_or_default();
+    let s = settled.unwrap();
+    assert_eq!(s.end, WorkerEnd::Failed, "{log}");
+    let evs = r
+        .store
+        .reader()
+        .unwrap()
+        .read_events(&env.session_id, 0, 5000)
+        .unwrap();
+    let text = format!("{evs:?}");
+    assert!(text.contains("budget_exceeded:max_turns"), "{log}\n{text}");
 }
 
 #[test]

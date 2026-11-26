@@ -879,7 +879,7 @@ fn the_contract_is_approved_by_a_command_the_owner_applies() {
 fn widened() -> Contract {
     let mut c = contract();
     c.envelope.allowed_paths.push("docs/**".into());
-    c.envelope.budgets.max_cost_usd = 9.0;
+    c.envelope.budgets.max_cost_usd = Some(9.0);
     c
 }
 

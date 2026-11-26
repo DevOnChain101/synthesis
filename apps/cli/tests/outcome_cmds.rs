@@ -279,12 +279,11 @@ fn ro_create_read_only_goal_in_a_plain_folder_through_the_owner_process() {
     let plain = r.base.join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let plain = plain.to_string_lossy().into_owned();
-    // the other kind's inputs are refused, and a budget is required
+    // the other kind's inputs are refused (a money cap is optional since slice D)
     for extra in [
         vec!["--base-commit", r.head.as_str()],
         vec!["--criteria-file", "x.json"],
         vec!["--envelope-file", "x.json"],
-        vec![],
     ] {
         let mut a = vec![
             "create",
@@ -309,6 +308,24 @@ fn ro_create_read_only_goal_in_a_plain_folder_through_the_owner_process() {
         &plain,
     ]);
     assert_eq!(code, 2, "a write goal takes no read-only options");
+    // no money named: the legacy cap is optional and the contract is stored without it
+    let free = r.json(&[
+        "create",
+        "--kind",
+        "read-only",
+        "--goal",
+        "no money named",
+        "--max-turns",
+        "20",
+        "--cwd",
+        &plain,
+    ]);
+    let c = r.json(&["contract", free["id"].as_str().unwrap()]);
+    let b = &c["contract"]["envelope"]["budgets"];
+    assert!(
+        b.get("max_cost_usd").is_none() && b["max_turns"] == 20,
+        "{b}"
+    );
     let made = r.json(&[
         "create",
         "--kind",

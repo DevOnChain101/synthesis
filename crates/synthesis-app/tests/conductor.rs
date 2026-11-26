@@ -1098,12 +1098,13 @@ fn the_auto_list_refuses_message_worker_and_close_and_message_worker_ships_off()
     );
     assert_eq!(
         (c.confirm, c.max_cost_usd, c.max_sessions),
-        (Confirm::All, 3.0, 4)
+        (Confirm::All, Some(3.0), 4)
     );
     let d = ConductorConfig::from_docs(None, []);
+    // no money caps unless the person sets one (owner decision 2026-11-25)
     assert_eq!(
         (d.max_cost_usd, d.session_max_cost_usd, d.max_sessions),
-        (2.0, 5.0, 6)
+        (None, None, 6)
     );
 }
 

@@ -871,7 +871,7 @@ fn a_revised_contract_is_replanned_by_the_model_and_the_outcome_runs_after_the_a
     to(&mut w, OutcomeState::Blocked).unwrap();
     // a revised contract, approved: the outcome is rebound and its plan (v1) is for the old one
     let mut c2 = contract();
-    c2.envelope.budgets.max_cost_usd = 4.0;
+    c2.envelope.budgets.max_cost_usd = Some(4.0);
     let queue = |w: &OutcomeWriter, key: &str, kind: &str, params: Value, rev: Option<i64>| {
         r.store
             .enqueue_command(NewCommand {

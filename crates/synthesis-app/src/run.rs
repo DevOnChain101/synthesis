@@ -10,6 +10,7 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use synthesis_config::{Config, Env, LoadContext, ProjectTrust, parse_model, resolve_credential};
+use synthesis_core::outcome::{HARD_MAX_TOKENS, HARD_MAX_TURNS};
 use synthesis_core::{AgentSession, BudgetUsage, SessionStatus, WorkspaceContext};
 use synthesis_events::{ArtifactRef, Event, SessionEnd, TaskStatus};
 use synthesis_harness::{
@@ -505,7 +506,7 @@ pub struct Native {
     pub browser_view: Option<Arc<synthesis_tools::BrowserTap>>,
     /// Set: the conductor role (super-agent-s1.md 4.1). The session's only tools are the host's
     /// read-only `conductor_*` tools; no project instructions, memory, MCP, peers or browser; a cost
-    /// cap (`Limits::max_cost_usd`) is required.
+    /// cap (`Limits::max_cost_usd`) is optional (legacy).
     pub host_tools: Option<Arc<dyn crate::host_tools::HostTools>>,
 }
 
@@ -926,7 +927,19 @@ pub fn expand_file_mentions(
 
 /// Refusals of the governed (headless / engine) runs and of `--unattended`; `Err` is the exit-2 text.
 pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(), String> {
-    if (governed || c.unattended) && limits.max_cost_usd.is_none() && !limits.no_cost_cap {
+    // An outcome attempt may run with no money cap (custom providers have no reliable prices) when the
+    // orchestrator bounds it by turns and tokens (and `--max-wall-secs`, which a governed run always has).
+    let in_range = |v: Option<u64>, max: u64| v.is_some_and(|v| (1..=max).contains(&v));
+    let bounded_attempt = c.attempt_session
+        && in_range(limits.max_turns.map(u64::from), u64::from(HARD_MAX_TURNS))
+        && in_range(limits.max_tokens, HARD_MAX_TOKENS)
+        // `--max-wall-secs` is optional here (a governed run has a default); when given it has the settings ceiling
+        && limits.max_wall_secs.is_none_or(|w| (1..=7 * 24 * 3600).contains(&w));
+    if (governed || c.unattended)
+        && limits.max_cost_usd.is_none()
+        && !limits.no_cost_cap
+        && !bounded_attempt
+    {
         return Err("an unattended run needs a cost cap: pass --max-cost-usd N (the model needs a price, see docs/UNATTENDED.md) or --no-cost-cap to accept spending without one".into());
     }
     if c.unattended {
@@ -1034,13 +1047,16 @@ pub fn prepare(
     if let Some(h) = &host_tools {
         cli_allow.extend(h.specs().into_iter().map(|s| s.name));
     }
-    // its own budget, capped: never the outcomes' and never unbounded (an unpriced model is refused under a cap)
+    // its own budget, never the outcomes': a legacy `synt.conductor.max_cost_usd` still caps it (and then needs a
+    // price); without one the engine's per-task turn limit (50 by default) bounds it
     if conductor
         && limits
             .max_cost_usd
-            .is_none_or(|v| !v.is_finite() || v <= 0.0)
+            .is_some_and(|v| !v.is_finite() || v <= 0.0)
     {
-        return Err("a conductor session needs a cost cap (max_cost_usd > 0)".into());
+        return Err(
+            "a conductor session's cost cap (max_cost_usd) must be a positive number".into(),
+        );
     }
     // The conductor never takes the project's trust: project settings, hooks, provider config and MCP load as for
     // an untrusted folder (user and managed settings only), whatever the host's start flags say.
@@ -3593,6 +3609,57 @@ mod tests {
         assert!(
             check_governance(&u, &free, true).is_err(),
             "no cap is not allowed"
+        );
+        // an outcome attempt may run with no money cap when turns and tokens bound it; nothing else may
+        let bounded = Limits {
+            max_turns: Some(50),
+            max_tokens: Some(2_000_000),
+            ..Limits::default()
+        };
+        let att = W::parse_from(["x", "--unattended", "--attempt-session", "--resume", "s"]).c;
+        assert!(check_governance(&att, &Limits::default(), true).is_err());
+        assert!(check_governance(&att, &bounded, true).is_ok());
+        // out-of-range bounds are no bound: zero, above the hard ceilings, a wall above 7 days
+        for bad in [
+            Limits {
+                max_turns: Some(0),
+                ..bounded.clone()
+            },
+            Limits {
+                max_turns: Some(HARD_MAX_TURNS + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_tokens: Some(0),
+                ..bounded.clone()
+            },
+            Limits {
+                max_tokens: Some(HARD_MAX_TOKENS + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_wall_secs: Some(7 * 24 * 3600 + 1),
+                ..bounded.clone()
+            },
+            Limits {
+                max_wall_secs: Some(0),
+                ..bounded.clone()
+            },
+        ] {
+            assert!(check_governance(&att, &bad, true).is_err());
+        }
+        let ok_wall = Limits {
+            max_wall_secs: Some(1800),
+            ..bounded.clone()
+        };
+        assert!(check_governance(&att, &ok_wall, true).is_ok());
+        assert!(
+            check_governance(&u, &bounded, true).is_err(),
+            "a plain unattended run still needs a cap"
+        );
+        assert!(
+            check_governance(&att, &free, true).is_err(),
+            "--no-cost-cap stays refused"
         );
         // strictly tighter than allow: hosts through the proxy are accepted, but the list must come
         // from settings, not from --allow-host

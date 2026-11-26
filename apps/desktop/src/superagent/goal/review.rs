@@ -156,6 +156,16 @@ fn review_body(f: &GoalForm, r: &Review) -> Div {
             .child(kit::card("sa-goal-stored", false).child(kv(vec![
                 ("Kind", plain(kind_line(f.kind))),
                 (
+                    "Cost cap (legacy)",
+                    plain(
+                        r.contract
+                            .as_ref()
+                            .ok()
+                            .and_then(|c| c.max_cost_usd)
+                            .map_or_else(|| "none".to_string(), |m| format!("${m}")),
+                    ),
+                ),
+                (
                     "Turns",
                     plain(turns_line(
                         r.contract.as_ref().ok().and_then(|c| c.max_turns),
@@ -300,9 +310,17 @@ pub(super) fn dialog(
         ),
         ("Kind", plain(kind_line(f.kind))),
         (
-            "Budget",
-            plain(sanitize_for_display(&format!("${}", typed.budget.trim()))),
+            "Folder",
+            mono(sanitize_for_display(typed.workspace.trim()), t::TEXT_STRONG),
         ),
+    ];
+    // a legacy money cap is shown only when the stored contract carries one
+    if let Some(m) = r.contract.as_ref().ok().and_then(|c| c.max_cost_usd) {
+        rows.insert(2, ("Cost cap (legacy)", plain(format!("${m}"))));
+    }
+    // the number that will run is on the dialog, so the person sees it before approving
+    rows.insert(
+        2,
         (
             "Turns",
             plain(turns_line(
@@ -310,11 +328,7 @@ pub(super) fn dialog(
                 f.turn_setting,
             )),
         ),
-        (
-            "Folder",
-            mono(sanitize_for_display(typed.workspace.trim()), t::TEXT_STRONG),
-        ),
-    ];
+    );
     if f.kind == GoalKind::Writes {
         rows.push((
             "Base commit",

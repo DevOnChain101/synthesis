@@ -725,7 +725,10 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
     p.attempt_max_wall_secs = Some(600);
     let prof = Profile::build(PathBuf::from("synt"), &env, &c, &p, 0.0, "goal".into()).unwrap();
     // the smallest of contract and settings; the outcome cap bounds it too
-    assert_eq!((prof.max_cost_usd(), prof.max_wall_secs()), (1.5, 600));
+    assert_eq!(
+        (prof.max_cost_usd(), prof.max_wall_secs()),
+        (Some(1.5), 600)
+    );
     // never acceptEdits: that would allow edits outside allowed_paths; writes come from rules
     assert_eq!(prof.permission_mode(), "default");
     let argv: Vec<String> = prof
@@ -787,7 +790,7 @@ fn the_profile_is_unattended_capped_and_cannot_be_loosened() {
         "g".into(),
     )
     .unwrap();
-    assert_eq!(plain.max_cost_usd(), 5.0);
+    assert_eq!(plain.max_cost_usd(), Some(5.0));
     assert_eq!(plain.max_wall_secs(), DEFAULT_WALL_SECS);
     // a contract that does not allow writing gets no edit rule and an edit deny
     let mut ro = r.contract_for_profile();
@@ -1183,8 +1186,8 @@ fn later_attempts_get_what_is_left_of_the_outcome_cap() {
             "g".into(),
         )
     };
-    assert_eq!(build(0.0).unwrap().max_cost_usd(), 5.0);
-    assert_eq!(build(3.5).unwrap().max_cost_usd(), 1.5);
+    assert_eq!(build(0.0).unwrap().max_cost_usd(), Some(5.0));
+    assert_eq!(build(3.5).unwrap().max_cost_usd(), Some(1.5));
     assert!(matches!(
         build(5.0),
         Err(ProfileError::BudgetExhausted { .. })
@@ -1202,7 +1205,7 @@ fn later_attempts_get_what_is_left_of_the_outcome_cap() {
         build(f64::INFINITY),
         Err(ProfileError::BudgetExhausted { .. })
     ));
-    assert_eq!(build(-100.0).unwrap().max_cost_usd(), 5.0);
+    assert_eq!(build(-100.0).unwrap().max_cost_usd(), Some(5.0));
     // the settings' ceiling bounds it as well
     let mut p = policy();
     p.max_cost_usd = Some(4.0);
@@ -1210,7 +1213,7 @@ fn later_attempts_get_what_is_left_of_the_outcome_cap() {
         Profile::build(PathBuf::from("synt"), &env, &c, &p, 1.0, "g".into())
             .unwrap()
             .max_cost_usd(),
-        3.0
+        Some(3.0)
     );
     // the spend is read from what the attempts' sessions recorded
     let id = w.id().clone();
@@ -1232,7 +1235,88 @@ fn later_attempts_get_what_is_left_of_the_outcome_cap() {
         "g".into(),
     )
     .unwrap();
-    assert_eq!(left.max_cost_usd(), 2.75);
+    assert_eq!(left.max_cost_usd(), Some(2.75));
+}
+
+/// Slice D: no money cap anywhere means no `--max-cost-usd` and no reservation; a cap that exists (the
+/// contract's, a per-attempt one, the settings ceiling) is still enforced exactly as before.
+#[test]
+fn no_money_cap_means_no_cost_flag_and_no_reservation_but_a_legacy_cap_still_binds() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let mut c = r.contract_for_profile();
+    c.envelope.budgets.max_cost_usd = None;
+    let build = |c: &Contract, p: &OutcomePolicy, spent| {
+        Profile::build(PathBuf::from("synt"), &env, c, p, spent, "g".into())
+    };
+    let free = build(&c, &policy(), 0.0).unwrap();
+    assert_eq!(free.max_cost_usd(), None);
+    let argv: Vec<String> = free
+        .argv()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(!argv.iter().any(|a| a == "--max-cost-usd"), "{argv:?}");
+    // the backstops are never optional
+    for f in ["--max-turns", "--max-tokens", "--max-wall-secs"] {
+        assert!(argv.iter().any(|a| a == f), "{f} in {argv:?}");
+    }
+    // a spend that is not a number is still a used-up budget, with or without a cap
+    assert!(matches!(
+        build(&c, &policy(), f64::NAN),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
+    // the settings ceiling alone still caps the attempt, minus what earlier attempts spent
+    let mut ceiling = policy();
+    ceiling.max_cost_usd = Some(4.0);
+    assert_eq!(build(&c, &ceiling, 1.0).unwrap().max_cost_usd(), Some(3.0));
+    assert!(matches!(
+        build(&c, &ceiling, 4.0),
+        Err(ProfileError::BudgetExhausted { .. })
+    ));
+    // so does a per-attempt cap of the contract
+    c.envelope.budgets.attempt_max_cost_usd = Some(0.5);
+    assert_eq!(build(&c, &policy(), 0.0).unwrap().max_cost_usd(), Some(0.5));
+    // and an old contract's outcome cap, unchanged
+    assert_eq!(
+        build(&r.contract_for_profile(), &policy(), 0.0)
+            .unwrap()
+            .max_cost_usd(),
+        Some(5.0)
+    );
+}
+
+#[test]
+fn a_run_with_no_money_cap_reserves_nothing_and_hands_over_to_verification() {
+    need_git!();
+    let r = rig();
+    let (mut w, one, _) = r.outcome();
+    let env = r
+        .allocator()
+        .allocate(&mut w, &r.spec(&one, 1), OffsetDateTime::now_utc())
+        .unwrap();
+    let mut c = r.contract_for_profile();
+    c.envelope.budgets.max_cost_usd = None;
+    let p = Profile::build(PathBuf::from("sh"), &env, &c, &policy(), 0.0, "g".into()).unwrap();
+    let s = Script("echo made > out.txt; exit 0".into());
+    let settled = runner(&r, &s)
+        .run_attempt(&mut w, &env, &p, &CancelFlag::default())
+        .unwrap();
+    assert_eq!(
+        (settled.end, settled.item),
+        (WorkerEnd::Completed, WorkItemState::Verifying)
+    );
+    let a = attempt(&w, &one, 1);
+    assert!(
+        a.reserved_usd.is_none_or(|u| u == 0.0),
+        "{:?}",
+        a.reserved_usd
+    );
 }
 
 #[test]

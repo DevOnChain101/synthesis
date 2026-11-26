@@ -1269,11 +1269,15 @@ impl OutcomePolicy {
         if b.max_attempts_per_work_item > self.max_attempts_per_work_item {
             return Err(over("max_attempts_per_work_item"));
         }
-        if self.max_cost_usd.is_some_and(|m| b.max_cost_usd > m) {
+        // money caps are legacy: a contract that names none is fine (the settings ceiling, when set, still
+        // applies to every attempt as a limit); one that names more than the ceiling is refused
+        if let (Some(m), Some(c)) = (self.max_cost_usd, b.max_cost_usd)
+            && c > m
+        {
             return Err(over("max_cost_usd"));
         }
-        if let Some(m) = self.attempt_max_cost_usd
-            && !b.attempt_max_cost_usd.is_some_and(|c| c <= m)
+        if let (Some(m), Some(c)) = (self.attempt_max_cost_usd, b.attempt_max_cost_usd)
+            && c > m
         {
             return Err(over("attempt_max_cost_usd"));
         }
@@ -3589,11 +3593,18 @@ impl OutcomeTx<'_, '_> {
         }
         self.live_attempt(id, fence)?;
         let o = self.outcome()?;
-        let cap = self
-            .stored_contract(o.contract_version)?
-            .envelope
-            .budgets
-            .max_cost_usd;
+        // the smaller of the contract's cap and the settings ceiling; none of either: nothing to reserve
+        // against (turns, tokens and wall time bound the attempt)
+        let cap = [
+            self.stored_contract(o.contract_version)?
+                .envelope
+                .budgets
+                .max_cost_usd,
+            self.policy.max_cost_usd,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
         let own: f64 = self.et.tx.query_row(
             "SELECT COALESCE(reserved_usd,0) FROM attempts WHERE id=?1",
             [id.as_str()],
@@ -4811,7 +4822,13 @@ impl OutcomeTx<'_, '_> {
         // the ceilings may have tightened since the contract was approved (as for an attempt)
         let contract = self.stored_contract(o.contract_version)?;
         self.policy.check(&contract)?;
-        let cap = contract.envelope.budgets.max_cost_usd;
+        let cap = [
+            contract.envelope.budgets.max_cost_usd,
+            self.policy.max_cost_usd,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
         let left = cap - spend(self.et.tx, self.id)?;
         // a NaN spend (a corrupt row) is not "enough left" either
         if left.is_nan() || left < MIN_PLAN_RESERVE_USD {

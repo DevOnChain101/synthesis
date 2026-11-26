@@ -43,15 +43,14 @@ pub struct ConductorConfig {
     /// `provider/model` of the conductor; `None`: the user's default.
     pub model: Option<String>,
     pub confirm: Confirm,
-    /// USD per conductor session; the engine refuses an unpriced model.
-    pub max_cost_usd: f64,
-    pub session_max_cost_usd: f64,
+    /// Legacy USD caps, `None` unless the person sets them (no prices are known for custom providers): the engine
+    /// refuses an unpriced model under one. Without it the engine's per-task turn limit bounds the session.
+    pub max_cost_usd: Option<f64>,
+    pub session_max_cost_usd: Option<f64>,
     pub max_sessions: usize,
     pub diagnostics: Vec<String>,
 }
 
-pub const DEFAULT_MAX_COST_USD: f64 = 2.0;
-pub const DEFAULT_SESSION_MAX_COST_USD: f64 = 5.0;
 pub const DEFAULT_MAX_SESSIONS: usize = 6;
 const MAX_SESSIONS_LIMIT: u64 = 20;
 
@@ -83,8 +82,8 @@ impl ConductorConfig {
         let mut c = Self {
             model,
             confirm: Confirm::All,
-            max_cost_usd: DEFAULT_MAX_COST_USD,
-            session_max_cost_usd: DEFAULT_SESSION_MAX_COST_USD,
+            max_cost_usd: None,
+            session_max_cost_usd: None,
             max_sessions: DEFAULT_MAX_SESSIONS,
             diagnostics: vec![],
         };
@@ -107,11 +106,11 @@ impl ConductorConfig {
                         None => bad(k, "must be \"provider/model\""),
                     },
                     "max_cost_usd" => match usd(v) {
-                        Some(x) => c.max_cost_usd = x,
+                        Some(x) => c.max_cost_usd = Some(x),
                         None => bad(k, "must be a positive number"),
                     },
                     "session_max_cost_usd" => match usd(v) {
-                        Some(x) => c.session_max_cost_usd = x,
+                        Some(x) => c.session_max_cost_usd = Some(x),
                         None => bad(k, "must be a positive number"),
                     },
                     "max_sessions" => {

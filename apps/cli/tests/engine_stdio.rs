@@ -1212,7 +1212,7 @@ fn a_conductor_role_engine_stays_untrusted_after_a_trust_grant() {
 }
 
 #[test]
-fn a_conductor_role_needs_the_engines_own_cap_and_an_unknown_role_is_refused() {
+fn a_conductor_role_needs_no_money_cap_and_an_unknown_role_is_refused() {
     let mut e = engine_with(
         &["--host", "desktop"],
         None,
@@ -1229,12 +1229,10 @@ fn a_conductor_role_needs_the_engines_own_cap_and_an_unknown_role_is_refused() {
             .is_some_and(|e| e.contains("unknown role")),
         "{r}"
     );
+    // no money cap is asked for any more (slice D): the engine's per-task turn limit bounds the session
     let id = e.call("start", json!({"cwd": ws, "role": "conductor"}));
     let (_, r) = e.result(id);
-    assert!(
-        r["error"].as_str().is_some_and(|e| e.contains("cost cap")),
-        "{r}"
-    );
+    assert!(r.get("error").is_none_or(|e| e.is_null()), "{r}");
 }
 
 /// `synt stop` from another process reaches the engine: the running task is cancelled.

@@ -219,8 +219,9 @@ pub struct StartOpts {
 /// host's read-only `conductor_*` tools. Its spend is its own, capped, and never an outcome's.
 pub struct ConductorOpts {
     pub host: Arc<dyn synthesis_app::host_tools::HostTools>,
-    /// `synt.conductor.max_cost_usd`; a model with no price is refused under it.
-    pub max_cost_usd: f64,
+    /// Legacy `synt.conductor.max_cost_usd`; a model with no price is refused under it. `None` (the default):
+    /// no money cap, the engine's per-task turn limit bounds the session.
+    pub max_cost_usd: Option<f64>,
 }
 
 /// One row of the MCP panel.
@@ -562,7 +563,7 @@ impl Engine {
             host_tools: conductor.as_ref().map(|c| c.host.clone()),
         };
         let limits = Limits {
-            max_cost_usd: conductor.as_ref().map(|c| c.max_cost_usd),
+            max_cost_usd: conductor.as_ref().and_then(|c| c.max_cost_usd),
             ..Limits::default()
         };
         let t_prepare = crate::trace::span(
@@ -674,7 +675,7 @@ impl Engine {
             memory_report: (info.notes.clone().hook().report)(),
             notes: info.notes,
             followup: Arc::default(),
-            conductor: limits.max_cost_usd.is_some(),
+            conductor: conductor.is_some(),
             browser,
         };
         Ok((engine, rx))

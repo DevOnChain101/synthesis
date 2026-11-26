@@ -139,7 +139,7 @@ fn rig(d: &Dirs) -> Rig {
     }
 }
 
-fn conductor(d: &Dirs, host: Arc<Host>, cap: f64) -> Result<Rig, String> {
+fn conductor(d: &Dirs, host: Arc<Host>, cap: Option<f64>) -> Result<Rig, String> {
     let (o, env) = opts(d);
     let c = ConductorOpts {
         host,
@@ -165,7 +165,7 @@ fn the_conductor_engine_has_only_host_tools_no_project_text_and_a_fixed_mode() {
     std::fs::write(d.ws.join("AGENTS.md"), "PROJECT-MARKER-XYZ").unwrap();
     std::fs::write(d.home.join("AGENTS.md"), "HOME-MARKER-XYZ").unwrap();
     let host = Arc::new(Host::default());
-    let mut r = conductor(&d, host.clone(), 2.0).expect("conductor starts");
+    let mut r = conductor(&d, host.clone(), Some(2.0)).expect("conductor starts");
     r.engine.send("who are you".into()).unwrap();
     r.pump("task end", |r| r.done.is_some());
     assert_eq!(r.done, Some(Ok(())));
@@ -193,17 +193,19 @@ fn the_conductor_engine_has_only_host_tools_no_project_text_and_a_fixed_mode() {
 }
 
 #[test]
-fn the_conductor_needs_a_cap_and_stops_at_it() {
+fn a_legacy_conductor_cap_must_be_positive_and_stops_the_session_at_it() {
     let script = json!([
         {"usage": [2_000_000, 0], "tools": [{"id": "c1", "name": "conductor_list", "input": {}}]},
         {"text": "SHOULD-NOT-RUN"}
     ]);
     let d = dirs(script, priced());
     for cap in [0.0, -1.0, f64::NAN] {
-        let e = conductor(&d, Arc::default(), cap).err().expect("refused");
+        let e = conductor(&d, Arc::default(), Some(cap))
+            .err()
+            .expect("refused");
         assert!(e.contains("cost cap"), "{e}");
     }
-    let mut r = conductor(&d, Arc::default(), 0.5).unwrap();
+    let mut r = conductor(&d, Arc::default(), Some(0.5)).unwrap();
     r.engine.send("go".into()).unwrap();
     r.pump("task end", |r| r.done.is_some());
     assert!(
@@ -214,10 +216,27 @@ fn the_conductor_needs_a_cap_and_stops_at_it() {
     r.engine.close();
 }
 
+/// Slice D: no money cap is the default. An unpriced model (a custom provider) runs the conductor, and the
+/// engine's per-task turn limit is what bounds it.
+#[test]
+fn a_conductor_with_no_money_cap_runs_on_an_unpriced_model() {
+    let script = json!([
+        {"tools": [{"id": "c1", "name": "conductor_list", "input": {}}]},
+        {"text": "listed"}
+    ]);
+    let d = dirs(script, json!({}));
+    let mut r = conductor(&d, Arc::default(), None).expect("starts with no cap and no price");
+    r.engine.send("go".into()).unwrap();
+    r.pump("task end", |r| r.done.is_some());
+    assert_eq!(r.done, Some(Ok(())));
+    assert!(r.texts().iter().any(|t| t.contains("listed")));
+    r.engine.close();
+}
+
 #[test]
 fn a_model_with_no_price_is_refused_under_the_conductor_cap() {
     let d = dirs(json!([{"text": "x"}]), json!({}));
-    let r = conductor(&d, Arc::default(), 2.0);
+    let r = conductor(&d, Arc::default(), Some(2.0));
     let outcome = match r {
         Err(e) => Err(e),
         Ok(mut r) => {
@@ -344,7 +363,7 @@ fn a_trusted_project_cannot_run_hooks_or_bring_a_provider_into_the_conductor() {
         o,
         ConductorOpts {
             host: Arc::new(Host::default()),
-            max_cost_usd: 2.0,
+            max_cost_usd: Some(2.0),
         },
         &env,
     )

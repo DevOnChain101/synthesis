@@ -61,7 +61,7 @@ pub enum OutcomeCmd {
         goal: String,
         /// `write` (default): a worktree, checks and a git repository. `read-only`: the worker
         /// only reads the folder (any directory) and sends back a report that you review; it
-        /// takes `--max-cost-usd` and optional `--rubric` lines instead of the definition files.
+        /// takes optional `--rubric` lines and `--max-turns` instead of the definition files.
         #[arg(long, value_enum, default_value = "write")]
         kind: KindArg,
         /// JSON array of criteria (`id`, `text`, optional `mandatory`, `required_trust`, `check_ids`).
@@ -76,7 +76,8 @@ pub enum OutcomeCmd {
         /// Full commit id the work starts from (for example the output of `git rev-parse HEAD`).
         #[arg(long)]
         base_commit: Option<String>,
-        /// Read-only only: what you accept to spend, in USD.
+        /// Read-only only, legacy: a money cap in USD (needs a price for the model, see `synt.pricing`).
+        /// Left out, an attempt is limited by `--max-turns`, the token limit and wall time only.
         #[arg(long)]
         max_cost_usd: Option<f64>,
         /// Read-only only: attempts allowed, the first included (default 3).
@@ -526,10 +527,9 @@ pub fn dispatch<T: Transport>(
                     || checks_file.is_some()
                     || base_commit.is_some()
                 {
-                    return Err("a read-only goal takes no criteria, envelope or checks file and no base commit: use --max-cost-usd and --rubric".into());
+                    return Err("a read-only goal takes no criteria, envelope or checks file and no base commit: use --rubric (and --max-turns)".into());
                 }
-                let cost = max_cost_usd.ok_or("a read-only goal needs --max-cost-usd")?;
-                let mut budgets = Budgets::new(cost);
+                let mut budgets = max_cost_usd.map_or_else(Budgets::without_cost, Budgets::new);
                 budgets.max_attempts_per_work_item =
                     max_attempts.unwrap_or(budgets.max_attempts_per_work_item);
                 Contract::read_only(goal, &rubric, budgets)
