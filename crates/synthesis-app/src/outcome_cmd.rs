@@ -978,10 +978,10 @@ fn queue_text(p: &mut P, q: &Queue, now: i64) -> Result<(), String> {
             Source::Lapsed => {}
         }
     }
-    p.line(&format!(
-        "{} waiting",
-        q.rows.iter().filter(|r| r.source != Source::Lapsed).count()
-    ))
+    if let Some(gaps) = q.gaps() {
+        p.line(&gaps)?;
+    }
+    p.line(&format!("{} waiting", q.waiting))
 }
 
 fn history_cmd<T: Transport>(

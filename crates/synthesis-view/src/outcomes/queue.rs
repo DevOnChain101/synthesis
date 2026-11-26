@@ -71,8 +71,10 @@ pub struct QueueRow {
     pub expires_ms: Option<i64>,
     pub recommended: Option<Alternative>,
     pub one_tap: bool,
-    /// Keys of the work items this holds.
+    /// Keys of the work items this holds (the server names only the first ones).
     pub blocks: Vec<String>,
+    /// How many it holds.
+    pub blocks_total: u64,
     pub waiting_on_it: u64,
 }
 
@@ -162,6 +164,7 @@ impl QueueRow {
                 .map(|b| text(b, "key"))
                 .filter(|k| !k.is_empty())
                 .collect(),
+            blocks_total: v.get("blocks_total").and_then(Value::as_u64).unwrap_or(0),
             waiting_on_it: v.get("waiting_on_it").and_then(Value::as_u64).unwrap_or(0),
         })
     }
@@ -172,8 +175,10 @@ impl QueueRow {
             return None;
         }
         let mut keys = self.blocks[..self.blocks.len().min(MAX_KEYS)].join(", ");
-        if self.blocks.len() > MAX_KEYS {
-            keys.push_str(&format!(" +{}", self.blocks.len() - MAX_KEYS));
+        let shown = self.blocks.len().min(MAX_KEYS) as u64;
+        let more = self.blocks_total.max(self.blocks.len() as u64) - shown;
+        if more > 0 {
+            keys.push_str(&format!(" +{more}"));
         }
         let mut s = format!("blocks {keys}");
         if self.waiting_on_it > 0 {
@@ -186,6 +191,12 @@ impl QueueRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Queue {
     pub rows: Vec<QueueRow>,
+    /// Every ask the server counted, listed or not.
+    pub waiting: u64,
+    /// Asks left out because there are too many.
+    pub omitted: u64,
+    /// Outcomes the server could not read: their asks are not listed.
+    pub unreadable: Vec<String>,
 }
 
 impl Queue {
@@ -197,8 +208,40 @@ impl Queue {
         rows.iter()
             .take(MAX_ROWS)
             .map(|r| QueueRow::from_json(r).ok_or_else(|| "a queue row cannot be read".to_string()))
-            .collect::<Result<_, _>>()
-            .map(|rows| Self { rows })
+            .collect::<Result<Vec<QueueRow>, _>>()
+            .map(|rows| {
+                let listed = rows.iter().filter(|r| r.source != Source::Lapsed).count() as u64;
+                let count = |k: &str| v["counts"][k].as_u64().unwrap_or(0);
+                Self {
+                    waiting: count("waiting").max(listed),
+                    omitted: count("omitted"),
+                    unreadable: v["unreadable"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .take(MAX_ROWS)
+                        .map(|o| clean(o).chars().take(MAX_TEXT).collect())
+                        .collect(),
+                    rows,
+                }
+            })
+    }
+
+    /// What the list leaves out, in words; `None` when it is complete.
+    pub fn gaps(&self) -> Option<String> {
+        let mut s = vec![];
+        if !self.unreadable.is_empty() {
+            s.push(format!(
+                "{} outcome(s) could not be read and are not listed: {}",
+                self.unreadable.len(),
+                self.unreadable[..self.unreadable.len().min(MAX_KEYS)].join(", ")
+            ));
+        }
+        if self.omitted > 0 {
+            s.push(format!("{} older item(s) are not listed", self.omitted));
+        }
+        (!s.is_empty()).then(|| s.join("; "))
     }
 }
 
@@ -246,9 +289,14 @@ impl Record {
             "approval.auto_decided" => "decided by your setting",
             other => other,
         };
+        // the choice can be text the agent wrote: quoted, so it cannot pass for the record's own words
+        let choice = Some(&self.choice)
+            .filter(|c| !c.is_empty())
+            .map(|c| format!("{c:?}"))
+            .unwrap_or_default();
         [
             what,
-            &self.choice,
+            &choice,
             &self.mechanism,
             &self.tier,
             &self.by,
@@ -287,6 +335,31 @@ mod tests {
         assert!(r.one_tap);
         assert_eq!(r.blocks_line().unwrap(), "blocks w3 \u{b7} 2 waiting on it");
         assert_eq!(r.expires_ms.unwrap() - r.created_ms.unwrap(), 86_400_000);
+    }
+
+    #[test]
+    fn what_is_left_out_is_said_and_an_agents_choice_is_quoted() {
+        let mut r = row("T1");
+        r["blocks_total"] = json!(30);
+        let q = Queue::from_json(&json!({"rows": [r], "unreadable": ["o9"],
+            "counts": {"waiting": 1200, "omitted": 199}}))
+        .unwrap();
+        assert!(
+            q.rows[0]
+                .blocks_line()
+                .unwrap()
+                .starts_with("blocks w3 +29")
+        );
+        assert_eq!((q.waiting, q.omitted), (1200, 199));
+        let gaps = q.gaps().unwrap();
+        assert!(gaps.contains("o9") && gaps.contains("199 older"), "{gaps}");
+        let rec = Record::from_json(&json!({"event_id": 1, "type": "decision.resolved",
+            "payload": {"choice": "x\" \u{b7} batch \u{b7} T0"}}))
+        .unwrap();
+        assert_eq!(
+            rec.describe(),
+            "answered \u{b7} \"x\\\" \u{b7} batch \u{b7} T0\""
+        );
     }
 
     #[test]

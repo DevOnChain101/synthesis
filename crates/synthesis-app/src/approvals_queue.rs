@@ -17,6 +17,8 @@ use time::format_description::FormatItem;
 
 /// Most rows one reply carries (the counts cover every row).
 const MAX_ROWS: usize = 1000;
+/// Most held work items one row names (`blocks_total` counts them all).
+const MAX_BLOCKS: usize = 20;
 /// Most work items of a plan the dependency walk looks at.
 const MAX_ITEMS: usize = 1000;
 const MAX_TEXT: usize = 300;
@@ -124,65 +126,126 @@ struct Row {
     body: Value,
 }
 
+/// A row before the work of rating it: a pending or lapsed decision, or a waiting contract.
+struct Ask {
+    /// Index into the outcomes.
+    o: usize,
+    /// `None`: the outcome's contract waits.
+    decision: Option<DecisionRecord>,
+}
+
+impl Ask {
+    /// What stays when there are more than [`MAX_ROWS`]: waiting before lapsed, then the newest.
+    fn keep<'a>(&'a self, outcomes: &'a [OutcomeRecord]) -> (bool, &'a str) {
+        match &self.decision {
+            Some(d) => (d.row_state == DecisionState::Pending, &d.created_at),
+            None => (true, &outcomes[self.o].created_at),
+        }
+    }
+}
+
+/// The asks of one outcome. An `Err` is this outcome's alone.
+fn asks_of(r: &Reader, i: usize, o: &OutcomeRecord, since: &str) -> Result<Vec<Ask>, String> {
+    let mut asks = vec![];
+    if o.state == OutcomeState::ContractPending {
+        asks.push(Ask {
+            o: i,
+            decision: None,
+        });
+    }
+    for d in r.list_decisions(&o.id).map_err(s)? {
+        let lapsed = matches!(
+            d.row_state,
+            DecisionState::Expired | DecisionState::Invalidated
+        ) && d.expires_at.as_str() >= since;
+        if d.row_state == DecisionState::Pending || lapsed {
+            asks.push(Ask {
+                o: i,
+                decision: Some(d),
+            });
+        }
+    }
+    Ok(asks)
+}
+
+fn rate(r: &Reader, o: &OutcomeRecord, plan: &Plan, ask: &Ask) -> Result<Row, String> {
+    let Some(d) = &ask.decision else {
+        let (_, hash, _) = r.get_contract(&o.id, o.contract_version).map_err(s)?;
+        return Ok(row(
+            o,
+            Tier::T3,
+            plan,
+            plan.items.iter().collect(),
+            o.created_at.clone(),
+            o.id.to_string(),
+            json!({"source": "contract", "kind": "contract", "state": "pending",
+                   "version": o.contract_version, "hash": hash, "expires_at": null}),
+        ));
+    };
+    let lapsed = d.row_state != DecisionState::Pending;
+    let (tier, recommended, held) = if lapsed {
+        (Tier::T0, None, vec![])
+    } else {
+        let a = tier::assess(r, o, d);
+        (a.tier, a.recommended, blocks(plan, d))
+    };
+    let mut body = json!({
+        "source": if lapsed { "lapsed" } else { "decision" },
+        "decision_id": d.id, "kind": d.kind, "state": d.row_state,
+        "revision": d.revision, "brief_sha256": d.brief_sha256, "expires_at": d.expires_at,
+    });
+    if let Some((id, label)) = recommended {
+        body["recommended"] = json!({"id": capped(&id), "label": capped(&label)});
+    }
+    Ok(row(
+        o,
+        tier,
+        plan,
+        held,
+        d.created_at.clone(),
+        d.id.to_string(),
+        body,
+    ))
+}
+
 pub(crate) fn queue(r: &Reader, workspace: Option<&str>) -> Result<Value, String> {
     // shortcut: an invalidated row has no time of its own, so "the last 24 h" is judged by its
     // expiry (never later than 24 h after it was made); add a column if the Lapsed list gets noisy
     let since = ts(OffsetDateTime::now_utc() - LAPSED);
+    let outcomes: Vec<OutcomeRecord> = r
+        .list_outcomes()
+        .map_err(s)?
+        .into_iter()
+        .filter(|o| workspace.is_none_or(|w| w == o.workspace_id))
+        .collect();
+    let (mut asks, mut unreadable) = (vec![], BTreeSet::new());
+    for (i, o) in outcomes.iter().enumerate() {
+        match asks_of(r, i, o, &since) {
+            Ok(a) => asks.extend(a),
+            Err(_) => {
+                unreadable.insert(o.id.to_string());
+            }
+        }
+    }
+    // cut before the per-row reads
+    asks.sort_by(|a, b| b.keep(&outcomes).cmp(&a.keep(&outcomes)));
+    let waiting = asks.iter().filter(|a| a.keep(&outcomes).0).count();
+    let omitted = asks.len().saturating_sub(MAX_ROWS);
+    asks.truncate(MAX_ROWS);
+    let mut plans = BTreeMap::new();
     let mut rows = vec![];
-    for o in r.list_outcomes().map_err(s)? {
-        if workspace.is_some_and(|w| w != o.workspace_id) {
-            continue;
-        }
-        if o.state == OutcomeState::ContractPending {
-            let (_, hash, _) = r.get_contract(&o.id, o.contract_version).map_err(s)?;
-            let plan = plan_of(r, &o)?;
-            rows.push(row(
-                &o,
-                Tier::T3,
-                &plan,
-                plan.items.iter().collect(),
-                o.created_at.clone(),
-                o.id.to_string(),
-                json!({"source": "contract", "kind": "contract", "state": "pending",
-                       "version": o.contract_version, "hash": hash, "expires_at": null}),
-            ));
-        }
-        let mut plan = None;
-        for d in r.list_decisions(&o.id).map_err(s)? {
-            let lapsed = matches!(
-                d.row_state,
-                DecisionState::Expired | DecisionState::Invalidated
-            ) && d.expires_at >= since;
-            if d.row_state != DecisionState::Pending && !lapsed {
-                continue;
+    for ask in &asks {
+        let o = &outcomes[ask.o];
+        let plan = plans.entry(ask.o).or_insert_with(|| plan_of(r, o));
+        match plan
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|p| rate(r, o, p, ask))
+        {
+            Ok(row) => rows.push(row),
+            Err(_) => {
+                unreadable.insert(o.id.to_string());
             }
-            if plan.is_none() {
-                plan = Some(plan_of(r, &o)?);
-            }
-            let Some(plan) = plan.as_ref() else { continue };
-            let (tier, recommended, held) = if lapsed {
-                (Tier::T0, None, vec![])
-            } else {
-                let a = tier::assess(r, &o, &d);
-                (a.tier, a.recommended, blocks(plan, &d))
-            };
-            let mut body = json!({
-                "source": if lapsed { "lapsed" } else { "decision" },
-                "decision_id": d.id, "kind": d.kind, "state": d.row_state,
-                "revision": d.revision, "brief_sha256": d.brief_sha256, "expires_at": d.expires_at,
-            });
-            if let Some((id, label)) = recommended {
-                body["recommended"] = json!({"id": capped(&id), "label": capped(&label)});
-            }
-            rows.push(row(
-                &o,
-                tier,
-                plan,
-                held,
-                d.created_at.clone(),
-                d.id.to_string(),
-                body,
-            ));
         }
     }
     // highest tier first, then what holds the most work, then the oldest
@@ -211,10 +274,13 @@ pub(crate) fn queue(r: &Reader, workspace: Option<&str>) -> Result<Value, String
         "classifier_version": CLASSIFIER_VERSION,
         // no mechanism is offered by this build (slices P2 to P4)
         "policy": {"one_tap": false, "batch_max": 0, "undo_seconds": 0},
+        // the tiers count the listed rows; `waiting` counts every ask, listed or omitted
         "counts": {"t0": count(&all, Tier::T0), "t1": count(&all, Tier::T1),
-                   "t2": count(&all, Tier::T2), "t3": count(&all, Tier::T3)},
+                   "t2": count(&all, Tier::T2), "t3": count(&all, Tier::T3),
+                   "waiting": waiting, "omitted": omitted},
+        "unreadable": unreadable,
         "per_outcome": per_outcome,
-        "rows": rows.iter().take(MAX_ROWS).map(|r| &r.body).collect::<Vec<_>>(),
+        "rows": rows.iter().map(|r| &r.body).collect::<Vec<_>>(),
     }))
 }
 
@@ -237,8 +303,10 @@ fn row(
     body["batchable"] = json!(false);
     body["blocks"] = held
         .iter()
+        .take(MAX_BLOCKS)
         .map(|i| json!({"id": i.id, "key": i.key}))
         .collect();
+    body["blocks_total"] = json!(held.len());
     body["waiting_on_it"] = json!(waiting);
     Row {
         tier,

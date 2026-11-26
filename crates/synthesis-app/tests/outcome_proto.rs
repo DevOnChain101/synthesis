@@ -1081,7 +1081,8 @@ fn open_kind(r: &mut Rig, kind: &str, action: Option<Value>) -> String {
 #[test]
 fn proto_approvals_queue_golden_and_blocked_by() {
     let mut r = rig();
-    let low = open_kind(&mut r, "blocked", None);
+    let quiet = || Some(json!({"needed": [], "calls": [], "grant_rules": []}));
+    let low = open_kind(&mut r, "blocked", quiet());
     let push = json!({"needed": [], "grant_rules": [], "tier": "T1",
         "calls": [{"tool": "Bash", "input": {"command": "git push origin main"}}]});
     let high = open_kind(&mut r, "approval_needed", Some(push));
@@ -1119,7 +1120,11 @@ fn proto_approvals_queue_golden_and_blocked_by() {
         q["policy"],
         json!({"one_tap": false, "batch_max": 0, "undo_seconds": 0})
     );
-    assert_eq!(q["counts"], json!({"t0": 0, "t1": 1, "t2": 0, "t3": 2}));
+    assert_eq!(
+        q["counts"],
+        json!({"t0": 0, "t1": 1, "t2": 0, "t3": 2, "waiting": 3, "omitted": 0})
+    );
+    assert_eq!(q["unreadable"], json!([]));
     let rows = q["rows"].as_array().unwrap();
     // highest tier first; among equals, what holds the most work
     assert_eq!(
@@ -1147,7 +1152,7 @@ fn proto_approvals_queue_golden_and_blocked_by() {
             "brief_sha256": d.brief_sha256, "created_at": d.created_at, "expires_at": d.expires_at,
             "recommended": {"id": "retry", "label": "run the work item again"},
             "one_tap": false, "batchable": false,
-            "blocks": [{"id": one["id"], "key": "one"}], "waiting_on_it": 1})
+            "blocks": [{"id": one["id"], "key": "one"}], "blocks_total": 1, "waiting_on_it": 1})
     );
     let t3 = by("decision_id", &high);
     assert_eq!(t3["tier"], "T3");
@@ -1219,7 +1224,8 @@ fn proto_approvals_queue_golden_and_blocked_by() {
 #[test]
 fn proto_approvals_history_records_the_answer_and_lapsed_rows_are_info() {
     let mut r = rig();
-    let id = open_kind(&mut r, "blocked", None);
+    let quiet = json!({"needed": [], "calls": [], "grant_rules": []});
+    let id = open_kind(&mut r, "blocked", Some(quiet));
     r.decide("gone", 1, |_| {});
     let mut c = r.client(Surface::Superagent);
     let card = c
@@ -1253,7 +1259,10 @@ fn proto_approvals_history_records_the_answer_and_lapsed_rows_are_info() {
     let (empty, same) = c.approvals_history(&r.outcome, next).unwrap();
     assert!(empty.is_empty() && same == next);
     let q = c.approvals_queue(None).unwrap();
-    assert_eq!(q["counts"], json!({"t0": 1, "t1": 0, "t2": 0, "t3": 0}));
+    assert_eq!(
+        q["counts"],
+        json!({"t0": 1, "t1": 0, "t2": 0, "t3": 0, "waiting": 0, "omitted": 0})
+    );
     assert_eq!(q["rows"][0]["source"], "lapsed");
     assert_eq!(q["rows"][0]["state"], "expired");
     assert_eq!(q["per_outcome"], json!([]));
@@ -1278,7 +1287,71 @@ fn proto_approvals_history_records_the_answer_and_lapsed_rows_are_info() {
         },
     );
     assert!(
-        out.contains("answered \u{b7} retry \u{b7} card \u{b7} T1"),
+        out.contains("answered \u{b7} \"retry\" \u{b7} card \u{b7} T1"),
+        "{out}"
+    );
+}
+
+#[test]
+fn proto_approvals_queue_skips_an_outcome_it_cannot_read_and_says_so() {
+    let mut r = rig();
+    let quiet = json!({"needed": [], "calls": [], "grant_rules": []});
+    open_kind(&mut r, "blocked", Some(quiet));
+    let broken = {
+        let repo = r.home.parent().unwrap().join("repo");
+        let ws = WorkspaceContext::open("w", &repo, &repo, &[], r.home.join("c2"), "pg").unwrap();
+        let mut w = r
+            .store
+            .create_outcome(NewOutcome {
+                workspace: &ws,
+                base_commit: "c0ffee".into(),
+                contract: &contract(),
+                policy: &OutcomePolicy::new(true, 16, 10, 24),
+            })
+            .unwrap();
+        let rev = w.get_outcome(w.id()).unwrap().revision;
+        w.transition_outcome(
+            rev,
+            OutcomeState::ContractPending,
+            None,
+            &Effects::default(),
+        )
+        .unwrap();
+        w.id().to_string()
+    };
+    // the stored contract of the second outcome is damaged (its triggers forbid it, so drop them)
+    let db = rusqlite::Connection::open(r.home.join("synt.db")).unwrap();
+    let triggers: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='contracts'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for t in triggers {
+        db.execute_batch(&format!("DROP TRIGGER {t}")).unwrap();
+    }
+    assert_eq!(
+        db.execute(
+            "UPDATE contracts SET body='{}' WHERE outcome_id=?1",
+            [&broken]
+        )
+        .unwrap(),
+        1
+    );
+    let q = r.client(Surface::Cli).approvals_queue(None).unwrap();
+    assert_eq!(q["unreadable"], json!([broken]));
+    assert_eq!(q["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(q["rows"][0]["outcome"], json!(r.outcome));
+    let out = run_cli(
+        &mut r.client(Surface::Cli),
+        OutcomeCmd::Queue {
+            workspace: None,
+            history: None,
+        },
+    );
+    assert!(
+        out.contains("1 outcome(s) could not be read") && out.contains("2 waiting"),
         "{out}"
     );
 }

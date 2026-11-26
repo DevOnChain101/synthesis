@@ -3,7 +3,10 @@
 //! title, detail, age, expiry, what it blocks, the risk chip and Review (Open for a session). Review opens the
 //! decision card in place of the row. Below: "Lapsed" and "Answered, recorded", collapsed.
 
-use gpui::{AnyElement, Context, IntoElement as _, ParentElement as _, Styled as _, px};
+use gpui::{
+    AnyElement, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    Styled as _, px,
+};
 
 use super::data::{Model, NeedRow};
 use super::{HomeView, RowSpec, row, section};
@@ -41,7 +44,18 @@ impl HomeView {
             })
             .collect();
         let hidden = m.needs.len() - rows.len();
-        if m.needs.is_empty() {
+        if let Some(g) = &m.gaps {
+            rows.push(
+                kit::text(t::T2, t::W_REGULAR, t::SOFT_BEIGE)
+                    .debug_selector(|| "home-gaps".to_string())
+                    .whitespace_normal()
+                    .px(px(t::S4))
+                    .py(px(t::S2))
+                    .child(g.clone())
+                    .into_any_element(),
+            );
+        }
+        if m.needs.is_empty() && m.gaps.is_none() {
             rows.push(
                 kit::text(t::T2, t::W_REGULAR, t::TEXT)
                     .px(px(t::S4))

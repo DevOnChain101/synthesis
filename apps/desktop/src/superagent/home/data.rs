@@ -107,6 +107,8 @@ pub struct Model {
     pub banner: Option<String>,
     pub retry: bool,
     pub needs: Vec<NeedRow>,
+    /// What the queue left out (outcomes it could not read, rows over its limit), in words.
+    pub gaps: Option<String>,
     pub lapsed: Vec<LogRow>,
     /// The newest recorded answers first.
     pub answered: Vec<LogRow>,
@@ -238,6 +240,7 @@ pub fn build(st: &State, rows: Vec<Row>, now: i64) -> Model {
         .collect();
     // like the rows above, these are drawn only while the link is up
     if let Some(q) = st.queue.as_ref().filter(|_| st.screen == Screen::Ready) {
+        m.gaps = q.queue.gaps();
         m.lapsed = q
             .queue
             .rows
