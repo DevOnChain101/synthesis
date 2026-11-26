@@ -184,9 +184,37 @@ fn network(tool: &str) -> bool {
 
 /// Programs that talk to another machine, or fetch and run what is there.
 const NETWORK: &[&str] = &[
-    "curl", "wget", "ssh", "scp", "sftp", "rsync", "ftp", "nc", "ncat", "netcat", "socat",
-    "telnet", "mosh", "gh", "aws", "gcloud", "az", "npx", "pnpx", "bunx", "uvx", "pip", "pip3",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "ftp",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "telnet",
+    "mosh",
+    "gh",
+    "aws",
+    "gcloud",
+    "az",
+    "npx",
+    "pnpx",
+    "bunx",
+    "uvx",
+    "pip",
+    "pip3",
+    "iwr",
+    "irm",
+    "invoke-webrequest",
+    "invoke-restmethod",
 ];
+/// Recipe runners, wherever they stand: behind a shell keyword or a wrapper the scan does not look
+/// through, what they would run is still unknown.
+const RUNNERS: &[&str] = &["make", "gmake", "just", "npm", "pnpm", "yarn", "bun"];
 const GIT_NETWORK: &[&str] = &[
     "push",
     "fetch",
@@ -215,9 +243,12 @@ fn unescaped(s: &str) -> String {
 }
 
 fn names_secret(s: &str) -> bool {
-    [s, &unescaped(s)]
-        .iter()
-        .any(|v| words(v).any(|w| is_secret_shaped(Path::new(w))))
+    [s, &unescaped(s)].iter().any(|v| {
+        words(v).any(|w| {
+            // by name, or a wildcard that could match one (`.env*`)
+            is_secret_shaped(Path::new(w)) || synthesis_core::secrets::names_secret(w)
+        })
+    })
 }
 
 /// Judged as written and as the shell would join it; either one raises. Nothing on disk is read.
@@ -236,7 +267,9 @@ fn acts_outside(cmd: &str) -> bool {
                     let w = w.to_ascii_lowercase();
                     let base = w.rsplit(['/', '\\']).next().unwrap_or(&w);
                     let base = base.strip_suffix(".exe").unwrap_or(base);
-                    let hit = NETWORK.contains(&base) || (git && GIT_NETWORK.contains(&base));
+                    let hit = NETWORK.contains(&base)
+                        || RUNNERS.contains(&base)
+                        || (git && GIT_NETWORK.contains(&base));
                     git |= base == "git";
                     hit
                 })
@@ -411,6 +444,43 @@ mod tests {
         ] {
             assert_eq!(t(&a), Tier::T2, "{a}");
         }
+    }
+
+    #[test]
+    fn runners_behind_keywords_wildcard_secrets_and_powershell_fetches_are_confirm() {
+        for c in [
+            "if true; then make deploy; fi",
+            "for x in a b; do npm test; done",
+            "! make deploy",
+            "while just ship; do :; done",
+            "until gmake x; do :; done",
+            "case x in x) pnpm run y;; esac",
+            "strace make deploy",
+            "stdbuf make x",
+            "script -c 'make deploy'",
+            "if yarn build; then :; fi",
+            "! bun run x",
+            "cat .env*",
+            "cat config/.e*",
+            "iwr http://x.test",
+            "irm http://x.test",
+            "Invoke-WebRequest http://x.test",
+            "invoke-restmethod http://x.test",
+        ] {
+            for tool in ["Bash", "PowerShell"] {
+                let a = action(tool, json!({"command": c}));
+                assert_eq!(
+                    classify("approval_needed", Some(&a), fresh()),
+                    Tier::T3,
+                    "{c}"
+                );
+            }
+        }
+        let glob = action("Grep", json!({"pattern": "KEY", "glob": ".env*"}));
+        assert_eq!(classify("blocked", Some(&glob), fresh()), Tier::T2);
+        assert_eq!(classify("approval_needed", Some(&glob), fresh()), Tier::T3);
+        let rule = json!({"calls": [], "needed": ["Read(/p/.env*)"]});
+        assert_eq!(classify("approval_needed", Some(&rule), fresh()), Tier::T3);
     }
 
     #[test]
