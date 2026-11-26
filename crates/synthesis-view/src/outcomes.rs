@@ -11,6 +11,8 @@ use serde_json::Value;
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_session::outcome::CommandState;
 
+pub mod queue;
+pub use queue::*;
 pub mod views;
 pub use views::*;
 

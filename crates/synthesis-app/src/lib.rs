@@ -33,6 +33,7 @@ macro_rules! out {
 }
 
 pub mod agents;
+mod approvals_queue;
 pub mod asks;
 pub mod conductor;
 pub mod ctx;

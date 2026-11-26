@@ -562,6 +562,49 @@ impl<T: Transport> OutcomeClient<T> {
         }
     }
 
+    /// Everything that waits for a person (`approvals_queue` feature); read it with
+    /// `synthesis_view::outcomes::Queue`.
+    pub fn approvals_queue(&mut self, workspace: Option<&str>) -> Result<Value, ClientError> {
+        let v = self.t.call(Call::ApprovalsQueue {
+            workspace: workspace.map(Into::into),
+        })?;
+        if v.get("rows").and_then(Value::as_array).is_none() {
+            return malformed("approvals queue");
+        }
+        Ok(v)
+    }
+
+    /// One page of the recorded answers after `after`; a cursor that did not move is the end.
+    pub fn approvals_history(
+        &mut self,
+        outcome: &str,
+        after: u64,
+    ) -> Result<(Vec<Value>, u64), ClientError> {
+        let v = self.t.call(Call::ApprovalsHistory {
+            outcome: outcome.into(),
+            after_event_id: after,
+        })?;
+        let (Some(records), Some(next)) = (
+            v.get("records").and_then(Value::as_array),
+            v.get("next_event_id").and_then(Value::as_u64),
+        ) else {
+            return malformed("approvals history");
+        };
+        let mut last = after;
+        for r in records {
+            match r.get("event_id").and_then(Value::as_u64) {
+                Some(s) if s > last => last = s,
+                _ => return Err(ClientError::Hostile("records out of order".into())),
+            }
+        }
+        if next < last {
+            return Err(ClientError::Hostile(
+                "a cursor before the last record".into(),
+            ));
+        }
+        Ok((records.clone(), next))
+    }
+
     /// One page of events after `after`; resume from the returned cursor. Sequence numbers must
     /// rise from `after`: a server that repeats or reorders is not believed.
     pub fn events(&mut self, outcome: &str, after: u64) -> Result<(Vec<Value>, u64), ClientError> {

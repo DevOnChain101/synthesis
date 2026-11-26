@@ -365,6 +365,7 @@ fn answer(
             approver: "user:cli".into(),
             choice: choice.into(),
             brief_sha256: d.brief_sha256.clone(),
+            audit: Default::default(),
         },
         &plan_binding_for(w, d).unwrap(),
     )

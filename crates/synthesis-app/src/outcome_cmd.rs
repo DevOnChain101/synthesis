@@ -22,7 +22,8 @@ use synthesis_core::outcome::{
 use synthesis_harness::sanitize_for_display as clean;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
-    CommandReply, DecisionCard, InspectorTab, OutcomeRow, Picker, WSL2_REFUSAL, brief_rows,
+    CommandReply, DecisionCard, InspectorTab, OutcomeRow, Picker, Queue, Record, Source,
+    WSL2_REFUSAL, brief_rows, span,
 };
 
 use crate::outcome_client::{OutcomeClient, Transport};
@@ -131,6 +132,15 @@ pub enum OutcomeCmd {
     Ack(Cmd),
     /// Every outcome with what needs you.
     List,
+    /// Everything that waits for you, across outcomes: tier, what it blocks, and the command that
+    /// answers it. `--history OUTCOME` lists the recorded answers of one outcome instead.
+    Queue {
+        /// Only this workspace id.
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long, value_name = "OUTCOME", conflicts_with = "workspace")]
+        history: Option<String>,
+    },
     /// One outcome: needs-you line, contract, work items, evidence, decisions.
     Status {
         id: String,
@@ -195,6 +205,7 @@ impl OutcomeCmd {
             self,
             Self::Contract { .. }
                 | Self::List
+                | Self::Queue { .. }
                 | Self::Status { .. }
                 | Self::Decisions { .. }
                 | Self::Inspect { .. }
@@ -695,6 +706,28 @@ pub fn dispatch<T: Transport>(
             }
             Ok(0)
         }
+        OutcomeCmd::Queue { workspace, history } => {
+            let status = c.status().map_err(e)?;
+            if !status["features"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|f| f == "approvals_queue"))
+            {
+                return Err("this orchestrator is older and has no queue; use `synt outcome list` and `synt outcome decisions OUTCOME`".into());
+            }
+            match history {
+                Some(id) => history_cmd(c, &mut p, &id)?,
+                None => {
+                    let v = c.approvals_queue(workspace.as_deref()).map_err(e)?;
+                    if json {
+                        p.json(v)?;
+                    } else {
+                        let q = Queue::from_json(&v)?;
+                        queue_text(&mut p, &q, now_ms())?;
+                    }
+                }
+            }
+            Ok(0)
+        }
         OutcomeCmd::Status { id } => {
             let o = c.outcome(&id).map_err(e)?;
             let ct = c.contract(&id, None).map_err(e)?;
@@ -903,6 +936,76 @@ pub fn dispatch<T: Transport>(
             Ok(0)
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The queue as text: one block per row with the command that answers it. No choice is filled in.
+fn queue_text(p: &mut P, q: &Queue, now: i64) -> Result<(), String> {
+    for r in &q.rows {
+        let id = r.decision_id.clone().unwrap_or_default();
+        let mut head = format!("{}  {}  {}", r.tier.chip(), r.kind, r.outcome);
+        if !id.is_empty() {
+            head.push_str(&format!("  {id}"));
+        }
+        if let Some(c) = r.created_ms {
+            head.push_str(&format!("  age {}", span(now - c)));
+        }
+        match r.expires_ms {
+            _ if r.source == Source::Lapsed => head.push_str(&format!("  {}", r.state)),
+            Some(x) if x > now => head.push_str(&format!("  expires in {}", span(x - now))),
+            Some(_) => head.push_str("  expired"),
+            None => {}
+        }
+        p.line(&head)?;
+        p.line(&format!("    {}", r.goal))?;
+        if let Some(b) = r.blocks_line() {
+            p.line(&format!("    {b}"))?;
+        }
+        match r.source {
+            Source::Decision => p.line(&format!(
+                "    Answer: synt outcome resolve {} {id} --revision {} --brief-hash {} --choice CHOICE (see: synt outcome decisions {} {id})",
+                r.outcome, r.revision, r.hash, r.outcome
+            ))?,
+            Source::Contract => p.line(&format!(
+                "    Approve: synt outcome approve {} --version {} --hash {} (read: synt outcome contract {})",
+                r.outcome, r.version, r.hash, r.outcome
+            ))?,
+            Source::Lapsed => {}
+        }
+    }
+    p.line(&format!(
+        "{} waiting",
+        q.rows.iter().filter(|r| r.source != Source::Lapsed).count()
+    ))
+}
+
+fn history_cmd<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    p: &mut P,
+    outcome: &str,
+) -> Result<(), String> {
+    let (mut after, mut all) = (0, vec![]);
+    // a cursor that stops moving is the end; the cap bounds a server that never stops
+    for _ in 0..100 {
+        let (records, next) = c.approvals_history(outcome, after).map_err(e)?;
+        all.extend(records);
+        if next == after {
+            break;
+        }
+        after = next;
+    }
+    if p.1 {
+        return p.json(json!({"records": all, "next_event_id": after}));
+    }
+    for r in all.iter().filter_map(Record::from_json) {
+        p.line(&format!("{}  {}  {}", r.event_id, r.ts, r.describe()))?;
+    }
+    p.line(&format!("{} record(s)", all.len()))
 }
 
 fn json_or(p: &mut P, v: Value, text: &str) -> Result<(), String> {

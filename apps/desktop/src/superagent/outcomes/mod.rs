@@ -204,11 +204,13 @@ impl OutcomesView {
                     // a failed or restarted link: what that engine advertised no longer holds
                     self.state.read_only_goal = false;
                     self.state.attempt_message = false;
+                    self.state.queue = None;
                     self.state.set_screen(s);
                 }
                 Msg::ReadOnlyGoal(on) => self.state.read_only_goal = on,
                 Msg::AttemptMessage(on) => self.state.attempt_message = on,
                 Msg::Sent { key, result } => cx.emit(MessageSent { key, result }),
+                Msg::Queue(q) => self.state.queue = q.map(|q| *q),
                 Msg::Snapshot {
                     items,
                     selected,

@@ -1328,6 +1328,10 @@ pub struct Resolution {
     pub choice: String,
     /// Hash of the brief as shown ([`DecisionRecord::brief_sha256`]).
     pub brief_sha256: String,
+    /// What the owner records with the answer (mechanism, tier; never brief text), copied into the
+    /// chained `decision.resolved` event and not into the approval MAC. `Null`: none. Set by the
+    /// owner after it classified the decision, never from a surface's params.
+    pub audit: Value,
 }
 
 impl Resolution {
@@ -1356,6 +1360,7 @@ impl Resolution {
             approver,
             choice: choice.to_string(),
             brief_sha256: brief_sha256.to_string(),
+            audit: Value::Null,
         })
     }
 
@@ -4147,13 +4152,14 @@ impl OutcomeTx<'_, '_> {
             &enum_str(&to),
             None,
         )?;
-        self.et.append(
-            ev::DECISION_RESOLVED,
-            json!({"decision_id": r.decision_id, "outcome_id": self.id,
+        let mut event = json!({"decision_id": r.decision_id, "outcome_id": self.id,
                    "revision": d.revision + 1, "binding_hash": d.binding_hash,
                    "approver": r.approver, "choice": r.choice,
-                   "brief_sha256": r.brief_sha256, "state": to}),
-        )?;
+                   "brief_sha256": r.brief_sha256, "state": to});
+        if !r.audit.is_null() {
+            event["audit"] = r.audit.clone();
+        }
+        self.et.append(ev::DECISION_RESOLVED, event)?;
         Ok(to)
     }
 

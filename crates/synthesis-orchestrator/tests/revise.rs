@@ -98,6 +98,7 @@ fn answer(w: &mut OutcomeWriter, d: &DecisionRecord, choice: &str) {
             approver: "user:cli".into(),
             choice: choice.into(),
             brief_sha256: d.brief_sha256.clone(),
+            audit: Default::default(),
         },
         &d.binding,
     )

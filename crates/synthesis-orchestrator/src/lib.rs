@@ -37,6 +37,7 @@ mod report;
 mod retention;
 mod runner;
 mod sched;
+pub mod tier;
 mod verify;
 
 pub use alloc::{AllocError, AllocSpec, Allocator, AttemptEnv, Platform};

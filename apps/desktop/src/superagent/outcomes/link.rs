@@ -7,6 +7,7 @@
 //! The server is not trusted and every read can fail: a failed link ends the worker with an error the window
 //! shows; a refused or unreadable single part (the decisions, the contract, a tab) is shown as that part's error.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
@@ -18,11 +19,11 @@ use synthesis_core::outcome::ContractKind;
 use synthesis_session::outcome::{CommandState, Surface};
 use synthesis_view::outcomes::{
     AttemptView, BudgetView, CommandReply, CriteriaView, DecisionCard, InspectorContent,
-    InspectorTab, MessageRow, OverviewTab, is_hex, valid_alt_id,
+    InspectorTab, MessageRow, OverviewTab, Queue, Record, is_hex, valid_alt_id,
 };
 
 use super::form::{DiffView, Review, Submit};
-use super::model::{Detail, Item, Screen};
+use super::model::{Detail, Item, QueueData, Screen};
 
 /// How long without a hint before the worker looks again.
 const POLL: Duration = Duration::from_secs(20);
@@ -36,6 +37,9 @@ const MAX_BUDGETS: usize = 50;
 const MAX_PAGES: usize = 5;
 /// Events the Activity tab of the inspector shows (the newest).
 const ACTIVITY_TAIL: usize = 100;
+/// Outcomes whose recorded answers are read, and the newest answers kept of each.
+const MAX_HISTORY: usize = 20;
+const HISTORY_TAIL: usize = 20;
 /// How long a queued answer is followed.
 const SETTLE: Duration = Duration::from_secs(5);
 
@@ -130,6 +134,8 @@ pub enum Msg {
         content: InspectorContent,
     },
     Answered(String),
+    /// Sent before the snapshot; `None`: the queue could not be read.
+    Queue(Option<Box<QueueData>>),
     Form(FormMsg),
     /// The migration's result (`Err` is the reason; the worker reconnects itself after an `Ok`).
     Enabled(u64, Result<(), String>),
@@ -342,7 +348,8 @@ fn run(env: &Env, rx: &Receiver<Req>, out: &UnboundedSender<Msg>) {
                             has("read_only_goal") && has("report_review"),
                         ));
                         let _ = out.unbounded_send(Msg::AttemptMessage(has("attempt_message")));
-                        match serve(&mut c, rx, out, HINT_WAIT, &|ws| {
+                        let queue = has("approvals_queue");
+                        match serve(&mut c, rx, out, HINT_WAIT, queue, &|ws| {
                             synthesis_view::project::head_commit(std::path::Path::new(ws), env)
                         }) {
                             Ok(()) => return,
@@ -419,6 +426,10 @@ fn await_enable<T: Transport>(
 struct Watch {
     selected: Option<String>,
     tab: InspectorTab,
+    /// The engine has `approvals_queue`.
+    queue: bool,
+    /// Per outcome: the history cursor and the newest records read up to it.
+    history: HashMap<String, (u64, Vec<Record>)>,
 }
 
 /// The loop over one live client. `Ok` when the window closed; `Err` is the text of a failed link.
@@ -427,11 +438,14 @@ pub(super) fn serve<T: Transport>(
     rx: &Receiver<Req>,
     out: &UnboundedSender<Msg>,
     wait: Duration,
+    queue: bool,
     head: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     let mut w = Watch {
         selected: None,
         tab: InspectorTab::Overview,
+        queue,
+        history: HashMap::new(),
     };
     refresh(c, &mut w, out)?;
     let mut last = Instant::now();
@@ -546,6 +560,10 @@ fn refresh<T: Transport>(
     if !items.iter().any(|i| Some(&i.row.id) == w.selected.as_ref()) {
         w.selected = items.first().map(|i| i.row.id.clone());
     }
+    if w.queue {
+        let data = queue_data(c, w, &items)?;
+        let _ = out.unbounded_send(Msg::Queue(data.map(Box::new)));
+    }
     let (mut detail, mut inspector) = (None, None);
     if let Some(item) = items
         .iter()
@@ -592,6 +610,40 @@ fn refresh<T: Transport>(
         inspector,
     });
     Ok(())
+}
+
+/// The queue and the recorded answers since the last look. A refused or unreadable queue is `None` (the rows of
+/// before are drawn instead); only a failed link is an `Err`.
+fn queue_data<T: Transport>(
+    c: &mut OutcomeClient<T>,
+    w: &mut Watch,
+    items: &[Item],
+) -> Result<Option<QueueData>, String> {
+    let queue = match soft(c.approvals_queue(None))? {
+        Ok(v) => match Queue::from_json(&v) {
+            Ok(q) => q,
+            Err(_) => return Ok(None),
+        },
+        Err(_) => return Ok(None),
+    };
+    let mut answered = vec![];
+    for i in items.iter().take(MAX_HISTORY) {
+        let (cursor, tail) = w.history.entry(i.row.id.clone()).or_default();
+        for _ in 0..MAX_PAGES {
+            let Ok((page, next)) = soft(c.approvals_history(&i.row.id, *cursor))? else {
+                break;
+            };
+            let full = page.len() >= 200;
+            tail.extend(page.iter().filter_map(Record::from_json));
+            tail.drain(..tail.len().saturating_sub(HISTORY_TAIL));
+            *cursor = next;
+            if !full {
+                break;
+            }
+        }
+        answered.extend(tail.iter().map(|r| (i.row.id.clone(), r.clone())));
+    }
+    Ok(Some(QueueData { queue, answered }))
 }
 
 /// The events of the outcome, page by page (the server checks the order and the cursor).

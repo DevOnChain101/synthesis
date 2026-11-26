@@ -29,7 +29,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `read_only_goal` and `report_review` go together: a goal whose report cannot be reviewed must
 /// not be offered. `attempt_message` (S1 4.6, P2c): the owner delivers a person's line to a running
 /// worker or queues it; a surface that does not see it must not offer the control.
-pub const FEATURES: [&str; 3] = ["read_only_goal", "report_review", "attempt_message"];
+/// `approvals_queue` (docs/specs/approvals.md P1): `approvals.queue` and `approvals.history`.
+pub const FEATURES: [&str; 4] = [
+    "read_only_goal",
+    "report_review",
+    "attempt_message",
+    "approvals_queue",
+];
 // ---- end S1 P2a/P2b --------------------------------------------------------------------------------
 /// Longest accepted line (a tool result can carry a big file).
 pub const MAX_LINE: usize = 8 << 20;
@@ -412,6 +418,19 @@ pub enum Call {
         #[serde(flatten)]
         cmd: CommandArgs,
     },
+    /// Everything that waits for a person, rated and ordered by the server (read-only).
+    #[serde(rename = "approvals.queue")]
+    ApprovalsQueue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
+    /// The recorded answers of an outcome after an event cursor (read-only).
+    #[serde(rename = "approvals.history")]
+    ApprovalsHistory {
+        outcome: String,
+        #[serde(default)]
+        after_event_id: u64,
+    },
     #[serde(rename = "evidence.get")]
     EvidenceGet {
         outcome: String,
@@ -497,6 +516,8 @@ impl Call {
                 | Call::DecisionGet { .. }
                 | Call::DecisionResolve { .. }
                 | Call::AttemptMessage { .. }
+                | Call::ApprovalsQueue { .. }
+                | Call::ApprovalsHistory { .. }
                 | Call::EvidenceGet { .. }
                 | Call::CommandStatus { .. }
                 | Call::EventsSubscribe { .. }
@@ -550,6 +571,8 @@ impl Call {
             | Call::AttemptDiff { .. }
             | Call::DecisionList { .. }
             | Call::DecisionGet { .. }
+            | Call::ApprovalsQueue { .. }
+            | Call::ApprovalsHistory { .. }
             | Call::EvidenceGet { .. }
             | Call::CommandStatus { .. }
             | Call::EventsSubscribe { .. } => None,

@@ -2,10 +2,10 @@ use gpui::{
     Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, px, size,
 };
 use serde_json::json;
-use synthesis_view::outcomes::{DecisionCard, uncovered};
+use synthesis_view::outcomes::{DecisionCard, Tier, uncovered};
 
 use super::card::{more_label, shown_rows, why_not};
-use super::data::{self, Gates, Risk, Target};
+use super::data::{self, Gates, Target};
 use super::*;
 use crate::approvals::{Ages, Popup, decision_rows};
 use crate::superagent::outcomes::popup::SAMPLE_NOW;
@@ -56,11 +56,11 @@ fn the_recommended_one_tap_is_gated_off_and_never_for_high_risk() {
     };
     assert_eq!(Gates::SHIPPED, Gates::default());
     assert!(!r.one_tap(open), "the model carries no risk yet");
-    r.risk = Some(Risk::Low);
+    r.tier = Some(Tier::T1);
     r.recommended = Some("keep".into());
     assert!(r.one_tap(open));
     assert!(!r.one_tap(Gates::SHIPPED), "the gate is shut");
-    r.risk = Some(Risk::High);
+    r.tier = Some(Tier::T2);
     assert!(!r.one_tap(open), "high risk never");
 }
 
@@ -309,4 +309,77 @@ fn the_conversation_slot_is_there_when_the_home_is_empty(cx: &mut TestAppContext
         v.debug_bounds("home-conversation").is_some(),
         "the chat must not vanish on a fresh home"
     );
+}
+
+#[gpui::test]
+fn the_queue_makes_one_row_per_decision_with_tier_blocks_and_real_age(cx: &mut TestAppContext) {
+    let (h, o, v) = open(cx);
+    o.update(v, |o, cx| {
+        o.state.queue = Some(sample::queue());
+        cx.notify();
+    });
+    v.run_until_parked();
+    let m = h.read_with(v, |h, cx| h.model(cx));
+    let ids: Vec<_> = m.needs.iter().map(|r| r.id()).collect();
+    assert_eq!(ids, ["o_cfg", "d_7f3a", "d_91bc"], "the server's order");
+    assert_eq!(
+        o.read_with(v, |o, _| o.waiting_count()),
+        3,
+        "lapsed asks nothing"
+    );
+    let r = &m.needs[1];
+    assert_eq!(r.detail, "Decision \u{b7} approval needed");
+    assert_eq!(r.age, "9m");
+    assert_eq!(r.expires.as_deref(), Some("expires in 22h"));
+    assert_eq!(
+        r.blocks.as_deref(),
+        Some("blocks w3 \u{b7} 2 waiting on it")
+    );
+    assert_eq!(r.tier, Some(Tier::T2));
+    assert_eq!(m.needs[0].detail, "Contract v2 waits for approval");
+    assert!(!m.needs[2].one_tap(Gates::SHIPPED));
+    assert_eq!((m.lapsed.len(), m.answered.len()), (1, 1));
+    assert_eq!(m.running[0].notes, ["w3, w5 wait for your decision"]);
+    assert!(v.debug_bounds("home-risk").is_some());
+    assert!(v.debug_bounds("home-need-2").is_some());
+    // collapsed until asked for
+    assert!(v.debug_bounds("home-lapsed-sec").is_some());
+    assert!(v.debug_bounds("home-lapsed-0").is_none());
+    // Review opens the card of the row's own decision, in its place only
+    h.update(v, |h, cx| h.activate(Target::Need(2), cx));
+    v.run_until_parked();
+    assert!(v.debug_bounds("home-card").is_some());
+    assert!(
+        v.debug_bounds("home-need-1").is_some(),
+        "the other decision stays a row"
+    );
+    assert!(v.debug_bounds("home-need-2").is_none());
+    assert_eq!(
+        h.read_with(v, |h, _| h
+            .open
+            .as_ref()
+            .unwrap()
+            .popup
+            .as_ref()
+            .unwrap()
+            .card
+            .id
+            .clone()),
+        "d_91bc"
+    );
+}
+
+#[gpui::test]
+fn a_row_to_confirm_is_never_folded_behind_show_more(cx: &mut TestAppContext) {
+    let (_h, o, v) = open(cx);
+    o.update(v, |o, cx| {
+        let mut q = sample::queue();
+        let t3 = q.queue.rows[0].clone();
+        q.queue.rows = std::iter::repeat_n(t3, 7).collect();
+        o.state.queue = Some(q);
+        cx.notify();
+    });
+    v.run_until_parked();
+    assert!(v.debug_bounds("home-need-6").is_some());
+    assert!(v.debug_bounds("home-more").is_none());
 }

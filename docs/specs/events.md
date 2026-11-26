@@ -136,6 +136,7 @@ Applied by the producer before persistence AND before streaming; an unredacted c
 - Additive changes (new `type`, new optional payload field, new enum value in a field documented as open) keep `v`. Consumers MUST ignore unknown types and unknown fields, and MUST treat unknown enum values as "other".
 - Removing/renaming a field, changing a type or meaning, or making a field required bumps `v`. A producer emits one `v` per session; a store may hold sessions of different `v`.
 - The JSON Schema for each payload lives in `crates/synthesis-events/schema/v1/*.json` (to be generated from the Rust types); golden stream fixtures in `tests/golden/events/` pin it.
+- Outcome events are untyped store events in the control session (ADR-016). `decision.resolved` gained an optional `audit` object (approvals.md 5.2: `mechanism`, `tier`, `classifier_version`, `recommended`, `batch_id`, `held_until`; ids and codes only), absent on records written before it. `approval.reverted` and `approval.auto_decided` are reserved for the later approval slices.
 
 ## Open
 - Whether `model.delta` for `thinking` is streamed at all to non-CLI clients (doc §5.4 "never leak hidden internals").

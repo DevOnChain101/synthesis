@@ -1498,6 +1498,7 @@ fn resolution(d: &DecisionRecord, choice: &str) -> Resolution {
         approver: "user:cli".into(),
         choice: choice.into(),
         brief_sha256: d.brief_sha256.clone(),
+        audit: Default::default(),
     }
 }
 
